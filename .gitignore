@@ -1,0 +1,105 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.zed/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.secrets/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Node / JS
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.turbo/
+.cache/
+coverage/
+.pnpm-store/
+.yarn/cache
+.yarn/install-state.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Swift / Xcode
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+.build/
+Packages/
+Package.resolved
+
+# Tauri / Electron
+src-tauri/target/
+release/
+
+# Local models / weights / audio assets (large binaries)
+models/
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+*.mlmodelc/
+*.safetensors
+recordings/
+*.wav
+*.mp3
+*.m4a
+*.flac
+!docs/**/*.wav
+!tests/**/fixtures/**
+
+# Misc
+tmp/
+temp/
+.DS_Store?
+Thumbs.db

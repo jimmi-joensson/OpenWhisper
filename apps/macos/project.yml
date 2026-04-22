@@ -1,0 +1,68 @@
+name: OpenWhisper
+options:
+  bundleIdPrefix: com.openwhisper
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+  defaultConfig: Debug
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: "YES"
+    DEAD_CODE_STRIPPING: "YES"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    ONLY_ACTIVE_ARCH: "YES"
+    ALWAYS_SEARCH_USER_PATHS: "NO"
+    CLANG_ENABLE_MODULES: "YES"
+    CLANG_ENABLE_OBJC_ARC: "YES"
+  configs:
+    Debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    Release:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+targets:
+  OpenWhisper:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App
+      - path: Generated
+        optional: true
+    resources:
+      - path: Resources/Assets.xcassets
+    info:
+      path: Resources/Info.plist
+      properties:
+        NSMicrophoneUsageDescription: "OpenWhisper needs microphone access to transcribe your speech on-device."
+        NSAppleEventsUsageDescription: "OpenWhisper needs accessibility access to paste transcribed text into the app you're working in."
+        NSHumanReadableCopyright: "Copyright © 2026 Jimmi Joensson. Licensed under MIT."
+        LSMinimumSystemVersion: "14.0"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleDisplayName: "OpenWhisper"
+    entitlements:
+      path: Resources/OpenWhisper.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.openwhisper.OpenWhisper
+        SWIFT_OBJC_BRIDGING_HEADER: App/OpenWhisper-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Generated
+          - $(SRCROOT)/Generated/openwhisper_core
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/Vendor
+        OTHER_LDFLAGS:
+          - -lopenwhisper_core

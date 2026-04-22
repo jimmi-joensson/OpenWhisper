@@ -4,7 +4,7 @@ title: Global hotkey + toggle activation UX
 status: To Do
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-22 21:18'
+updated_date: '2026-04-22 21:22'
 labels:
   - macos
   - ux
@@ -21,8 +21,8 @@ Register configurable global hotkey using a toggle semantic (Superwhisper-style)
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Toggle mode works: first press starts recording + shows pill; second press stops + triggers transcribe + inject
-- [ ] #2 Default hotkey matches current Superwhisper factory default (verify against live app before shipping)
-- [ ] #3 User can rebind hotkey in settings, including single modifier keys (Fn, Right Option) and double-tap chords
-- [ ] #4 Works even when OpenWhisper is not the frontmost app
-- [ ] #5 Hotkey registers without Accessibility permission until text injection actually fires (defer permission prompt)
+- [ ] #2 User can rebind hotkey in settings, including single modifier keys (Fn, Right Option) and double-tap chords
+- [ ] #3 Works even when OpenWhisper is not the frontmost app
+- [ ] #4 Hotkey registers without Accessibility permission until text injection actually fires (defer permission prompt)
+- [ ] #5 Default hotkey: single press of Right Command (⌘ on right side) to toggle recording — matches user's current Superwhisper setup
 <!-- AC:END -->

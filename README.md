@@ -32,6 +32,19 @@ Hotkey defaults to match Superwhisper's for familiarity; fully rebindable in set
 - **No dark patterns.** Paid tiers only exist for features that genuinely cost us money (hosted sync, subscription infra, etc.), never for gating local capability.
 - **Correctable.** Custom vocabulary, post-processing, and prompt shaping are first-class — not afterthoughts.
 
+## Building
+
+**Prerequisites:** Rust (install via [rustup](https://rustup.rs/)), Xcode 15+, and [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
+
+```sh
+scripts/bootstrap.sh           # builds Rust core, stages artifacts, generates Xcode project
+open apps/macos/OpenWhisper.xcodeproj
+# or:
+xcodebuild -project apps/macos/OpenWhisper.xcodeproj -scheme OpenWhisper build
+```
+
+The Xcode project is *generated* — it lives under `.gitignore` and is reproduced from `apps/macos/project.yml`. The Rust core (`core/`) builds into a staticlib that the Swift target links via a swift-bridge bridging header.
+
 ## Task tracking
 
 Tasks tracked in-repo via [Backlog.md](https://github.com/MrLesk/Backlog.md). Run `backlog board` to view the kanban.

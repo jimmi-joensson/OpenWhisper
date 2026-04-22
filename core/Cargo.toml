@@ -1,0 +1,17 @@
+[package]
+name = "openwhisper-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Shared core logic for OpenWhisper: audio capture, VAD, config, providers, post-processing. Exposed to native UI shells via swift-bridge (macOS) and P/Invoke (Windows)."
+
+[lib]
+name = "openwhisper_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+swift-bridge = "0.1.59"
+
+[build-dependencies]
+swift-bridge-build = "0.1.59"

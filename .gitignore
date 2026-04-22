@@ -108,6 +108,7 @@ recordings/
 *.flac
 !docs/**/*.wav
 !tests/**/fixtures/**
+!apps/macos/Resources/samples/**
 
 # Misc
 tmp/

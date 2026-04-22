@@ -6,7 +6,6 @@ struct OpenWhisperApp: App {
         WindowGroup("OpenWhisper") {
             ContentView()
         }
-        .defaultSize(width: 520, height: 360)
-        .windowResizability(.contentSize)
+        .defaultSize(width: 580, height: 520)
     }
 }

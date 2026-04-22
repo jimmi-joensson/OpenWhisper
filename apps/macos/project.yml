@@ -43,7 +43,6 @@ targets:
       - path: App
       - path: Generated
         optional: true
-    resources:
       - path: Resources/Assets.xcassets
       - path: Resources/samples
     dependencies:

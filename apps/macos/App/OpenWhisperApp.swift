@@ -50,7 +50,7 @@ struct OpenWhisperApp: App {
     }
 
     var body: some Scene {
-        Window("OpenWhisper", id: "main") {
+        Window(Bundle.main.appDisplayName, id: "main") {
             ContentView()
                 .environment(\.hotkey, hotkey)
                 .environment(\.pill, pill)
@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.dictation = dictation
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.toolTip = "OpenWhisper"
+        item.button?.toolTip = Bundle.main.appDisplayName
         item.menu = menu
 
         menu.delegate = self
@@ -146,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         menu.removeAllItems()
 
-        let openItem = NSMenuItem(title: "Open OpenWhisper", action: #selector(openMain), keyEquivalent: "")
+        let openItem = NSMenuItem(title: "Open \(Bundle.main.appDisplayName)", action: #selector(openMain), keyEquivalent: "")
         openItem.target = self
         openItem.isEnabled = true
         menu.addItem(openItem)
@@ -160,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let quitItem = NSMenuItem(title: "Quit OpenWhisper", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit \(Bundle.main.appDisplayName)", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         quitItem.isEnabled = true
         menu.addItem(quitItem)
@@ -327,5 +327,15 @@ extension EnvironmentValues {
     var dictation: DictationService? {
         get { self[DictationServiceKey.self] }
         set { self[DictationServiceKey.self] = newValue }
+    }
+}
+
+extension Bundle {
+    /// Display name for the running build — "OpenWhisper" in Release, "OpenWhisper Dev" in Debug.
+    /// Driven by per-config PRODUCT_NAME, which CFBundleDisplayName/CFBundleName inherit.
+    var appDisplayName: String {
+        (object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String)
+            ?? "OpenWhisper"
     }
 }

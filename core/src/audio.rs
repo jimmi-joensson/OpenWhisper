@@ -27,7 +27,10 @@ enum Ctrl {
 }
 
 struct Capture {
-    _stream: cpal::Stream,
+    // `None` means the stream has been stopped but the captured samples
+    // are still waiting in `buffer` for the next `drain`. This lets Swift
+    // call stop → drain in that order without losing data.
+    stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<Vec<f32>>>,
     native_rate: u32,
     channels: u16,
@@ -86,7 +89,9 @@ fn run_worker(rx: mpsc::Receiver<Ctrl>) {
                 }
             }
             Ctrl::Stop(reply) => {
-                capture = None;
+                if let Some(c) = capture.as_mut() {
+                    c.stream = None;
+                }
                 let _ = reply.send(());
             }
             Ctrl::Drain(reply) => {
@@ -94,10 +99,15 @@ fn run_worker(rx: mpsc::Receiver<Ctrl>) {
                     .as_ref()
                     .map(drain_and_resample)
                     .unwrap_or_default();
+                // Once stopped + drained, fully release.
+                if capture.as_ref().is_some_and(|c| c.stream.is_none()) {
+                    capture = None;
+                }
                 let _ = reply.send(samples);
             }
             Ctrl::IsCapturing(reply) => {
-                let _ = reply.send(capture.is_some());
+                let is_live = capture.as_ref().is_some_and(|c| c.stream.is_some());
+                let _ = reply.send(is_live);
             }
         }
     }
@@ -109,6 +119,7 @@ fn begin_capture() -> Result<Capture, String> {
         .default_input_device()
         .ok_or_else(|| "no default input device".to_string())?;
 
+    let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
     let supported = device
         .default_input_config()
         .map_err(|e| format!("default input config: {e}"))?;
@@ -116,6 +127,9 @@ fn begin_capture() -> Result<Capture, String> {
     let sample_format = supported.sample_format();
     let native_rate = supported.sample_rate();
     let channels = supported.channels();
+    eprintln!(
+        "[openwhisper-core] mic: device={device_name:?} rate={native_rate} ch={channels} fmt={sample_format:?}"
+    );
     let config: cpal::StreamConfig = supported.into();
 
     let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -132,7 +146,7 @@ fn begin_capture() -> Result<Capture, String> {
         .map_err(|e| format!("stream.play failed: {e}"))?;
 
     Ok(Capture {
-        _stream: stream,
+        stream: Some(stream),
         buffer,
         native_rate,
         channels,

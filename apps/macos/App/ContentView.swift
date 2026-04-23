@@ -1,6 +1,9 @@
 import SwiftUI
 import AVFoundation
 import FluidAudio
+import os
+
+private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "dictation")
 
 private enum MicPermission: String {
     case checking
@@ -178,19 +181,28 @@ struct ContentView: View {
         Task {
             if asr == nil {
                 status = "loading Parakeet model (first run ~500 MB)…"
+                let loadStart = Date()
                 do {
-                    let models = try await AsrModels.downloadAndLoad(version: .v2)
+                    // Run the model load off the main actor — it involves
+                    // heavy CoreML compilation and file IO.
+                    let models = try await Task.detached(priority: .userInitiated) {
+                        try await AsrModels.downloadAndLoad(version: .v2)
+                    }.value
                     let manager = AsrManager(config: .default)
                     try await manager.loadModels(models)
                     asr = manager
+                    let dur = Date().timeIntervalSince(loadStart)
+                    log.info("asr loaded in \(dur, format: .fixed(precision: 2))s")
                 } catch {
                     status = "ASR load failed: \(error.localizedDescription)"
+                    log.error("asr load failed: \(error.localizedDescription, privacy: .public)")
                     return
                 }
             }
 
             do {
                 try audio_start_capture()
+                log.info("capture started")
             } catch let rustErr as RustString {
                 status = "mic start failed: \(rustErr.toString())"
                 return
@@ -214,9 +226,12 @@ struct ContentView: View {
         status = "draining mic buffer…"
         pill?.show(status: .transcribing)
 
+        let drainStart = Date()
         let rustSamples = audio_drain_samples()
         let samples = Array(rustSamples) as [Float]
         sampleCount = samples.count
+        let drainDur = Date().timeIntervalSince(drainStart)
+        log.info("drained \(samples.count) samples in \(drainDur, format: .fixed(precision: 3))s")
 
         if samples.isEmpty {
             status = "no audio captured"
@@ -227,23 +242,38 @@ struct ContentView: View {
 
         status = "transcribing on ANE…"
 
-        Task {
-            guard let manager = asr else {
-                status = "error: ASR not loaded"
-                isTranscribing = false
-                return
-            }
-            do {
-                let result = try await manager.transcribe(samples, source: .microphone)
-                transcript = result.text
-                confidence = String(format: "%.3f", result.confidence)
-                injector.inject(result.text)
-                status = "done — pasted to focused app"
-            } catch {
-                status = "transcribe failed: \(error.localizedDescription)"
-            }
+        guard let manager = asr else {
+            status = "error: ASR not loaded"
             isTranscribing = false
             pill?.hideAfter()
+            return
+        }
+
+        // Run transcribe detached so heavy CoreML work never sits on the
+        // main actor. Hop back to main only to publish results.
+        let samplesCopy = samples
+        Task.detached(priority: .userInitiated) {
+            let start = Date()
+            do {
+                let result = try await manager.transcribe(samplesCopy, source: .microphone)
+                let dur = Date().timeIntervalSince(start)
+                await MainActor.run {
+                    log.info("transcribed \(samplesCopy.count) samples in \(dur, format: .fixed(precision: 2))s → \"\(result.text, privacy: .public)\" conf=\(result.confidence, format: .fixed(precision: 3))")
+                    transcript = result.text
+                    confidence = String(format: "%.3f", result.confidence)
+                    injector.inject(result.text)
+                    status = "done — pasted to focused app"
+                    isTranscribing = false
+                    pill?.hideAfter()
+                }
+            } catch {
+                await MainActor.run {
+                    log.error("transcribe failed: \(error.localizedDescription, privacy: .public)")
+                    status = "transcribe failed: \(error.localizedDescription)"
+                    isTranscribing = false
+                    pill?.hideAfter()
+                }
+            }
         }
     }
 

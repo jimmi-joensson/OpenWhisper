@@ -1,9 +1,10 @@
 ---
 id: TASK-8
 title: Text injection via Accessibility + CGEventPost
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-22 21:11'
+updated_date: '2026-04-23 06:41'
 labels:
   - macos
   - integration

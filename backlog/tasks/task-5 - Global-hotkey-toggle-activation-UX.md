@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: Global hotkey + toggle activation UX
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-23 06:17'
+updated_date: '2026-04-23 06:39'
 labels:
   - macos
   - ux
@@ -20,9 +20,21 @@ Register configurable global hotkey using a toggle semantic (Superwhisper-style)
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Toggle mode works: first press starts recording + shows pill; second press stops + triggers transcribe + inject
+- [x] #1 Toggle mode works: first press starts recording + shows pill; second press stops + triggers transcribe + inject
 - [ ] #2 User can rebind hotkey in settings, including single modifier keys (Fn, Right Option) and double-tap chords
-- [ ] #3 Works even when OpenWhisper is not the frontmost app
+- [x] #3 Works even when OpenWhisper is not the frontmost app
 - [ ] #4 Hotkey registers without Accessibility permission until text injection actually fires (defer permission prompt)
-- [ ] #5 Default hotkey: single press of Right Command (⌘ on right side) to toggle recording — matches user's current Superwhisper setup
+- [x] #5 Uses CGEventTap + Accessibility (same grant needed for text injection) — single TCC prompt, not two, matching Superwhisper's UX. Replaces the earlier 'defer Accessibility' AC, which assumed an NSEvent-based hotkey implementation.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Runtime verified 2026-04-23. Right Command tap anywhere on the system toggles recording; chord detection filters out Cmd+Q etc. Debug panel (AX trusted / tap status / events seen / last event) shipped in-app to aid dev diagnosis — worth keeping at least through TASK-11 settings work. TCC/Accessibility invalidates on every Debug rebuild (ad-hoc sig); scripts/reset-tcc.sh is the recovery. Rebinding is deferred to TASK-11 (settings window).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Right Command hotkey toggles dictation globally via CGEventTap. Transcript from first end-to-end run: 'Amazing. It is working. So uh we are currently recording from hitting my uh um right command key on on my Mac.' Confidence 0.973.
+<!-- SECTION:FINAL_SUMMARY:END -->

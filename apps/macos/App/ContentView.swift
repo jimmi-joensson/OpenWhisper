@@ -20,6 +20,7 @@ struct ContentView: View {
 
     // Keep the loaded ASR across captures so we only pay the load cost once.
     @State private var asr: AsrManager?
+    @State private var injector = TextInjector()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -198,7 +199,8 @@ struct ContentView: View {
                 let result = try await manager.transcribe(samples, source: .microphone)
                 transcript = result.text
                 confidence = String(format: "%.3f", result.confidence)
-                status = "done"
+                injector.inject(result.text)
+                status = "done — pasted to focused app"
             } catch {
                 status = "transcribe failed: \(error.localizedDescription)"
             }

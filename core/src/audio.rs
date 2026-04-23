@@ -15,9 +15,10 @@ use rubato::{
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 
-// Rolling RMS of the most recent callback. Written by the CoreAudio callback,
+// Peak amplitude of the most recent callback. Written by the CoreAudio callback,
 // read from any thread via audio_current_level(). Stored as f32 bits so we can
-// use a lock-free atomic.
+// use a lock-free atomic. Peak reads cleaner on a UI meter than RMS because
+// transients in speech (consonants, syllable onsets) show as real spikes.
 static LEVEL_BITS: AtomicU32 = AtomicU32::new(0);
 
 pub struct AudioEngine {
@@ -172,18 +173,20 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                let mut sum_sq: f64 = 0.0;
+                let mut peak: f32 = 0.0;
                 if let Ok(mut buf) = buffer.lock() {
                     buf.reserve(data.len());
                     for &s in data {
                         let f = f32::from_sample(s);
-                        sum_sq += (f as f64) * (f as f64);
+                        let abs = f.abs();
+                        if abs > peak {
+                            peak = abs;
+                        }
                         buf.push(f);
                     }
                 }
                 if !data.is_empty() {
-                    let rms = (sum_sq / data.len() as f64).sqrt() as f32;
-                    LEVEL_BITS.store(rms.to_bits(), Ordering::Relaxed);
+                    LEVEL_BITS.store(peak.to_bits(), Ordering::Relaxed);
                 }
             },
             err_fn,

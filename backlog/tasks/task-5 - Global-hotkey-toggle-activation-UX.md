@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: Global hotkey + toggle activation UX
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-22 21:22'
+updated_date: '2026-04-23 06:17'
 labels:
   - macos
   - ux

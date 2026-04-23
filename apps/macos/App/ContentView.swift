@@ -1,5 +1,20 @@
 import SwiftUI
+import AVFoundation
 import FluidAudio
+
+private enum MicPermission: String {
+    case checking
+    case granted
+    case denied
+    case awaitingPrompt = "awaiting prompt"
+
+    var display: String {
+        switch self {
+        case .denied: return "denied — enable in System Settings"
+        default: return rawValue
+        }
+    }
+}
 
 struct ContentView: View {
     @Environment(\.hotkey) private var hotkey
@@ -17,6 +32,7 @@ struct ContentView: View {
     @State private var isTranscribing = false
     @State private var recordTimer: Timer?
     @State private var levelHistory: [Float] = Array(repeating: 0, count: 32)
+    @State private var micPermission: MicPermission = .checking
 
     // Keep the loaded ASR across captures so we only pay the load cost once.
     @State private var asr: AsrManager?
@@ -42,12 +58,13 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-            if let hotkey {
-                GroupBox("Hotkey debug") {
-                    VStack(alignment: .leading, spacing: 4) {
+            GroupBox("Permissions & hotkey debug") {
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledValue(label: "microphone", value: micPermission.display)
+                    if let hotkey {
                         LabeledValue(
-                            label: "AX trusted",
-                            value: hotkey.isAccessibilityTrusted ? "yes" : "no — grant + relaunch"
+                            label: "accessibility",
+                            value: hotkey.isAccessibilityTrusted ? "granted" : "not granted — grant + relaunch"
                         )
                         LabeledValue(label: "tap", value: hotkey.tapStatus)
                         LabeledValue(label: "events seen", value: "\(hotkey.eventCount)")
@@ -62,9 +79,9 @@ struct ContentView: View {
                         Button("Retry tap install") { hotkey.retryInstall() }
                             .controlSize(.small)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
             }
 
             GroupBox("Dictation (mic → Rust core → Parakeet)") {
@@ -111,6 +128,7 @@ struct ContentView: View {
         .task {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
+            await resolveMicPermission()
         }
         .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
             toggle()
@@ -205,6 +223,26 @@ struct ContentView: View {
                 status = "transcribe failed: \(error.localizedDescription)"
             }
             isTranscribing = false
+        }
+    }
+
+    // MARK: - Permissions
+
+    /// Resolve microphone access at app launch so the system prompt fires
+    /// here — not halfway into the user's first utterance. Safe to call
+    /// repeatedly; a prior decision short-circuits immediately.
+    private func resolveMicPermission() async {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            micPermission = .granted
+        case .notDetermined:
+            micPermission = .awaitingPrompt
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            micPermission = granted ? .granted : .denied
+        case .denied, .restricted:
+            micPermission = .denied
+        @unknown default:
+            micPermission = .denied
         }
     }
 

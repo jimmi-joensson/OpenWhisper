@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var isRecording = false
     @State private var isTranscribing = false
     @State private var recordTimer: Timer?
+    @State private var levelHistory: [Float] = Array(repeating: 0, count: 32)
 
     // Keep the loaded ASR across captures so we only pay the load cost once.
     @State private var asr: AsrManager?
@@ -39,6 +40,10 @@ struct ContentView: View {
                     LabeledValue(label: "elapsed", value: String(format: "%.1f s", elapsed))
                     LabeledValue(label: "samples", value: sampleCount == 0 ? "—" : "\(sampleCount) @ 16 kHz")
                     LabeledValue(label: "confidence", value: confidence)
+
+                    LevelMeter(levels: levelHistory, active: isRecording)
+                        .frame(height: 36)
+                        .padding(.vertical, 4)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("transcript:").foregroundStyle(.tertiary)
@@ -170,14 +175,48 @@ struct ContentView: View {
 
     private func startTimer() {
         let start = Date()
-        recordTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+        levelHistory = Array(repeating: 0, count: levelHistory.count)
+        recordTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             elapsed = Date().timeIntervalSince(start)
+            // Shift left and push the new sample.
+            let level = audio_current_level()
+            levelHistory.removeFirst()
+            levelHistory.append(level)
         }
     }
 
     private func stopTimer() {
         recordTimer?.invalidate()
         recordTimer = nil
+        levelHistory = Array(repeating: 0, count: levelHistory.count)
+    }
+}
+
+private struct LevelMeter: View {
+    let levels: [Float]
+    let active: Bool
+
+    // RMS on mic usually lives around 0.02–0.3 during speech. Scale so
+    // conversational input roughly fills the meter without clipping.
+    private static let gain: Float = 4.0
+
+    var body: some View {
+        GeometryReader { geo in
+            let barSpacing: CGFloat = 2
+            let barCount = CGFloat(levels.count)
+            let barWidth = max(1, (geo.size.width - barSpacing * (barCount - 1)) / barCount)
+
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                    let scaled = CGFloat(min(1.0, level * LevelMeter.gain))
+                    let h = max(2, scaled * geo.size.height)
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
+                        .frame(width: barWidth, height: h)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
     }
 }
 

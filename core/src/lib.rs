@@ -10,6 +10,7 @@ mod ffi {
         fn audio_stop_capture();
         fn audio_drain_samples() -> Vec<f32>;
         fn audio_is_capturing() -> bool;
+        fn audio_current_level() -> f32;
     }
 }
 
@@ -35,4 +36,8 @@ fn audio_drain_samples() -> Vec<f32> {
 
 fn audio_is_capturing() -> bool {
     audio::audio_is_capturing()
+}
+
+fn audio_current_level() -> f32 {
+    audio::audio_current_level()
 }

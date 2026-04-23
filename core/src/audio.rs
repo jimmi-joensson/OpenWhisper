@@ -4,7 +4,7 @@
 //! it via the pull-based FFI in [`crate::ffi`]: start, talk, stop + drain.
 //! Output is always 16 kHz mono f32 so FluidAudio can consume it directly.
 
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicU32, Ordering}, mpsc};
 use std::thread;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -14,6 +14,11 @@ use rubato::{
 };
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
+
+// Rolling RMS of the most recent callback. Written by the CoreAudio callback,
+// read from any thread via audio_current_level(). Stored as f32 bits so we can
+// use a lock-free atomic.
+static LEVEL_BITS: AtomicU32 = AtomicU32::new(0);
 
 pub struct AudioEngine {
     ctrl_tx: mpsc::Sender<Ctrl>,
@@ -167,11 +172,18 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
+                let mut sum_sq: f64 = 0.0;
                 if let Ok(mut buf) = buffer.lock() {
                     buf.reserve(data.len());
                     for &s in data {
-                        buf.push(f32::from_sample(s));
+                        let f = f32::from_sample(s);
+                        sum_sq += (f as f64) * (f as f64);
+                        buf.push(f);
                     }
+                }
+                if !data.is_empty() {
+                    let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                    LEVEL_BITS.store(rms.to_bits(), Ordering::Relaxed);
                 }
             },
             err_fn,
@@ -249,6 +261,7 @@ fn engine() -> &'static AudioEngine {
 }
 
 pub fn audio_start_capture() -> Result<(), String> {
+    LEVEL_BITS.store(0, Ordering::Relaxed);
     engine().start()
 }
 
@@ -256,6 +269,7 @@ pub fn audio_stop_capture() {
     if let Some(e) = ENGINE.get() {
         e.stop();
     }
+    LEVEL_BITS.store(0, Ordering::Relaxed);
 }
 
 pub fn audio_drain_samples() -> Vec<f32> {
@@ -264,4 +278,10 @@ pub fn audio_drain_samples() -> Vec<f32> {
 
 pub fn audio_is_capturing() -> bool {
     ENGINE.get().map(|e| e.is_capturing()).unwrap_or(false)
+}
+
+/// Returns the RMS level of the most recent audio callback, in [0, 1].
+/// Lock-free, safe to poll from a UI timer.
+pub fn audio_current_level() -> f32 {
+    f32::from_bits(LEVEL_BITS.load(Ordering::Relaxed))
 }

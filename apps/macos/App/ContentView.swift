@@ -196,9 +196,10 @@ private struct LevelMeter: View {
     let levels: [Float]
     let active: Bool
 
-    // RMS on mic usually lives around 0.02–0.3 during speech. Scale so
-    // conversational input roughly fills the meter without clipping.
-    private static let gain: Float = 4.0
+    // dB floor for the meter. Anything quieter than -55 dBFS is treated as
+    // silence; anything louder than 0 dBFS fills the bar. Tuned so a
+    // conversational mic input visibly fills most of the meter's height.
+    private static let floorDb: Float = -55
 
     var body: some View {
         GeometryReader { geo in
@@ -208,8 +209,8 @@ private struct LevelMeter: View {
 
             HStack(alignment: .center, spacing: barSpacing) {
                 ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
-                    let scaled = CGFloat(min(1.0, level * LevelMeter.gain))
-                    let h = max(2, scaled * geo.size.height)
+                    let scaled = CGFloat(LevelMeter.dbNormalize(level))
+                    let h = max(3, scaled * geo.size.height)
                     RoundedRectangle(cornerRadius: 1.5)
                         .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
                         .frame(width: barWidth, height: h)
@@ -217,6 +218,13 @@ private struct LevelMeter: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
+    }
+
+    /// Maps a linear amplitude [0, 1] to a meter fill [0, 1] using a dB curve.
+    /// Values below `floorDb` clamp to 0; values at or above 0 dBFS clamp to 1.
+    private static func dbNormalize(_ amplitude: Float) -> Float {
+        let db = 20 * log10f(max(amplitude, 1e-6))
+        return max(0, min(1, (db - floorDb) / -floorDb))
     }
 }
 

@@ -5,24 +5,12 @@ import os
 
 private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "dictation")
 
-private enum MicPermission: String {
-    case checking
-    case granted
-    case denied
-    case awaitingPrompt = "awaiting prompt"
-
-    var display: String {
-        switch self {
-        case .denied: return "denied — enable in System Settings"
-        default: return rawValue
-        }
-    }
-}
 
 struct ContentView: View {
     @Environment(\.hotkey) private var hotkey
     @Environment(\.pill) private var pill
 
+    @State private var permissions = PermissionsCoordinator()
     @State private var coreMessage: String = "—"
     @State private var coreVersion: String = "—"
 
@@ -36,13 +24,26 @@ struct ContentView: View {
     @State private var isTranscribing = false
     @State private var recordTimer: Timer?
     @State private var levelHistory: [Float] = Array(repeating: 0, count: 32)
-    @State private var micPermission: MicPermission = .checking
 
     // Keep the loaded ASR across captures so we only pay the load cost once.
     @State private var asr: AsrManager?
     @State private var injector = TextInjector()
 
     var body: some View {
+        Group {
+            if permissions.phase != .ready {
+                PermissionsSetupView(coordinator: permissions)
+            } else {
+                mainBody
+            }
+        }
+        .frame(minWidth: 580, minHeight: 540)
+        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
+            if permissions.phase == .ready { toggle() }
+        }
+    }
+
+    private var mainBody: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("OpenWhisper")
                 .font(.largeTitle.weight(.semibold))
@@ -62,30 +63,9 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-            if hotkey?.needsRelaunch == true {
-                HStack(spacing: 12) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                    Text("Accessibility granted. Restart OpenWhisper to activate the hotkey.")
-                    Spacer()
-                    Button("Restart") { relaunchOpenWhisper() }
-                        .buttonStyle(.borderedProminent)
-                }
-                .padding(10)
-                .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(.blue.opacity(0.35), lineWidth: 1)
-                )
-            }
-
-            GroupBox("Permissions & hotkey debug") {
-                VStack(alignment: .leading, spacing: 4) {
-                    LabeledValue(label: "microphone", value: micPermission.display)
-                    if let hotkey {
-                        LabeledValue(
-                            label: "accessibility",
-                            value: hotkey.isAccessibilityTrusted ? "granted" : "not granted — grant + relaunch"
-                        )
+            if let hotkey {
+                GroupBox("Hotkey debug") {
+                    VStack(alignment: .leading, spacing: 4) {
                         LabeledValue(label: "tap", value: hotkey.tapStatus)
                         LabeledValue(label: "events seen", value: "\(hotkey.eventCount)")
                         if let ev = hotkey.lastEvent {
@@ -99,9 +79,9 @@ struct ContentView: View {
                         Button("Retry tap install") { hotkey.retryInstall() }
                             .controlSize(.small)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
             }
 
             GroupBox("Dictation (mic → Rust core → Parakeet)") {
@@ -144,14 +124,9 @@ struct ContentView: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 580, minHeight: 540)
         .task {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
-            await resolveMicPermission()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
-            toggle()
         }
     }
 
@@ -274,26 +249,6 @@ struct ContentView: View {
                     pill?.hideAfter()
                 }
             }
-        }
-    }
-
-    // MARK: - Permissions
-
-    /// Resolve microphone access at app launch so the system prompt fires
-    /// here — not halfway into the user's first utterance. Safe to call
-    /// repeatedly; a prior decision short-circuits immediately.
-    private func resolveMicPermission() async {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            micPermission = .granted
-        case .notDetermined:
-            micPermission = .awaitingPrompt
-            let granted = await AVCaptureDevice.requestAccess(for: .audio)
-            micPermission = granted ? .granted : .denied
-        case .denied, .restricted:
-            micPermission = .denied
-        @unknown default:
-            micPermission = .denied
         }
     }
 

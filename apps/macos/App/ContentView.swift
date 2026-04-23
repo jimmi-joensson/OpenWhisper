@@ -5,10 +5,18 @@ struct ContentView: View {
     @State private var coreMessage: String = "—"
     @State private var coreVersion: String = "—"
 
-    @State private var status: String = "idle"
+    @State private var status: String = "idle — tap Record, speak, tap again"
     @State private var transcript: String = ""
     @State private var confidence: String = "—"
-    @State private var isRunning = false
+    @State private var elapsed: TimeInterval = 0
+    @State private var sampleCount: Int = 0
+
+    @State private var isRecording = false
+    @State private var isTranscribing = false
+    @State private var recordTimer: Timer?
+
+    // Keep the loaded ASR across captures so we only pay the load cost once.
+    @State private var asr: AsrManager?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -25,97 +33,151 @@ struct ContentView: View {
                 .padding(8)
             }
 
-            GroupBox("Parakeet (FluidAudio) smoke test") {
+            GroupBox("Dictation (mic → Rust core → Parakeet)") {
                 VStack(alignment: .leading, spacing: 10) {
                     LabeledValue(label: "status", value: status)
-                    LabeledValue(
-                        label: "confidence",
-                        value: confidence
-                    )
+                    LabeledValue(label: "elapsed", value: String(format: "%.1f s", elapsed))
+                    LabeledValue(label: "samples", value: sampleCount == 0 ? "—" : "\(sampleCount) @ 16 kHz")
+                    LabeledValue(label: "confidence", value: confidence)
+
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("transcript:")
-                            .foregroundStyle(.tertiary)
+                        Text("transcript:").foregroundStyle(.tertiary)
                         ScrollView {
                             Text(transcript.isEmpty ? "—" : transcript)
                                 .font(.system(.body, design: .monospaced))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(minHeight: 60, maxHeight: 120)
+                        .frame(minHeight: 60, maxHeight: 140)
                         .padding(8)
                         .background(.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 6))
                     }
 
-                    Button(action: runSmokeTest) {
+                    Button(action: toggle) {
                         Label(
-                            isRunning ? "Running…" : "Transcribe bundled sample",
-                            systemImage: "waveform"
+                            buttonLabel,
+                            systemImage: isRecording ? "stop.circle.fill" : "mic.circle.fill"
                         )
                     }
-                    .disabled(isRunning)
+                    .disabled(isTranscribing)
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
+                    .tint(isRecording ? .red : .accentColor)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
             }
         }
         .padding(20)
-        .frame(minWidth: 560, minHeight: 460)
+        .frame(minWidth: 580, minHeight: 540)
         .task {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
         }
     }
 
-    private func runSmokeTest() {
-        isRunning = true
-        transcript = ""
-        confidence = "—"
-        status = "loading models (first run downloads ~500 MB)…"
+    private var buttonLabel: String {
+        if isTranscribing { return "Transcribing…" }
+        if isRecording { return "Stop & transcribe" }
+        return "Record"
+    }
 
-        Task.detached {
-            do {
-                let models = try await AsrModels.downloadAndLoad(version: .v2)
-                await MainActor.run { status = "configuring ASR…" }
+    // MARK: - Actions
 
-                let asr = AsrManager(config: .default)
-                try await asr.loadModels(models)
-
-                guard let sampleURL = Bundle.main.url(
-                    forResource: "smoke-test",
-                    withExtension: "wav"
-                ) else {
-                    throw SmokeTestError.missingSample
-                }
-
-                await MainActor.run { status = "transcribing on ANE…" }
-                let result = try await asr.transcribe(sampleURL, source: .system)
-
-                await MainActor.run {
-                    transcript = result.text
-                    confidence = String(format: "%.3f", result.confidence)
-                    status = "done"
-                    isRunning = false
-                }
-            } catch {
-                await MainActor.run {
-                    status = "error: \(error.localizedDescription)"
-                    isRunning = false
-                }
-            }
+    private func toggle() {
+        if isRecording {
+            stopAndTranscribe()
+        } else {
+            startRecording()
         }
     }
-}
 
-private enum SmokeTestError: LocalizedError {
-    case missingSample
+    private func startRecording() {
+        transcript = ""
+        confidence = "—"
+        elapsed = 0
+        sampleCount = 0
+        status = "preparing…"
 
-    var errorDescription: String? {
-        switch self {
-        case .missingSample:
-            return "smoke-test.wav not found in app bundle"
+        Task {
+            if asr == nil {
+                status = "loading Parakeet model (first run ~500 MB)…"
+                do {
+                    let models = try await AsrModels.downloadAndLoad(version: .v2)
+                    let manager = AsrManager(config: .default)
+                    try await manager.loadModels(models)
+                    asr = manager
+                } catch {
+                    status = "ASR load failed: \(error.localizedDescription)"
+                    return
+                }
+            }
+
+            do {
+                try audio_start_capture()
+            } catch let rustErr as RustString {
+                status = "mic start failed: \(rustErr.toString())"
+                return
+            } catch {
+                status = "mic start failed: \(error.localizedDescription)"
+                return
+            }
+
+            isRecording = true
+            status = "recording — tap again to stop"
+            startTimer()
         }
+    }
+
+    private func stopAndTranscribe() {
+        stopTimer()
+        audio_stop_capture()
+        isRecording = false
+        isTranscribing = true
+        status = "draining mic buffer…"
+
+        let rustSamples = audio_drain_samples()
+        let samples = Array(rustSamples) as [Float]
+        sampleCount = samples.count
+
+        if samples.isEmpty {
+            status = "no audio captured"
+            isTranscribing = false
+            return
+        }
+
+        status = "transcribing on ANE…"
+
+        Task {
+            guard let manager = asr else {
+                status = "error: ASR not loaded"
+                isTranscribing = false
+                return
+            }
+            do {
+                let result = try await manager.transcribe(samples, source: .microphone)
+                transcript = result.text
+                confidence = String(format: "%.3f", result.confidence)
+                status = "done"
+            } catch {
+                status = "transcribe failed: \(error.localizedDescription)"
+            }
+            isTranscribing = false
+        }
+    }
+
+    // MARK: - Timer
+
+    private func startTimer() {
+        let start = Date()
+        recordTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            elapsed = Date().timeIntervalSince(start)
+        }
+    }
+
+    private func stopTimer() {
+        recordTimer?.invalidate()
+        recordTimer = nil
     }
 }
 

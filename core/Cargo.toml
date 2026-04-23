@@ -12,6 +12,8 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 swift-bridge = "0.1.59"
+cpal = "0.17"
+rubato = "0.16"
 
 [build-dependencies]
 swift-bridge-build = "0.1.59"

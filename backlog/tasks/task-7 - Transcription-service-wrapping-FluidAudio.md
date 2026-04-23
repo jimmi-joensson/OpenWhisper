@@ -1,10 +1,10 @@
 ---
 id: TASK-7
 title: Transcription service wrapping FluidAudio
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-22 21:26'
+updated_date: '2026-04-23 08:29'
 labels:
   - macos
   - model

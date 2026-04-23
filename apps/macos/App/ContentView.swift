@@ -23,7 +23,7 @@ struct ContentView: View {
                 .padding(8)
             }
 
-            Text("tap Right Command to toggle dictation from anywhere")
+            Text("Right Command to toggle · Escape to cancel while recording")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -44,6 +44,9 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
             dictation?.toggle()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openWhisperCancelDictation)) { _ in
+            dictation?.cancel()
         }
     }
 

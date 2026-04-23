@@ -8,6 +8,10 @@ private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "ho
 extension Notification.Name {
     /// Posted when the user taps the activation hotkey (default: Right Command).
     static let openWhisperToggleDictation = Notification.Name("com.openwhisper.toggleDictation")
+
+    /// Posted when the user presses Escape. Receivers decide whether to act
+    /// on it (e.g. DictationService cancels only when recording).
+    static let openWhisperCancelDictation = Notification.Name("com.openwhisper.cancelDictation")
 }
 
 /// Watches keyboard events system-wide via a CGEventTap and fires
@@ -23,6 +27,9 @@ final class HotkeyService {
     /// Device-dependent bit for Right Command inside `CGEventFlags.rawValue`,
     /// corresponding to `NX_DEVICERCMDKEYMASK` in `IOKit/hidsystem/ev_keymap.h`.
     private static let rightCommandMask: UInt64 = 0x0010
+
+    /// kVK_Escape.
+    private static let escapeKeyCode: UInt16 = 0x35
 
     // Debug/diagnostic state — surfaced in ContentView so you can see at a
     // glance whether Accessibility is granted and whether events are flowing.
@@ -137,6 +144,12 @@ final class HotkeyService {
         case .keyDown:
             if rightCommandDown {
                 otherKeyPressedWhileHeld = true
+            }
+            if keyCode == Self.escapeKeyCode {
+                NotificationCenter.default.post(
+                    name: .openWhisperCancelDictation,
+                    object: nil
+                )
             }
         default:
             break

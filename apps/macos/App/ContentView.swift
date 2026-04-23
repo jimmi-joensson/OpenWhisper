@@ -18,6 +18,7 @@ private enum MicPermission: String {
 
 struct ContentView: View {
     @Environment(\.hotkey) private var hotkey
+    @Environment(\.pill) private var pill
 
     @State private var coreMessage: String = "—"
     @State private var coreVersion: String = "—"
@@ -184,6 +185,7 @@ struct ContentView: View {
 
             isRecording = true
             status = "recording — tap again to stop"
+            pill?.show(status: .recording)
             startTimer()
         }
     }
@@ -194,6 +196,7 @@ struct ContentView: View {
         isRecording = false
         isTranscribing = true
         status = "draining mic buffer…"
+        pill?.show(status: .transcribing)
 
         let rustSamples = audio_drain_samples()
         let samples = Array(rustSamples) as [Float]
@@ -202,6 +205,7 @@ struct ContentView: View {
         if samples.isEmpty {
             status = "no audio captured"
             isTranscribing = false
+            pill?.hideAfter()
             return
         }
 
@@ -223,6 +227,7 @@ struct ContentView: View {
                 status = "transcribe failed: \(error.localizedDescription)"
             }
             isTranscribing = false
+            pill?.hideAfter()
         }
     }
 
@@ -251,12 +256,21 @@ struct ContentView: View {
     private func startTimer() {
         let start = Date()
         levelHistory = Array(repeating: 0, count: levelHistory.count)
+        // The pill has a shorter ring than the debug view; reset it too so
+        // the bars start flat when a new session begins.
+        pill?.update(levels: Array(repeating: 0, count: pill?.state.levels.count ?? 24))
         recordTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             elapsed = Date().timeIntervalSince(start)
-            // Shift left and push the new sample.
             let level = audio_current_level()
             levelHistory.removeFirst()
             levelHistory.append(level)
+
+            if let pill {
+                var pillLevels = pill.state.levels
+                pillLevels.removeFirst()
+                pillLevels.append(level)
+                pill.update(levels: pillLevels)
+            }
         }
     }
 
@@ -264,42 +278,6 @@ struct ContentView: View {
         recordTimer?.invalidate()
         recordTimer = nil
         levelHistory = Array(repeating: 0, count: levelHistory.count)
-    }
-}
-
-private struct LevelMeter: View {
-    let levels: [Float]
-    let active: Bool
-
-    // dB floor for the meter. Anything quieter than -55 dBFS is treated as
-    // silence; anything louder than 0 dBFS fills the bar. Tuned so a
-    // conversational mic input visibly fills most of the meter's height.
-    private static let floorDb: Float = -55
-
-    var body: some View {
-        GeometryReader { geo in
-            let barSpacing: CGFloat = 2
-            let barCount = CGFloat(levels.count)
-            let barWidth = max(1, (geo.size.width - barSpacing * (barCount - 1)) / barCount)
-
-            HStack(alignment: .center, spacing: barSpacing) {
-                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
-                    let scaled = CGFloat(LevelMeter.dbNormalize(level))
-                    let h = max(3, scaled * geo.size.height)
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
-                        .frame(width: barWidth, height: h)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        }
-    }
-
-    /// Maps a linear amplitude [0, 1] to a meter fill [0, 1] using a dB curve.
-    /// Values below `floorDb` clamp to 0; values at or above 0 dBFS clamp to 1.
-    private static func dbNormalize(_ amplitude: Float) -> Float {
-        let db = 20 * log10f(max(amplitude, 1e-6))
-        return max(0, min(1, (db - floorDb) / -floorDb))
     }
 }
 

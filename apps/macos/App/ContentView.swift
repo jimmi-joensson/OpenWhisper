@@ -59,6 +59,22 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
 
+            if hotkey?.needsRelaunch == true {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Text("Accessibility granted. Restart OpenWhisper to activate the hotkey.")
+                    Spacer()
+                    Button("Restart") { relaunchOpenWhisper() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(10)
+                .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(.blue.opacity(0.35), lineWidth: 1)
+                )
+            }
+
             GroupBox("Permissions & hotkey debug") {
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledValue(label: "microphone", value: micPermission.display)

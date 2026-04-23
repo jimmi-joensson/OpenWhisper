@@ -4,7 +4,7 @@ title: Transcription service wrapping FluidAudio
 status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-23 08:30'
+updated_date: '2026-04-23 18:16'
 labels:
   - macos
   - model
@@ -13,6 +13,7 @@ dependencies:
 references:
   - 'https://github.com/FluidInference/FluidAudio'
 priority: high
+ordinal: 1000
 ---
 
 ## Description

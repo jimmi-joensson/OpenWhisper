@@ -4,7 +4,7 @@ title: Integrate FluidAudio + Parakeet CoreML artifact
 status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-23 05:39'
+updated_date: '2026-04-23 18:16'
 labels:
   - macos
   - stt
@@ -15,6 +15,7 @@ references:
 documentation:
   - docs/spikes/task-3-parakeet-on-apple-silicon.md
 priority: high
+ordinal: 5000
 ---
 
 ## Description

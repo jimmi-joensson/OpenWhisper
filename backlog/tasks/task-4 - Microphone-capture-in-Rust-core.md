@@ -4,12 +4,13 @@ title: Microphone capture in Rust core
 status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-23 06:08'
+updated_date: '2026-04-23 18:16'
 labels:
   - core
   - audio
 dependencies: []
 priority: high
+ordinal: 4000
 ---
 
 ## Description

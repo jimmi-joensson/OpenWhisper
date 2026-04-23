@@ -1,9 +1,10 @@
 ---
 id: TASK-20
 title: Menu bar agent mode (status bar app + LSUIElement)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-23 13:46'
+updated_date: '2026-04-23 18:30'
 labels:
   - macos
   - ui

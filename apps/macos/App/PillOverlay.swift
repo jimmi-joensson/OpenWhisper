@@ -14,7 +14,7 @@ enum PillStatus {
 @Observable
 final class PillState {
     var status: PillStatus = .recording
-    var levels: [Float] = Array(repeating: 0, count: 24)
+    var levels: [Float] = Array(repeating: 0, count: 12)
 }
 
 /// SwiftUI content of the pill. Borderless capsule on an HUD-style material
@@ -23,18 +23,18 @@ struct PillView: View {
     let state: PillState
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             if state.status == .transcribing {
                 ProgressView()
                     .controlSize(.mini)
-                    .scaleEffect(0.65)
-                    .frame(width: 10, height: 10)
+                    .scaleEffect(0.55)
+                    .frame(width: 8, height: 8)
             }
             LevelMeter(levels: state.levels, active: state.status == .recording)
-                .frame(height: 12)
+                .frame(height: 10)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
             Capsule()
                 .fill(.black.opacity(0.55))
@@ -57,7 +57,7 @@ final class PillWindowController {
     private let panel: NSPanel
     private var hideTask: Task<Void, Never>?
 
-    private static let pillSize = CGSize(width: 108, height: 26)
+    private static let pillSize = CGSize(width: 70, height: 22)
     private static let gapAboveDock: CGFloat = 14
 
     init() {

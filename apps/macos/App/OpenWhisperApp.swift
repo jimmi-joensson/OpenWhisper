@@ -1,8 +1,11 @@
 import AppKit
+import Observation
 import SwiftUI
 
 @main
 struct OpenWhisperApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @State private var hotkey = HotkeyService()
     @State private var pill: PillWindowController
     @State private var permissions = PermissionsCoordinator()
@@ -11,14 +14,18 @@ struct OpenWhisperApp: App {
     init() {
         // Enforce single-instance before any Scene mounts. During a TCC-driven
         // relaunch (Relaunch.swift spawns a new instance, then terminates),
-        // both processes briefly own a MenuBarExtra → two mic icons in the
-        // bar. Terminating the predecessor here closes that window.
+        // both processes briefly own a status item → two mic icons in the bar.
         Self.terminatePriorInstances()
 
         let pill = PillWindowController()
         let dictation = DictationService(pill: pill)
         self._pill = State(wrappedValue: pill)
         self._dictation = State(wrappedValue: dictation)
+
+        // Hand the dictation service to the AppDelegate via a shared bridge.
+        // App.init runs before applicationDidFinishLaunching, so the delegate
+        // sees this when it sets up the NSStatusItem.
+        AppBridge.dictation = dictation
     }
 
     private static func terminatePriorInstances() {
@@ -32,16 +39,13 @@ struct OpenWhisperApp: App {
 
         for other in others { other.terminate() }
 
-        // Block briefly until predecessors actually exit. Worst case we wait
-        // 2s and proceed anyway — falls back to the old (visible) overlap
-        // rather than hanging the user.
         let deadline = Date().addingTimeInterval(2.0)
         while Date() < deadline {
             let stillAlive = NSRunningApplication
                 .runningApplications(withBundleIdentifier: bundleID)
                 .contains { $0.processIdentifier != me.processIdentifier }
             if !stillAlive { return }
-            usleep(50_000) // 50 ms
+            usleep(50_000)
         }
     }
 
@@ -52,64 +56,244 @@ struct OpenWhisperApp: App {
                 .environment(\.pill, pill)
                 .environment(\.permissions, permissions)
                 .environment(\.dictation, dictation)
+                .modifier(CaptureOpenWindow())
         }
         .defaultSize(width: 580, height: 540)
-
-        MenuBarExtra {
-            MenuBarContent(dictation: dictation)
-        } label: {
-            // SF Symbol auto-tints to match the menu bar (template image).
-            Image(systemName: menuBarSymbol(for: dictation.phase))
-        }
-        .menuBarExtraStyle(.menu)
-    }
-
-    private func menuBarSymbol(for phase: DictationService.Phase) -> String {
-        switch phase {
-        case .recording: return "waveform"
-        case .transcribing: return "waveform.and.mic"
-        default: return "mic.fill"
-        }
     }
 }
 
-/// Contents of the menu-bar dropdown. Lives inside the MenuBarExtra scene
-/// so `openWindow` resolves via the SwiftUI environment without any
-/// AppKit bridging.
-private struct MenuBarContent: View {
+/// Stash SwiftUI's `openWindow` action in `AppBridge` so the AppKit
+/// status-bar menu can reopen the main window after a close. The window
+/// auto-opens once at launch (Window scene), so onAppear fires at least
+/// once and the closure is captured before the user can possibly close it.
+private struct CaptureOpenWindow: ViewModifier {
     @Environment(\.openWindow) private var openWindow
-    @Bindable var dictation: DictationService
 
-    var body: some View {
-        Button("Open OpenWhisper") {
-            openWindow(id: "main")
-            NSApp.activate(ignoringOtherApps: true)
-        }
-
-        Divider()
-
-        Button(dictationLabel) {
-            dictation.toggle()
-        }
-        .disabled(!dictation.isInteractable)
-
-        Divider()
-
-        Button("Quit OpenWhisper") {
-            NSApp.terminate(nil)
-        }
-        .keyboardShortcut("q")
-    }
-
-    private var dictationLabel: String {
-        switch dictation.phase {
-        case .idle, .done, .error: return "Start Dictation"
-        case .loadingModel: return "Loading model…"
-        case .recording: return "Stop Dictation"
-        case .transcribing: return "Transcribing…"
+    func body(content: Content) -> some View {
+        content.onAppear {
+            AppBridge.openMainWindow = { openWindow(id: "main") }
         }
     }
 }
+
+/// Shared bridge between the SwiftUI App graph and the AppKit AppDelegate.
+/// Set in `App.init` (dictation) and `ContentView.onAppear` (openMainWindow).
+@MainActor
+enum AppBridge {
+    static var dictation: DictationService?
+    static var openMainWindow: (() -> Void)?
+}
+
+// MARK: - AppDelegate
+
+/// Owns the NSStatusItem and its NSMenu directly, sidestepping SwiftUI's
+/// MenuBarExtra (FB13683957: label doesn't rerender on @Observable changes).
+/// We get full control over the icon image swap in response to dictation
+/// phase changes via withObservationTracking.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusItem: NSStatusItem?
+    private let menu = NSMenu()
+    private weak var dictation: DictationService?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let dictation = AppBridge.dictation else {
+            assertionFailure("AppBridge.dictation must be set in App.init before delegate runs")
+            return
+        }
+        self.dictation = dictation
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.toolTip = "OpenWhisper"
+        item.menu = menu
+
+        menu.delegate = self
+        menu.autoenablesItems = false
+
+        statusItem = item
+
+        refreshIcon()
+        observePhase()
+    }
+
+    // MARK: - Reactive icon
+
+    /// Re-arms itself on every change because withObservationTracking only
+    /// fires once per registration. Idiomatic AppKit consumer of @Observable.
+    private func observePhase() {
+        guard let dictation else { return }
+        withObservationTracking {
+            _ = dictation.phase
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                self?.refreshIcon()
+                self?.observePhase()
+            }
+        }
+    }
+
+    private func refreshIcon() {
+        guard let dictation else { return }
+        statusItem?.button?.image = StatusIconRenderer.render(phase: dictation.phase)
+    }
+
+    // MARK: - Menu
+
+    func menuWillOpen(_ menu: NSMenu) {
+        rebuildMenu()
+    }
+
+    private func rebuildMenu() {
+        menu.removeAllItems()
+
+        let openItem = NSMenuItem(title: "Open OpenWhisper", action: #selector(openMain), keyEquivalent: "")
+        openItem.target = self
+        openItem.isEnabled = true
+        menu.addItem(openItem)
+
+        menu.addItem(.separator())
+
+        let dictationItem = NSMenuItem(title: dictationItemTitle(), action: #selector(toggleDictation), keyEquivalent: "")
+        dictationItem.target = self
+        dictationItem.isEnabled = dictation?.isInteractable ?? false
+        menu.addItem(dictationItem)
+
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "Quit OpenWhisper", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        quitItem.isEnabled = true
+        menu.addItem(quitItem)
+    }
+
+    private func dictationItemTitle() -> String {
+        switch dictation?.phase {
+        case .recording: return "Stop Dictation"
+        case .loadingModel: return "Loading model…"
+        case .transcribing: return "Transcribing…"
+        case .none, .some(.idle), .some(.done), .some(.error): return "Start Dictation"
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func openMain() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.canBecomeKey }) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        AppBridge.openMainWindow?()
+    }
+
+    @objc private func toggleDictation() {
+        dictation?.toggle()
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
+}
+
+// MARK: - Status icon rendering
+
+/// Builds the menu-bar NSImage from the same rect coordinates as the
+/// source SVGs (OpenWhisper_Default.svg / OpenWhisper_Recording.svg).
+/// Idle = template image so AppKit auto-tints for dark/light + highlight.
+/// Recording = composite (mic + orange badge) drawn explicitly with
+/// NSColor.labelColor so the mic still adapts to dark/light, and the
+/// badge stays vivid orange — at the cost of menu-highlight inversion
+/// on the recording-state icon.
+@MainActor
+enum StatusIconRenderer {
+    private static let viewBox: CGFloat = 792
+    private static let iconSize: CGFloat = 18
+
+    private static let micRects: [CGRect] = [
+        CGRect(x: 204, y: 188, width: 64, height: 64),
+        CGRect(x: 204, y: 284, width: 64, height: 64),
+        CGRect(x: 204, y: 380, width: 64, height: 64),
+        CGRect(x: 204, y: 476, width: 64, height: 64),
+        CGRect(x: 204, y: 700, width: 64, height: 64),
+        CGRect(x: 268, y: 28, width: 64, height: 64),
+        CGRect(x: 268, y: 92, width: 256, height: 64),
+        CGRect(x: 268, y: 188, width: 64, height: 64),
+        CGRect(x: 268, y: 284, width: 64, height: 64),
+        CGRect(x: 268, y: 380, width: 64, height: 64),
+        CGRect(x: 268, y: 476, width: 256, height: 64),
+        CGRect(x: 268, y: 700, width: 256, height: 64),
+        CGRect(x: 364, y: 28, width: 64, height: 64),
+        CGRect(x: 364, y: 156, width: 64, height: 320),
+        CGRect(x: 364, y: 572, width: 64, height: 64),
+        CGRect(x: 364, y: 636, width: 64, height: 64),
+        CGRect(x: 460, y: 28, width: 64, height: 64),
+        CGRect(x: 460, y: 188, width: 64, height: 64),
+        CGRect(x: 460, y: 284, width: 64, height: 64),
+        CGRect(x: 460, y: 380, width: 64, height: 64),
+        CGRect(x: 524, y: 92, width: 64, height: 64),
+        CGRect(x: 524, y: 188, width: 64, height: 64),
+        CGRect(x: 524, y: 284, width: 64, height: 64),
+        CGRect(x: 524, y: 380, width: 64, height: 64),
+        CGRect(x: 524, y: 476, width: 64, height: 64),
+        CGRect(x: 524, y: 700, width: 64, height: 64),
+    ]
+
+    private static let badgeRects: [CGRect] = [
+        CGRect(x: 524, y: 92, width: 64, height: 64),
+        CGRect(x: 524, y: 188, width: 64, height: 64),
+        CGRect(x: 620, y: 92, width: 64, height: 64),
+        CGRect(x: 620, y: 188, width: 64, height: 64),
+    ]
+
+    private static let badgeColor = NSColor(red: 0.88, green: 0.44, blue: 0, alpha: 1) // #E07000
+
+    static func render(phase: DictationService.Phase) -> NSImage {
+        if phase == .recording {
+            return recordingImage
+        }
+        return idleImage
+    }
+
+    private static let idleImage: NSImage = {
+        let img = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
+            let scale = rect.width / viewBox
+            NSColor.black.setFill()
+            for r in micRects { drawRect(r, scale: scale, in: rect).fill() }
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }()
+
+    private static let recordingImage: NSImage = {
+        let img = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
+            let scale = rect.width / viewBox
+            // Mic body in label color so it still reads on light + dark bars.
+            NSColor.labelColor.setFill()
+            for r in micRects { drawRect(r, scale: scale, in: rect).fill() }
+            // Badge rects on top, vivid orange, NOT template-tinted.
+            badgeColor.setFill()
+            for r in badgeRects { drawRect(r, scale: scale, in: rect).fill() }
+            return true
+        }
+        // NOT template: we want the orange to stay orange. Mic body uses
+        // labelColor which still resolves to the current appearance.
+        img.isTemplate = false
+        return img
+    }()
+
+    /// Convert source SVG-coord rect to target NSImage rect (Y-flipped).
+    private static func drawRect(_ r: CGRect, scale: CGFloat, in bounds: NSRect) -> NSRect {
+        NSRect(
+            x: r.minX * scale,
+            y: bounds.height - (r.minY + r.height) * scale,
+            width: r.width * scale,
+            height: r.height * scale
+        )
+    }
+}
+
+// MARK: - Environment keys
 
 private struct HotkeyServiceKey: EnvironmentKey {
     static let defaultValue: HotkeyService? = nil

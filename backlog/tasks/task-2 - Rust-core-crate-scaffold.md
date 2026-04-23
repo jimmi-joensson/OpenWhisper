@@ -4,12 +4,13 @@ title: Rust core crate scaffold
 status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-22 21:39'
+updated_date: '2026-04-23 18:16'
 labels:
   - core
   - setup
 dependencies: []
 priority: high
+ordinal: 7000
 ---
 
 ## Description

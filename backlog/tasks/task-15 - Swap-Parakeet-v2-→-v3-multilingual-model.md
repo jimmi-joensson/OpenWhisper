@@ -1,9 +1,10 @@
 ---
 id: TASK-15
 title: Swap Parakeet v2 → v3 multilingual model
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-23 09:10'
+updated_date: '2026-04-23 18:30'
 labels:
   - macos
   - stt

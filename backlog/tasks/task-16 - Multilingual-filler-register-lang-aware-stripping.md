@@ -1,9 +1,10 @@
 ---
 id: TASK-16
 title: Multilingual filler register + lang-aware stripping
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-23 09:48'
+updated_date: '2026-04-23 18:30'
 labels:
   - macos
   - post-processing

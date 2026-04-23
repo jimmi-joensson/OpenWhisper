@@ -4,12 +4,13 @@ title: Text injection via Accessibility + CGEventPost
 status: Done
 assignee: []
 created_date: '2026-04-22 21:11'
-updated_date: '2026-04-23 07:13'
+updated_date: '2026-04-23 18:16'
 labels:
   - macos
   - integration
 dependencies: []
 priority: high
+ordinal: 2000
 ---
 
 ## Description

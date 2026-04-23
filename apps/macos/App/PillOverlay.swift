@@ -24,11 +24,16 @@ struct PillView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            indicator
+            if state.status == .transcribing {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+                    .frame(width: 14, height: 14)
+            }
             LevelMeter(levels: state.levels, active: state.status == .recording)
-                .frame(width: 120, height: 22)
+                .frame(height: 22)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(
             Capsule()
@@ -38,25 +43,6 @@ struct PillView: View {
         .overlay(
             Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 1)
         )
-    }
-
-    @ViewBuilder
-    private var indicator: some View {
-        switch state.status {
-        case .recording:
-            Circle()
-                .fill(.red)
-                .frame(width: 10, height: 10)
-                .overlay(
-                    Circle()
-                        .stroke(.red.opacity(0.35), lineWidth: 4)
-                )
-        case .transcribing:
-            ProgressView()
-                .controlSize(.small)
-                .scaleEffect(0.7)
-                .frame(width: 14, height: 14)
-        }
     }
 }
 

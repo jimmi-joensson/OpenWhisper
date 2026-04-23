@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.openwhisper
   createIntermediateGroups: true
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "15.0"
   defaultConfig: Debug
   generateEmptyDirectories: true
 
@@ -17,7 +17,7 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
-    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: "-"
     ENABLE_HARDENED_RUNTIME: "YES"
@@ -38,12 +38,14 @@ targets:
   OpenWhisper:
     type: application
     platform: macOS
-    deploymentTarget: "14.0"
+    deploymentTarget: "15.0"
     sources:
       - path: App
       - path: Generated
         optional: true
       - path: Resources/Assets.xcassets
+      - path: Resources/AppIcon.icon
+      - path: Resources/AppIconDev.icon
       - path: Resources/samples
     dependencies:
       - package: FluidAudio
@@ -53,7 +55,7 @@ targets:
         NSMicrophoneUsageDescription: "OpenWhisper needs microphone access to transcribe your speech on-device."
         NSAppleEventsUsageDescription: "OpenWhisper needs accessibility access to paste transcribed text into the app you're working in."
         NSHumanReadableCopyright: "Copyright © 2026 Jimmi Joensson. Licensed under MIT."
-        LSMinimumSystemVersion: "14.0"
+        LSMinimumSystemVersion: "15.0"
         # Run as a menu-bar agent: no Dock icon, app keeps running
         # after the main window closes. Status item lives in the
         # MenuBarExtra scene in OpenWhisperApp.swift.
@@ -68,7 +70,6 @@ targets:
         com.apple.security.device.audio-input: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.openwhisper.OpenWhisper
         SWIFT_OBJC_BRIDGING_HEADER: App/OpenWhisper-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/Generated
@@ -77,3 +78,12 @@ targets:
           - $(SRCROOT)/Vendor
         OTHER_LDFLAGS:
           - -lopenwhisper_core
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.openwhisper.OpenWhisper.dev
+          PRODUCT_NAME: "OpenWhisper Dev"
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDev
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.openwhisper.OpenWhisper
+          PRODUCT_NAME: "OpenWhisper"
+          ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

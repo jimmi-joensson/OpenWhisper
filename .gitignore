@@ -90,6 +90,10 @@ apps/macos/Resources/Info.plist
 src-tauri/target/
 release/
 
+# Release packaging output (from scripts/package-release.sh)
+dist/
+build/
+
 # Local models / weights / audio assets (large binaries)
 # Note: models/ is tracked (docs, conversion scripts); only actual weight files are ignored.
 *.gguf

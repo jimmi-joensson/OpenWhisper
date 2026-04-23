@@ -34,6 +34,11 @@ struct ContentView: View {
                 .padding(8)
             }
 
+            Text("tap Right Command to toggle dictation from anywhere")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
             GroupBox("Dictation (mic → Rust core → Parakeet)") {
                 VStack(alignment: .leading, spacing: 10) {
                     LabeledValue(label: "status", value: status)
@@ -78,6 +83,9 @@ struct ContentView: View {
         .task {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
+            toggle()
         }
     }
 

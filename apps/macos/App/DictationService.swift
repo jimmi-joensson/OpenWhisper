@@ -73,6 +73,24 @@ final class DictationService {
         }
     }
 
+    /// Abort an in-progress recording. Discards the captured audio, does
+    /// not transcribe or paste. No-op if we aren't recording — Escape
+    /// should only cancel an active session, never disturb other state.
+    func cancel() {
+        guard case .recording = phase else { return }
+        log.info("cancel requested")
+        stopTimer()
+        audio_stop_capture()
+        _ = audio_drain_samples()  // drop samples on the floor
+        transcript = ""
+        confidence = "—"
+        sampleCount = 0
+        elapsed = 0
+        statusMessage = "cancelled"
+        phase = .idle
+        pill?.hideAfter()
+    }
+
     // MARK: - Flow
 
     private func startRecording() {

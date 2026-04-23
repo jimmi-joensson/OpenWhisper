@@ -23,18 +23,18 @@ struct PillView: View {
     let state: PillState
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             if state.status == .transcribing {
                 ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.7)
-                    .frame(width: 14, height: 14)
+                    .controlSize(.mini)
+                    .scaleEffect(0.65)
+                    .frame(width: 10, height: 10)
             }
             LevelMeter(levels: state.levels, active: state.status == .recording)
-                .frame(height: 22)
+                .frame(height: 12)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
             Capsule()
                 .fill(.black.opacity(0.55))
@@ -57,8 +57,8 @@ final class PillWindowController {
     private let panel: NSPanel
     private var hideTask: Task<Void, Never>?
 
-    private static let pillSize = CGSize(width: 180, height: 44)
-    private static let gapAboveDock: CGFloat = 16
+    private static let pillSize = CGSize(width: 108, height: 26)
+    private static let gapAboveDock: CGFloat = 14
 
     init() {
         let hosting = NSHostingView(rootView: PillView(state: state))

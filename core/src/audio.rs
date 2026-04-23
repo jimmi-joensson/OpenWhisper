@@ -196,6 +196,7 @@ where
 }
 
 fn drain_and_resample(capture: &Capture) -> Vec<f32> {
+    let t0 = std::time::Instant::now();
     let raw = match capture.buffer.lock() {
         Ok(mut g) => std::mem::take(&mut *g),
         Err(_) => return Vec::new(),
@@ -207,11 +208,22 @@ fn drain_and_resample(capture: &Capture) -> Vec<f32> {
 
     let mono = downmix_to_mono(&raw, capture.channels);
 
-    if capture.native_rate == TARGET_SAMPLE_RATE {
-        return mono;
-    }
+    let out = if capture.native_rate == TARGET_SAMPLE_RATE {
+        mono
+    } else {
+        resample_to_target(mono, capture.native_rate).unwrap_or_default()
+    };
 
-    resample_to_target(mono, capture.native_rate).unwrap_or_default()
+    let dt = t0.elapsed();
+    eprintln!(
+        "[openwhisper-core] drained raw={} mono_out={} native={}Hz took={:.1}ms",
+        raw.len(),
+        out.len(),
+        capture.native_rate,
+        dt.as_secs_f64() * 1000.0,
+    );
+
+    out
 }
 
 fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {

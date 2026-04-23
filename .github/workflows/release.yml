@@ -16,7 +16,9 @@ permissions:
 
 jobs:
   build-macos-arm64:
-    runs-on: macos-14
+    # macos-15 = Sequoia arm64; needed for Xcode 26 (`.icon` format and the
+    # xcodegen-generated project file format 77).
+    runs-on: macos-15
     timeout-minutes: 30
 
     steps:
@@ -51,8 +53,14 @@ jobs:
       - name: Install build tools
         run: brew install xcodegen create-dmg
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: Select newest Xcode
+        run: |
+          ls /Applications/ | grep -E '^Xcode' || true
+          NEWEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [[ -z "$NEWEST" ]]; then NEWEST=/Applications/Xcode.app; fi
+          echo "Selecting: $NEWEST"
+          sudo xcode-select -s "$NEWEST"
+          xcodebuild -version
 
       - name: Package DMG
         env:

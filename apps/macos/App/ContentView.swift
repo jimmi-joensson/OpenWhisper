@@ -30,20 +30,6 @@ struct ContentView: View {
     @State private var injector = TextInjector()
 
     var body: some View {
-        Group {
-            if permissions.phase != .ready {
-                PermissionsSetupView(coordinator: permissions)
-            } else {
-                mainBody
-            }
-        }
-        .frame(minWidth: 580, minHeight: 540)
-        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
-            if permissions.phase == .ready { toggle() }
-        }
-    }
-
-    private var mainBody: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("OpenWhisper")
                 .font(.largeTitle.weight(.semibold))
@@ -62,6 +48,22 @@ struct ContentView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
+
+            if permissions.accessibilityGrantedThisSession {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                    Text("Accessibility granted. Restart OpenWhisper to activate the hotkey.")
+                    Spacer()
+                    Button("Restart") { relaunchOpenWhisper() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(10)
+                .background(.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(.blue.opacity(0.35), lineWidth: 1)
+                )
+            }
 
             if let hotkey {
                 GroupBox("Hotkey debug") {
@@ -124,9 +126,13 @@ struct ContentView: View {
             }
         }
         .padding(20)
+        .frame(minWidth: 580, minHeight: 540)
         .task {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
+            toggle()
         }
     }
 

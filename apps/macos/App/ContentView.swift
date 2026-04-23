@@ -9,8 +9,8 @@ private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "di
 struct ContentView: View {
     @Environment(\.hotkey) private var hotkey
     @Environment(\.pill) private var pill
+    @Environment(\.permissions) private var permissions
 
-    @State private var permissions = PermissionsCoordinator()
     @State private var coreMessage: String = "—"
     @State private var coreVersion: String = "—"
 
@@ -49,7 +49,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-            if permissions.accessibilityGrantedThisSession {
+            if permissions?.accessibilityGrantedThisSession == true {
                 HStack(spacing: 12) {
                     Image(systemName: "arrow.triangle.2.circlepath")
                     Text("Accessibility granted. Restart OpenWhisper to activate the hotkey.")

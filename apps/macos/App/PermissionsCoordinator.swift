@@ -6,26 +6,18 @@ import os
 
 private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "permissions")
 
-enum PermissionPhase: Equatable {
-    /// Accessibility is not granted. Step 1 of setup.
-    case needsAccessibility
-    /// Accessibility is now granted but the running process still has stale
-    /// TCC state — we can't use it without a fresh process.
-    case needsAccessibilityRestart
-    /// Accessibility is good; microphone is next.
-    case needsMicrophone
-    /// Everything granted; the app can dictate.
-    case ready
-}
-
-/// Single owner of the permission state machine. Prompts are surfaced in a
+/// Single owner of the permission state. Fires system prompts in a
 /// deliberate order — Accessibility first, Microphone second — so the user
-/// isn't buried under multiple system dialogs on first launch.
+/// never faces both TCC dialogs at once. No in-app setup UI is shown; the
+/// main window loads normally and the system handles the prompts.
 @MainActor
 @Observable
 final class PermissionsCoordinator {
     private(set) var accessibilityTrusted: Bool
     private(set) var microphoneGranted: Bool
+    /// True when Accessibility was granted *during this running process*,
+    /// meaning the new trust state won't take effect until relaunch. Drives
+    /// the inline Restart banner.
     private(set) var accessibilityGrantedThisSession: Bool = false
 
     private var pollTask: Task<Void, Never>?
@@ -34,19 +26,23 @@ final class PermissionsCoordinator {
         self.accessibilityTrusted = AXIsProcessTrusted()
         self.microphoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         log.info("init axTrusted=\(self.accessibilityTrusted) micGranted=\(self.microphoneGranted)")
+
+        resumeFlow()
     }
 
-    var phase: PermissionPhase {
-        if accessibilityGrantedThisSession { return .needsAccessibilityRestart }
-        if !accessibilityTrusted { return .needsAccessibility }
-        if !microphoneGranted { return .needsMicrophone }
-        return .ready
+    /// Fire the next needed system prompt (if any). Called on init, and
+    /// intended for re-entry after a relaunch.
+    private func resumeFlow() {
+        if !accessibilityTrusted {
+            log.info("resumeFlow → prompting Accessibility")
+            promptAccessibility()
+        } else if !microphoneGranted {
+            log.info("resumeFlow → prompting Microphone")
+            Task { await promptMicrophone() }
+        }
     }
 
-    /// Fire the system Accessibility prompt. macOS opens System Settings;
-    /// this process's trust state is frozen at launch, so once the user
-    /// grants we detect the change via poll and move to the restart step.
-    func promptAccessibility() {
+    private func promptAccessibility() {
         let options: NSDictionary = [
             kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true,
         ]
@@ -54,12 +50,10 @@ final class PermissionsCoordinator {
         startAccessibilityPoll()
     }
 
-    /// Fire the system Microphone prompt. Unlike Accessibility, mic grants
-    /// take effect immediately in the running process.
-    func promptMicrophone() async {
+    private func promptMicrophone() async {
         let granted = await AVCaptureDevice.requestAccess(for: .audio)
         microphoneGranted = granted
-        log.info("microphone prompt result granted=\(granted)")
+        log.info("mic prompt granted=\(granted)")
     }
 
     private func startAccessibilityPoll() {
@@ -70,7 +64,7 @@ final class PermissionsCoordinator {
                 guard let self else { return }
                 let trusted = AXIsProcessTrusted()
                 if trusted, !self.accessibilityTrusted {
-                    log.info("accessibility granted during this session — restart required")
+                    log.info("accessibility granted this session — restart required")
                     self.accessibilityTrusted = true
                     self.accessibilityGrantedThisSession = true
                     return

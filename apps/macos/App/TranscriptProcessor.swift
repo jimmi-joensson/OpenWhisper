@@ -1,29 +1,54 @@
 import Foundation
 
 /// Post-processes a raw Parakeet transcript before it's pasted into the
-/// focused app. Two passes today:
-///   1. Strip filler words (um, uh, er, ah, oh, …).
-///   2. Apply user substitutions (e.g. "open whisper" → "OpenWhisper",
-///      "payproof" → "PayProff").
+/// focused app. Passes:
+///   1. Strip filler words (um, uh, øh, …) per detected language.
+///   2. Apply user substitutions (e.g. "open whisper" → "OpenWhisper").
+///
+/// Filler lists are keyed by `FillerLang`. Critical distinction:
+/// "er" is English hesitation ("er, I think…") but also the Danish
+/// copula ("det er fedt"). Stripping it blindly ate Danish verbs — hence
+/// per-language registers + lightweight detection.
 ///
 /// Lives on the @MainActor for consistency with the rest of the service
 /// layer, but the transformation itself is pure and cheap — safe to call
 /// from a transcription-completion handler.
 @MainActor
 final class TranscriptProcessor {
-    /// Default filler-word set. Case-insensitive whole-word matching, so
-    /// "umbrella" and "oh-well" survive. Multi-letter repeats like "uhhh"
-    /// and "ummmmm" are caught via the regex pattern, not this list.
-    static let defaultFillers: Set<String> = [
-        "um", "umm", "ummm",
-        "uh", "uhh", "uhhh",
-        "uhm", "uhmm",
-        "er", "err", "erm", "errm",
-        "ah", "ahh",
-        "oh", "ooh",
-        "hm", "hmm", "hmmm",
-        "mm", "mmm",
-        "øh", "øhm", // Danish
+    enum FillerLang: String, Sendable {
+        case en
+        case da
+    }
+
+    /// Per-language filler register. Each list is self-contained so a
+    /// reviewer can scan what gets stripped for a given language without
+    /// mentally intersecting sets.
+    ///
+    /// Note the asymmetry around "er": present in `.en` (hesitation),
+    /// absent from `.da` (copula "is/are"). "erm"/"err"/"errm" are in both
+    /// — they're never Danish words, so safe to strip as standalone tokens.
+    static let defaultFillersByLang: [FillerLang: Set<String>] = [
+        .en: [
+            "um", "umm", "ummm",
+            "uh", "uhh", "uhhh",
+            "uhm", "uhmm",
+            "er", "err", "erm", "errm",
+            "ah", "ahh",
+            "oh", "ooh",
+            "hm", "hmm", "hmmm",
+            "mm", "mmm",
+        ],
+        .da: [
+            "um", "umm", "ummm",
+            "uh", "uhh", "uhhh",
+            "uhm", "uhmm",
+            "err", "erm", "errm",
+            "ah", "ahh",
+            "oh", "ooh",
+            "hm", "hmm", "hmmm",
+            "mm", "mmm",
+            "øh", "øhm",
+        ],
     ]
 
     /// Default substitutions. Kept short — users will add their own via
@@ -33,23 +58,36 @@ final class TranscriptProcessor {
     ]
 
     var removeFillers: Bool = true
-    var fillers: Set<String> = TranscriptProcessor.defaultFillers
+    var fillersByLang: [FillerLang: Set<String>] = TranscriptProcessor.defaultFillersByLang
     var substitutions: [String: String] = TranscriptProcessor.defaultSubstitutions
 
-    func process(_ text: String) -> String {
+    /// Transcription language to apply. Nil = auto-detect from text.
+    /// Will be wired to FluidAudio's detected language once issue #303 ships.
+    func process(_ text: String, lang: FillerLang? = nil) -> String {
+        let effectiveLang = lang ?? Self.detectLang(text)
         var out = text
         if removeFillers {
-            out = strippingFillers(out)
+            out = strippingFillers(out, lang: effectiveLang)
         }
         out = applyingSubstitutions(out)
         out = normalizingWhitespace(out)
         return out
     }
 
+    /// Heuristic language detection from text. Today: any Danish-specific
+    /// character (æ/ø/å) flips to .da; otherwise .en. Intentionally simple
+    /// — replace with FluidAudio's per-result language once available.
+    static func detectLang(_ text: String) -> FillerLang {
+        let daChars: Set<Character> = ["æ", "ø", "å", "Æ", "Ø", "Å"]
+        return text.contains(where: daChars.contains) ? .da : .en
+    }
+
     // MARK: - Passes
 
-    private func strippingFillers(_ text: String) -> String {
-        guard !fillers.isEmpty else { return text }
+    private func strippingFillers(_ text: String, lang: FillerLang) -> String {
+        guard let fillers = fillersByLang[lang], !fillers.isEmpty else {
+            return text
+        }
 
         // Match: word-boundary, one of the fillers, word-boundary, then
         // optionally a single trailing comma (but NOT a period — removing a

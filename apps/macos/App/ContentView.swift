@@ -65,9 +65,17 @@ struct ContentView: View {
                 )
             }
 
-            if let hotkey {
-                GroupBox("Hotkey debug") {
-                    VStack(alignment: .leading, spacing: 4) {
+            GroupBox("Permissions & hotkey debug") {
+                VStack(alignment: .leading, spacing: 4) {
+                    LabeledValue(
+                        label: "accessibility",
+                        value: permissions?.accessibilityTrusted == true ? "granted" : "not granted"
+                    )
+                    LabeledValue(
+                        label: "microphone",
+                        value: permissions?.microphoneGranted == true ? "granted" : "not granted"
+                    )
+                    if let hotkey {
                         LabeledValue(label: "tap", value: hotkey.tapStatus)
                         LabeledValue(label: "events seen", value: "\(hotkey.eventCount)")
                         if let ev = hotkey.lastEvent {
@@ -81,9 +89,9 @@ struct ContentView: View {
                         Button("Retry tap install") { hotkey.retryInstall() }
                             .controlSize(.small)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
             }
 
             GroupBox("Dictation (mic → Rust core → Parakeet)") {

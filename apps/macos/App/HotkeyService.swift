@@ -13,17 +13,27 @@ extension Notification.Name {
 /// as a chord modifier (e.g. Cmd+Q) does not trigger a toggle.
 ///
 /// Uses Accessibility permission — the same grant OpenWhisper needs for
-/// pasting transcribed text into the focused app. One permission, one prompt,
-/// matches Superwhisper's UX. The alternative (NSEvent global monitor) would
-/// require a *separate* Input Monitoring grant, so the user would see two
-/// prompts for what is conceptually one capability.
+/// pasting transcribed text into the focused app. One permission, one prompt.
 @MainActor
+@Observable
 final class HotkeyService {
     /// Device-dependent bit for Right Command inside `CGEventFlags.rawValue`,
     /// corresponding to `NX_DEVICERCMDKEYMASK` in `IOKit/hidsystem/ev_keymap.h`.
-    /// Distinguishing left vs right is not part of the public CGEventFlags API,
-    /// but the underlying bit is stable across macOS versions.
     private static let rightCommandMask: UInt64 = 0x0010
+
+    // Debug/diagnostic state — surfaced in ContentView so you can see at a
+    // glance whether Accessibility is granted and whether events are flowing.
+    private(set) var isAccessibilityTrusted = false
+    private(set) var tapStatus: String = "not installed"
+    private(set) var lastEvent: DebugEvent?
+    private(set) var eventCount: Int = 0
+
+    struct DebugEvent {
+        let type: String
+        let flagsHex: String
+        let keyCode: UInt16
+        let rightCommandDown: Bool
+    }
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -35,10 +45,13 @@ final class HotkeyService {
         installTap()
     }
 
+    func retryInstall() {
+        if tap == nil {
+            installTap()
+        }
+    }
+
     private func requestAccessibilityIfNeeded() {
-        // Triggers the system Accessibility prompt if the app isn't trusted.
-        // On first launch the user is taken to System Settings to grant access;
-        // they typically need to relaunch the app for the tap to start firing.
         let options: NSDictionary = [
             kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true,
         ]
@@ -46,6 +59,8 @@ final class HotkeyService {
     }
 
     private func installTap() {
+        isAccessibilityTrusted = AXIsProcessTrusted()
+
         let mask: CGEventMask =
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.keyDown.rawValue)
@@ -60,8 +75,9 @@ final class HotkeyService {
             callback: Self.eventCallback,
             userInfo: refcon
         ) else {
-            // Usually means Accessibility hasn't been granted yet. The user
-            // will see the system prompt and can relaunch after approving.
+            tapStatus = isAccessibilityTrusted
+                ? "tapCreate returned nil (signature changed after grant? re-toggle in System Settings)"
+                : "waiting for Accessibility permission"
             return
         }
 
@@ -71,11 +87,9 @@ final class HotkeyService {
 
         self.tap = tap
         self.runLoopSource = source
+        tapStatus = "installed"
     }
 
-    // C callback: fires on the main run loop (we attach it there). We unpack
-    // state to primitives synchronously and call into the MainActor-isolated
-    // handler via `assumeIsolated` so Swift 6 strict concurrency is happy.
     private static let eventCallback: CGEventTapCallBack = { _, type, event, refcon in
         guard let refcon else { return Unmanaged.passUnretained(event) }
         let service = Unmanaged<HotkeyService>.fromOpaque(refcon).takeUnretainedValue()
@@ -83,23 +97,32 @@ final class HotkeyService {
         // Extract primitives before crossing the MainActor boundary so the
         // non-Sendable CGEvent is never captured by the isolated closure.
         let flags = event.flags.rawValue
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
         MainActor.assumeIsolated {
-            service.handle(type: type, flags: flags)
+            service.handle(type: type, flags: flags, keyCode: keyCode)
         }
 
         // Pass every event through unchanged — we observe, we don't swallow.
         return Unmanaged.passUnretained(event)
     }
 
-    private func handle(type: CGEventType, flags: UInt64) {
+    private func handle(type: CGEventType, flags: UInt64, keyCode: UInt16) {
+        let rightDown = (flags & Self.rightCommandMask) != 0
+        eventCount += 1
+        lastEvent = DebugEvent(
+            type: Self.describe(type),
+            flagsHex: String(format: "0x%06llx", flags),
+            keyCode: keyCode,
+            rightCommandDown: rightDown
+        )
+
         switch type {
         case .flagsChanged:
-            let nowDown = (flags & Self.rightCommandMask) != 0
-            if nowDown, !rightCommandDown {
+            if rightDown, !rightCommandDown {
                 rightCommandDown = true
                 otherKeyPressedWhileHeld = false
-            } else if !nowDown, rightCommandDown {
+            } else if !rightDown, rightCommandDown {
                 rightCommandDown = false
                 if !otherKeyPressedWhileHeld {
                     NotificationCenter.default.post(
@@ -114,6 +137,15 @@ final class HotkeyService {
             }
         default:
             break
+        }
+    }
+
+    private static func describe(_ type: CGEventType) -> String {
+        switch type {
+        case .flagsChanged: return "flagsChanged"
+        case .keyDown: return "keyDown"
+        case .keyUp: return "keyUp"
+        default: return "other(\(type.rawValue))"
         }
     }
 }

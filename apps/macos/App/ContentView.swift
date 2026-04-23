@@ -2,6 +2,8 @@ import SwiftUI
 import FluidAudio
 
 struct ContentView: View {
+    @Environment(\.hotkey) private var hotkey
+
     @State private var coreMessage: String = "—"
     @State private var coreVersion: String = "—"
 
@@ -38,6 +40,31 @@ struct ContentView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
+
+            if let hotkey {
+                GroupBox("Hotkey debug") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledValue(
+                            label: "AX trusted",
+                            value: hotkey.isAccessibilityTrusted ? "yes" : "no — grant + relaunch"
+                        )
+                        LabeledValue(label: "tap", value: hotkey.tapStatus)
+                        LabeledValue(label: "events seen", value: "\(hotkey.eventCount)")
+                        if let ev = hotkey.lastEvent {
+                            LabeledValue(
+                                label: "last event",
+                                value: "\(ev.type) keyCode=\(ev.keyCode) flags=\(ev.flagsHex) rCmd=\(ev.rightCommandDown ? "↓" : "·")"
+                            )
+                        } else {
+                            LabeledValue(label: "last event", value: "none yet — tap any key")
+                        }
+                        Button("Retry tap install") { hotkey.retryInstall() }
+                            .controlSize(.small)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                }
+            }
 
             GroupBox("Dictation (mic → Rust core → Parakeet)") {
                 VStack(alignment: .leading, spacing: 10) {

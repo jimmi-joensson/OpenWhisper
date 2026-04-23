@@ -32,9 +32,13 @@ Hotkey defaults to match Superwhisper's for familiarity; fully rebindable in set
 - **No dark patterns.** Paid tiers only exist for features that genuinely cost us money (hosted sync, subscription infra, etc.), never for gating local capability.
 - **Correctable.** Custom vocabulary, post-processing, and prompt shaping are first-class — not afterthoughts.
 
-## Building
+## Install (pre-built)
 
-**Prerequisites:** Rust (install via [rustup](https://rustup.rs/)), Xcode 15+, and [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`).
+Grab the latest DMG from [Releases](https://github.com/jimmi-joensson/OpenWhisper/releases) — macOS 15+ on Apple Silicon only. Builds are ad-hoc signed (not notarized), so first launch requires a Gatekeeper bypass. Walkthrough: [INSTALL.md](./INSTALL.md).
+
+## Building from source
+
+**Prerequisites:** macOS 15+, Rust (install via [rustup](https://rustup.rs/)), Xcode 26+, and [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The app icon uses the new `.icon` format which requires Xcode 26 + macOS 15 deployment.
 
 ```sh
 scripts/bootstrap.sh           # builds Rust core, stages artifacts, generates Xcode project
@@ -44,6 +48,16 @@ xcodebuild -project apps/macos/OpenWhisper.xcodeproj -scheme OpenWhisper build
 ```
 
 The Xcode project is *generated* — it lives under `.gitignore` and is reproduced from `apps/macos/project.yml`. The Rust core (`core/`) builds into a staticlib that the Swift target links via a swift-bridge bridging header.
+
+### Packaging a release DMG locally
+
+```sh
+brew install create-dmg
+VERSION=0.1.0 scripts/package-release.sh
+# → dist/OpenWhisper-0.1.0-arm64.dmg
+```
+
+Tagged pushes (`v*`) also trigger `.github/workflows/release.yml` to build + upload a draft release.
 
 ## Task tracking
 

@@ -28,6 +28,13 @@ final class HotkeyService {
     private(set) var lastEvent: DebugEvent?
     private(set) var eventCount: Int = 0
 
+    /// True when the user has granted Accessibility *after* we tried to
+    /// install the tap, meaning we need a fresh process to pick up the new
+    /// TCC state. Drives the in-app "Restart" banner.
+    private(set) var needsRelaunch = false
+
+    private var accessibilityPollTask: Task<Void, Never>?
+
     struct DebugEvent {
         let type: String
         let flagsHex: String
@@ -78,6 +85,7 @@ final class HotkeyService {
             tapStatus = isAccessibilityTrusted
                 ? "tapCreate returned nil (signature changed after grant? re-toggle in System Settings)"
                 : "waiting for Accessibility permission"
+            startAccessibilityPoll()
             return
         }
 
@@ -88,6 +96,27 @@ final class HotkeyService {
         self.tap = tap
         self.runLoopSource = source
         tapStatus = "installed"
+        accessibilityPollTask?.cancel()
+        accessibilityPollTask = nil
+    }
+
+    /// Poll Accessibility status so that when the user grants it in
+    /// System Settings while we're already running, we can show an in-app
+    /// "Restart" banner instead of silently doing nothing.
+    private func startAccessibilityPoll() {
+        guard accessibilityPollTask == nil else { return }
+        accessibilityPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self else { return }
+                let trusted = AXIsProcessTrusted()
+                if trusted, !self.isAccessibilityTrusted {
+                    self.isAccessibilityTrusted = true
+                    self.needsRelaunch = true
+                    return
+                }
+            }
+        }
     }
 
     private static let eventCallback: CGEventTapCallBack = { _, type, event, refcon in

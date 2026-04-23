@@ -62,7 +62,7 @@ targets:
         LSUIElement: true
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        CFBundleDisplayName: "OpenWhisper"
+        CFBundleDisplayName: "$(PRODUCT_NAME)"
     entitlements:
       path: Resources/OpenWhisper.entitlements
       properties:

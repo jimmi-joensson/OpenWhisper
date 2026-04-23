@@ -10,7 +10,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("OpenWhisper")
+            Text(Bundle.main.appDisplayName)
                 .font(.largeTitle.weight(.semibold))
                 .frame(maxWidth: .infinity, alignment: .center)
 

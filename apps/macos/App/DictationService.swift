@@ -37,6 +37,7 @@ final class DictationService {
 
     private let pill: PillWindowController?
     private let injector = TextInjector()
+    let processor = TranscriptProcessor()
     private var asr: AsrManager?
     private var recordTimer: Timer?
     private var recordStart: Date?
@@ -176,10 +177,11 @@ final class DictationService {
                 let result = try await manager.transcribe(samplesCopy, source: .microphone)
                 let dur = Date().timeIntervalSince(start)
                 await MainActor.run {
-                    log.info("transcribed \(samplesCopy.count) samples in \(dur, format: .fixed(precision: 2))s → \"\(result.text, privacy: .public)\" conf=\(result.confidence, format: .fixed(precision: 3))")
-                    self.transcript = result.text
+                    let cleaned = self.processor.process(result.text)
+                    log.info("transcribed \(samplesCopy.count) samples in \(dur, format: .fixed(precision: 2))s → raw=\"\(result.text, privacy: .public)\" cleaned=\"\(cleaned, privacy: .public)\" conf=\(result.confidence, format: .fixed(precision: 3))")
+                    self.transcript = cleaned
                     self.confidence = String(format: "%.3f", result.confidence)
-                    self.injector.inject(result.text)
+                    self.injector.inject(cleaned)
                     self.statusMessage = "done — pasted to focused app"
                     self.phase = .done
                     self.pill?.hideAfter()

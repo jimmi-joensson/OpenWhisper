@@ -178,7 +178,11 @@ final class DictationService {
                 let dur = Date().timeIntervalSince(start)
                 await MainActor.run {
                     let cleaned = self.processor.process(result.text)
-                    log.info("transcribed \(samplesCopy.count) samples in \(dur, format: .fixed(precision: 2))s → raw=\"\(result.text, privacy: .public)\" cleaned=\"\(cleaned, privacy: .public)\" conf=\(result.confidence, format: .fixed(precision: 3))")
+                    // Transcript text is user content — marked .private so the
+                    // unified log store (Console.app / sysdiagnose) redacts it
+                    // as `<private>`. Xcode still shows plaintext when
+                    // attached via the debugger, so this doesn't hurt dev.
+                    log.info("transcribed \(samplesCopy.count) samples in \(dur, format: .fixed(precision: 2))s → raw=\"\(result.text, privacy: .private)\" cleaned=\"\(cleaned, privacy: .private)\" conf=\(result.confidence, format: .fixed(precision: 3))")
                     self.transcript = cleaned
                     self.confidence = String(format: "%.3f", result.confidence)
                     self.injector.inject(cleaned)

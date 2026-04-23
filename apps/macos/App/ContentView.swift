@@ -304,7 +304,7 @@ struct ContentView: View {
         levelHistory = Array(repeating: 0, count: levelHistory.count)
         // The pill has a shorter ring than the debug view; reset it too so
         // the bars start flat when a new session begins.
-        pill?.update(levels: Array(repeating: 0, count: pill?.state.levels.count ?? 24))
+        pill?.update(levels: Array(repeating: 0, count: pill?.state.levels.count ?? 12))
         recordTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             elapsed = Date().timeIntervalSince(start)
             let level = audio_current_level()

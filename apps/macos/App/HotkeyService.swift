@@ -1,6 +1,9 @@
 import AppKit
 @preconcurrency import ApplicationServices
 import CoreGraphics
+import os
+
+private let log = Logger(subsystem: "com.openwhisper.OpenWhisper", category: "hotkey")
 
 extension Notification.Name {
     /// Posted when the user taps the activation hotkey (default: Right Command).
@@ -48,8 +51,12 @@ final class HotkeyService {
     private var otherKeyPressedWhileHeld = false
 
     init() {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let trusted = AXIsProcessTrusted()
+        log.info("HotkeyService.init pid=\(pid) trustedBeforePrompt=\(trusted)")
         requestAccessibilityIfNeeded()
         installTap()
+        log.info("HotkeyService.init done trusted=\(self.isAccessibilityTrusted) tapStatus=\(self.tapStatus, privacy: .public)")
     }
 
     func retryInstall() {

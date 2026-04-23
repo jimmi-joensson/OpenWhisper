@@ -111,7 +111,7 @@ final class DictationService {
             let loadStart = Date()
             do {
                 let models = try await Task.detached(priority: .userInitiated) {
-                    try await AsrModels.downloadAndLoad(version: .v2)
+                    try await AsrModels.downloadAndLoad(version: .v3)
                 }.value
                 let manager = AsrManager(config: .default)
                 try await manager.loadModels(models)

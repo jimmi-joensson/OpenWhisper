@@ -81,6 +81,18 @@
     <Copy SourceFiles="@(SherpaNative)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- dotnet publish doesn't copy the .pri file (WinUI resource index) for
+       unpackaged WinUI 3 apps, causing XAML parsing to fail at runtime
+       because every {StaticResource X} lookup goes through the .pri. Copy
+       it manually after publish. The build step always produces .pri in
+       $(OutDir), we just need to mirror it into $(PublishDir). -->
+  <Target Name="CopyPriToPublish" AfterTargets="Publish">
+    <Copy SourceFiles="$(OutDir)$(TargetName).pri"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(OutDir)$(TargetName).pri')" />
+  </Target>
+
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>

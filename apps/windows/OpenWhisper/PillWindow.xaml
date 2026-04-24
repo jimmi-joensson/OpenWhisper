@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="OpenWhisper.PillWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:OpenWhisper">
+    <Window.SystemBackdrop>
+        <DesktopAcrylicBackdrop />
+    </Window.SystemBackdrop>
+
+    <Border x:Name="PillRoot"
+            Background="{StaticResource PillBaseBrush}"
+            BorderBrush="{StaticResource PillBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="{StaticResource PillCornerRadius}"
+            Padding="{StaticResource PillPadding}"
+            PointerPressed="OnPillPressed">
+        <Grid>
+            <StackPanel x:Name="IdleDots"
+                        Orientation="Horizontal"
+                        Spacing="{StaticResource IdleDotSpacing}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center">
+                <Ellipse Width="{StaticResource IdleDotSize}"
+                         Height="{StaticResource IdleDotSize}"
+                         Fill="{StaticResource PillIdleDotBrush}" />
+                <Ellipse Width="{StaticResource IdleDotSize}"
+                         Height="{StaticResource IdleDotSize}"
+                         Fill="{StaticResource PillIdleDotBrush}" />
+                <Ellipse Width="{StaticResource IdleDotSize}"
+                         Height="{StaticResource IdleDotSize}"
+                         Fill="{StaticResource PillIdleDotBrush}" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal"
+                        x:Name="ActiveRow"
+                        Spacing="{StaticResource PillItemSpacing}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <ProgressRing x:Name="TranscribingRing"
+                              Width="8" Height="8"
+                              IsActive="False"
+                              Visibility="Collapsed" />
+                <StackPanel x:Name="LevelBars"
+                            Orientation="Horizontal"
+                            Spacing="{StaticResource LevelMeterBarSpacing}"
+                            VerticalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

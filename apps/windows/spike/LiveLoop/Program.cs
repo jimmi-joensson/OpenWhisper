@@ -166,16 +166,21 @@ static void RunOneIteration(OfflineRecognizer recognizer, double? timedSeconds)
     Console.WriteLine($"[live] decoded   : {inferMs:F0} ms ({rtf:F1}x realtime)");
     Console.WriteLine($"[live] raw text  : \"{rawText}\"");
 
-    // Push the transcript back into core. This triggers the post-processing
-    // pipeline (filler stripping, substitutions) and transitions to DONE.
-    // We keep a reasonable confidence placeholder — sherpa's OfflineResult
-    // doesn't expose a confidence, and we'd derive one from TDT decode stats
-    // in a real build.
-    Core.DeliverTranscript(rawText, confidence: 0.90f);
+    // Post-process BEFORE delivering. Same pattern as apps/macos/App/
+    // DictationService.swift — the shell owns this two-step flow because it
+    // also needs the cleaned text for paste-injection (not wired in this
+    // spike yet). `deliver_transcript` itself is a pure state store; it does
+    // not run the processing pipeline.
+    string cleaned = Core.ProcessTranscript(rawText);
+    Console.WriteLine($"[live] cleaned   : \"{cleaned}\"");
+
+    // Confidence placeholder — sherpa's OfflineResult doesn't expose one;
+    // a real build would derive it from TDT decode stats.
+    Core.DeliverTranscript(cleaned, confidence: 0.90f);
 
     var snap = Core.GetSnapshot();
-    Console.WriteLine($"[live] post-proc : \"{Core.GetTranscript()}\"");
-    Console.WriteLine($"[live] status    : {Core.GetStatusMessage()} (phase={snap.Phase}, conf={snap.Confidence:F2})");
+    Console.WriteLine($"[live] snapshot  : phase={snap.Phase} conf={snap.Confidence:F2} transcript=\"{Core.GetTranscript()}\"");
+    Console.WriteLine($"[live] status    : {Core.GetStatusMessage()}");
 }
 
 
@@ -219,6 +224,9 @@ namespace OpenWhisper.Spike.LiveLoop
         [DllImport(Dll, EntryPoint = "ow_core_version")]
         private static extern IntPtr ow_core_version();
 
+        [DllImport(Dll, EntryPoint = "ow_process_transcript")]
+        private static extern nint ow_process_transcript(byte[] input, byte[]? outBuf, nuint outCap);
+
         [DllImport(Dll, EntryPoint = "ow_dictation_snapshot")]
         private static extern void ow_dictation_snapshot(out OwDictationSnapshot snap);
 
@@ -256,6 +264,12 @@ namespace OpenWhisper.Spike.LiveLoop
         private static extern nint ow_audio_drain_samples(float[]? outBuf, nuint outCap);
 
         public static string GetVersion() => Marshal.PtrToStringUTF8(ow_core_version()) ?? string.Empty;
+
+        public static string ProcessTranscript(string input)
+        {
+            var inBytes = EncodeCString(input);
+            return CallIntoBuffer((buf, cap) => ow_process_transcript(inBytes, buf, cap));
+        }
 
         public static OwDictationSnapshot GetSnapshot()
         {

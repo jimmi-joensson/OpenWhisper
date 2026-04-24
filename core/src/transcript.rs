@@ -26,7 +26,6 @@ const EN_FILLERS: &[&str] = &[
     "uhm", "uhmm",
     "er", "err", "erm", "errm",
     "ah", "ahh",
-    "oh", "ooh",
     "hm", "hmm", "hmmm",
     "mm", "mmm",
 ];
@@ -37,7 +36,6 @@ const DA_FILLERS: &[&str] = &[
     "uhm", "uhmm",
     "err", "erm", "errm",
     "ah", "ahh",
-    "oh", "ooh",
     "hm", "hmm", "hmmm",
     "mm", "mmm",
     "øh", "øhm",
@@ -165,5 +163,10 @@ mod tests {
     #[test]
     fn pure_filler_input() {
         assert_eq!(process("um uh ah"), "");
+    }
+
+    #[test]
+    fn preserves_oh_interjection() {
+        assert_eq!(process("Oh, I didn't know that"), "Oh, I didn't know that");
     }
 }

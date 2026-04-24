@@ -47,8 +47,10 @@ final class HotkeyService {
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var tapThread: Thread?
     private var rightCommandDown = false
     private var otherKeyPressedWhileHeld = false
+    private var watchdogTimer: Timer?
 
     init() {
         let pid = ProcessInfo.processInfo.processIdentifier
@@ -91,30 +93,99 @@ final class HotkeyService {
             return
         }
 
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-
         self.tap = tap
+
+        // Run the tap on a dedicated thread instead of the main run loop.
+        // CGEventTap callbacks have a ~2s budget; if main is stalled (big
+        // SwiftUI renders, another app pushing heavy events, a video call
+        // hogging UI time), our callback misses the deadline and macOS
+        // fires `tapDisabledByTimeout`. Isolating the tap on its own
+        // high-QoS thread means main-thread busy periods can't kill it.
+        // Events hop back to the main actor for handling.
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         self.runLoopSource = source
+
+        let thread = Thread { [weak self] in
+            guard let tap = self?.tap, let source = self?.runLoopSource else { return }
+            let runLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            CFRunLoopRun()
+        }
+        thread.name = "com.openwhisper.hotkey-tap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        self.tapThread = thread
+
         tapStatus = "installed"
+        startWatchdog()
+    }
+
+    /// Backstop: verify the tap is still live every 5s. With the tap on
+    /// its own thread, `tapDisabledByTimeout` from main-thread stalls is
+    /// no longer a realistic cause of death. But sleep/wake, TCC
+    /// revocation, and other edge cases can still silently kill the tap
+    /// without delivering a `tapDisabledBy*` event, so the watchdog stays.
+    private func startWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkTapHealth() }
+        }
+    }
+
+    private func checkTapHealth() {
+        guard let tap = self.tap else { return }
+        if !CGEvent.tapIsEnabled(tap: tap) {
+            log.warning("event tap went stale — re-enabling")
+            CGEvent.tapEnable(tap: tap, enable: true)
+            tapStatus = "re-enabled by watchdog"
+        }
     }
 
     private static let eventCallback: CGEventTapCallBack = { _, type, event, refcon in
         guard let refcon else { return Unmanaged.passUnretained(event) }
         let service = Unmanaged<HotkeyService>.fromOpaque(refcon).takeUnretainedValue()
 
-        // Extract primitives before crossing the MainActor boundary so the
-        // non-Sendable CGEvent is never captured by the isolated closure.
+        // Runs on the dedicated tap thread, NOT the main thread. Never
+        // call `MainActor.assumeIsolated` here — it would crash. Hop back
+        // to main via DispatchQueue.main.async for any shared-state work.
+
+        // macOS fires one of these synthetic events when it disables the
+        // tap (timeout, user-input policing, internal heuristics). Re-enable
+        // right here on the tap thread — no main hop needed, and we want
+        // the tap alive as fast as possible regardless of main-thread state.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = service.tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { service.handleTapDisabled(reason: type) }
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Extract CGEvent primitives before marshaling — CGEvent isn't
+        // Sendable and must not be captured across threads.
         let flags = event.flags.rawValue
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
-        MainActor.assumeIsolated {
-            service.handle(type: type, flags: flags, keyCode: keyCode)
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                service.handle(type: type, flags: flags, keyCode: keyCode)
+            }
         }
 
         // Pass every event through unchanged — we observe, we don't swallow.
         return Unmanaged.passUnretained(event)
+    }
+
+    private func handleTapDisabled(reason: CGEventType) {
+        let label = reason == .tapDisabledByTimeout ? "timeout" : "user-input"
+        log.warning("event tap disabled by system (\(label, privacy: .public)) — re-enabling")
+        tapStatus = "re-enabled after \(label)"
+        if let tap = self.tap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
     }
 
     private func handle(type: CGEventType, flags: UInt64, keyCode: UInt16) {

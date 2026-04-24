@@ -56,10 +56,11 @@ targets:
         NSAppleEventsUsageDescription: "OpenWhisper needs accessibility access to paste transcribed text into the app you're working in."
         NSHumanReadableCopyright: "Copyright © 2026 Jimmi Joensson. Licensed under MIT."
         LSMinimumSystemVersion: "15.0"
-        # Run as a menu-bar agent: no Dock icon, app keeps running
-        # after the main window closes. Status item lives in the
-        # MenuBarExtra scene in OpenWhisperApp.swift.
-        LSUIElement: true
+        # Intentionally NOT LSUIElement. We run as a regular app at the
+        # Launch Services level (so the system registers us in the Force
+        # Quit dialog and Activity Monitor lists us as a proper app),
+        # then flip to .accessory at runtime in applicationWillFinishLaunching
+        # to suppress the Dock icon. This is the pattern Superwhisper uses.
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleDisplayName: "$(PRODUCT_NAME)"

@@ -125,7 +125,10 @@ fn begin_capture() -> Result<Capture, String> {
         .default_input_device()
         .ok_or_else(|| "no default input device".to_string())?;
 
-    let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+    let device_name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     let supported = device
         .default_input_config()
         .map_err(|e| format!("default input config: {e}"))?;

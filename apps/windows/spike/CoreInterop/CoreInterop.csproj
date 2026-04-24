@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>OpenWhisper.Spike.CoreInterop</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <!-- Copy openwhisper_core.dll from the Rust target/release dir next to the
+       C# exe on every build. Keeps the spike self-contained: as long as the
+       release build of openwhisper-core has run first, `dotnet run` will pick
+       up the latest .dll without manual copies. -->
+  <Target Name="CopyRustCoreDll" BeforeTargets="PrepareForRun">
+    <ItemGroup>
+      <RustCoreDll Include="$(MSBuildThisFileDirectory)..\..\..\..\target\release\openwhisper_core.dll" />
+    </ItemGroup>
+    <Error Condition="!Exists('@(RustCoreDll)')"
+           Text="openwhisper_core.dll not found at @(RustCoreDll). Run: cargo build --release -p openwhisper-core" />
+    <Copy SourceFiles="@(RustCoreDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

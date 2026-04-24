@@ -8,7 +8,10 @@ description = "Shared core logic for OpenWhisper: audio capture, VAD, config, pr
 
 [lib]
 name = "openwhisper_core"
-crate-type = ["staticlib", "rlib"]
+# staticlib: swift-bridge links this into the macOS app (.a).
+# rlib:      for cargo internal consumers (tests, future Rust-only shells).
+# cdylib:    .dll for Windows P/Invoke from the C# shell.
+crate-type = ["staticlib", "rlib", "cdylib"]
 
 [dependencies]
 swift-bridge = "0.1.59"

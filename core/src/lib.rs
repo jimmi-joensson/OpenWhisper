@@ -1,5 +1,6 @@
 mod audio;
 mod dictation;
+mod ffi_c;
 mod transcript;
 
 #[swift_bridge::bridge]

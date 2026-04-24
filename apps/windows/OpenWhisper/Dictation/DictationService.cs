@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using Microsoft.UI.Dispatching;
+using OpenWhisper.TextInjection;
+using OpenWhisper.Util;
 
 namespace OpenWhisper.Dictation;
 
@@ -17,20 +19,68 @@ namespace OpenWhisper.Dictation;
 internal sealed class DictationService : IDisposable
 {
     private readonly DispatcherQueue _dispatcher;
-    private readonly Action<string>? _injectText;
+    private readonly Action<string, IntPtr>? _injectText;
 
-    // Recognizer is lazily loaded on first toggle — model download + warmup
-    // is expensive (~seconds) so we don't block app startup.
     private Recognizer? _recognizer;
-    private Task<Recognizer>? _recognizerLoad;
+    private readonly Task _initializationTask;
+
+    private IntPtr _targetHwnd;
+
+    /// <summary>Latest download progress, null once load has completed.</summary>
+    public DownloadProgress? LastProgress { get; private set; }
+
+    /// <summary>True when the recognizer is loaded and ready to transcribe.</summary>
+    public bool IsReady => _recognizer is not null;
+
+    /// <summary>Any exception raised during initial model load, else null.</summary>
+    public Exception? LoadError { get; private set; }
+
+    public event EventHandler? ModelLoadProgressChanged;
 
     public event EventHandler? StateChanged;
     public event EventHandler<string>? LogMessage;
 
-    public DictationService(DispatcherQueue dispatcher, Action<string>? injectText)
+    public DictationService(DispatcherQueue dispatcher, Action<string, IntPtr>? injectText)
     {
         _dispatcher = dispatcher;
         _injectText = injectText;
+
+        // Eagerly load the recognizer at startup. First run downloads ~465 MB;
+        // doing it lazily on the first record click would saddle the user with
+        // a long silent wait, so we kick it off in the background and surface
+        // progress through the UI. The recording path later awaits
+        // `_initializationTask` — if the user hits Record before we're done it
+        // won't crash, just wait for completion before starting capture.
+        _initializationTask = Task.Run(InitializeAsync);
+    }
+
+    private async Task InitializeAsync()
+    {
+        try
+        {
+            var progress = new Progress<DownloadProgress>(p =>
+            {
+                LastProgress = p;
+                _dispatcher.TryEnqueue(() => ModelLoadProgressChanged?.Invoke(this, EventArgs.Empty));
+            });
+            SpikeLog.Log("InitializeAsync: starting Recognizer.LoadAsync");
+            _recognizer = await Recognizer.LoadAsync(progress).ConfigureAwait(false);
+            SpikeLog.Log("InitializeAsync: recognizer ready");
+        }
+        catch (Exception ex)
+        {
+            LoadError = ex;
+            SpikeLog.Log($"InitializeAsync: FAILED {ex}");
+        }
+        finally
+        {
+            LastProgress = null;
+            _dispatcher.TryEnqueue(() =>
+            {
+                ModelLoadProgressChanged?.Invoke(this, EventArgs.Empty);
+                StateChanged?.Invoke(this, EventArgs.Empty);
+            });
+        }
     }
 
     /// <summary>
@@ -39,20 +89,36 @@ internal sealed class DictationService : IDisposable
     /// </summary>
     public void Toggle()
     {
+        SpikeLog.Log("Toggle() entered");
+        // Capture foreground window BEFORE asking core what to do — if the
+        // toggle starts recording, this is the app we'll inject into later.
+        // Doing it here (rather than inside BeginAsync) matters for the
+        // hotkey path: by the time BeginAsync runs on an async continuation,
+        // focus has already wobbled through the hotkey handler.
+        var fg = TextInjector.CaptureForegroundWindow();
+
         var action = Core.RequestToggle();
+        SpikeLog.Log($"Toggle() action={action}");
         switch (action)
         {
             case ToggleAction.BeginRecording:
-                _ = BeginAsync();
+                _targetHwnd = fg;
+                _ = SafeRun("BeginAsync", BeginAsync);
                 break;
             case ToggleAction.StopRecording:
-                _ = StopAsync();
+                _ = SafeRun("StopAsync", StopAsync);
                 break;
             case ToggleAction.Ignore:
-                // Core rejected the toggle — busy state, already transcribing, etc.
                 break;
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
+        SpikeLog.Log("Toggle() exited");
+    }
+
+    private static async Task SafeRun(string name, Func<Task> body)
+    {
+        try { await body().ConfigureAwait(false); }
+        catch (Exception ex) { SpikeLog.Log($"{name} FAILED: {ex}"); }
     }
 
     public void Cancel()
@@ -66,56 +132,58 @@ internal sealed class DictationService : IDisposable
 
     private async Task BeginAsync()
     {
-        // Load the recognizer on first use. Further toggles reuse the warm instance.
+        SpikeLog.Log("BeginAsync entered");
+
+        // Normal case: recognizer has been ready since shortly after app
+        // launch. Rare case: user was very quick on the hotkey and the
+        // background load is still in flight — wait for it.
         if (_recognizer is null)
         {
+            SpikeLog.Log("BeginAsync: waiting for initialization to finish");
             Core.MarkLoadingModel();
             RaiseStateChanged();
-            try
+            await _initializationTask.ConfigureAwait(false);
+            if (_recognizer is null)
             {
-                _recognizerLoad ??= Recognizer.LoadAsync(
-                    progress: new Progress<DownloadProgress>(p =>
-                    {
-                        var pct = p.PercentComplete is double v ? $"{v:F0}%" : $"{p.BytesReceived / 1_048_576.0:F1} MB";
-                        Log($"downloading Parakeet v3 — {pct}");
-                    }));
-                _recognizer = await _recognizerLoad.ConfigureAwait(false);
-                Log($"recognizer ready (core {Core.Version})");
-            }
-            catch (Exception ex)
-            {
-                Core.DeliverError($"model load failed: {ex.Message}");
+                var msg = LoadError?.Message ?? "model load did not complete";
+                SpikeLog.Log($"BeginAsync: initialization unavailable: {msg}");
+                Core.DeliverError($"model load failed: {msg}");
                 RaiseStateChanged();
                 return;
             }
+            SpikeLog.Log("BeginAsync: initialization complete, proceeding");
         }
 
+        SpikeLog.Log("BeginAsync: starting audio capture");
         if (!Core.AudioStartCapture(out var err))
         {
+            SpikeLog.Log($"BeginAsync: audio start failed: {err}");
             Core.DeliverError(err);
             RaiseStateChanged();
             return;
         }
         Core.MarkCaptureStarted();
         RaiseStateChanged();
+        SpikeLog.Log("BeginAsync: capture started");
     }
 
     private async Task StopAsync()
     {
+        SpikeLog.Log("StopAsync entered");
         Core.AudioStopCapture();
         var samples = Core.AudioDrainSamples();
+        SpikeLog.Log($"StopAsync drained {samples.Length} samples ({samples.Length / 16_000.0:F2}s)");
         Core.MarkCaptureStopped((ulong)samples.Length);
         RaiseStateChanged();
 
         if (samples.Length == 0 || _recognizer is null)
         {
-            // Core already transitioned to Done via the zero-sample path; nothing to decode.
+            SpikeLog.Log("StopAsync: no samples or no recognizer — bailing");
             RaiseStateChanged();
             return;
         }
 
-        // Decode off the UI thread; the recognizer itself is thread-safe for
-        // a single concurrent call, which is all we issue.
+        SpikeLog.Log("StopAsync: decoding on thread pool");
         TranscribeResult result;
         try
         {
@@ -123,6 +191,7 @@ internal sealed class DictationService : IDisposable
         }
         catch (Exception ex)
         {
+            SpikeLog.Log($"StopAsync: decode FAILED {ex}");
             Core.DeliverError($"transcription failed: {ex.Message}");
             RaiseStateChanged();
             return;
@@ -130,19 +199,20 @@ internal sealed class DictationService : IDisposable
 
         var duration = samples.Length / 16_000.0;
         var rtf = duration * 1000 / result.Elapsed.TotalMilliseconds;
+        SpikeLog.Log($"StopAsync: decoded {duration:F2}s in {result.Elapsed.TotalMilliseconds:F0} ms ({rtf:F1}x realtime)");
+        SpikeLog.Log($"StopAsync: raw=\"{result.RawText}\"");
         Log($"decoded {duration:F2}s of audio in {result.Elapsed.TotalMilliseconds:F0} ms ({rtf:F1}x realtime)");
 
-        // Two-step: process then deliver, same as macOS DictationService.
         var cleaned = Core.ProcessTranscript(result.RawText);
+        SpikeLog.Log($"StopAsync: cleaned=\"{cleaned}\"");
         Core.DeliverTranscript(cleaned, confidence: 0.90f);
         RaiseStateChanged();
 
-        // Inject into the currently focused app. This IS the product — the
-        // UI window is incidental. Runs on whatever thread we're on; the
-        // injector is fire-and-forget.
         if (!string.IsNullOrEmpty(cleaned))
         {
-            _injectText?.Invoke(cleaned);
+            SpikeLog.Log($"StopAsync: injecting {cleaned.Length} chars into HWND=0x{_targetHwnd.ToInt64():X}");
+            _injectText?.Invoke(cleaned, _targetHwnd);
+            SpikeLog.Log("StopAsync: injection complete");
         }
     }
 

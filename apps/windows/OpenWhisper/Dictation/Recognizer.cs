@@ -3,6 +3,8 @@ using System.Net.Http;
 using OpenWhisper.Util;
 using SherpaOnnx;
 
+// SpikeLog alias for diagnostic breadcrumbs during Windows bring-up.
+
 namespace OpenWhisper.Dictation;
 
 /// <summary>
@@ -34,21 +36,23 @@ internal sealed class Recognizer : IDisposable
     /// </summary>
     public static async Task<Recognizer> LoadAsync(IProgress<DownloadProgress>? progress = null, CancellationToken ct = default)
     {
+        SpikeLog.Log("Recognizer.LoadAsync entered");
         string cacheRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".cache", "openwhisper", "models");
         string modelDir = Path.Combine(cacheRoot, ModelName);
+        SpikeLog.Log($"Recognizer.LoadAsync modelDir={modelDir} exists={Directory.Exists(modelDir)}");
 
         if (!Directory.Exists(modelDir))
         {
             await DownloadAndExtractAsync(cacheRoot, modelDir, progress, ct).ConfigureAwait(false);
         }
 
-        // 8.3 short-path collapse for the ANSI/UTF-8 marshaling trap (see PathTricks).
         var encoder = PathTricks.ToShortPath(Path.Combine(modelDir, "encoder.int8.onnx"));
         var decoder = PathTricks.ToShortPath(Path.Combine(modelDir, "decoder.int8.onnx"));
         var joiner  = PathTricks.ToShortPath(Path.Combine(modelDir, "joiner.int8.onnx"));
         var tokens  = PathTricks.ToShortPath(Path.Combine(modelDir, "tokens.txt"));
+        SpikeLog.Log($"Recognizer.LoadAsync short-paths resolved: encoder={encoder}");
 
         foreach (var p in new[] { encoder, decoder, joiner, tokens })
         {
@@ -63,10 +67,14 @@ internal sealed class Recognizer : IDisposable
         config.ModelConfig.Tokens = tokens;
         config.ModelConfig.ModelType = "nemo_transducer";
         config.ModelConfig.NumThreads = 1;
-        config.ModelConfig.Provider = "cpu"; // DirectML comes later; sherpa default runtime NuGet is CPU.
+        config.ModelConfig.Provider = "cpu";
+        config.ModelConfig.Debug = 1; // verbose native-side logging while we're still bringing up the shell
         config.DecodingMethod = "greedy_search";
+        SpikeLog.Log("Recognizer.LoadAsync config built, constructing OfflineRecognizer (native init ~2.6s)");
 
-        return new Recognizer(new OfflineRecognizer(config));
+        var rec = new OfflineRecognizer(config);
+        SpikeLog.Log("Recognizer.LoadAsync OfflineRecognizer constructed");
+        return new Recognizer(rec);
     }
 
     /// <summary>

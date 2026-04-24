@@ -23,7 +23,7 @@ struct LevelMeter: View {
                     let scaled = CGFloat(LevelMeter.dbNormalize(level))
                     let h = max(3, scaled * geo.size.height)
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
+                        .fill(active ? Color.openWhisperRecording : Color.secondary.opacity(0.35))
                         .frame(width: barWidth, height: h)
                 }
             }

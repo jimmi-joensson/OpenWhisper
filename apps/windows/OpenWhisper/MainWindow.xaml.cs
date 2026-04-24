@@ -1,25 +1,41 @@
+using System.Runtime.InteropServices;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Windowing;
 using OpenWhisper.Dictation;
 using OpenWhisper.Hotkey;
+using OpenWhisper.Settings;
 using OpenWhisper.TextInjection;
+using OpenWhisper.Tray;
 using OpenWhisper.Util;
 
 namespace OpenWhisper;
 
 public sealed partial class MainWindow : Window
 {
+    private const int TrayIconSize = 32;
+    private const int GWL_EXSTYLE = -20;
+    private const long WS_EX_TOOLWINDOW = 0x00000080;
+
+    private readonly AppSettings _settings;
     private readonly DictationService _service;
     private readonly GlobalHotkey _hotkey;
     private readonly DispatcherQueueTimer _refreshTimer;
+    private readonly PillWindow _pill;
+    private readonly TrayIcon? _tray;
+    private DictationPhase _trayPhase = DictationPhase.Idle;
+    private bool _reallyClosing;
 
     public MainWindow()
     {
         SpikeLog.Log("MainWindow ctor entered");
+        _settings = AppSettings.Load();
         InitializeComponent();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         AppWindow.SetIcon("Assets/AppIcon.ico");
+        ApplyTaskbarVisibility();
         SpikeLog.Log($"MainWindow ctor: core version from ffi = {Core.Version}");
 
         var dispatcher = DispatcherQueue.GetForCurrentThread();
@@ -44,9 +60,33 @@ public sealed partial class MainWindow : Window
         _refreshTimer.Tick += (_, _) => RefreshFromCore();
         _refreshTimer.Start();
 
+        _pill = new PillWindow(_service, Activate);
+        _pill.Activate();
+
+        try
+        {
+            _tray = new TrayIcon("OpenWhisper — idle", StatusIconRenderer.RenderIdle(TrayIconSize));
+            _tray.LeftDoubleClicked += (_, _) => dispatcher.TryEnqueue(RestoreFromTray);
+            _tray.RightClicked += (_, pt) => dispatcher.TryEnqueue(() => ShowTrayMenu(pt.X, pt.Y));
+            _service.StateChanged += (_, _) => RefreshTray();
+        }
+        catch (Exception ex)
+        {
+            SpikeLog.Log($"MainWindow: tray init failed: {ex}");
+        }
+
+        // Main window close → hide to tray. App keeps running; hotkey,
+        // dictation, pill, and tray icon stay alive. Mac gets the same
+        // behavior via `applicationShouldTerminateAfterLastWindowClosed = false`
+        // plus the `.accessory` activation policy — here we intercept the
+        // close on the AppWindow.
+        AppWindow.Closing += OnAppWindowClosing;
+
         Closed += (_, _) =>
         {
             _refreshTimer.Stop();
+            _tray?.Dispose();
+            _pill.Close();
             _hotkey.Dispose();
             _service.Dispose();
         };
@@ -60,6 +100,59 @@ public sealed partial class MainWindow : Window
         SpikeLog.Log("OnRecordClick");
         _service.Toggle();
     }
+
+    // --- Tray-only / accessory mode ---
+
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_reallyClosing) return;
+        args.Cancel = true;
+        AppWindow.Hide();
+    }
+
+    /// <summary>
+    /// Called when the user double-clicks the tray icon. Unhides the window
+    /// (if hidden), raises it above other windows, and gives it focus.
+    /// </summary>
+    private void RestoreFromTray()
+    {
+        AppWindow.Show();
+        Activate();
+    }
+
+    /// <summary>
+    /// Used by TASK-30's Quit menu item (and eventual future shutdown paths)
+    /// to bypass the hide-on-close behavior and terminate the process.
+    /// </summary>
+    internal void RequestQuit()
+    {
+        _reallyClosing = true;
+        Close();
+        Microsoft.UI.Xaml.Application.Current.Exit();
+    }
+
+    /// <summary>
+    /// Apply the "Show in taskbar" setting by toggling WS_EX_TOOLWINDOW on
+    /// the main HWND. Tool-window style drops the window out of both the
+    /// taskbar and Alt-Tab — exactly what macOS's `.accessory` policy gives
+    /// us for free. Must run after <c>InitializeComponent</c> so AppWindow /
+    /// HWND exist.
+    /// </summary>
+    private void ApplyTaskbarVisibility()
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        ex = _settings.ShowInTaskbar
+            ? ex & ~WS_EX_TOOLWINDOW
+            : ex | WS_EX_TOOLWINDOW;
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex));
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
     private void RefreshFromCore()
     {
@@ -82,6 +175,70 @@ public sealed partial class MainWindow : Window
             RecordButtonText.Text = snap.IsRecording != 0 ? "Stop recording" : "Start recording";
         }
     }
+
+    private void RefreshTray()
+    {
+        if (_tray is null) return;
+
+        var phase = (DictationPhase)Core.Snapshot().Phase;
+        if (phase == _trayPhase) return;
+
+        bool nowRecording = phase == DictationPhase.Recording;
+        bool wasRecording = _trayPhase == DictationPhase.Recording;
+        _trayPhase = phase;
+
+        if (nowRecording != wasRecording)
+        {
+            _tray.UpdateIcon(nowRecording
+                ? StatusIconRenderer.RenderRecording(TrayIconSize)
+                : StatusIconRenderer.RenderIdle(TrayIconSize));
+        }
+        _tray.UpdateTooltip($"OpenWhisper — {TooltipFor(phase)}");
+    }
+
+    private static string TooltipFor(DictationPhase phase) => phase switch
+    {
+        DictationPhase.LoadingModel => "loading model",
+        DictationPhase.Recording => "recording",
+        DictationPhase.Transcribing => "transcribing",
+        DictationPhase.Error => "error",
+        _ => "idle",
+    };
+
+    // --- Tray menu (mirrors macOS menubar menu item text) ---
+
+    private void ShowTrayMenu(int screenX, int screenY)
+    {
+        var phase = (DictationPhase)Core.Snapshot().Phase;
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+        var items = new TrayMenu.Item[]
+        {
+            new() { Text = "Open OpenWhisper", Handler = RestoreFromTray },
+            TrayMenu.Item.Separator(),
+            new()
+            {
+                Text = DictationItemTitle(phase),
+                Enabled = IsInteractable(phase),
+                Handler = () => _service.Toggle(),
+            },
+            TrayMenu.Item.Separator(),
+            new() { Text = "Quit OpenWhisper", Handler = RequestQuit },
+        };
+
+        TrayMenu.Show(screenX, screenY, hwnd, items);
+    }
+
+    private static string DictationItemTitle(DictationPhase phase) => phase switch
+    {
+        DictationPhase.Recording => "Stop Dictation",
+        DictationPhase.LoadingModel => "Loading model…",
+        DictationPhase.Transcribing => "Transcribing…",
+        _ => "Start Dictation",
+    };
+
+    private static bool IsInteractable(DictationPhase phase) =>
+        phase != DictationPhase.LoadingModel && phase != DictationPhase.Transcribing;
 
     private void RefreshModelLoad()
     {

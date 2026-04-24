@@ -268,15 +268,6 @@ enum StatusIconRenderer {
         CGRect(x: 524, y: 700, width: 64, height: 64),
     ]
 
-    private static let badgeRects: [CGRect] = [
-        CGRect(x: 524, y: 92, width: 64, height: 64),
-        CGRect(x: 524, y: 188, width: 64, height: 64),
-        CGRect(x: 620, y: 92, width: 64, height: 64),
-        CGRect(x: 620, y: 188, width: 64, height: 64),
-    ]
-
-    private static let badgeColor = NSColor(red: 0.88, green: 0.44, blue: 0, alpha: 1) // #E07000
-
     static func render(phase: DictationService.Phase) -> NSImage {
         if phase == .recording {
             return recordingImage
@@ -298,16 +289,12 @@ enum StatusIconRenderer {
     private static let recordingImage: NSImage = {
         let img = NSImage(size: NSSize(width: iconSize, height: iconSize), flipped: false) { rect in
             let scale = rect.width / viewBox
-            // Mic body in label color so it still reads on light + dark bars.
-            NSColor.labelColor.setFill()
+            NSColor.openWhisperRecording.setFill()
             for r in micRects { drawRect(r, scale: scale, in: rect).fill() }
-            // Badge rects on top, vivid orange, NOT template-tinted.
-            badgeColor.setFill()
-            for r in badgeRects { drawRect(r, scale: scale, in: rect).fill() }
             return true
         }
-        // NOT template: we want the orange to stay orange. Mic body uses
-        // labelColor which still resolves to the current appearance.
+        // NOT template: we want the orange to stay orange regardless of the
+        // current menu bar appearance, at the cost of menu-highlight inversion.
         img.isTemplate = false
         return img
     }()
@@ -368,4 +355,16 @@ extension Bundle {
             ?? (object(forInfoDictionaryKey: kCFBundleNameKey as String) as? String)
             ?? "OpenWhisper"
     }
+}
+
+// MARK: - Brand colors
+
+extension NSColor {
+    /// Vivid orange used wherever the app indicates an active recording —
+    /// menu bar icon, pill level meter, main-window level meter.
+    static let openWhisperRecording = NSColor(red: 0.88, green: 0.44, blue: 0, alpha: 1) // #E07000
+}
+
+extension Color {
+    static let openWhisperRecording = Color(nsColor: .openWhisperRecording)
 }

@@ -51,6 +51,20 @@
     <Copy SourceFiles="@(RustCoreDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- Hoist sherpa-onnx native DLLs from runtimes/win-x64/native/ to the app
+       root. .NET's console-app RID-based native resolver would find them
+       in-place, but WinUI 3 unpackaged apps don't — sherpa's managed wrapper
+       P/Invokes `sherpa-onnx-c-api.dll` and dies with a native SEH crash
+       before any managed exception handler can catch it.
+       Windows' LoadLibrary only searches the exe directory + system dirs, so
+       copying the native deps next to the exe is the simplest fix. -->
+  <Target Name="HoistSherpaNative" AfterTargets="Build">
+    <ItemGroup>
+      <SherpaNative Include="$(OutDir)runtimes\win-x64\native\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SherpaNative)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
   <PropertyGroup>
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>

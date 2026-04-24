@@ -1,49 +1,81 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
-using Windows.ApplicationModel;
-using Windows.ApplicationModel.Activation;
-using Windows.Foundation;
-using Windows.Foundation.Collections;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Navigation;
-using Microsoft.UI.Xaml.Shapes;
-
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
+using OpenWhisper.Util;
 
 namespace OpenWhisper;
 
-/// <summary>
-/// Provides application-specific behavior to supplement the default Application class.
-/// </summary>
 public partial class App : Application
 {
     private Window? _window;
-    
-    /// <summary>
-    /// Initializes the singleton application object.  This is the first line of authored code
-    /// executed, and as such is the logical equivalent of main() or WinMain().
-    /// </summary>
+
     public App()
     {
+        // Pre-load sherpa's native DLLs explicitly. Copying them to the app
+        // root (the csproj target) isn't sufficient on WinUI 3 unpackaged
+        // apps — the WindowsAppRuntime bootstrap manipulates the DLL search
+        // path, and sherpa's managed wrapper's implicit DllImport lookup
+        // sometimes fails to find `sherpa-onnx-c-api.dll` even when it's
+        // sitting next to the exe. Forcing it into the loaded-module table
+        // with NativeLibrary.Load(absolute path) sidesteps the search.
+        PreloadNativeDll("onnxruntime");
+        PreloadNativeDll("sherpa-onnx-c-api");
+        PreloadNativeDll("openwhisper_core");
+
         InitializeComponent();
+
+        // Surface unhandled exceptions on the UI thread. Default WinUI 3
+        // behavior is to terminate silently on unhandled — terrible for
+        // debugging. Log + keep running so the user sees what broke.
+        UnhandledException += (_, e) =>
+        {
+            Debug.WriteLine($"[unhandled] {e.Exception}");
+            Console.Error.WriteLine($"[unhandled] {e.Exception}");
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "openwhisper-crash.log"),
+                    $"{DateTime.Now:O}\n{e.Exception}\n\n");
+            }
+            catch { /* best effort */ }
+            e.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Debug.WriteLine($"[appdomain unhandled] {e.ExceptionObject}");
+            Console.Error.WriteLine($"[appdomain unhandled] {e.ExceptionObject}");
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Debug.WriteLine($"[unobserved task] {e.Exception}");
+            Console.Error.WriteLine($"[unobserved task] {e.Exception}");
+            e.SetObserved();
+        };
     }
 
-    /// <summary>
-    /// Invoked when the application is launched.
-    /// </summary>
-    /// <param name="args">Details about the launch request and process.</param>
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
         _window.Activate();
+    }
+
+    private static void PreloadNativeDll(string name)
+    {
+        try
+        {
+            string exeDir = AppContext.BaseDirectory;
+            string full = System.IO.Path.Combine(exeDir, name + ".dll");
+            if (!System.IO.File.Exists(full))
+            {
+                SpikeLog.Log($"PreloadNativeDll: missing {full}");
+                return;
+            }
+            var handle = NativeLibrary.Load(full);
+            SpikeLog.Log($"PreloadNativeDll: loaded {name} handle=0x{handle.ToInt64():X}");
+        }
+        catch (Exception ex)
+        {
+            SpikeLog.Log($"PreloadNativeDll: {name} FAILED {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }

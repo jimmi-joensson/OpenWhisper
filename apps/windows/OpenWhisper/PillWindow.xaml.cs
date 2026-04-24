@@ -125,7 +125,33 @@ public sealed partial class PillWindow : Window
         // WS_EX_NOACTIVATE stops the pill from stealing focus when it shows up.
         SetExStyleBits(hwnd, PillInterop.WS_EX_TOOLWINDOW | PillInterop.WS_EX_NOACTIVATE, enable: true);
 
+        // Win11 will otherwise auto-round our window corners by ~8 px, which
+        // conflicts with the larger capsule radius we apply ourselves below.
+        // Telling DWM not to round lets the window region define the shape.
+        int noRound = PillInterop.DWMWCP_DONOTROUND;
+        PillInterop.DwmSetWindowAttribute(hwnd, PillInterop.DWMWA_WINDOW_CORNER_PREFERENCE, ref noRound, sizeof(int));
+
         ResizeForDpi(hwnd, appWindow);
+        ApplyCapsuleRegion(hwnd, appWindow);
+    }
+
+    /// <summary>
+    /// Clip the window to a capsule (stadium) shape via <c>SetWindowRgn</c>.
+    /// Without this, the window is rectangular and the <c>Border</c>'s
+    /// <c>CornerRadius</c> only rounds the rendered content — the window
+    /// chrome (or acrylic backdrop's rectangular footprint) still shows as
+    /// a halo behind the capsule. Region-clipping makes the window itself
+    /// capsule-shaped so there's no rectangle to leak.
+    /// </summary>
+    private void ApplyCapsuleRegion(IntPtr hwnd, AppWindow appWindow)
+    {
+        var size = appWindow.Size;
+        // CreateRoundRectRgn takes the ellipse axis lengths (diameters), not
+        // radii. For a full capsule, both axes equal the window height.
+        IntPtr rgn = PillInterop.CreateRoundRectRgn(0, 0, size.Width + 1, size.Height + 1, size.Height, size.Height);
+        if (rgn == IntPtr.Zero) return;
+        // After SetWindowRgn succeeds, the system owns the region — don't delete.
+        PillInterop.SetWindowRgn(hwnd, rgn, bRedraw: true);
     }
 
     private void ResizeForDpi(IntPtr hwnd, AppWindow appWindow)
@@ -392,6 +418,10 @@ internal static class PillInterop
 
     public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
 
+    // DWMWA_WINDOW_CORNER_PREFERENCE (Win11 22000+). Values per DWMWINDOWATTRIBUTE.
+    public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    public const int DWMWCP_DONOTROUND = 1;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -432,4 +462,13 @@ internal static class PillInterop
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int w, int h);
+
+    [DllImport("user32.dll")]
+    public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, [MarshalAs(UnmanagedType.Bool)] bool bRedraw);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 }

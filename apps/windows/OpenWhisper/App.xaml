@@ -32,7 +32,7 @@
             <SolidColorBrush x:Key="InfoBannerBorderBrush" Color="#590078D4" />       <!-- blue  0.35 -->
 
             <!-- Corner radii -->
-            <CornerRadius x:Key="PillCornerRadius">11</CornerRadius>
+            <CornerRadius x:Key="PillCornerRadius">17</CornerRadius>
             <CornerRadius x:Key="LevelMeterBarCornerRadius">1.5</CornerRadius>
             <CornerRadius x:Key="TranscriptCornerRadius">6</CornerRadius>
             <CornerRadius x:Key="InfoBannerCornerRadius">8</CornerRadius>
@@ -46,26 +46,28 @@
             <x:Double x:Key="SecondaryOpacity">0.7</x:Double>
             <FontFamily x:Key="MonospaceFontFamily">Consolas, Cascadia Mono, Courier New</FontFamily>
 
-            <!-- Pill geometry -->
-            <x:Double x:Key="PillWidth">70</x:Double>
-            <x:Double x:Key="PillHeight">22</x:Double>
+            <!-- Pill geometry. Sized for Windows taskbar presence (not Mac menubar);
+                 SuperWhisper-scale. Mac equivalent (70x22) is menubar-optimized — the
+                 two shells will drift here until Mac is bumped to match. -->
+            <x:Double x:Key="PillWidth">100</x:Double>
+            <x:Double x:Key="PillHeight">34</x:Double>
             <x:Double x:Key="PillGapAboveTaskbar">14</x:Double>
-            <x:Double x:Key="PillItemSpacing">4</x:Double>
-            <Thickness x:Key="PillPadding">8,5,8,5</Thickness>
+            <x:Double x:Key="PillItemSpacing">6</x:Double>
+            <Thickness x:Key="PillPadding">12,7,12,7</Thickness>
             <x:Double x:Key="PillBorderThickness">1</x:Double>
 
             <!-- Idle dots -->
-            <x:Double x:Key="IdleDotSize">3</x:Double>
-            <x:Double x:Key="IdleDotSpacing">3</x:Double>
+            <x:Double x:Key="IdleDotSize">4</x:Double>
+            <x:Double x:Key="IdleDotSpacing">4</x:Double>
 
             <!-- Level meter (shared math) -->
             <x:Double x:Key="LevelMeterFloorDb">-55</x:Double>
             <x:Double x:Key="LevelMeterBarSpacing">2</x:Double>
-            <x:Double x:Key="LevelMeterBarMinHeight">3</x:Double>
+            <x:Double x:Key="LevelMeterBarMinHeight">4</x:Double>
 
             <!-- Level meter (pill variant) -->
             <x:Int32 x:Key="PillLevelMeterBarCount">12</x:Int32>
-            <x:Double x:Key="PillLevelMeterHeight">10</x:Double>
+            <x:Double x:Key="PillLevelMeterHeight">20</x:Double>
 
             <!-- Level meter (main-window variant) -->
             <x:Int32 x:Key="MainLevelMeterBarCount">32</x:Int32>

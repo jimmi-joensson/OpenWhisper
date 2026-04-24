@@ -68,22 +68,31 @@ Platform system font. No bundled custom font.
 
 ## 5. HUD (pill) geometry
 
+Sized for taskbar-adjacent presence (SuperWhisper-scale), not Mac-menubar-scale.
+The earlier 70 × 22 sizing was menubar-optimized and felt cramped against the
+Windows taskbar; bigger proportions also give acrylic/mica room to render.
+
+**Drift check (2026-04-24):** Windows uses these values. Mac shell is still on
+the smaller menubar-scale values (70 × 22, 10 px meter, etc.) and needs a
+catch-up pass — track under a future backlog task if Mac parity is desired.
+
 | Token | Value |
 |---|---|
-| Pill outer size | **70 × 22 px** |
+| Pill outer size | **100 × 34 px** |
 | Pill gap above Dock/taskbar | **14 px** |
-| Pill horizontal padding (inside) | **8 px** |
-| Pill vertical padding (inside) | **5 px** |
+| Pill horizontal padding (inside) | **12 px** |
+| Pill vertical padding (inside) | **7 px** |
 | Pill position | Bottom-center of active display |
-| Pill HStack item spacing | **4 px** |
+| Pill HStack item spacing | **6 px** |
+| Pill corner radius | **17 px** (= height ÷ 2, capsule) |
 
 ### Level meter (inside pill)
 | Token | Value |
 |---|---|
 | Bar count | **12** |
 | Bar spacing | **2 px** |
-| Bar height (max fill area) | **10 px** |
-| Bar min height (at silence) | **3 px** |
+| Bar height (max fill area) | **20 px** |
+| Bar min height (at silence) | **4 px** |
 | Bar corner radius | **1.5 px** |
 | Fill color (recording) | `recording` (`#E07000`) |
 | Fill color (inactive / transcribing) | Theme secondary at 0.35 opacity |
@@ -92,8 +101,8 @@ Platform system font. No bundled custom font.
 | Token | Value |
 |---|---|
 | Dot count | **3** |
-| Dot size | **3 × 3 px** |
-| Dot spacing | **3 px** |
+| Dot size | **4 × 4 px** |
+| Dot spacing | **4 px** |
 | Dot color | White at 0.4 opacity |
 
 ### Main-window level meter (larger variant)
@@ -159,6 +168,8 @@ Icon geometry is stored as SVG rects in `apps/macos/App/OpenWhisperApp.swift:242
 ### Windows (WinUI 3)
 - Brand color, neutrals, radii, type sizes in `apps/windows/OpenWhisper/App.xaml` merged `ResourceDictionary`.
 - Pill / HUD geometry in `PillWindow.xaml` (TASK-24) pulled from `App.xaml` resources — do not hardcode in `PillWindow.xaml`.
+- Window is clipped to a capsule shape via `SetWindowRgn` (see `PillWindow.xaml.cs:ApplyCapsuleRegion`) so the OS itself shapes the window, not just the inner `Border`. Required because WinUI 3 doesn't expose per-pixel alpha on a rectangular window — without the region, acrylic/mica renders the rectangular footprint as a halo behind the capsule Border.
+- `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND` is set so Win11 doesn't auto-round (and conflict with our explicit capsule radius).
 - Tray icon assets live under `apps/windows/OpenWhisper/Assets/` — two ICO files (idle template + orange recording).
 
 ### Linux (future)

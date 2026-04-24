@@ -135,9 +135,12 @@ final class PillWindowController {
         // to whatever app the user is dictating into.
         panel.ignoresMouseEvents = false
         panel.isMovableByWindowBackground = false
+        // Deliberately omit `.canJoinAllSpaces` / `.fullScreenAuxiliary`:
+        // the pill stays on the desktop space it was created on, so
+        // full-screen apps (movies, focused editors) cover it. It reappears
+        // when the user leaves full-screen. Hotkey + menu bar icon still
+        // work in full-screen, so dictation itself is unaffected.
         panel.collectionBehavior = [
-            .canJoinAllSpaces,
-            .fullScreenAuxiliary,
             .stationary,
         ]
         panel.contentView = hosting

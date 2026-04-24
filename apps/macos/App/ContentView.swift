@@ -42,12 +42,6 @@ struct ContentView: View {
             coreMessage = hello_from_rust().toString()
             coreVersion = core_version().toString()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .openWhisperToggleDictation)) { _ in
-            dictation?.toggle()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openWhisperCancelDictation)) { _ in
-            dictation?.cancel()
-        }
     }
 
     private var restartBanner: some View {

@@ -18,6 +18,7 @@ struct OpenWhisperApp: App {
         Self.terminatePriorInstances()
 
         let pill = PillWindowController()
+        pill.showIdle()
         let dictation = DictationService(pill: pill)
         self._pill = State(wrappedValue: pill)
         self._dictation = State(wrappedValue: dictation)
@@ -82,6 +83,21 @@ private struct CaptureOpenWindow: ViewModifier {
 enum AppBridge {
     static var dictation: DictationService?
     static var openMainWindow: (() -> Void)?
+
+    /// Bring the main window forward, activating the app first. Handles both
+    /// "window closed" (via SwiftUI's openWindow) and "window open but
+    /// behind another app" (via NSWindow.makeKeyAndOrderFront) so callers
+    /// don't have to branch. Used by the menu-bar status item + the floating
+    /// pill — both need the same "give me the main UI, whatever its current
+    /// state" semantics.
+    static func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.canBecomeKey }) {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        openMainWindow?()
+    }
 }
 
 // MARK: - AppDelegate
@@ -95,6 +111,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
     private weak var dictation: DictationService?
+
+    /// Hide the Dock icon before AppKit shows it. We register as a regular
+    /// application in the Info.plist (no LSUIElement) so Launch Services
+    /// puts us in the Force Quit dialog + Activity Monitor's application
+    /// list — then flip to `.accessory` here so the Dock icon never
+    /// materializes. Must happen in `willFinishLaunching` — later is too
+    /// late and the icon briefly flashes.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// SwiftUI's `Window` scene (unlike `MenuBarExtra` / `WindowGroup`) defaults
+    /// to terminating the app when the last window closes. That defeats the
+    /// menu-bar-agent behavior we get from `.accessory` activation policy:
+    /// closing the main window would nuke the status icon and kill the
+    /// hotkey. Force false so the app keeps running in the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let dictation = AppBridge.dictation else {
@@ -178,12 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func openMain() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.canBecomeKey }) {
-            window.makeKeyAndOrderFront(nil)
-            return
-        }
-        AppBridge.openMainWindow?()
+        AppBridge.showMainWindow()
     }
 
     @objc private func toggleDictation() {

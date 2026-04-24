@@ -45,31 +45,51 @@ internal sealed class GlobalHotkey : IDisposable
     }
 
     /// <summary>
-    /// Register Left Ctrl + Space as a system-wide hotkey. Returns false if
+    /// Register Ctrl + Space as a system-wide hotkey. Returns false if
     /// another app already owns that combination; caller should surface.
     /// RegisterHotKey doesn't distinguish left/right Ctrl — the MOD_CONTROL
-    /// flag binds both. Left-only discrimination would require a low-level
-    /// keyboard hook; deferred until it matters (the Mac uses Right Command
-    /// via tap-not-hold semantics, which is also a higher-level decision).
+    /// flag binds both, and that's the intended behavior on Windows.
+    ///
+    /// Deliberate platform-convention choice: Windows = Ctrl+Space chord
+    /// (idiomatic Windows, zero hook complexity, no AV friction). Mac =
+    /// Right Command tap-not-hold. Don't port Mac's semantics here.
     /// </summary>
     public bool Register()
     {
         if (_registered) return true;
 
-        if (!SetWindowSubclass(_hwnd, _proc, HotkeyId, 0))
+        if (!_subclassed)
         {
-            return false;
+            if (!SetWindowSubclass(_hwnd, _proc, HotkeyId, 0))
+            {
+                return false;
+            }
+            _subclassed = true;
         }
-        _subclassed = true;
 
         if (!RegisterHotKey(_hwnd, HotkeyId, MOD_CONTROL | MOD_NOREPEAT, VK_SPACE))
         {
-            RemoveWindowSubclass(_hwnd, _proc, HotkeyId);
-            _subclassed = false;
+            // Keep the subclass installed — it's cheap and lets the next
+            // Register() retry succeed quickly. Subclass is only torn down
+            // in Dispose.
             return false;
         }
         _registered = true;
         return true;
+    }
+
+    /// <summary>
+    /// Stop listening for the hotkey without tearing down subclass state.
+    /// Designed for transient disable scenarios — the primary one being a
+    /// fullscreen app coming to the foreground, where we deliberately
+    /// release Ctrl+Space so the fullscreen app can consume it and the
+    /// user can't accidentally trigger dictation.
+    /// </summary>
+    public void Unregister()
+    {
+        if (!_registered) return;
+        UnregisterHotKey(_hwnd, HotkeyId);
+        _registered = false;
     }
 
     private IntPtr WndProc(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, IntPtr dwRefData)

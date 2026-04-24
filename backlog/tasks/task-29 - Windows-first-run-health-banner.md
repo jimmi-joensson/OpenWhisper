@@ -1,7 +1,8 @@
 ---
 id: TASK-29
 title: Windows first-run health banner
-status: To Do
+status: In Review
+updated_date: '2026-04-24 21:45'
 assignee: []
 created_date: '2026-04-24 18:45'
 labels:

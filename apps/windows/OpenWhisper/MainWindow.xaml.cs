@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
     private readonly AppSettings _settings;
     private readonly DictationService _service;
     private readonly GlobalHotkey _hotkey;
+    private readonly EscapeHook _escapeHook;
     private readonly DispatcherQueueTimer _refreshTimer;
     private readonly PillWindow _pill;
     private readonly TrayIcon? _tray;
@@ -47,8 +48,20 @@ public sealed partial class MainWindow : Window
         _hotkey.Pressed += (_, _) => _service.Toggle();
         if (!_hotkey.Register())
         {
-            // Another app owns Ctrl+Space. Surface it inline rather than crashing.
-            StatusText.Text = "couldn't register Left Ctrl + Space — another app may own it";
+            ShowHotkeyBlockedBanner();
+        }
+
+        // Global Escape-to-cancel: Windows analog of macOS's event-tap Escape
+        // handling. Core gates the action by phase, so Escape is a no-op
+        // outside of Recording. If the low-level hook fails to install
+        // (AV intervention, locked-down policy), we silently lose the
+        // global-Escape feature but the app keeps working — in-window
+        // Escape still reaches the focused XAML tree.
+        _escapeHook = new EscapeHook();
+        _escapeHook.EscapePressed += (_, _) => dispatcher.TryEnqueue(_service.Cancel);
+        if (!_escapeHook.Start())
+        {
+            SpikeLog.Log("MainWindow: EscapeHook failed to install — Escape-to-cancel disabled");
         }
 
         // 20 Hz UI refresh for status + level meter. Same cadence the handoff
@@ -61,6 +74,7 @@ public sealed partial class MainWindow : Window
         _refreshTimer.Start();
 
         _pill = new PillWindow(_service, Activate);
+        _pill.FullscreenChanged += OnFullscreenChanged;
         _pill.Activate();
 
         try
@@ -87,6 +101,7 @@ public sealed partial class MainWindow : Window
             _refreshTimer.Stop();
             _tray?.Dispose();
             _pill.Close();
+            _escapeHook.Dispose();
             _hotkey.Dispose();
             _service.Dispose();
         };
@@ -99,6 +114,30 @@ public sealed partial class MainWindow : Window
     {
         SpikeLog.Log("OnRecordClick");
         _service.Toggle();
+    }
+
+    // --- Fullscreen-aware hotkey gating ---
+
+    /// <summary>
+    /// When a fullscreen app comes to the foreground, release the global
+    /// Ctrl+Space hotkey so it reaches the fullscreen app normally (games
+    /// that bind space, presentations, videos). Re-register when the user
+    /// leaves fullscreen. The pill's <see cref="PillWindow.FullscreenChanged"/>
+    /// event piggybacks on its own 20 Hz poll so this costs nothing extra.
+    /// </summary>
+    private void OnFullscreenChanged(object? sender, bool isFullscreen)
+    {
+        if (isFullscreen)
+        {
+            _hotkey.Unregister();
+        }
+        else
+        {
+            // Re-register. If another app grabbed Ctrl+Space during the
+            // fullscreen window, this silently fails — the hotkey stays off
+            // until something releases the combo. Acceptable edge case.
+            _hotkey.Register();
+        }
     }
 
     // --- Tray-only / accessory mode ---
@@ -153,6 +192,26 @@ public sealed partial class MainWindow : Window
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    // --- Health banner (Windows analog of Mac restart banner) ---
+
+    private void ShowHotkeyBlockedBanner()
+    {
+        HealthBannerText.Text = "Ctrl+Space is in use by another app. Dictation can still run from the Record button or the tray, but the global hotkey won't fire.";
+        HealthBannerAction.Content = "Retry";
+        HealthBanner.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+    }
+
+    private void OnHealthBannerAction(object sender, RoutedEventArgs e)
+    {
+        // Re-attempt hotkey registration. If another app released the combo
+        // since startup, the banner hides and the hotkey starts working; if
+        // the block is still in place, the banner stays visible.
+        if (_hotkey.Register())
+        {
+            HealthBanner.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+        }
+    }
 
     private void RefreshFromCore()
     {

@@ -51,6 +51,15 @@ public sealed partial class PillWindow : Window
     private PillStatus _status = PillStatus.Idle;
     private DictationPhase _lastPhase = DictationPhase.Idle;
     private CancellationTokenSource? _graceCts;
+    private bool _fullscreenHidden;
+
+    /// <summary>
+    /// Raised on the UI thread when the foreground-app-is-fullscreen state
+    /// flips. Subscribers piggyback on the pill's 20 Hz poll for their own
+    /// fullscreen-sensitive behavior (e.g. MainWindow disables the global
+    /// hotkey while fullscreen is active).
+    /// </summary>
+    public event EventHandler<bool>? FullscreenChanged;
 
     internal PillWindow(DictationService service, Action showMainWindow)
     {
@@ -195,12 +204,66 @@ public sealed partial class PillWindow : Window
 
     private void Tick()
     {
+        // Mac gets fullscreen hiding for free because fullscreen apps live on
+        // their own Space (see `PillOverlay.swift` collectionBehavior comment).
+        // Windows has no Spaces — IsAlwaysOnTop would render the pill over
+        // fullscreen games, videos, and presentations. Detect the condition
+        // ourselves and hide; re-show on exit.
+        bool wantHidden = IsForegroundAppFullscreen();
+        if (wantHidden != _fullscreenHidden)
+        {
+            _fullscreenHidden = wantHidden;
+            var appWindow = GetAppWindow();
+            if (wantHidden) appWindow.Hide();
+            else appWindow.Show();
+            FullscreenChanged?.Invoke(this, wantHidden);
+        }
+
         if (_status == PillStatus.Idle) return;
 
         float sample = _status == PillStatus.Recording ? Core.AudioCurrentLevel() : 0f;
         Array.Copy(_levelHistory, 1, _levelHistory, 0, _levelHistory.Length - 1);
         _levelHistory[^1] = sample;
         RefreshBars();
+    }
+
+    private AppWindow GetAppWindow()
+    {
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        return AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(hwnd));
+    }
+
+    /// <summary>
+    /// True if the foreground window covers its monitor exactly — classical
+    /// fullscreen games (D3D exclusive), borderless fullscreen apps, and
+    /// presentation modes all match. The pill itself is skipped so we don't
+    /// flicker if it's ever foreground; shell surfaces (desktop, taskbar)
+    /// don't match because their window rects don't cover the full monitor.
+    /// </summary>
+    private bool IsForegroundAppFullscreen()
+    {
+        IntPtr fg = PillInterop.GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+
+        var myHwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        if (fg == myHwnd) return false;
+
+        if (!PillInterop.GetWindowRect(fg, out var winRect)) return false;
+
+        IntPtr monitor = PillInterop.MonitorFromWindow(fg, PillInterop.MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero) return false;
+
+        var mi = new PillInterop.MONITORINFO { cbSize = (uint)Marshal.SizeOf<PillInterop.MONITORINFO>() };
+        if (!PillInterop.GetMonitorInfo(monitor, ref mi)) return false;
+
+        // Exact-match against the full monitor rect (including the area under
+        // the taskbar). We deliberately don't compare against WorkArea — that
+        // would also match ordinary maximized windows, which should NOT hide
+        // the pill.
+        return winRect.left <= mi.rcMonitor.left
+            && winRect.top <= mi.rcMonitor.top
+            && winRect.right >= mi.rcMonitor.right
+            && winRect.bottom >= mi.rcMonitor.bottom;
     }
 
     private void RefreshBars()
@@ -327,6 +390,26 @@ internal static class PillInterop
     public const long WS_EX_LAYERED = 0x00080000;
     public const long WS_EX_NOACTIVATE = 0x08000000;
 
+    public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO
+    {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
 
@@ -335,4 +418,18 @@ internal static class PillInterop
 
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 }

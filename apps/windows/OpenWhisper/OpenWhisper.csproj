@@ -53,6 +53,20 @@
     <Copy SourceFiles="@(RustCoreDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- Publish also needs the Rust core DLL next to the published exe.
+       PrepareForRun copies it to the build OutDir (used by dotnet run), but
+       the publish pipeline creates a separate output folder that our custom
+       Copy doesn't hit. Declare the DLL as None with CopyToPublishDirectory
+       so msbuild includes it in the publish output automatically. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\target\release\openwhisper_core.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\target\release\openwhisper_core.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>openwhisper_core.dll</Link>
+    </None>
+  </ItemGroup>
+
   <!-- Hoist sherpa-onnx native DLLs from runtimes/win-x64/native/ to the app
        root. .NET's console-app RID-based native resolver would find them
        in-place, but WinUI 3 unpackaged apps don't — sherpa's managed wrapper

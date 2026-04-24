@@ -25,7 +25,7 @@ Windows equivalent of the macOS pill HUD (TASK-6). Borderless, topmost, click-th
 - [ ] #2 Pill positioned at bottom-center of active monitor, 14 px above the Windows taskbar
 - [ ] #3 Three states visible: idle (three dots, low opacity), recording (orange 12-bar level meter), transcribing (spinner)
 - [ ] #4 Click-through enabled during recording/transcribing; idle state is clickable (opens main window)
-- [ ] #5 Stays above normal windows including full-screen borderless apps (best-effort for exclusive fullscreen)
+- [ ] #5 Stays above normal windows; HIDES when a fullscreen app (game, video, presentation, borderless-fullscreen) is foreground. Mirrors Mac where fullscreen apps live on their own Space so the pill is naturally hidden behind them. Re-shows when the user leaves fullscreen.
 - [ ] #6 Level meter redraws at 20 Hz using the same dB normalization as Mac (`LevelMeter.dbNormalize`)
 - [ ] #7 Pill state driven by polling the Rust core phase snapshot, not Windows-side state duplication
 - [ ] #8 250 ms grace delay before returning to idle after transcription, matching Mac

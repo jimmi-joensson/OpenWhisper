@@ -18,10 +18,11 @@
             <RowDefinition Height="Auto" /> <!-- 1 Header -->
             <RowDefinition Height="Auto" /> <!-- 2 Subtitle -->
             <RowDefinition Height="Auto" /> <!-- 3 Model load bar -->
-            <RowDefinition Height="Auto" /> <!-- 4 Record button -->
-            <RowDefinition Height="Auto" /> <!-- 5 Level meter -->
-            <RowDefinition Height="*" />    <!-- 6 Transcript -->
-            <RowDefinition Height="Auto" /> <!-- 7 Status -->
+            <RowDefinition Height="Auto" /> <!-- 4 Health banner -->
+            <RowDefinition Height="Auto" /> <!-- 5 Record button -->
+            <RowDefinition Height="Auto" /> <!-- 6 Level meter -->
+            <RowDefinition Height="*" />    <!-- 7 Transcript -->
+            <RowDefinition Height="Auto" /> <!-- 8 Status -->
         </Grid.RowDefinitions>
 
         <TitleBar Grid.Row="0" x:Name="AppTitleBar" Title="OpenWhisper">
@@ -57,7 +58,41 @@
             </InfoBar.Content>
         </InfoBar>
 
-        <Button Grid.Row="4"
+        <!-- Health banner: blue info panel shown when a startup probe fails
+             (e.g. another app owns the Ctrl+Space hotkey). Mirrors the Mac
+             restart banner's visual language via the shared InfoBanner
+             tokens in App.xaml. Auto-hides on successful retry. -->
+        <Border Grid.Row="4"
+                x:Name="HealthBanner"
+                Visibility="Collapsed"
+                Background="{StaticResource InfoBannerBackgroundBrush}"
+                BorderBrush="{StaticResource InfoBannerBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource InfoBannerCornerRadius}"
+                Padding="12,10,12,10">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <FontIcon Grid.Column="0"
+                          Glyph="&#xE946;"
+                          FontSize="16"
+                          VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1"
+                           x:Name="HealthBannerText"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap" />
+                <Button Grid.Column="2"
+                        x:Name="HealthBannerAction"
+                        Click="OnHealthBannerAction"
+                        Content="Retry"
+                        Style="{StaticResource AccentButtonStyle}" />
+            </Grid>
+        </Border>
+
+        <Button Grid.Row="5"
                 x:Name="RecordButton"
                 Click="OnRecordClick"
                 Height="48"
@@ -66,7 +101,7 @@
             <TextBlock x:Name="RecordButtonText" Text="Start recording" FontSize="16" />
         </Button>
 
-        <ProgressBar Grid.Row="5"
+        <ProgressBar Grid.Row="6"
                      x:Name="LevelMeter"
                      Minimum="0"
                      Maximum="1"
@@ -75,7 +110,7 @@
                      ShowPaused="False"
                      ShowError="False" />
 
-        <TextBox Grid.Row="6"
+        <TextBox Grid.Row="7"
                  x:Name="TranscriptText"
                  Margin="0,8,0,0"
                  FontSize="15"
@@ -85,7 +120,7 @@
                  ScrollViewer.VerticalScrollBarVisibility="Auto"
                  PlaceholderText="Transcript will appear here." />
 
-        <TextBlock Grid.Row="7"
+        <TextBlock Grid.Row="8"
                    x:Name="StatusText"
                    Opacity="0.7"
                    FontSize="12"

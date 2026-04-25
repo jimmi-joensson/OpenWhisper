@@ -1,8 +1,9 @@
-mod audio;
-mod dictation;
+pub mod audio;
+pub mod dictation;
 mod ffi_c;
-mod transcript;
+pub mod transcript;
 
+#[cfg(feature = "macos-shell")]
 #[swift_bridge::bridge]
 mod ffi {
     extern "Rust" {
@@ -81,7 +82,7 @@ fn hello_from_rust() -> String {
     "Hello from openwhisper-core (Rust)".to_string()
 }
 
-fn core_version() -> String {
+pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 

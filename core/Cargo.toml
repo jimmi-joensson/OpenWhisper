@@ -9,15 +9,24 @@ description = "Shared core logic for OpenWhisper: audio capture, VAD, config, pr
 [lib]
 name = "openwhisper_core"
 # staticlib: swift-bridge links this into the macOS app (.a).
-# rlib:      for cargo internal consumers (tests, future Rust-only shells).
+# rlib:      for cargo internal consumers (tests, Tauri shell).
 # cdylib:    .dll for Windows P/Invoke from the C# shell.
 crate-type = ["staticlib", "rlib", "cdylib"]
 
+[features]
+default = ["macos-shell"]
+# swift-bridge FFI for the shipped macOS SwiftUI app. Off when a pure-Rust
+# consumer (Tauri) links core as a path dep.
+macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
+# Marker selected by the Tauri shell. Empty today; future Tauri-only code
+# can cfg-gate on it without flipping macos-shell on.
+tauri = []
+
 [dependencies]
-swift-bridge = "0.1.59"
+swift-bridge = { version = "0.1.59", optional = true }
 cpal = "0.17"
 rubato = "0.16"
 regex = "1.11"
 
 [build-dependencies]
-swift-bridge-build = "0.1.59"
+swift-bridge-build = { version = "0.1.59", optional = true }

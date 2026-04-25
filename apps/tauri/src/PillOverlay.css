@@ -1,0 +1,110 @@
+/*
+ * Pill HUD — Phase 1 spike.
+ *
+ * Mirrors apps/macos/App/PillOverlay.swift:
+ *  - 70x22 capsule, black 55% bg + thin material blur, 1px white 8% border.
+ *  - Three states: idle dots, orange 12-bar meter, transcribing spinner+meter.
+ *
+ * The window itself is transparent; this CSS draws the visible capsule.
+ */
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.pill-root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+.pill-capsule {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 4px 14px rgba(0, 0, 0, 0.35);
+  color: white;
+  /* Disable user-select; pill is a HUD, not text. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Material falls back to flat when the OS reports reduced transparency
+   (notably Windows RDP, where DWM blur is disabled). */
+@media (prefers-reduced-transparency: reduce) {
+  .pill-capsule {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: rgba(20, 20, 20, 0.92);
+  }
+}
+
+/* Idle: three muted dots. */
+.pill-idle-dots {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 10px;
+  padding: 0 6px;
+}
+
+.pill-idle-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* Level meter: 12 vertical bars; scaleY drives the live amplitude. */
+.pill-meter {
+  display: flex;
+  align-items: center;
+  gap: 1.5px;
+  height: 10px;
+}
+
+.pill-meter-bar {
+  width: 2px;
+  height: 10px;
+  border-radius: 1px;
+  background: var(--primary, #e07000);
+  transform-origin: center;
+  transition: transform 50ms linear;
+}
+
+.pill-meter-bar.is-muted {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+/* Spinner used during transcription. Tiny, subtle. */
+.pill-spinner {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.25px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  animation: pill-spin 0.7s linear infinite;
+}
+
+@keyframes pill-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

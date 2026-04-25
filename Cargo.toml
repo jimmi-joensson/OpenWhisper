@@ -1,9 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["core"]
+members = ["core", "apps/tauri/src-tauri"]
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 opt-level = 3
 strip = "symbols"
+
+# Debug Rust core is 50–120× slower on rubato sinc resample (see
+# feedback_rust_release_in_dev_loop memory). Build core optimized even
+# in dev so Tauri's default `tauri dev` does not regress audio latency.
+[profile.dev.package.openwhisper-core]
+opt-level = 3

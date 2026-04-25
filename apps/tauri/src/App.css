@@ -1,0 +1,173 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+:root {
+  --background:        oklch(0.985 0.002 270);
+  --foreground:        oklch(0.16 0.005 270);
+  --card:              oklch(1 0 0);
+  --card-foreground:   oklch(0.16 0.005 270);
+  --popover:           oklch(1 0 0);
+  --popover-foreground:oklch(0.16 0.005 270);
+  --primary:           oklch(0.22 0.005 270);
+  --primary-foreground:oklch(0.985 0 0);
+  --secondary:         oklch(0.96 0.003 270);
+  --secondary-foreground: oklch(0.22 0.005 270);
+  --muted:             oklch(0.96 0.003 270);
+  --muted-foreground:  oklch(0.55 0.005 270);
+  --accent:            oklch(0.96 0.003 270);
+  --accent-foreground: oklch(0.22 0.005 270);
+  --destructive:       oklch(0.62 0.21 27);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border:            oklch(0.91 0.003 270);
+  --input:             oklch(0.91 0.003 270);
+  --ring:              oklch(0.22 0.005 270);
+  --radius:            0.5rem;
+
+  --recording:                #E07000;
+  --recording-rgb:            224 112 0;
+  --info:                     #0A84FF;
+  --info-rgb:                 10 132 255;
+  --info-bg:                  rgb(10 132 255 / 0.15);
+  --info-border:              rgb(10 132 255 / 0.35);
+
+  --pill-fill:                rgb(0 0 0 / 0.55);
+  --pill-border:              rgb(255 255 255 / 0.08);
+  --pill-shadow:              0 4px 14px rgb(0 0 0 / 0.35);
+  --pill-idle-dot:            rgb(255 255 255 / 0.4);
+  --transcript-bg:            rgb(0 0 0 / 0.2);
+  --window-backdrop:          oklch(0.22 0.005 270 / 0.78);
+
+  --pill-w:                   70px;
+  --pill-h:                   22px;
+  --pill-radius:              11px;
+  --pill-px:                  8px;
+  --pill-py:                  5px;
+  --pill-gap:                 4px;
+  --pill-dock-gap:            14px;
+
+  --bar-count-pill:           12;
+  --bar-w:                    2px;
+  --bar-spacing:              2px;
+  --bar-max-h:                10px;
+  --bar-min-h:                2px;
+  --bar-radius:               1.5px;
+
+  --main-meter-h:             36px;
+  --bar-count-main:           32;
+
+  --tick-ms:                  50ms;
+  --grace-ms:                 250ms;
+
+  --font-sys: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background:        oklch(0.18 0.005 270);
+    --foreground:        oklch(0.97 0.003 270);
+    --card:              oklch(0.22 0.005 270);
+    --card-foreground:   oklch(0.97 0.003 270);
+    --popover:           oklch(0.22 0.005 270);
+    --popover-foreground:oklch(0.97 0.003 270);
+    --primary:           oklch(0.97 0.003 270);
+    --primary-foreground:oklch(0.18 0.005 270);
+    --secondary:         oklch(0.27 0.005 270);
+    --secondary-foreground: oklch(0.97 0.003 270);
+    --muted:             oklch(0.27 0.005 270);
+    --muted-foreground:  oklch(0.68 0.005 270);
+    --accent:            oklch(0.27 0.005 270);
+    --accent-foreground: oklch(0.97 0.003 270);
+    --destructive:       oklch(0.65 0.22 27);
+    --destructive-foreground: oklch(0.985 0 0);
+    --border:            oklch(0.30 0.005 270);
+    --input:             oklch(0.30 0.005 270);
+    --ring:              oklch(0.85 0.005 270);
+
+    --info:              #0A84FF;
+    --window-backdrop:   oklch(0.22 0.005 270 / 0.78);
+  }
+}
+
+.ow-dark {
+  --background:        oklch(0.18 0.005 270);
+  --foreground:        oklch(0.97 0.003 270);
+  --card:              oklch(0.22 0.005 270);
+  --card-foreground:   oklch(0.97 0.003 270);
+  --popover:           oklch(0.22 0.005 270);
+  --popover-foreground:oklch(0.97 0.003 270);
+  --primary:           oklch(0.97 0.003 270);
+  --primary-foreground:oklch(0.18 0.005 270);
+  --secondary:         oklch(0.27 0.005 270);
+  --secondary-foreground: oklch(0.97 0.003 270);
+  --muted:             oklch(0.27 0.005 270);
+  --muted-foreground:  oklch(0.68 0.005 270);
+  --border:            oklch(0.30 0.005 270);
+  --input:             oklch(0.30 0.005 270);
+  --ring:              oklch(0.85 0.005 270);
+  color-scheme: dark;
+}
+
+.ow-light {
+  --background:        oklch(0.985 0.002 270);
+  --foreground:        oklch(0.16 0.005 270);
+  --card:              oklch(1 0 0);
+  --muted:             oklch(0.96 0.003 270);
+  --muted-foreground:  oklch(0.55 0.005 270);
+  --border:            oklch(0.91 0.003 270);
+  color-scheme: light;
+}
+
+.ow-flat {
+  --pill-fill:        oklch(0.18 0.005 270);
+  --pill-border:      oklch(0.30 0.005 270);
+  --window-backdrop:  oklch(0.20 0.005 270);
+  --transcript-bg:    oklch(0.16 0.005 270);
+}
+
+@theme inline {
+  --color-background:        var(--background);
+  --color-foreground:        var(--foreground);
+  --color-card:              var(--card);
+  --color-card-foreground:   var(--card-foreground);
+  --color-muted:             var(--muted);
+  --color-muted-foreground:  var(--muted-foreground);
+  --color-border:            var(--border);
+  --color-input:             var(--input);
+  --color-ring:              var(--ring);
+  --color-destructive:       var(--destructive);
+
+  --color-recording:         var(--recording);
+  --color-info:              var(--info);
+  --color-info-bg:           var(--info-bg);
+  --color-info-border:       var(--info-border);
+
+  --color-pill-fill:         var(--pill-fill);
+  --color-pill-border:       var(--pill-border);
+  --color-pill-idle-dot:     var(--pill-idle-dot);
+  --color-transcript-bg:     var(--transcript-bg);
+
+  --radius-pill:             var(--pill-radius);
+  --radius-bar:              var(--bar-radius);
+
+  --font-sans:               var(--font-sys);
+  --font-mono:               var(--font-mono);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+@keyframes ow-spin {
+  to { transform: rotate(360deg); }
+}

@@ -1,6 +1,7 @@
-use std::path::PathBuf;
-
+#[cfg(feature = "macos-shell")]
 fn main() {
+    use std::path::PathBuf;
+
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = crate_dir
         .parent()
@@ -17,4 +18,9 @@ fn main() {
 
     swift_bridge_build::parse_bridges(bridges)
         .write_all_concatenated(&out_dir, "openwhisper_core");
+}
+
+#[cfg(not(feature = "macos-shell"))]
+fn main() {
+    // No-op for non-macOS-shell consumers (Tauri): skip swift-bridge codegen.
 }

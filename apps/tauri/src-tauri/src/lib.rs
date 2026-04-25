@@ -1,0 +1,182 @@
+use std::thread;
+use std::time::Duration;
+
+use openwhisper_core::audio;
+use openwhisper_core::dictation::{
+    self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
+};
+use serde::Serialize;
+use tauri::{Emitter, LogicalPosition, Manager};
+
+const TICK_MS: u64 = 50;
+const SAMPLE_RATE_HZ: u64 = 16_000;
+const STUB_RECOGNIZER_MS: u64 = 1_500;
+const STUB_TRANSCRIPT: &str = "[recognizer pending — TASK-33]";
+
+#[derive(Serialize, Clone)]
+struct DictationTick {
+    phase: u32,
+    status: &'static str,
+    status_message: String,
+    transcript: String,
+    confidence: f32,
+    sample_count: u64,
+    elapsed_ms: u64,
+    error_message: String,
+    can_toggle: bool,
+    is_recording: bool,
+    level: f32,
+}
+
+fn phase_to_status(phase: u32) -> &'static str {
+    match phase {
+        PHASE_RECORDING => "recording",
+        PHASE_TRANSCRIBING => "transcribing",
+        _ => "idle",
+    }
+}
+
+#[tauri::command]
+fn core_version() -> String {
+    openwhisper_core::core_version()
+}
+
+#[tauri::command]
+fn dictation_toggle() -> Result<(), String> {
+    let action = dictation::dictation_request_toggle();
+    match action {
+        TOGGLE_BEGIN_RECORDING => {
+            audio::audio_start_capture()?;
+            dictation::dictation_mark_capture_started();
+        }
+        TOGGLE_STOP_RECORDING => {
+            audio::audio_stop_capture();
+            let samples = audio::audio_drain_samples();
+            let count = samples.len() as u64;
+            dictation::dictation_mark_capture_stopped(count);
+            if count > 0 {
+                spawn_stub_recognizer();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn dictation_cancel() -> bool {
+    audio::audio_stop_capture();
+    let _ = audio::audio_drain_samples();
+    dictation::dictation_request_cancel()
+}
+
+// Real recognizer (TASK-33) replaces this. For now, sleep 1.5 s then deliver a
+// placeholder so the phase machine actually reaches DONE and the UI clears.
+fn spawn_stub_recognizer() {
+    thread::spawn(|| {
+        thread::sleep(Duration::from_millis(STUB_RECOGNIZER_MS));
+        dictation::dictation_deliver_transcript(STUB_TRANSCRIPT, 1.0);
+    });
+}
+
+fn spawn_dictation_emitter(app: tauri::AppHandle) {
+    thread::Builder::new()
+        .name("openwhisper-dictation-emitter".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(TICK_MS));
+                let snap = dictation::dictation_snapshot();
+                let level = audio::audio_current_level();
+                // While recording, snapshot.sample_count is 0 until stop. Show a
+                // running count so the UI counter doesn't sit at 0 throughout.
+                let live_samples = if snap.phase() == PHASE_RECORDING {
+                    snap.elapsed_ms() * SAMPLE_RATE_HZ / 1000
+                } else {
+                    snap.sample_count()
+                };
+                let payload = DictationTick {
+                    phase: snap.phase(),
+                    status: phase_to_status(snap.phase()),
+                    status_message: snap.status_message(),
+                    transcript: snap.transcript(),
+                    confidence: snap.confidence(),
+                    sample_count: live_samples,
+                    elapsed_ms: snap.elapsed_ms(),
+                    error_message: snap.error_message(),
+                    can_toggle: snap.can_toggle(),
+                    is_recording: snap.is_recording(),
+                    level,
+                };
+                if app.emit("dictation_tick", payload).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("spawn dictation emitter");
+}
+
+#[tauri::command]
+async fn set_pill_click_through(
+    app: tauri::AppHandle,
+    passthrough: bool,
+) -> Result<(), String> {
+    let pill = app
+        .get_webview_window("pill")
+        .ok_or_else(|| "pill window not found".to_string())?;
+    pill.set_ignore_cursor_events(passthrough)
+        .map_err(|e| e.to_string())
+}
+
+/// Place the pill bottom-center of its current monitor. The 80 px bottom
+/// margin clears the Dock / taskbar in the default-layout case; Phase 7
+/// will replace this with true work-area math (NSScreen.visibleFrame on
+/// Mac, GetMonitorInfo rcWork on Windows).
+#[tauri::command]
+async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String> {
+    let pill = app
+        .get_webview_window("pill")
+        .ok_or_else(|| "pill window not found".to_string())?;
+
+    let monitor = match pill.current_monitor().map_err(|e| e.to_string())? {
+        Some(m) => m,
+        None => pill
+            .primary_monitor()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no monitor available".to_string())?,
+    };
+
+    let scale = monitor.scale_factor();
+    let mon_w = monitor.size().width as f64 / scale;
+    let mon_h = monitor.size().height as f64 / scale;
+    let mon_x = monitor.position().x as f64 / scale;
+    let mon_y = monitor.position().y as f64 / scale;
+
+    const PILL_W: f64 = 70.0;
+    const PILL_H: f64 = 22.0;
+    const BOTTOM_MARGIN: f64 = 80.0;
+
+    let x = mon_x + (mon_w - PILL_W) / 2.0;
+    let y = mon_y + mon_h - PILL_H - BOTTOM_MARGIN;
+
+    pill.set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            spawn_dictation_emitter(app.handle().clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            core_version,
+            dictation_toggle,
+            dictation_cancel,
+            set_pill_click_through,
+            position_pill_bottom_center
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -7,23 +7,27 @@
 //
 // Windows / Linux: no TCC equivalent, no bundle constraint — `tauri dev`
 // is sufficient and works against the bare cargo binary.
+//
+// Implementation note: Node 22+ blocks direct spawn of `.cmd`/`.bat` files
+// without `shell: true` (security fix → EINVAL). Passing `args` *with*
+// `shell: true` triggers the DEP0190 deprecation warning. The escape
+// hatch is to build the full command line as a single string and pass
+// it with `shell: true` and no `args` array — the OS shell parses it,
+// no Node-side concatenation happens, no warnings, no EINVAL.
 
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 
 const isMac = process.platform === "darwin";
-const isWin = process.platform === "win32";
 
-// On Windows, pnpm is shipped as pnpm.cmd. Calling that directly avoids
-// `shell: true` and the DEP0190 deprecation warning Node 22+ throws.
-const cmd = isMac ? "bash" : isWin ? "pnpm.cmd" : "pnpm";
-const args = isMac
-    ? [path.join(__dirname, "dev-run.sh")]
-    : ["tauri", "dev"];
+const command = isMac
+    ? `bash "${path.join(__dirname, "dev-run.sh")}"`
+    : "pnpm tauri dev";
 
-const child = spawn(cmd, args, {
+const child = spawn(command, {
     stdio: "inherit",
     cwd: path.join(__dirname, ".."),
+    shell: true,
 });
 
 child.on("exit", (code, signal) => {

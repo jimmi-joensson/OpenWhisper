@@ -21,6 +21,10 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 openwhisper-core = { path = "../../../core", default-features = false, features = ["tauri"] }
+# Cross-platform clipboard for the paste flow. Text-only save/restore
+# (non-text formats lossy across both OSes — same as the WinUI 3 shell
+# shipped behavior).
+arboard = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"

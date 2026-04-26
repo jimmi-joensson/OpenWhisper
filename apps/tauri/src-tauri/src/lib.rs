@@ -10,6 +10,7 @@ use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
 mod hotkey;
+mod injection;
 mod tray;
 
 pub(crate) const TICK_MS: u64 = 50;
@@ -239,6 +240,7 @@ pub fn run() {
             position_pill_bottom_center,
             hotkey::hotkey_retry,
             hotkey::hotkey_status_current,
+            injection::inject_test,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

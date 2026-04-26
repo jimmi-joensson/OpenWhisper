@@ -1,10 +1,11 @@
 ---
 id: TASK-40
 title: Recognizer engine swap to `ort` + runtime EP probe + DirectML bench
-status: To Do
+status: Done
 assignee:
   - claude
 created_date: '2026-04-26 20:15'
+completed_date: '2026-04-26 21:10'
 labels:
   - recognizer
   - windows
@@ -43,17 +44,38 @@ Multilingual: no model change needed. The shipped `sherpa-onnx-nemo-parakeet-tdt
 ## Acceptance Criteria
 
 <!-- AC:BEGIN -->
-- [ ] #1 `core/Cargo.toml` Windows recognizer feature swaps `sherpa-onnx` dep for `ort` crate (latest 2.x); sherpa-onnx-sys removed from the build closure on Windows
-- [ ] #2 `core/src/recognizer/sherpa.rs` renamed/replaced by `ort_parakeet.rs` (or similar); implements the same `Recognizer` trait. Includes a Rust RNN-T greedy decoder over the encoder/decoder/joiner ONNX sessions
-- [ ] #3 Recognizer download module unchanged — same Parakeet v3 int8 archive, same cache path; only the consumer changes
-- [ ] #4 Runtime EP probe implemented: priority order TensorRT → CUDA → DirectML → CPU; logs which EP engaged at first session creation; each probe has a fail-fast guard so a broken EP doesn't stall startup
-- [ ] #5 EP-selection cache: once a host has chosen an EP (or auto-disabled a slow one), the choice is remembered (e.g. `~/.cache/openwhisper/ep-pref.json`) so the probe doesn't re-run every boot. Override via `OPENWHISPER_PROVIDER` env var (matches existing TASK-39 knob)
-- [ ] #6 Bench arm: extend `scripts/bench/bench-sherpa/` (rename to `bench-recognizer/` if you like) to run the same 5-rep harness against each available EP on the host. Append results to `scripts/bench/results/<host>-<date>.txt` mirroring TASK-39 format. Capture vendor-appropriate GPU util sample during decode (nvidia-smi for NVIDIA, GPU-Z / DXGI counters for DirectML, etc.)
-- [ ] #7 Decision recorded in `backlog/decisions/recognizer-ort-engine-<date>.md`: which EPs cleared CPU on which hardware classes, whether the runtime probe ships in the Tauri bundle or stays gated, and the bundling story (DirectML default? CUDA optional download? CPU-only floor?)
-- [ ] #8 If shipping the probe: Tauri bundler config updated to include the DirectML EP DLLs and the chosen onnxruntime build; bundle size delta measured and recorded in the decision doc
-- [ ] #9 Mac path unchanged — `target_os = "macos"` arm still uses `FluidAudioBridge`. Verified by `cargo check --target aarch64-apple-darwin` (or by building the shipped Mac SwiftUI app, whichever is faster)
-- [ ] #10 `OPENWHISPER_NUM_THREADS` env var continues to apply to the CPU EP path (TASK-39 default of `min(num_cpus::get_physical(), 8)` preserved)
+- [x] #1 `core/Cargo.toml` Windows recognizer feature swaps `sherpa-onnx` dep for `ort` crate (latest 2.x); sherpa-onnx-sys removed from the build closure on Windows
+- [x] #2 `core/src/recognizer/sherpa.rs` renamed/replaced by `ort_parakeet.rs` (or similar); implements the same `Recognizer` trait. Includes a Rust RNN-T greedy decoder over the encoder/decoder/joiner ONNX sessions
+- [x] #3 Recognizer download module unchanged — same Parakeet v3 int8 archive, same cache path; only the consumer changes
+- [x] #4 Runtime EP probe implemented: priority order TensorRT → CUDA → DirectML → CPU; logs which EP engaged at first session creation; each probe has a fail-fast guard so a broken EP doesn't stall startup
+- [x] #5 EP-selection cache: once a host has chosen an EP (or auto-disabled a slow one), the choice is remembered (e.g. `~/.cache/openwhisper/ep-pref.json`) so the probe doesn't re-run every boot. Override via `OPENWHISPER_PROVIDER` env var (matches existing TASK-39 knob)
+- [x] #6 Bench arm: extend `scripts/bench/bench-sherpa/` (rename to `bench-recognizer/` if you like) to run the same 5-rep harness against each available EP on the host. Append results to `scripts/bench/results/<host>-<date>.txt` mirroring TASK-39 format. Capture vendor-appropriate GPU util sample during decode (nvidia-smi for NVIDIA, GPU-Z / DXGI counters for DirectML, etc.)
+- [x] #7 Decision recorded in `backlog/decisions/recognizer-ort-engine-<date>.md`: which EPs cleared CPU on which hardware classes, whether the runtime probe ships in the Tauri bundle or stays gated, and the bundling story (DirectML default? CUDA optional download? CPU-only floor?)
+- [x] #8 If shipping the probe: Tauri bundler config updated to include the DirectML EP DLLs and the chosen onnxruntime build; bundle size delta measured and recorded in the decision doc — N/A: probe gated to opt-in (see decision §3), no bundler change needed; bundle delta = 3 KB (recorded)
+- [~] #9 Mac path unchanged — `target_os = "macos"` arm still uses `FluidAudioBridge`. Verified by `cargo check --target aarch64-apple-darwin` (or by building the shipped Mac SwiftUI app, whichever is faster) — Mac cfg-gating audited in `core/src/recognizer/mod.rs`; cross-compile to aarch64-apple-darwin not run from this Windows box (no Apple toolchain present). Re-verify on next macOS sync.
+- [x] #10 `OPENWHISPER_NUM_THREADS` env var continues to apply to the CPU EP path (TASK-39 default of `min(num_cpus::get_physical(), 8)` preserved). Verified: threads=2 → 1011 ms, threads=8 → 682 ms on RTX 3070 box.
 <!-- AC:END -->
+
+## Outcome (RTX 3070, DESKTOP-V7KRON6, 2026-04-26)
+
+- Engine swap **shipped**: ort 2.0.0-rc.10 replaces sherpa-onnx
+  1.12.40. CPU-EP parity within 6% of TASK-39 baseline (696 ms vs
+  656 ms median, 5 reps).
+- DirectML EP **deferred to opt-in**: 1163 ms median, 1.67× slower
+  than CPU on RTX 3070. Same "GPU mostly idle, kernel launch
+  overhead dominates" failure mode TASK-39 caught with CUDA. No
+  non-NVIDIA hardware available for cross-vendor validation.
+- EP probe code path lives in `core/src/recognizer/ep_probe.rs`,
+  honours `OPENWHISPER_PROVIDER` env override, caches choice at
+  `~/.cache/openwhisper/ep-pref.json`. Default Tauri build only
+  compiles in CPU EP — DML/CUDA/TRT are Cargo-feature opt-ins.
+- Bundle size delta vs sherpa CPU build: -1 MB (sherpa shipped
+  21 MB exe + 22 MB onnxruntime.dll + sherpa-onnx-c-api.dll;
+  ort ships 22 MB self-contained exe). DirectML feature delta:
+  3 KB (uses system `DirectML.dll`).
+- Full decision in
+  `backlog/decisions/recognizer-ort-engine-2026-04-26.md`. Raw
+  numbers in `scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt`.
 
 ## Handover prompt
 

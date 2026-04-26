@@ -106,6 +106,24 @@ fn spawn_recognizer(samples: Vec<f32>) {
         .expect("spawn recognizer decoder");
 }
 
+// Cold-loading the recognizer takes ~2.5s on Windows (sherpa-onnx + Parakeet
+// int8). Doing it at boot on a background thread means the in-line load
+// inside dictation_toggle becomes a no-op once this completes, so the first
+// Record click decodes at steady-state latency instead of paying the wait.
+// recognizer_ensure_loaded is idempotent, so a slow warmup overlapping a
+// fast first Record still yields the same correct result — spawn_recognizer
+// blocks on it.
+fn spawn_recognizer_warmup() {
+    thread::Builder::new()
+        .name("openwhisper-recognizer-warmup".into())
+        .spawn(|| {
+            if let Err(e) = recognizer::recognizer_ensure_loaded() {
+                eprintln!("[warmup] recognizer load failed: {e}");
+            }
+        })
+        .expect("spawn recognizer warmup");
+}
+
 fn spawn_dictation_emitter(app: tauri::AppHandle) {
     thread::Builder::new()
         .name("openwhisper-dictation-emitter".into())
@@ -195,6 +213,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
+            spawn_recognizer_warmup();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

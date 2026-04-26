@@ -6,6 +6,7 @@ use openwhisper_core::dictation::{
     self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
 use openwhisper_core::recognizer;
+use openwhisper_core::transcript;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 
@@ -117,7 +118,10 @@ fn spawn_recognizer(samples: Vec<f32>) {
                 return;
             }
             match recognizer::recognizer_transcribe(&samples) {
-                Ok(res) => dictation::dictation_deliver_transcript(&res.text, res.confidence),
+                Ok(res) => {
+                    let cleaned = transcript::process(&res.text);
+                    dictation::dictation_deliver_transcript(&cleaned, res.confidence);
+                }
                 Err(e) => dictation::dictation_deliver_error(&format!("transcribe: {e}")),
             }
         })

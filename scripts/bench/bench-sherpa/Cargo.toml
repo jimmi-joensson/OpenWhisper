@@ -10,4 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 openwhisper-core = { path = "../../../core", default-features = false, features = ["recognizer"] }
-sherpa-onnx = "1.12.40"
+# Pure-Rust WAV reader. Avoids sherpa-onnx's `Wave::read`, whose C++ side
+# opens files via the ANSI Win32 API and fails on non-ASCII paths
+# (see `feedback_ansi_path_marshaling.md`).
+hound = "3.5"

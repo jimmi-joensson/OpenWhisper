@@ -124,6 +124,10 @@ recordings/
 # always local, never committed.
 scripts/bench/clips/*.wav
 scripts/bench/clips/*.ref.txt
+# Per-host benchmark output. Format defined by smoke-with-wpr.ps1 /
+# smoke-with-powermetrics.sh; numbers are machine-specific and noisy
+# across developers — keep them local.
+scripts/bench/results/
 
 # SwiftPM build artifacts for the FluidAudio Rust↔Swift bridge.
 core/swift/**/.build/

@@ -8,7 +8,7 @@ Existing dictation tools paywall good local transcription. Their free local mode
 
 ## Status
 
-Very early. Project scaffolding in progress. MVP target: **macOS**, using NVIDIA Parakeet (CC-BY-4.0) converted to CoreML for Apple Neural Engine execution. Windows and Linux ports to follow.
+Very early. Single Tauri app shell targeting **macOS** + **Windows**, using NVIDIA Parakeet (CC-BY-4.0). Mac path runs FluidAudio/CoreML on the Apple Neural Engine; Windows path runs sherpa-onnx on CPU. Linux port to follow. The retired SwiftUI shell lives at `archive/macos/` for reference.
 
 ## How it works (MVP)
 
@@ -20,10 +20,11 @@ Hotkey defaults to match Superwhisper's for familiarity; fully rebindable in set
 
 ## Stack
 
-- **Shared core:** Rust (audio capture, VAD, config, custom vocab, post-processing, BYO-key cloud providers)
-- **macOS shell:** Swift + SwiftUI/AppKit, CoreML on Apple Neural Engine
-- **Windows shell** (future): C# + WinUI 3, ONNX Runtime + DirectML
-- **Linux shell** (future): Rust + gtk4-rs, ONNX Runtime (CUDA/ROCm/CPU)
+- **Shared core:** Rust (audio capture, VAD, dictation phase machine, transcript post-processing, BYO-key cloud providers)
+- **App shell:** Tauri 2 (single codebase, Mac + Windows). React/TypeScript frontend, Rust backend, WebView UI.
+- **Recognizer (Mac):** FluidAudio + Parakeet CoreML on Apple Neural Engine
+- **Recognizer (Windows):** sherpa-onnx + Parakeet ONNX on CPU
+- **Linux** (future): same Tauri shell, ONNX Runtime (CUDA/ROCm/CPU)
 
 ## Principles
 
@@ -34,30 +35,28 @@ Hotkey defaults to match Superwhisper's for familiarity; fully rebindable in set
 
 ## Install (pre-built)
 
-Grab the latest DMG from [Releases](https://github.com/jimmi-joensson/OpenWhisper/releases) — macOS 15+ on Apple Silicon only. Builds are ad-hoc signed (not notarized), so first launch requires a Gatekeeper bypass. Walkthrough: [INSTALL.md](./INSTALL.md).
+No pre-built binaries yet — the Tauri release pipeline is being rebuilt (see TASK-46). For now, build from source.
 
 ## Building from source
 
-**Prerequisites:** macOS 15+, Rust (install via [rustup](https://rustup.rs/)), Xcode 26+, and [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). The app icon uses the new `.icon` format which requires Xcode 26 + macOS 15 deployment.
+**Prerequisites:** Rust (install via [rustup](https://rustup.rs/)), Node.js 20+, and [pnpm](https://pnpm.io/installation). Mac builds also need Xcode command-line tools (for AppKit linking).
 
 ```sh
-scripts/bootstrap.sh           # builds Rust core, stages artifacts, generates Xcode project
-open apps/macos/OpenWhisper.xcodeproj
+cd apps/tauri
+pnpm install
+pnpm dev:tauri          # full bundled dev cycle (recommended on macOS — see apps/tauri/scripts/dev-run.sh)
 # or:
-xcodebuild -project apps/macos/OpenWhisper.xcodeproj -scheme OpenWhisper build
+pnpm tauri dev          # bare cargo run, no .app bundle (no TCC grants)
 ```
 
-The Xcode project is *generated* — it lives under `.gitignore` and is reproduced from `apps/macos/project.yml`. The Rust core (`core/`) builds into a staticlib that the Swift target links via a swift-bridge bridging header.
+The Rust core (`core/`) builds as a normal cargo dependency of `apps/tauri/src-tauri`. No Xcode project, no swift-bridge for the Tauri shell.
 
-### Packaging a release DMG locally
+### Packaging a release locally
 
 ```sh
-brew install create-dmg
-VERSION=0.1.0 scripts/package-release.sh
-# → dist/OpenWhisper-0.1.0-arm64.dmg
+cd apps/tauri
+pnpm tauri build        # produces a platform-native bundle (.app + .dmg on Mac, .msi on Win)
 ```
-
-Tagged pushes (`v*`) also trigger `.github/workflows/release.yml` to build + upload a draft release.
 
 ## Task tracking
 

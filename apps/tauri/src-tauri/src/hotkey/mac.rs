@@ -1,4 +1,4 @@
-//! macOS hotkey via CGEventTap. Port of `apps/macos/App/HotkeyService.swift`.
+//! macOS hotkey via CGEventTap. Port of `archive/macos/App/HotkeyService.swift`.
 //!
 //! Tap-not-hold semantics for Right Command: if the user taps Right Cmd
 //! with no other key pressed in between, fire the toggle. Holding Right

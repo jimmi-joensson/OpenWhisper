@@ -6,9 +6,10 @@ import PackageDescription
 // async/concurrency runtime in user code. See `core/build.rs` for the
 // `swift build` invocation that produces the .a files we link.
 //
-// FluidAudio version pinned to match the shipped Mac SwiftUI app
-// (apps/macos/OpenWhisper.xcodeproj Package.resolved → 0.13.6). Drift
-// here = drift between recognizer behavior in Tauri vs shipped Mac.
+// FluidAudio version pinned to 0.13.6, matching the retired SwiftUI shell
+// (archive/macos/OpenWhisper.xcodeproj Package.resolved). Bumping here is
+// fine — the SwiftUI shell is no longer the source of truth — but treat
+// any change as a recognizer-behavior change and rerun the bench harness.
 let package = Package(
     name: "FluidAudioBridge",
     platforms: [.macOS(.v14)],

@@ -5,13 +5,15 @@
 //! `recognizer_transcribe`. Result flows back into the dictation state
 //! machine via `dictation::dictation_deliver_transcript`.
 //!
-//! Per the bench decision in
-//! `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`,
-//! sherpa-onnx + ONNX→CoreML EP did not engage the ANE on macOS — the
-//! Mac path uses FluidAudio (FluidInference's ANE-tuned `.mlmodelc`)
-//! through a Swift `@_cdecl` bridge. Windows continues with sherpa-onnx
-//! ONNX runtime on CPU. Both impls hide behind one `Recognizer` trait so
-//! the call site is OS-agnostic.
+//! Per the bench decisions in
+//! `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md` and
+//! `backlog/decisions/recognizer-ort-engine-2026-04-26.md`, sherpa-onnx
+//! + ONNX→CoreML EP did not engage the ANE on macOS — the Mac path uses
+//! FluidAudio (FluidInference's ANE-tuned `.mlmodelc`) through a Swift
+//! `@_cdecl` bridge. Windows runs Parakeet-TDT-v3 directly through the
+//! `ort` Rust crate on CPU EP (DML / CUDA / TRT compiled-in via opt-in
+//! Cargo features). Both impls hide behind the `Recognizer` trait so the
+//! call site is OS-agnostic.
 //!
 //! Parakeet-TDT v3 is offline (batch). There are no real partials; the
 //! shell pumps the full waveform after stop and gets a single result.
@@ -24,19 +26,23 @@ mod fluidaudio;
 #[cfg(not(target_os = "macos"))]
 mod download;
 #[cfg(not(target_os = "macos"))]
-mod sherpa;
+mod ep_probe;
+#[cfg(not(target_os = "macos"))]
+mod mel;
+#[cfg(not(target_os = "macos"))]
+mod ort_parakeet;
 
 #[cfg(target_os = "macos")]
 pub use fluidaudio::FluidAudioBridge;
 #[cfg(not(target_os = "macos"))]
-pub use sherpa::SherpaParakeet;
+pub use ort_parakeet::OrtParakeet;
 
 /// Outcome of a single utterance.
 #[derive(Debug, Clone)]
 pub struct TranscribeResult {
     pub text: String,
-    /// FluidAudio reports a real confidence scalar; sherpa-onnx
-    /// `OfflineResult` does not — Windows path returns 1.0 placeholder.
+    /// FluidAudio reports a real confidence scalar; the ort Parakeet
+    /// path doesn't surface one — Windows returns 1.0 placeholder.
     pub confidence: f32,
     pub elapsed_ms: u64,
 }
@@ -62,7 +68,7 @@ fn default_backend() -> Box<dyn Recognizer> {
 
 #[cfg(not(target_os = "macos"))]
 fn default_backend() -> Box<dyn Recognizer> {
-    Box::new(SherpaParakeet::new())
+    Box::new(OrtParakeet::new())
 }
 
 /// Wire up the platform default backend. Idempotent. The shell calls this

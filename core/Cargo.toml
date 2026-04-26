@@ -22,25 +22,50 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
 tauri = ["recognizer"]
-# In-core ASR via sherpa-onnx (upstream). Separate from `tauri` so a
-# future bench binary or test can enable it without flipping the shell
-# feature on. CoreML EP is selected at runtime, not via a Cargo feature.
-recognizer = ["dep:sherpa-onnx", "dep:ureq", "dep:tar", "dep:bzip2", "dep:dirs", "dep:num_cpus"]
+# In-core ASR. On macOS the shipped SwiftUI app uses FluidAudio via the
+# Swift bridge — this feature is for the cross-platform Tauri shell and
+# bench harness on Windows/Linux, where we drive Parakeet-TDT-v3 ONNX
+# directly through `ort` (pykeio). EP selection (CPU/DirectML/CUDA/TRT)
+# happens at runtime via the EP probe — not a Cargo feature flag.
+# `directml` and `cuda` are off by default; Phase 1 ships CPU-only.
+# Extending features = ["recognizer-directml"] etc. lights up the
+# corresponding ort EP at build time.
+recognizer = [
+    "dep:ort",
+    "dep:rustfft",
+    "dep:ndarray",
+    "dep:ureq",
+    "dep:tar",
+    "dep:bzip2",
+    "dep:dirs",
+    "dep:num_cpus",
+]
+recognizer-directml = ["recognizer", "ort?/directml"]
+recognizer-cuda = ["recognizer", "ort?/cuda"]
+recognizer-tensorrt = ["recognizer", "ort?/tensorrt"]
 
 [dependencies]
 swift-bridge = { version = "0.1.59", optional = true }
 cpal = "0.17"
 rubato = "0.16"
 regex = "1.11"
-# Upstream sherpa-onnx Rust crate. NOT thewh1teagle/sherpa-rs (deprecated).
-#
-# `shared` (NOT default `static`) is required on macOS: the static prebuilt
-# defines SHERPA_ONNX_DISABLE_COREML in cmake/onnxruntime-osx-arm64-static.cmake
-# because the static onnxruntime build doesn't include the CoreML EP. The
-# shared variant pulls the official Microsoft onnxruntime dylib, which does
-# include CoreML EP. Cost: ships libonnxruntime.dylib + libsherpa-onnx-c-api.dylib
-# next to the binary (Tauri bundle puts them under Contents/Frameworks/).
-sherpa-onnx = { version = "1.12.40", optional = true, default-features = false, features = ["shared"] }
+# pykeio/ort 2.x — the de-facto Rust binding to ONNXRuntime, with first-
+# class DirectML / CUDA / TensorRT EP support behind feature flags. We
+# replaced sherpa-onnx with ort in TASK-40 because sherpa wraps DML behind
+# a per-vendor source build, and we want one Windows binary that auto-
+# selects the best EP at runtime. Static-linked default (`download-binaries`)
+# pulls the prebuilt onnxruntime ~22 MB into the build closure; DirectML
+# adds ~33 MB of DirectML.dll alongside.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries", "ndarray", "std"] }
+# Pure-Rust FFT for the librosa-style mel spectrogram preprocessor —
+# Parakeet-TDT-v3 expects 128-bin slaney mel features at 16 kHz/hop=160,
+# matching NeMo's AudioToMelSpectrogramPreprocessor. Pure Rust avoids
+# pulling kaldi-native-fbank's C++ closure into the build.
+rustfft = { version = "6.2", optional = true }
+# ndarray powers the f32 tensor shapes ort consumes/produces. Same major
+# version that ort 2.0.0-rc.10 re-exports; pin to keep the type bridge
+# stable.
+ndarray = { version = "0.16", optional = true }
 # Parakeet v3 model archive download + extract (same .tar.bz2 the Windows
 # shell consumes from k2-fsa/sherpa-onnx releases).
 ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }

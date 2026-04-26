@@ -29,10 +29,13 @@ fn main() {
     let dec_ms = t_dec.elapsed().as_millis();
 
     // Single-line JSON: keep it small + grep-friendly. Quote the text so
-    // newlines/special chars survive jq.
+    // newlines/special chars survive jq. `provider` reflects the EP that
+    // actually engaged (set via `OPENWHISPER_PROVIDER`); the binary name
+    // stays `bench-sherpa` for now to avoid churning the harness scripts.
+    let provider = std::env::var("OPENWHISPER_PROVIDER").unwrap_or_else(|_| "cpu".to_string());
     println!(
-        "{{\"engine\":\"sherpa-onnx\",\"clip\":{:?},\"clip_seconds\":{:.3},\"load_ms\":{},\"decode_ms\":{},\"text\":{:?}}}",
-        wav_path, dur_s, load_ms, dec_ms, res.text
+        "{{\"engine\":\"ort\",\"provider\":{provider:?},\"clip\":{wav_path:?},\"clip_seconds\":{dur_s:.3},\"load_ms\":{load_ms},\"decode_ms\":{dec_ms},\"text\":{:?}}}",
+        res.text
     );
 }
 

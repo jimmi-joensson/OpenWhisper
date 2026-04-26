@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Mic prompt copy. Without this key cpal's audio open silently fails
+         on macOS — no prompt, no error in the UI. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OpenWhisper transcribes your voice locally on this Mac. Audio never leaves the device.</string>
+
+    <!-- Hide the Dock icon so OpenWhisper lives in the menu bar like the
+         shipped SwiftUI app. -->
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

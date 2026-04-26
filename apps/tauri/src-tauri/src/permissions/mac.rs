@@ -11,9 +11,31 @@
 //! AX gating matches Swift: don't prompt mic until AX is trusted, so
 //! the user never sees both dialogs at once.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use block2::RcBlock;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+/// dev-run.sh launches the .app via `open`, which routes stderr to
+/// /dev/null. eprintln is invisible — append-log to a fixed path so the
+/// diagnostic flow stays readable. Cleared on app launch so each run
+/// produces a self-contained trace.
+const LOG_PATH: &str = "/tmp/openwhisper-permissions.log";
+
+fn dbg_log(msg: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let line = format!("[{now:.3}] {msg}\n");
+    eprintln!("{}", line.trim_end());
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(LOG_PATH) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
 
 /// Mirrors `AVAuthorizationStatusNotDetermined`. The only state where
 /// `requestAccessForMediaType:` does anything user-visible — restricted,
@@ -32,9 +54,13 @@ extern "C" {
 }
 
 pub fn request_microphone() {
+    // Truncate at each call so the file holds one boot's trace, not
+    // accumulating noise from previous launches.
+    let _ = std::fs::write(LOG_PATH, "");
+    dbg_log("permissions: request_microphone() entered");
     unsafe {
         let trusted = AXIsProcessTrusted();
-        eprintln!("permissions: AX trusted = {trusted}");
+        dbg_log(&format!("permissions: AX trusted = {trusted}"));
         if !trusted {
             // Match Swift sequencing — wait for AX before prompting mic.
             // User restarts after granting AX, then mic prompt fires here.
@@ -42,33 +68,33 @@ pub fn request_microphone() {
         }
 
         let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
-            eprintln!("permissions: AVCaptureDevice class not loaded");
+            dbg_log("permissions: AVCaptureDevice class not loaded");
             return;
         };
 
         let media: *const AnyObject = AVMediaTypeAudio;
         if media.is_null() {
-            eprintln!("permissions: AVMediaTypeAudio symbol is null");
+            dbg_log("permissions: AVMediaTypeAudio symbol is null");
             return;
         }
 
         let status: i64 = msg_send![cls, authorizationStatusForMediaType: media];
-        eprintln!(
+        dbg_log(&format!(
             "permissions: mic auth status = {status} \
              (0=NotDetermined, 1=Restricted, 2=Denied, 3=Authorized)"
-        );
+        ));
         if status != AV_NOT_DETERMINED {
             return;
         }
 
         let block = RcBlock::new(|granted: Bool| {
-            eprintln!(
+            dbg_log(&format!(
                 "permissions: mic prompt completed, granted = {}",
                 granted.as_bool()
-            );
+            ));
         });
 
-        eprintln!("permissions: firing AVCaptureDevice.requestAccessForMediaType:audio");
+        dbg_log("permissions: firing AVCaptureDevice.requestAccessForMediaType:audio");
         let _: () = msg_send![
             cls,
             requestAccessForMediaType: media,

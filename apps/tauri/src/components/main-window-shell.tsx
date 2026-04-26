@@ -1,43 +1,80 @@
 import type { ReactNode } from "react";
 import type { PillStatus } from "../lib/pill-state";
-import { HealthBanner } from "./health-banner";
+import {
+  PHASE_DONE,
+  PHASE_ERROR,
+  PHASE_IDLE,
+  PHASE_LOADING_MODEL,
+  PHASE_RECORDING,
+  PHASE_TRANSCRIBING,
+} from "../lib/dictation";
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { LevelMeter } from "./level-meter";
 import { RecordButton } from "./record-button";
 
 export type Platform = "macos" | "windows";
 
 interface MainWindowShellProps {
+  phase?: number;
   status?: PillStatus;
   levels?: number[];
+  level?: number;
   elapsed?: number;
   samples?: number;
   transcript?: string;
+  confidence?: number;
+  statusMessage?: string;
+  errorMessage?: string;
+  canToggle?: boolean;
+  isRecording?: boolean;
+  ticks?: number;
   platform?: Platform;
-  showHealth?: boolean;
   onToggle?: () => void;
-  onRetry?: () => void;
   coreVersion?: string | null;
   coreError?: string | null;
 }
 
+const PHASE_NAMES: Record<number, string> = {
+  [PHASE_IDLE]: "idle",
+  [PHASE_LOADING_MODEL]: "loading_model",
+  [PHASE_RECORDING]: "recording",
+  [PHASE_TRANSCRIBING]: "transcribing",
+  [PHASE_DONE]: "done",
+  [PHASE_ERROR]: "error",
+};
+
 export function MainWindowShell({
+  phase = 0,
   status = "idle",
   levels = [],
+  level = 0,
   elapsed = 0,
   samples = 0,
   transcript = "",
+  confidence = 0,
+  statusMessage = "",
+  errorMessage = "",
+  canToggle = true,
+  isRecording = false,
+  ticks = 0,
   platform = "macos",
-  showHealth = false,
   onToggle,
-  onRetry,
   coreVersion,
   coreError,
 }: MainWindowShellProps) {
+  const statusText =
+    statusMessage ||
+    (status === "recording"
+      ? "recording — tap again to stop"
+      : status === "transcribing"
+        ? "transcribing…"
+        : "idle");
+
   return (
     <div
       style={{
         width: "100%",
-        maxWidth: 560,
+        maxWidth: 580,
         margin: "0 auto",
         padding: "20px 28px 24px",
         color: "var(--foreground)",
@@ -56,17 +93,7 @@ export function MainWindowShell({
         OpenWhisper Dev
       </h1>
 
-      {showHealth && (
-        <div style={{ marginBottom: 16 }}>
-          <HealthBanner
-            message="Microphone access denied. OpenWhisper needs the microphone to capture audio."
-            onRetry={onRetry}
-            retryLabel="Open System Settings"
-          />
-        </div>
-      )}
-
-      <Section label="Rust ↔ React FFI">
+      <Section title="Rust ↔ React FFI">
         <KV
           k="message"
           v={coreError ? `error: ${coreError}` : "Hello from openwhisper-core (Rust)"}
@@ -87,38 +114,30 @@ export function MainWindowShell({
           : "Ctrl + Space anywhere · Escape to cancel while recording"}
       </p>
 
-      <Section label="Permissions & hotkey debug">
-        <KV k="accessibility" v="granted" />
-        <KV k="microphone" v="granted" />
-        <KV k="tap" v="installed" />
-        <KV k="events seen" v="2641" />
+      <Section title="Dictation debug">
+        <KV k="platform" v={platform} />
         <KV
-          k="last event"
-          v="flagsChanged keyCode=0 flags=0x000000 rCmd=·"
-          wrap
+          k="phase"
+          v={`${phase} (${PHASE_NAMES[phase] ?? "unknown"})`}
         />
-        <div style={{ marginTop: 8 }}>
-          <SmallButton label="Retry tap install" />
-        </div>
+        <KV k="can_toggle" v={canToggle ? "true" : "false"} />
+        <KV k="is_recording" v={isRecording ? "true" : "false"} />
+        <KV k="level (raw)" v={level.toFixed(4)} />
+        <KV k="ticks" v={ticks.toLocaleString()} />
+        <KV k="last error" v={errorMessage || "—"} />
       </Section>
 
-      <Section label="Dictation (mic → Rust core → Parakeet)">
-        <KV
-          k="status"
-          v={
-            status === "recording"
-              ? "recording — tap again to stop"
-              : status === "transcribing"
-                ? "transcribing…"
-                : "idle"
-          }
-        />
+      <Section title="Dictation (mic → Rust core → Parakeet)">
+        <KV k="status" v={statusText} />
         <KV k="elapsed" v={status === "idle" ? "—" : `${elapsed.toFixed(1)} s`} />
         <KV
           k="samples"
-          v={status === "idle" ? "—" : samples.toLocaleString()}
+          v={status === "idle" ? "—" : `${samples.toLocaleString()} @ 16 kHz`}
         />
-        <KV k="confidence" v={status === "transcribing" ? "0.92" : "—"} />
+        <KV
+          k="confidence"
+          v={confidence > 0 ? confidence.toFixed(2) : "—"}
+        />
 
         <div style={{ marginTop: 12 }}>
           <LevelMeter
@@ -131,15 +150,21 @@ export function MainWindowShell({
             fill
           />
         </div>
+
+        <div style={{ marginTop: 14 }}>
+          <RecordButton phase={phase} onClick={onToggle} />
+        </div>
       </Section>
 
-      <Section label="transcript">
+      <Section title="transcript">
         <div
           style={{
             background: "var(--transcript-bg)",
             border: "1px solid var(--border)",
             borderRadius: 6,
             minHeight: 70,
+            maxHeight: 160,
+            overflowY: "auto",
             padding: "10px 12px",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
@@ -148,49 +173,27 @@ export function MainWindowShell({
             lineHeight: 1.45,
           }}
         >
-          {transcript ||
-            (status === "idle"
-              ? "—"
-              : status === "recording"
-                ? "…"
-                : "the quick brown fox jumps over the lazy dog")}
+          {transcript || (status === "idle" ? "—" : "…")}
         </div>
       </Section>
-
-      <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-start" }}>
-        <RecordButton status={status} onClick={onToggle} />
-      </div>
     </div>
   );
 }
 
-function Section({ label, children }: { label: string; children: ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section style={{ marginTop: 14 }}>
-      <div
-        style={{
-          fontSize: 11.5,
-          color: "var(--muted-foreground)",
-          marginBottom: 6,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          background: "color-mix(in oklch, var(--card) 30%, transparent)",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          padding: "10px 12px",
-        }}
-      >
-        {children}
-      </div>
-    </section>
+    <Card size="sm" className="mt-3.5">
+      <CardHeader>
+        <CardTitle className="text-xs font-normal text-muted-foreground tracking-wide">
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>{children}</CardContent>
+    </Card>
   );
 }
 
-function KV({ k, v, wrap = false }: { k: string; v: string; wrap?: boolean }) {
+function KV({ k, v }: { k: string; v: string }) {
   return (
     <div
       style={{
@@ -206,33 +209,12 @@ function KV({ k, v, wrap = false }: { k: string; v: string; wrap?: boolean }) {
       <span style={{ textAlign: "right", color: "var(--muted-foreground)" }}>{k}:</span>
       <span
         style={{
-          whiteSpace: wrap ? "pre-wrap" : "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
         }}
       >
         {v}
       </span>
     </div>
-  );
-}
-
-function SmallButton({ label, onClick }: { label: string; onClick?: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        fontFamily: "var(--font-sys)",
-        fontSize: 11.5,
-        padding: "3px 9px",
-        borderRadius: 5,
-        border: "1px solid var(--border)",
-        background: "color-mix(in oklch, var(--card) 60%, transparent)",
-        color: "var(--foreground)",
-        cursor: "pointer",
-      }}
-    >
-      {label}
-    </button>
   );
 }

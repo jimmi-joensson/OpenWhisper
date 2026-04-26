@@ -36,11 +36,19 @@ function App() {
 
   return (
     <MainWindowShell
+      phase={dictation.phase}
       status={dictation.status}
       levels={dictation.levels}
+      level={dictation.level}
       elapsed={dictation.elapsed}
       samples={dictation.samples}
-      transcript={dictation.transcript || (dictation.status === "idle" ? "—" : "…")}
+      transcript={dictation.transcript}
+      confidence={dictation.confidence}
+      statusMessage={dictation.statusMessage}
+      errorMessage={dictation.errorMessage}
+      canToggle={dictation.canToggle}
+      isRecording={dictation.isRecording}
+      ticks={dictation.ticks}
       platform={platform}
       onToggle={() => void dictation.toggle()}
       coreVersion={coreVersion}

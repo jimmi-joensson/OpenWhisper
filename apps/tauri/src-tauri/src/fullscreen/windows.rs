@@ -11,17 +11,43 @@
 //! GetWindowThreadProcessId) compared to GetCurrentProcessId, rather
 //! than tracking individual HWNDs. Same effect, less bookkeeping —
 //! covers main, pill, and any future window we add.
+//!
+//! Shell-surface exclusion: clicking the empty desktop on Win 11 sets
+//! the foreground window to `Progman` / `WorkerW`, whose rects span
+//! the whole monitor. Without filtering these, the pill hides every
+//! time the user clicks away from a real app. Same goes for the
+//! taskbar (`Shell_TrayWnd`, `Shell_SecondaryTrayWnd`) which
+//! technically covers the full monitor width on the screen edge it
+//! lives on.
 
 use std::mem::size_of;
 
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
 };
+
+/// Window classes for the Windows desktop + taskbar — never treat them
+/// as fullscreen apps. Order matters only for readability.
+const SHELL_CLASSES: &[&str] = &[
+    "Progman",                // Desktop (Program Manager)
+    "WorkerW",                // Desktop wallpaper worker
+    "Shell_TrayWnd",          // Primary taskbar
+    "Shell_SecondaryTrayWnd", // Secondary-monitor taskbar
+];
+
+fn window_class_name(hwnd: HWND) -> Option<String> {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if len <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
 
 pub fn is_fullscreen_now() -> bool {
     unsafe {
@@ -34,6 +60,12 @@ pub fn is_fullscreen_now() -> bool {
         GetWindowThreadProcessId(fg, Some(&mut pid));
         if pid == GetCurrentProcessId() {
             return false;
+        }
+
+        if let Some(class) = window_class_name(fg) {
+            if SHELL_CLASSES.iter().any(|c| *c == class) {
+                return false;
+            }
         }
 
         let mut win_rect = RECT::default();

@@ -39,33 +39,33 @@ BUNDLE_ID="com.openwhisper.app.dev"
 BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev.app"
 INSTALLED_APP_PATH="/Applications/OpenWhisper Dev.app"
 
-echo "==> Quitting any running OpenWhisper (Tauri) instances"
+echo "==> Quitting any running OpenWhisper Dev instances (release left alone)"
 # Try graceful Quit first (lets the app clean up: unhook hotkey, save, etc).
 osascript -e 'tell application "OpenWhisper Dev" to quit' 2>/dev/null || true
-osascript -e 'tell application "OpenWhisper" to quit' 2>/dev/null || true
 
 # Wait up to 3 s for graceful exit; force-kill anything still alive.
+# Only target the Dev bundle path + the bare cargo dev binary. Release
+# (com.openwhisper.app at /Applications/OpenWhisper.app) is independent and
+# stays running — different bundle id means dev + release coexist.
 for _ in 1 2 3 4 5 6; do
-    if ! pgrep -f "OpenWhisper Dev.app/Contents/MacOS/|OpenWhisper.app/Contents/MacOS/|target/debug/openwhisper-tauri" >/dev/null 2>&1; then
+    if ! pgrep -f "OpenWhisper Dev.app/Contents/MacOS/|target/debug/openwhisper-tauri" >/dev/null 2>&1; then
         break
     fi
     sleep 0.5
 done
 pkill -9 -f "OpenWhisper Dev.app/Contents/MacOS/" 2>/dev/null || true
-pkill -9 -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
 pkill -9 -f "target/debug/openwhisper-tauri" 2>/dev/null || true
 sleep 0.3
 
-# Reset every OpenWhisper variant we know of, every cycle. Ad-hoc rebuilds
-# drift their cdhash and leave stale entries; clearing them keeps the
-# Accessibility / Microphone / Input Monitoring lists tidy.
-echo "==> Resetting TCC grants for all OpenWhisper variants"
-for VARIANT_BID in \
-    "com.openwhisper.app.dev"     `# Tauri dev (this script)` \
-    "com.openwhisper.app"         `# Tauri release`; do
-    for SERVICE in Accessibility Microphone ListenEvent; do
-        tccutil reset "$SERVICE" "$VARIANT_BID" 2>/dev/null || true
-    done
+# Reset only the Dev bundle's TCC entries. Each ad-hoc rebuild drifts the
+# cdhash so the prior grant goes stale — wiping the entry keeps the
+# Accessibility list tidy and the next launch prompts cleanly.
+# DO NOT touch com.openwhisper.app — that's the release the user installed
+# from the DMG; resetting it would invalidate their granted state and
+# trigger an Accessibility prompt the next time they launch the release.
+echo "==> Resetting TCC grants for OpenWhisper Dev only"
+for SERVICE in Accessibility Microphone ListenEvent; do
+    tccutil reset "$SERVICE" "com.openwhisper.app.dev" 2>/dev/null || true
 done
 
 # System Settings caches the Accessibility list and ignores tccutil's mutations

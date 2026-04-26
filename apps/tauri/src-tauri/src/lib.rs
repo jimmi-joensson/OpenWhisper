@@ -228,6 +228,12 @@ pub fn run() {
     builder
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
+            // Register the Tauri-side paste flow so the core can call into
+            // it from `dictation_deliver_transcript`. Single-set; the core
+            // ignores subsequent calls.
+            openwhisper_core::dictation::set_injector(Box::new(
+                injection::TauriInjector::new(app.handle().clone()),
+            ));
             tray::install(app.handle())?;
             hotkey::install(app.handle());
             Ok(())
@@ -240,7 +246,6 @@ pub fn run() {
             position_pill_bottom_center,
             hotkey::hotkey_retry,
             hotkey::hotkey_status_current,
-            injection::inject_test,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

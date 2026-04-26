@@ -23,6 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use arboard::Clipboard;
+use openwhisper_core::dictation::Injector;
 use tauri::{AppHandle, Manager};
 
 #[cfg(target_os = "macos")]
@@ -35,17 +36,31 @@ mod windows;
 /// the pasteboard yet.
 const RESTORE_DELAY: Duration = Duration::from_millis(200);
 
-/// Inject `text` into whichever app is focused. Spawns a worker thread so
-/// the caller (recognizer thread) returns immediately. No-ops on empty
-/// input.
-pub fn inject(app: AppHandle, text: String) {
-    if text.is_empty() {
-        return;
+/// Tauri-side `Injector` impl. Registered with the core at boot via
+/// `dictation::set_injector`. Core calls `inject(text)` after a transcript
+/// is delivered.
+pub struct TauriInjector {
+    app: AppHandle,
+}
+
+impl TauriInjector {
+    pub fn new(app: AppHandle) -> Self {
+        Self { app }
     }
-    thread::Builder::new()
-        .name("openwhisper-inject".into())
-        .spawn(move || do_inject(app, &text))
-        .expect("spawn injection thread");
+}
+
+impl Injector for TauriInjector {
+    fn inject(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let app = self.app.clone();
+        let text = text.to_string();
+        thread::Builder::new()
+            .name("openwhisper-inject".into())
+            .spawn(move || do_inject(app, &text))
+            .expect("spawn injection thread");
+    }
 }
 
 fn do_inject(app: AppHandle, text: &str) {
@@ -106,11 +121,3 @@ fn synthesize_paste() {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn synthesize_paste() {}
-
-/// Manual smoke test handle. Lets the dev console drive `inject(...)` end
-/// to end without going through the full record→transcribe loop. Removed
-/// once C3 wires the real path.
-#[tauri::command]
-pub fn inject_test(app: AppHandle, text: String) {
-    inject(app, text);
-}

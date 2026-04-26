@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Playwright runtime artifacts (snapshots, screenshots, console logs).
+# Keep .claude/skills/playwright-cli/ committed — that's shared infra.
+.playwright-cli/
+test-results/
+playwright-report/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

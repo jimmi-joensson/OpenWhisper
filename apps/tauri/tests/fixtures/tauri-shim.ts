@@ -53,6 +53,12 @@ async function installTauriShim(page: Page) {
         if (cmd === "core_version") return "0.1.0-test";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
+        if (cmd === "hotkey_status_current") return null;
+        if (cmd === "hotkey_retry") {
+          (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount =
+            ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;

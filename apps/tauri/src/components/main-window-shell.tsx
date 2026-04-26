@@ -9,6 +9,7 @@ import {
   PHASE_TRANSCRIBING,
 } from "../lib/dictation";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { HealthBanner } from "./health-banner";
 import { LevelMeter } from "./level-meter";
 import { RecordButton } from "./record-button";
 
@@ -31,6 +32,8 @@ interface MainWindowShellProps {
   onToggle?: () => void;
   coreVersion?: string | null;
   coreError?: string | null;
+  hotkeyError?: string | null;
+  onHotkeyRetry?: () => void;
 }
 
 const PHASE_NAMES: Record<number, string> = {
@@ -59,6 +62,8 @@ export function MainWindowShell({
   onToggle,
   coreVersion,
   coreError,
+  hotkeyError,
+  onHotkeyRetry,
 }: MainWindowShellProps) {
   const statusText =
     statusMessage ||
@@ -90,6 +95,16 @@ export function MainWindowShell({
       >
         OpenWhisper Dev
       </h1>
+
+      {hotkeyError ? (
+        <div data-testid="hotkey-banner" style={{ marginBottom: 12 }}>
+          <HealthBanner
+            message={hotkeyError}
+            onRetry={onHotkeyRetry}
+            retryLabel="Retry"
+          />
+        </div>
+      ) : null}
 
       <Section title="Rust ↔ React FFI">
         <KV

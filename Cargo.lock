@@ -2718,8 +2718,10 @@ name = "openwhisper-tauri"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "block2",
  "core-foundation",
  "core-graphics",
+ "objc2",
  "openwhisper-core",
  "serde",
  "serde_json",

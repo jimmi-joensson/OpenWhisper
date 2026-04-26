@@ -29,6 +29,11 @@ arboard = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
+# AVCaptureDevice authorization probe + prompt — matches the Swift
+# PermissionsCoordinator at boot. Raw obj-c via objc2; block2 for the
+# completion handler.
+objc2 = "0.6"
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-global-shortcut = "2"

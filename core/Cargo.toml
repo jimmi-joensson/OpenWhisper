@@ -53,10 +53,19 @@ regex = "1.11"
 # class DirectML / CUDA / TensorRT EP support behind feature flags. We
 # replaced sherpa-onnx with ort in TASK-40 because sherpa wraps DML behind
 # a per-vendor source build, and we want one Windows binary that auto-
-# selects the best EP at runtime. Static-linked default (`download-binaries`)
-# pulls the prebuilt onnxruntime ~22 MB into the build closure; DirectML
-# adds ~33 MB of DirectML.dll alongside.
-ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries", "ndarray", "std"] }
+# selects the best EP at runtime.
+#
+# `load-dynamic` (instead of `download-binaries`): ort-sys's prebuilt
+# bundle skips x86_64-pc-windows-gnu (the no-admin Win dev box's
+# toolchain), so download-binaries panics during build there.
+# load-dynamic defers ORT linking to runtime via libloading —
+# `ort::init_from(path)` at startup tells ORT where to find
+# onnxruntime.{dll|dylib|so}. Same crate compiles on every (toolchain,
+# OS) combination; the lib is deployment metadata, not a Cargo concern.
+# Provisioned per-host via `apps/tauri/scripts/fetch-ort.cjs` into
+# ~/.cache/openwhisper/onnxruntime/ (matches ONNXRuntime version pinned
+# by ort-sys = 1.22.0).
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray", "std"] }
 # Pure-Rust FFT for the librosa-style mel spectrogram preprocessor —
 # Parakeet-TDT-v3 expects 128-bin slaney mel features at 16 kHz/hop=160,
 # matching NeMo's AudioToMelSpectrogramPreprocessor. Pure Rust avoids

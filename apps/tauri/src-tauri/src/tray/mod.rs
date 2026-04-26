@@ -164,12 +164,12 @@ impl Phase {
         }
     }
 
-    fn tooltip(self) -> &'static str {
+    fn tooltip(self, app_name: &str) -> String {
         match self {
-            Self::Idle => "OpenWhisper",
-            Self::LoadingModel => "OpenWhisper — loading model…",
-            Self::Recording => "OpenWhisper — recording",
-            Self::Transcribing => "OpenWhisper — transcribing…",
+            Self::Idle => app_name.to_string(),
+            Self::LoadingModel => format!("{app_name} — loading model…"),
+            Self::Recording => format!("{app_name} — recording"),
+            Self::Transcribing => format!("{app_name} — transcribing…"),
         }
     }
 
@@ -195,17 +195,18 @@ impl Phase {
 fn build_menu(
     app: &AppHandle,
     phase: Phase,
+    app_name: &str,
 ) -> tauri::Result<(tauri::menu::Menu<Wry>, String, String, String)> {
     let open_id = "ow.open".to_string();
     let toggle_id = "ow.toggle".to_string();
     let quit_id = "ow.quit".to_string();
 
     let open_item: MenuItem<Wry> =
-        MenuItemBuilder::with_id(&open_id, "Open OpenWhisper").build(app)?;
+        MenuItemBuilder::with_id(&open_id, format!("Open {app_name}")).build(app)?;
     let toggle_item: MenuItem<Wry> = MenuItemBuilder::with_id(&toggle_id, phase.dictation_label())
         .enabled(phase.dictation_enabled())
         .build(app)?;
-    let quit_item: MenuItem<Wry> = MenuItemBuilder::with_id(&quit_id, "Quit OpenWhisper")
+    let quit_item: MenuItem<Wry> = MenuItemBuilder::with_id(&quit_id, format!("Quit {app_name}"))
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
 
@@ -226,9 +227,10 @@ fn build_menu(
 /// inside the core), and means we don't have to plumb an event listener
 /// onto the main thread.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
+    let app_name = crate::product_name(app);
     let initial_phase = Phase::from_core(dictation::dictation_snapshot().phase());
 
-    let (menu, open_id, toggle_id, quit_id) = build_menu(app, initial_phase)?;
+    let (menu, open_id, toggle_id, quit_id) = build_menu(app, initial_phase, &app_name)?;
     let menu_ids = Arc::new((open_id, toggle_id, quit_id));
     let menu_ids_for_handler = Arc::clone(&menu_ids);
 
@@ -238,7 +240,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let _tray = TrayIconBuilder::with_id("ow.tray")
         .icon(idle_icon())
         .icon_as_template(true) // Mac: tint to match menu bar
-        .tooltip(initial_phase.tooltip())
+        .tooltip(initial_phase.tooltip(&app_name))
         .menu(&menu)
         // Mac: left-click opens menu (matches shipped SwiftUI app).
         // Win: left-click is no-op, right-click opens menu, double-click
@@ -271,6 +273,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let app_handle = app.clone();
     let icon_idle = Arc::new(idle_icon());
     let icon_rec = Arc::new(recording_icon());
+    let app_name_for_thread = app_name.clone();
 
     thread::Builder::new()
         .name("openwhisper-tray-watcher".into())
@@ -293,9 +296,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                     };
                     let _ = tray.set_icon(Some(icon));
                     let _ = tray.set_icon_as_template(snap.phase() != PHASE_RECORDING);
-                    let _ = tray.set_tooltip(Some(now.tooltip()));
+                    let _ = tray.set_tooltip(Some(now.tooltip(&app_name_for_thread)));
 
-                    if let Ok((menu, _, _, _)) = build_menu(&app_handle, now) {
+                    if let Ok((menu, _, _, _)) = build_menu(&app_handle, now, &app_name_for_thread) {
                         let _ = tray.set_menu(Some(menu));
                     }
                 }

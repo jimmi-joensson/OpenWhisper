@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo } from "@tauri-apps/api/event";
+import { getName } from "@tauri-apps/api/app";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { useDictation } from "./lib/use-dictation";
@@ -25,6 +26,10 @@ function detectPlatform(): Platform {
 function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
+  // App productName from Tauri runtime — "OpenWhisper" (release) or
+  // "OpenWhisper Dev" (per tauri.dev.conf.json overlay). Single source of
+  // truth: the running bundle's CFBundleName.
+  const [appName, setAppName] = useState<string>("OpenWhisper");
   const platform = detectPlatform();
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
@@ -54,6 +59,11 @@ function App() {
     invoke<string>("core_version")
       .then(setCoreVersion)
       .catch((e) => setCoreError(String(e)));
+    getName()
+      .then(setAppName)
+      .catch(() => {
+        // Keep default "OpenWhisper" if the API isn't available.
+      });
   }, []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
@@ -98,6 +108,7 @@ function App() {
   return (
     <>
       <MainWindowShell
+        title={appName}
         phase={dictation.phase}
         status={dictation.status}
         levels={dictation.levels}

@@ -1,0 +1,25 @@
+# Project-level cargo config — read regardless of CARGO_HOME, so any
+# shell (Bash, PowerShell, cmd, IDE) gets the same build behavior.
+#
+# Why this exists: the no-admin Win dev box uses the rust-gnu toolchain
+# (per `feedback_windows_no_admin`), which by default invokes MinGW's
+# `x86_64-w64-mingw32-gcc` → `ld.exe` for linking. ld.exe does ANSI
+# path marshaling on UTF-8 input, so any path containing non-ASCII
+# (e.g. a `ø` in `JimmiJønsson`) explodes at link time with thousands
+# of "cannot find" errors on intermediate cgu.*.rcgu.o files.
+#
+# `rust-lld.exe` (LLVM lld) handles UTF-16 / UTF-8 paths correctly, so
+# routing the GNU triple through it sidesteps the bug entirely. rustc
+# resolves rust-lld.exe via its own sysroot — no PATH lookup needed,
+# just a working toolchain.
+#
+# This is the same setting that lives in CARGO_HOME/config.toml for
+# Bash users via ~/.bashrc; pinning it here means the no-admin Win
+# build works from any shell, and other Windows GNU contributors don't
+# need to replicate the bashrc dance.
+#
+# Mac (apple-darwin) and admin Win MSVC (windows-msvc) targets are
+# unaffected — both use their own default linkers.
+
+[target.x86_64-pc-windows-gnu]
+linker = "rust-lld.exe"

@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "openwhisper-tauri"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "arboard",
  "block2",

@@ -66,7 +66,7 @@ If the updater banner overlaps in look with the health banner, you can reuse `He
 - **Single-instance plugin needs setup BEFORE the runtime starts** — register on the `Builder`, not in `setup`. The plugin's callback fires in the *original* process when a second launch is attempted; use it to `app.get_webview_window("main").set_focus()`.
 - **Updater plugin requires a public-key + endpoint config**. For Phase 6 use a placeholder URL (e.g. `https://updates.openwhisper.invalid/{{target}}/{{current_version}}`) and a generated keypair. Don't ship the private key. Endpoint can 404 — the plugin handles it gracefully.
 - **No new TCC surface**. Close-to-tray + single-instance + updater don't trigger any new system permission prompts.
-- **Cross-compile gate**: `cargo check --target x86_64-pc-windows-gnu` from Mac (mingw-w64 installed). Verify on each commit.
+- ~~**Cross-compile gate**: `cargo check --target x86_64-pc-windows-gnu` from Mac (mingw-w64 installed). Verify on each commit.~~ **OUTDATED post-TASK-40**: the ort engine swap dropped sherpa-onnx (which shipped gnu prebuilts) for `ort-sys`, which has no `x86_64-pc-windows-gnu` prebuilts. Build Win on Win, Mac on Mac. Revisit `ort` `load-dynamic` feature at release-packaging time, not for the dev-loop gate.
 - **Test loop**: `pnpm test:ui` is the regression gate. Add Playwright cases for:
   - Banner appears for mic-denied (mock the `permissions_status` event if you add one)
   - Update-available banner renders when updater event fires (mock event)
@@ -108,7 +108,7 @@ If the updater banner overlaps in look with the health banner, you can reuse `He
 - Closing the main window hides it; app stays alive; tray Quit is the only exit.
 - `tauri-plugin-updater` registered with placeholder endpoint; UI shows an update-available banner when the plugin reports one.
 - Existing 8 Playwright tests stay green; 2–4 new tests cover the new banner sources.
-- Mac + Win cross-compile clean (`cargo check` for native target, `cargo check --target x86_64-pc-windows-gnu` for Win-from-Mac).
+- Mac native `cargo check` clean. (Win-from-Mac cross-compile no longer supported post-TASK-40 — see Constraints + traps. Build Win on Win.)
 - Manual smoke on both OSes confirms close-to-tray and single-instance behavior end-to-end.
 
 Realistic total: **1.5–2 working days**.

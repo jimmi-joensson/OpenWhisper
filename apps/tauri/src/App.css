@@ -204,15 +204,47 @@
 html,
 body {
   margin: 0;
+  height: 100%;
+  overflow: hidden;
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sys);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.ow-selectable,
+.ow-selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* Webview scrollbar — Tauri's default is invisible on Mac. Slim, theme-aware. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 25%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 45%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 @keyframes ow-spin {

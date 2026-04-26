@@ -1,15 +1,23 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import App from "./App";
-import { PillOverlay } from "./PillOverlay";
 
 // Single Vite bundle, two windows. Choose the React tree by window label.
+// PillOverlay (and its global html/body/#root CSS) is dynamically imported
+// only in the pill window so it doesn't override main-window scroll/layout.
 const label = getCurrentWindow().label;
-const Root = label === "pill" ? PillOverlay : App;
+
+const Root: React.ComponentType =
+  label === "pill"
+    ? React.lazy(() =>
+        import("./PillOverlay").then((m) => ({ default: m.PillOverlay })),
+      )
+    : React.lazy(() => import("./App").then((m) => ({ default: m.default })));
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <Root />
+    <React.Suspense fallback={null}>
+      <Root />
+    </React.Suspense>
   </React.StrictMode>,
 );

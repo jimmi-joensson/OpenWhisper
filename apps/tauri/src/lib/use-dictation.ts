@@ -23,7 +23,6 @@ export interface DictationView {
   errorMessage: string;
   canToggle: boolean;
   isRecording: boolean;
-  ticks: number;
   toggle: () => Promise<void>;
   cancel: () => Promise<void>;
 }
@@ -41,7 +40,6 @@ const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
   errorMessage: "",
   canToggle: true,
   isRecording: false,
-  ticks: 0,
 };
 
 export function useDictation(): DictationView {
@@ -50,7 +48,7 @@ export function useDictation(): DictationView {
   useEffect(() => {
     const unlisten = listen<DictationTick>(DICTATION_TICK_EVENT, (event) => {
       const t = event.payload;
-      setState((prev) => {
+      setState((prev): typeof INITIAL => {
         // Only push level samples while there is meaningful audio activity
         // (recording or the transcribing tail). Idle keeps the buffer flat.
         const next = prev.levels.slice(1);
@@ -74,7 +72,6 @@ export function useDictation(): DictationView {
           errorMessage: t.error_message,
           canToggle: t.can_toggle,
           isRecording: t.is_recording,
-          ticks: prev.ticks + 1,
         };
       });
     });

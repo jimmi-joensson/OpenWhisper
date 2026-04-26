@@ -12,6 +12,7 @@ use tauri::{Emitter, LogicalPosition, Manager};
 mod fullscreen;
 mod hotkey;
 mod injection;
+mod permissions;
 mod tray;
 
 pub(crate) const TICK_MS: u64 = 50;
@@ -237,6 +238,10 @@ pub fn run() {
             ));
             tray::install(app.handle())?;
             hotkey::install(app.handle());
+            // Proactively prompt for Mic on macOS once AX is trusted —
+            // mirrors PermissionsCoordinator.swift. No-op if mic is
+            // already determined or AX is still pending.
+            permissions::request_microphone();
 
             // Fullscreen-aware: when the user enters a fullscreen app, drop
             // the global hotkey so the fullscreen app receives Right Cmd /

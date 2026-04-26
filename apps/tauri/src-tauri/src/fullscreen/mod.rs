@@ -1,9 +1,7 @@
 //! Fullscreen detection — fires a callback when the foreground app
 //! enters / exits fullscreen.
 //!
-//! C6 wires consumers (hotkey teardown, pill hide). This module just
-//! delivers the API: register a callback once via [`install`], read
-//! current state via [`is_active`].
+//! Consumer is `lib.rs` setup: register a callback once via [`install`].
 //!
 //! Implementation is poll-based (500 ms tick on a dedicated thread)
 //! rather than NSWorkspace / SetWinEventHook observer-driven. Reasons:
@@ -38,12 +36,6 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 type Callback = Box<dyn Fn(bool) + Send + Sync + 'static>;
 static CALLBACK: OnceLock<Callback> = OnceLock::new();
 static INSTALLED: AtomicBool = AtomicBool::new(false);
-
-/// Latest known fullscreen state. `false` until the first poll completes
-/// (~500 ms after [`install`]).
-pub fn is_active() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
-}
 
 /// Register the change callback and start the poll thread. First call
 /// wins; subsequent calls are no-ops.

@@ -58,6 +58,20 @@ pub fn request_microphone() {
     // accumulating noise from previous launches.
     let _ = std::fs::write(LOG_PATH, "");
     dbg_log("permissions: request_microphone() entered");
+
+    // Gate on hotkey install having actually succeeded — see module-level
+    // doc. Logged so the diagnostic file shows why the prompt is or is
+    // not firing.
+    let hotkey_status = crate::hotkey::hotkey_status_current();
+    dbg_log(&format!(
+        "permissions: hotkey_status = {hotkey_status:?}"
+    ));
+    let hotkey_ok = hotkey_status.map(|s| s.ok).unwrap_or(false);
+    if !hotkey_ok {
+        dbg_log("permissions: hotkey install not ok — deferring mic prompt to next launch");
+        return;
+    }
+
     unsafe {
         let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
             dbg_log("permissions: AVCaptureDevice class not loaded");

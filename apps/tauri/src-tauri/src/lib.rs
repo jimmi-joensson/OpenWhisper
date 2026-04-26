@@ -251,12 +251,7 @@ pub fn run() {
             // setup() runs before NSApp.run() spins it up, so a sync call
             // here goes nowhere.
             let _ = app.handle().run_on_main_thread(move || {
-                let hotkey_ok = hotkey::hotkey_status_current()
-                    .map(|s| s.ok)
-                    .unwrap_or(false);
-                if hotkey_ok {
-                    permissions::request_microphone();
-                }
+                permissions::request_microphone();
             });
 
             // Fullscreen-aware: when the user enters a fullscreen app, drop

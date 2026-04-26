@@ -50,6 +50,25 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Unregister the Ctrl+Space chord and stop the Escape hook thread —
+/// fullscreen-aware path. Re-installed via [`install`] on fullscreen exit.
+pub fn teardown(app: &AppHandle) {
+    let _ = app.global_shortcut().unregister(TOGGLE_SHORTCUT);
+    teardown_escape_hook();
+}
+
+fn teardown_escape_hook() {
+    let mut guard = hook_state().lock().unwrap();
+    if let Some(prev) = guard.take() {
+        unsafe {
+            let _ = PostThreadMessageW(prev.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+        if let Some(t) = prev.thread {
+            let _ = t.join();
+        }
+    }
+}
+
 fn register_chord(app: &AppHandle) -> Result<(), String> {
     let gs = app.global_shortcut();
     // Idempotent retry: unregister anything we'd previously registered.
@@ -60,17 +79,7 @@ fn register_chord(app: &AppHandle) -> Result<(), String> {
 
 fn install_escape_hook() -> Result<(), String> {
     // Tear down any previous hook thread before spawning a new one.
-    {
-        let mut guard = hook_state().lock().unwrap();
-        if let Some(prev) = guard.take() {
-            unsafe {
-                let _ = PostThreadMessageW(prev.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-            if let Some(t) = prev.thread {
-                let _ = t.join();
-            }
-        }
-    }
+    teardown_escape_hook();
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
 

@@ -9,7 +9,10 @@ use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
+mod fullscreen;
 mod hotkey;
+mod injection;
+mod permissions;
 mod tray;
 
 pub(crate) const TICK_MS: u64 = 50;
@@ -246,8 +249,41 @@ pub fn run() {
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
             spawn_recognizer_warmup();
+            // Register the Tauri-side paste flow so the core can call into
+            // it from `dictation_deliver_transcript`. Single-set; the core
+            // ignores subsequent calls.
+            openwhisper_core::dictation::set_injector(Box::new(
+                injection::TauriInjector::new(app.handle().clone()),
+            ));
             tray::install(app.handle())?;
             hotkey::install(app.handle());
+            // Proactively prompt for Mic on macOS once AX is operationally
+            // trusted — mirrors PermissionsCoordinator.swift's "AX before
+            // mic" sequencing. Gate on hotkey install having succeeded
+            // (CGEventTap created), NOT on AXIsProcessTrusted: the TCC
+            // flag false-negatives in dev because ad-hoc cdhash drift
+            // invalidates TCC's trusted record on every rebuild
+            // (project_tcc_dev_pain), but a working tap is proof that AX
+            // is real. Deferred to the next run-loop tick via
+            // run_on_main_thread because AVFoundation's
+            // requestAccessForMediaType: relies on the Cocoa run loop —
+            // setup() runs before NSApp.run() spins it up, so a sync call
+            // here goes nowhere.
+            let _ = app.handle().run_on_main_thread(move || {
+                permissions::request_microphone();
+            });
+
+            // Fullscreen-aware: when the user enters a fullscreen app, drop
+            // the global hotkey so the fullscreen app receives Right Cmd /
+            // Ctrl+Space normally, AND hide the pill so we don't paint over
+            // games / videos / presentations. Re-arm on exit.
+            let app_for_fullscreen = app.handle().clone();
+            fullscreen::install(move |is_fullscreen| {
+                hotkey::set_active(&app_for_fullscreen, !is_fullscreen);
+                if let Some(pill) = app_for_fullscreen.get_webview_window("pill") {
+                    let _ = if is_fullscreen { pill.hide() } else { pill.show() };
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

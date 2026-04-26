@@ -27,7 +27,6 @@ interface MainWindowShellProps {
   errorMessage?: string;
   canToggle?: boolean;
   isRecording?: boolean;
-  ticks?: number;
   platform?: Platform;
   onToggle?: () => void;
   coreVersion?: string | null;
@@ -56,7 +55,6 @@ export function MainWindowShell({
   errorMessage = "",
   canToggle = true,
   isRecording = false,
-  ticks = 0,
   platform = "macos",
   onToggle,
   coreVersion,
@@ -123,7 +121,6 @@ export function MainWindowShell({
         <KV k="can_toggle" v={canToggle ? "true" : "false"} />
         <KV k="is_recording" v={isRecording ? "true" : "false"} />
         <KV k="level (raw)" v={level.toFixed(4)} />
-        <KV k="ticks" v={ticks.toLocaleString()} />
         <KV k="last error" v={errorMessage || "—"} />
       </Section>
 
@@ -158,6 +155,7 @@ export function MainWindowShell({
 
       <Section title="transcript">
         <div
+          className="ow-selectable"
           style={{
             background: "var(--transcript-bg)",
             border: "1px solid var(--border)",
@@ -208,6 +206,7 @@ function KV({ k, v }: { k: string; v: string }) {
     >
       <span style={{ textAlign: "right", color: "var(--muted-foreground)" }}>{k}:</span>
       <span
+        className="ow-selectable"
         style={{
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",

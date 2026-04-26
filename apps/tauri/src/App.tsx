@@ -48,7 +48,6 @@ function App() {
       errorMessage={dictation.errorMessage}
       canToggle={dictation.canToggle}
       isRecording={dictation.isRecording}
-      ticks={dictation.ticks}
       platform={platform}
       onToggle={() => void dictation.toggle()}
       coreVersion={coreVersion}

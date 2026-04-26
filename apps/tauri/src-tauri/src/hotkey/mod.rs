@@ -77,3 +77,11 @@ pub fn install(app: &AppHandle) {
 pub fn hotkey_retry(app: AppHandle) {
     install(&app);
 }
+
+/// Returns the last status emitted via `hotkey_status`. UI calls this on
+/// mount so it can render the right banner state without racing the boot
+/// install emit.
+#[tauri::command]
+pub fn hotkey_status_current() -> Option<HotkeyStatus> {
+    LAST_STATUS.lock().ok().and_then(|g| g.clone())
+}

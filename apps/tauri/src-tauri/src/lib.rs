@@ -238,6 +238,7 @@ pub fn run() {
             set_pill_click_through,
             position_pill_bottom_center,
             hotkey::hotkey_retry,
+            hotkey::hotkey_status_current,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

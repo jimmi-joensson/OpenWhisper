@@ -9,7 +9,9 @@ use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
-const TICK_MS: u64 = 50;
+mod tray;
+
+pub(crate) const TICK_MS: u64 = 50;
 const SAMPLE_RATE_HZ: u64 = 16_000;
 
 #[derive(Serialize, Clone)]
@@ -207,6 +209,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
+            tray::install(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

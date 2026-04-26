@@ -34,6 +34,9 @@ interface MainWindowShellProps {
   coreError?: string | null;
   hotkeyError?: string | null;
   onHotkeyRetry?: () => void;
+  micError?: string | null;
+  recognizerError?: string | null;
+  onRecognizerRetry?: () => void;
 }
 
 const PHASE_NAMES: Record<number, string> = {
@@ -64,6 +67,9 @@ export function MainWindowShell({
   coreError,
   hotkeyError,
   onHotkeyRetry,
+  micError,
+  recognizerError,
+  onRecognizerRetry,
 }: MainWindowShellProps) {
   const statusText =
     statusMessage ||
@@ -102,6 +108,22 @@ export function MainWindowShell({
             message={hotkeyError}
             onRetry={onHotkeyRetry}
             retryLabel="Restart"
+          />
+        </div>
+      ) : null}
+
+      {micError ? (
+        <div data-testid="mic-banner" style={{ marginBottom: 12 }}>
+          <HealthBanner message={micError} />
+        </div>
+      ) : null}
+
+      {recognizerError ? (
+        <div data-testid="recognizer-banner" style={{ marginBottom: 12 }}>
+          <HealthBanner
+            message={recognizerError}
+            onRetry={onRecognizerRetry}
+            retryLabel="Retry"
           />
         </div>
       ) : null}

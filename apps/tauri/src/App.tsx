@@ -4,7 +4,9 @@ import { emitTo } from "@tauri-apps/api/event";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { useDictation } from "./lib/use-dictation";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
+import { usePermissionsStatus } from "./lib/use-permissions-status";
 import { PILL_STATE_EVENT, type PillState } from "./lib/pill-state";
+import { PHASE_ERROR } from "./lib/dictation";
 import "./App.css";
 
 const PILL_BAR_COUNT = 12;
@@ -20,6 +22,19 @@ function App() {
   const platform = detectPlatform();
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
+  const permissions = usePermissionsStatus();
+
+  // Recognizer-load failure: surfaced via the dictation phase machine
+  // (`dictation_deliver_error` flips phase to ERROR with a "recognizer
+  // load" prefix). Per-utterance transcribe failures keep using the
+  // small "last error" KV row in the debug card — only boot/load
+  // failures get the full banner because the recovery is different
+  // (relaunch vs. record again).
+  const recognizerError =
+    dictation.phase === PHASE_ERROR &&
+    dictation.errorMessage.startsWith("recognizer load")
+      ? dictation.errorMessage
+      : null;
 
   useEffect(() => {
     invoke<string>("core_version")
@@ -56,6 +71,12 @@ function App() {
       coreError={coreError}
       hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
       onHotkeyRetry={() => void hotkey.retry()}
+      micError={
+        permissions.status && !permissions.status.mic_ok
+          ? permissions.status.error
+          : null
+      }
+      recognizerError={recognizerError}
     />
   );
 }

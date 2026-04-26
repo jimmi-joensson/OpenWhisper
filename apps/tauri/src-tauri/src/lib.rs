@@ -7,7 +7,7 @@ use openwhisper_core::dictation::{
 };
 use openwhisper_core::recognizer;
 use serde::Serialize;
-use tauri::{Emitter, LogicalPosition, Manager};
+use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 
 mod fullscreen;
 mod hotkey;
@@ -227,7 +227,22 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    // Single-instance MUST register on the Builder before .setup() runs:
+    // the plugin's callback fires in the *original* process when a second
+    // launch is attempted, so it has to be wired before that process is
+    // ready to accept callbacks. Mirrors Mac SwiftUI's terminatePriorInstances
+    // (project_swiftui_window_lsuielement memory) but inverts the verb —
+    // existing process wins, new launch is dropped + focuses the existing
+    // window instead of killing the new one.
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_opener::init());
 
     #[cfg(target_os = "windows")]
     let builder = {
@@ -249,6 +264,24 @@ pub fn run() {
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
             spawn_recognizer_warmup();
+
+            // Close-to-tray: intercept the main window's close button and
+            // hide the window instead of letting AppKit / Win32 propagate
+            // the close. Tray Quit (`app.exit(0)` in tray::install) is the
+            // sole true-exit path. Mirrors the SwiftUI shell's
+            // `applicationShouldTerminateAfterLastWindowClosed = false`
+            // (project_swiftui_window_lsuielement). Pill window isn't
+            // user-closeable so it's untouched here.
+            if let Some(main) = app.get_webview_window("main") {
+                let main_clone = main.clone();
+                main.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = main_clone.hide();
+                    }
+                });
+            }
+
             // Register the Tauri-side paste flow so the core can call into
             // it from `dictation_deliver_transcript`. Single-set; the core
             // ignores subsequent calls.
@@ -269,8 +302,9 @@ pub fn run() {
             // requestAccessForMediaType: relies on the Cocoa run loop —
             // setup() runs before NSApp.run() spins it up, so a sync call
             // here goes nowhere.
+            let app_for_perm = app.handle().clone();
             let _ = app.handle().run_on_main_thread(move || {
-                permissions::request_microphone();
+                permissions::request_microphone(&app_for_perm);
             });
 
             // Fullscreen-aware: when the user enters a fullscreen app, drop
@@ -294,6 +328,7 @@ pub fn run() {
             position_pill_bottom_center,
             hotkey::hotkey_retry,
             hotkey::hotkey_status_current,
+            permissions::permissions_status_current,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

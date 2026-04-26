@@ -5,8 +5,8 @@
 //! the current state and `+[AVCaptureDevice
 //! requestAccessForMediaType:completionHandler:]` to fire the system
 //! dialog when status is `AVAuthorizationStatusNotDetermined`. The
-//! completion block is a no-op — cpal queries the latest state on the
-//! next `audio_start_capture`, so we don't need to act on the result.
+//! completion block re-emits status so the UI banner clears (or
+//! appears, on denial) the moment the user picks an option.
 //!
 //! AX gating is done by the caller via `hotkey::hotkey_status_current()`
 //! rather than `AXIsProcessTrusted`. The TCC flag false-negatives in dev
@@ -18,11 +18,15 @@
 use block2::RcBlock;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
+use tauri::AppHandle;
 
-/// Mirrors `AVAuthorizationStatusNotDetermined`. The only state where
-/// `requestAccessForMediaType:` does anything user-visible — restricted,
-/// denied, and authorized all return immediately without dialog.
+use super::emit_status;
+
+// AVAuthorizationStatus values.
 const AV_NOT_DETERMINED: i64 = 0;
+const AV_RESTRICTED: i64 = 1;
+const AV_DENIED: i64 = 2;
+const AV_AUTHORIZED: i64 = 3;
 
 #[link(name = "AVFoundation", kind = "framework")]
 extern "C" {
@@ -30,11 +34,38 @@ extern "C" {
     static AVMediaTypeAudio: *const AnyObject;
 }
 
-pub fn request_microphone() {
+/// Probe + emit. Folds AVAuthorizationStatus into the UI-facing
+/// `(mic_ok, mic_state, error)` tuple.
+fn emit_for_status(app: &AppHandle, status: i64) {
+    match status {
+        AV_AUTHORIZED => emit_status(app, true, "authorized", ""),
+        // NotDetermined: the user hasn't been asked yet. Treat as ok so
+        // the banner doesn't flash before the system dialog appears.
+        AV_NOT_DETERMINED => emit_status(app, true, "not_determined", ""),
+        AV_DENIED => emit_status(
+            app,
+            false,
+            "denied",
+            "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
+        ),
+        AV_RESTRICTED => emit_status(
+            app,
+            false,
+            "restricted",
+            "Microphone access is restricted (parental controls or MDM). OpenWhisper can't record on this device.",
+        ),
+        _ => emit_status(app, false, "unknown", format!("Unknown mic auth status: {status}")),
+    }
+}
+
+pub fn request_microphone(app: &AppHandle) {
     let hotkey_ok = crate::hotkey::hotkey_status_current()
         .map(|s| s.ok)
         .unwrap_or(false);
     if !hotkey_ok {
+        // AX not yet operationally trusted — don't probe AVFoundation
+        // (would race the user's first AX grant). UI banner stays clear
+        // until the next boot via the hotkey-watchdog → mic-prompt flow.
         return;
     }
 
@@ -49,11 +80,31 @@ pub fn request_microphone() {
         }
 
         let status: i64 = msg_send![cls, authorizationStatusForMediaType: media];
+
+        // Always emit the current state so the UI sees mic-denied even
+        // when there's nothing to prompt.
+        emit_for_status(app, status);
+
         if status != AV_NOT_DETERMINED {
             return;
         }
 
-        let block = RcBlock::new(|_granted: Bool| {});
+        let app_for_block = app.clone();
+        let block = RcBlock::new(move |_granted: Bool| {
+            // Re-probe after the user's choice — `granted` is the bool the
+            // dialog returned, but re-probing keeps the UI mapping in
+            // one place (denied → denied banner, authorized → cleared).
+            let cls = match AnyClass::get(c"AVCaptureDevice") {
+                Some(c) => c,
+                None => return,
+            };
+            let media: *const AnyObject = AVMediaTypeAudio;
+            if media.is_null() {
+                return;
+            }
+            let new_status: i64 = msg_send![cls, authorizationStatusForMediaType: media];
+            emit_for_status(&app_for_block, new_status);
+        });
 
         let _: () = msg_send![
             cls,

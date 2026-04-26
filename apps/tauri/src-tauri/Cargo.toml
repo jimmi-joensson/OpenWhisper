@@ -21,15 +21,26 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 openwhisper-core = { path = "../../../core", default-features = false, features = ["tauri"] }
+# Cross-platform clipboard for the paste flow. Text-only save/restore
+# (non-text formats lossy across both OSes — same as the WinUI 3 shell
+# shipped behavior).
+arboard = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
+# AVCaptureDevice authorization probe + prompt — matches the Swift
+# PermissionsCoordinator at boot. Raw obj-c via objc2; block2 for the
+# completion handler.
+objc2 = "0.6"
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-global-shortcut = "2"
 windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_Foundation",

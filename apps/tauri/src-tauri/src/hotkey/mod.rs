@@ -24,17 +24,6 @@ mod mac;
 #[cfg(target_os = "windows")]
 mod windows;
 
-// On macOS the kernel-side TCC cache for Accessibility doesn't refresh until
-// the process relaunches. Granting in System Settings while we're running
-// flips `AXIsProcessTrusted` to true but `CGEventTapCreate` keeps returning
-// nil — so a manual Retry can't recover. We detect this case in
-// `hotkey_retry` and call `app.restart()`.
-#[cfg(target_os = "macos")]
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXIsProcessTrusted() -> bool;
-}
-
 /// Pushed to the front-end on registration success / failure / watchdog
 /// re-enable. `error` is empty when `ok = true`. UI shows a HealthBanner
 /// when `ok = false`.
@@ -57,6 +46,28 @@ pub(crate) fn emit_status(app: &AppHandle, ok: bool, error: impl Into<String>) {
     }
     if let Err(e) = app.emit(HOTKEY_STATUS_EVENT, &status) {
         eprintln!("hotkey_status emit failed: {e}");
+    }
+}
+
+/// Toggle the global hotkey on/off. Used by the fullscreen-aware path:
+/// when a fullscreen app takes the foreground we tear down the system
+/// surface entirely (Mac CGEventTap, Win Ctrl+Space chord + Escape hook)
+/// so the fullscreen app receives those keystrokes normally and
+/// OpenWhisper doesn't activate. Re-armed on fullscreen exit.
+///
+/// Status events are NOT emitted for fullscreen-driven flips — the user
+/// hasn't lost permission, they just opened a fullscreen app. The pill
+/// hides at the same time so the absence of dictation is unambiguous.
+pub fn set_active(app: &AppHandle, active: bool) {
+    if active {
+        install(app);
+    } else {
+        #[cfg(target_os = "macos")]
+        mac::teardown();
+        #[cfg(target_os = "windows")]
+        windows::teardown(app);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = app;
     }
 }
 
@@ -86,24 +97,23 @@ pub fn install(app: &AppHandle) {
 
 #[tauri::command]
 pub fn hotkey_retry(app: AppHandle) {
-    install(&app);
-
+    // macOS: always restart on Retry. A full relaunch is the only reliable
+    // way to refresh the kernel-side TCC cache for Accessibility (Granting
+    // mid-session can flip AXIsProcessTrusted true while CGEventTapCreate
+    // keeps returning nil), AND it gives a clean post-grant boot state
+    // where the mic prompt fires via the regular boot path. Cheaper to
+    // restart than to track mid-session transitions.
+    //
+    // Windows: just re-attempt install — no kernel cache, no benefit to
+    // restarting.
     #[cfg(target_os = "macos")]
     {
-        // If install still fails AND the user has now granted Accessibility
-        // (TCC says trusted), the kernel-side cache is what's stale — only
-        // a relaunch fixes it. Restart so the new grant lands.
-        let needs_restart = {
-            let still_failing = LAST_STATUS
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| !s.ok))
-                .unwrap_or(false);
-            still_failing && unsafe { AXIsProcessTrusted() }
-        };
-        if needs_restart {
-            app.restart();
-        }
+        let _ = &app;
+        app.restart();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        install(&app);
     }
 }
 

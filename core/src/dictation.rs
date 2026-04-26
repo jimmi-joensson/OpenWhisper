@@ -206,7 +206,34 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
         s.status_message = "done — pasted to focused app".to_string();
         s.phase = PHASE_DONE;
         s.record_start = None;
-    })
+    });
+    // Outside the state lock — the injector spawns its own worker but
+    // there's no reason to hold the dictation mutex across the call.
+    if let Some(inj) = INJECTOR.get() {
+        inj.inject(text);
+    }
+}
+
+/// Implemented by the shell (Tauri's `TauriInjector`) and registered once
+/// at boot via [`set_injector`]. Core calls it from
+/// [`dictation_deliver_transcript`] so the paste flow lives in core
+/// orchestration even though the OS surface for synthesizing keystrokes is
+/// shell-side.
+///
+/// Mac SwiftUI shipped shell does NOT register an injector — it owns its
+/// own paste flow in `TextInjector.swift`. With no injector registered the
+/// dispatch in `dictation_deliver_transcript` no-ops, so the SwiftUI app is
+/// unaffected by this hook.
+pub trait Injector: Send + Sync {
+    fn inject(&self, text: &str);
+}
+
+static INJECTOR: OnceLock<Box<dyn Injector>> = OnceLock::new();
+
+/// Register the injector. First call wins; subsequent calls are silently
+/// ignored (single-process app, single shell — no reason to swap mid-run).
+pub fn set_injector(injector: Box<dyn Injector>) {
+    let _ = INJECTOR.set(injector);
 }
 
 pub fn dictation_deliver_error(message: &str) {

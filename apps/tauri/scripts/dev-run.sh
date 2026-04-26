@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-# One-command dev cycle for the Tauri shell on macOS.
+# One-command dev cycle for the Tauri shell on macOS, with frontend HMR.
 #
 # Why NOT `pnpm tauri dev`: that runs the bare cargo binary at
 # `target/debug/openwhisper-tauri`, with no .app bundle and no
 # Info.plist. TCC can't key Accessibility / Input Monitoring grants
-# to a bare binary cleanly, so CGEventTap creation fails and the
-# hotkey banner stays stuck even after granting in System Settings.
+# to a bare binary, so CGEventTap creation fails and the hotkey
+# banner stays stuck even after granting in System Settings.
 #
-# Instead: `tauri build --debug` produces a real `OpenWhisper.app`
-# at target/debug/bundle/macos/, with bundle id `com.openwhisper.app`
-# and the signing identity TCC needs. We `open` that bundle.
+# Instead: build a real .app bundle whose WebView loads from
+# Vite's dev server (frontendDist = http://localhost:1420 in
+# tauri.dev.conf.json). The bundle has a stable id
+# (com.openwhisper.app.dev) so TCC can grant Accessibility +
+# Microphone, AND the WebView hot-reloads on src/** changes
+# without rebuilding the .app.
 #
-# Trade-off: no HMR on Rust changes — every backend edit needs
-# another `dev-run.sh` cycle. Frontend changes still hot-reload
-# inside the bundled WebView.
-#
-# Ad-hoc codesigning still drifts each rebuild, so we always
-# tccutil reset before launch — re-grant on first launch each cycle,
-# matching the SwiftUI flow in `scripts/dev-run.sh`.
+# Backend (Rust) changes still need a full rerun of this script —
+# Tauri 2 has no built-in "rebuild + reload binary into running
+# .app" path, and ad-hoc codesigning drifts each rebuild's cdhash
+# so the AX prompt + grant cycle re-runs each time.
 #
 # Usage:
 #   apps/tauri/scripts/dev-run.sh
+#
+# Frontend HMR: edit anything in src/ — Vite pushes the change to
+# the running .app. No rebuild.
+# Rust HMR: re-run this script.
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -59,8 +63,39 @@ done
 echo "==> Refreshing System Settings cache"
 osascript -e 'tell application "System Settings" to quit' 2>/dev/null || true
 
-echo "==> pnpm tauri build --debug --config $DEV_CONFIG"
 cd "$TAURI_DIR"
+
+# Free port 1420 if a previous run left Vite hanging.
+PREV_VITE_PID="$(lsof -t -iTCP:1420 -sTCP:LISTEN 2>/dev/null || true)"
+if [[ -n "$PREV_VITE_PID" ]]; then
+    echo "==> Killing prior Vite on :1420 (pid $PREV_VITE_PID)"
+    kill "$PREV_VITE_PID" 2>/dev/null || true
+    sleep 0.5
+fi
+
+echo "==> Starting Vite dev server (background)"
+pnpm dev > /tmp/openwhisper-vite.log 2>&1 &
+VITE_PID=$!
+
+# Stop Vite when this script exits — but leave the .app running.
+# (User can quit the .app via tray; rerun this script to rebuild.)
+trap 'kill $VITE_PID 2>/dev/null || true' EXIT INT TERM
+
+echo "==> Waiting for Vite at http://localhost:1420"
+for i in $(seq 1 60); do
+    if curl -fsS --max-time 1 http://localhost:1420 > /dev/null 2>&1; then
+        echo "    Vite ready"
+        break
+    fi
+    if ! kill -0 $VITE_PID 2>/dev/null; then
+        echo "error: Vite died during startup. /tmp/openwhisper-vite.log:" >&2
+        tail -20 /tmp/openwhisper-vite.log >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+
+echo "==> tauri build --debug --config $DEV_CONFIG"
 pnpm tauri build --debug --config "$DEV_CONFIG"
 
 if [[ ! -d "$APP_PATH" ]]; then
@@ -81,4 +116,15 @@ Re-grant on first launch:
 
 After grant, click Retry in the banner — the app relaunches once
 and the tap installs cleanly.
+
+Frontend HMR: edit src/** — Vite pushes the change to the
+running .app via http://localhost:1420.
+Rust changes: re-run apps/tauri/scripts/dev-run.sh.
+
+Vite log: /tmp/openwhisper-vite.log
+Press Ctrl-C in this terminal to stop Vite (the .app keeps
+running; quit it from the tray when you're done).
 EOF
+
+# Keep Vite in the foreground so the user can Ctrl-C to stop it.
+wait $VITE_PID

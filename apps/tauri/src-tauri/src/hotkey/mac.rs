@@ -111,7 +111,7 @@ pub fn install(_app: &AppHandle) -> Result<(), String> {
     if !ax_check_trust_with_prompt() {
         return Err(
             "Accessibility permission needed. System Settings just opened — \
-             toggle OpenWhisper on, then click Retry."
+             toggle OpenWhisper on, then click Restart."
                 .into(),
         );
     }
@@ -226,11 +226,11 @@ fn run_tap_thread(
 
             let msg = if trusted {
                 "Accessibility granted but the hotkey tap is still blocked — \
-                 click Retry to relaunch the app and apply the grant."
+                 click Restart to relaunch the app and apply the grant."
             } else {
                 "Accessibility permission needed. Open System Settings → \
                  Privacy & Security → Accessibility, toggle OpenWhisper on, \
-                 then click Retry."
+                 then click Restart."
             };
             let _ = ready.send(Err(msg.into()));
             return;

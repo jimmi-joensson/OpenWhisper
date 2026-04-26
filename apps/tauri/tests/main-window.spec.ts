@@ -133,16 +133,16 @@ test.describe("hotkey banner", () => {
     await page.evaluate(() =>
       window.__owEmit("hotkey_status", {
         ok: false,
-        error: "AX denied — grant Accessibility, then click Retry.",
+        error: "AX denied — grant Accessibility, then click Restart.",
       }),
     );
     const banner = page.getByTestId("hotkey-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("AX denied");
-    await expect(banner.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(banner.getByRole("button", { name: "Restart" })).toBeVisible();
 
     // Retry click invokes hotkey_retry exactly once.
-    await banner.getByRole("button", { name: "Retry" }).click();
+    await banner.getByRole("button", { name: "Restart" }).click();
     const retryCount = await page.evaluate(
       () => (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0,
     );

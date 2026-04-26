@@ -27,27 +27,41 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 TAURI_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 REPO_ROOT="$( cd "$TAURI_DIR/../.." && pwd )"
 
-BUNDLE_ID="com.openwhisper.app"
-APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper.app"
+# Dev overlay (tauri.dev.conf.json) renames the bundle to "OpenWhisper Dev
+# Tauri" with id "com.openwhisper.app.dev" so it's visually distinct from
+# the SwiftUI shipped app + its debug variant in the Accessibility list.
+DEV_CONFIG="../src-tauri/tauri.dev.conf.json"
+BUNDLE_ID="com.openwhisper.app.dev"
+APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
 
 echo "==> Killing any running OpenWhisper (Tauri) instances"
-pkill -f "OpenWhisper.app/Contents/MacOS/OpenWhisper" 2>/dev/null || true
+pkill -f "OpenWhisper Dev Tauri.app/Contents/MacOS/" 2>/dev/null || true
+pkill -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
 pkill -f "target/debug/openwhisper-tauri" 2>/dev/null || true
 
-echo "==> Resetting TCC grants for $BUNDLE_ID"
-for SERVICE in Accessibility Microphone ListenEvent; do
-    tccutil reset "$SERVICE" "$BUNDLE_ID" 2>/dev/null || true
+# Reset every OpenWhisper variant we know of, every cycle. Ad-hoc rebuilds
+# drift their cdhash and leave stale entries; clearing them keeps the
+# Accessibility / Microphone / Input Monitoring lists tidy.
+echo "==> Resetting TCC grants for all OpenWhisper variants"
+for VARIANT_BID in \
+    "com.openwhisper.app.dev"     `# Tauri dev (this script)` \
+    "com.openwhisper.app"         `# Tauri release` \
+    "com.openwhisper.OpenWhisper" `# SwiftUI release` \
+    "com.openwhisper.OpenWhisper.dev" `# SwiftUI debug`; do
+    for SERVICE in Accessibility Microphone ListenEvent; do
+        tccutil reset "$SERVICE" "$VARIANT_BID" 2>/dev/null || true
+    done
 done
 
 # System Settings caches the Accessibility list and ignores tccutil's mutations
 # until the app is restarted. Kicking it forces the next open to re-read TCC,
-# so stale "OpenWhisper" entries from prior rebuilds disappear from the UI.
+# so stale entries from prior rebuilds disappear from the UI.
 echo "==> Refreshing System Settings cache"
 osascript -e 'tell application "System Settings" to quit' 2>/dev/null || true
 
-echo "==> pnpm tauri build --debug (produces $APP_PATH)"
+echo "==> pnpm tauri build --debug --config $DEV_CONFIG"
 cd "$TAURI_DIR"
-pnpm tauri build --debug
+pnpm tauri build --debug --config "$DEV_CONFIG"
 
 if [[ ! -d "$APP_PATH" ]]; then
     echo "error: built app not found at $APP_PATH" >&2
@@ -59,10 +73,12 @@ open "$APP_PATH"
 
 cat <<EOF
 
-Tauri dev run ready. Re-grant on first launch:
+Tauri dev run ready. App: OpenWhisper Dev Tauri (com.openwhisper.app.dev)
+
+Re-grant on first launch:
   1) Accessibility   → approve  (Right Cmd hotkey + paste)
   2) Microphone      → approve  (audio capture)
 
-After grant, click Retry in the banner — the app will relaunch
-once and the tap should install cleanly.
+After grant, click Retry in the banner — the app relaunches once
+and the tap installs cleanly.
 EOF

@@ -30,6 +30,8 @@ mod ep_probe;
 #[cfg(not(target_os = "macos"))]
 mod mel;
 #[cfg(not(target_os = "macos"))]
+mod ort_lib;
+#[cfg(not(target_os = "macos"))]
 mod ort_parakeet;
 
 #[cfg(target_os = "macos")]

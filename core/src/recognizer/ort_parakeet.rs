@@ -17,6 +17,7 @@
 
 use std::env;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use ndarray::{Array1, Array2, Array3};
 use ort::execution_providers::ExecutionProviderDispatch;
@@ -25,7 +26,7 @@ use ort::value::TensorRef;
 
 use super::ep_probe::{EpChoice, resolve_ep};
 use super::mel::{MelExtractor, N_MELS};
-use super::{Recognizer, TranscribeResult, download};
+use super::{Recognizer, TranscribeResult, download, ort_lib};
 
 /// `<blk>` index in `tokens.txt`, last entry. RNN-T blank.
 const BLANK_ID: i32 = 8192;
@@ -90,11 +91,31 @@ impl Default for OrtParakeet {
     }
 }
 
+/// Tracks whether `ort::init_from(...).commit()` has succeeded for this
+/// process. ort's load-dynamic global state must be set exactly once
+/// before any session creation; subsequent attempts are silent no-ops
+/// inside ort itself, but we still want to surface the resolver/init
+/// error on the first call.
+static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+fn init_ort_runtime() -> Result<(), String> {
+    let result = ORT_INIT.get_or_init(|| {
+        let lib_path = ort_lib::resolve()?;
+        eprintln!("[recognizer/ort] loading ONNXRuntime from {}", lib_path.display());
+        ort::init_from(lib_path.to_string_lossy().into_owned())
+            .commit()
+            .map_err(|e| format!("ort::init_from commit: {e}"))?;
+        Ok(())
+    });
+    result.clone()
+}
+
 impl Recognizer for OrtParakeet {
     fn ensure_loaded(&mut self) -> Result<(), String> {
         if self.sessions.is_some() {
             return Ok(());
         }
+        init_ort_runtime()?;
         let paths = download::ensure_model()?;
         self.tokens = load_tokens(&paths.tokens)?;
 

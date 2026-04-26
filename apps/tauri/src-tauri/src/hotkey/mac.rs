@@ -22,10 +22,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use core_foundation::base::TCFType;
+use core_foundation::boolean::CFBoolean;
+use core_foundation::dictionary::CFDictionary;
 use core_foundation::mach_port::CFMachPortRef;
 use core_foundation::runloop::{
     kCFRunLoopCommonModes, CFRunLoop, CFRunLoopRef, CFRunLoopRun, CFRunLoopStop,
 };
+use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     CGEventTapProxy, CallbackResult, CGEvent, EventField,
@@ -35,6 +38,23 @@ use tauri::AppHandle;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(
+        options: *const std::ffi::c_void, // CFDictionaryRef
+    ) -> bool;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+}
+
+/// Ask AX whether we're trusted, popping the system prompt if not. Trusted
+/// apps return true silently; untrusted apps get the OS dialog AND the
+/// `com.openwhisper.app` entry added to System Settings → Privacy →
+/// Accessibility, where the user can flip it on.
+fn ax_check_trust_with_prompt() -> bool {
+    let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
+    let value = CFBoolean::true_value();
+    let opts = CFDictionary::from_CFType_pairs(&[(key, value)]);
+    unsafe {
+        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef() as *const std::ffi::c_void)
+    }
 }
 
 use crate::{do_cancel, do_toggle};
@@ -81,6 +101,21 @@ fn slot() -> &'static Mutex<Option<TapHandles>> {
 
 pub fn install(_app: &AppHandle) -> Result<(), String> {
     teardown_existing();
+
+    // Check AX trust first — and prompt the user if needed. The prompt
+    // adds OpenWhisper to System Settings → Privacy & Security →
+    // Accessibility (if not already there) and shows the standard
+    // "would like to control your computer" dialog. Skips the tap attempt
+    // when trust is missing so we surface a clear actionable error
+    // instead of "CGEventTap creation failed".
+    if !ax_check_trust_with_prompt() {
+        return Err(
+            "Accessibility permission needed. System Settings just opened — \
+             toggle OpenWhisper on, then click Retry."
+                .into(),
+        );
+    }
+
     spawn_tap()
 }
 

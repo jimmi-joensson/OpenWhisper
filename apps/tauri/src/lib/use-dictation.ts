@@ -11,8 +11,10 @@ import {
 const MAIN_BAR_COUNT = 32;
 
 export interface DictationView {
+  phase: number;
   status: PillStatus;
   levels: number[];
+  level: number;
   elapsed: number;
   samples: number;
   transcript: string;
@@ -20,13 +22,17 @@ export interface DictationView {
   statusMessage: string;
   errorMessage: string;
   canToggle: boolean;
+  isRecording: boolean;
+  ticks: number;
   toggle: () => Promise<void>;
   cancel: () => Promise<void>;
 }
 
 const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
+  phase: 0,
   status: "idle",
   levels: new Array(MAIN_BAR_COUNT).fill(0),
+  level: 0,
   elapsed: 0,
   samples: 0,
   transcript: "",
@@ -34,6 +40,8 @@ const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
   statusMessage: "",
   errorMessage: "",
   canToggle: true,
+  isRecording: false,
+  ticks: 0,
 };
 
 export function useDictation(): DictationView {
@@ -54,8 +62,10 @@ export function useDictation(): DictationView {
               : 0,
         );
         return {
+          phase: t.phase,
           status: t.status,
           levels: next,
+          level: t.level,
           elapsed: t.elapsed_ms / 1000,
           samples: t.sample_count,
           transcript: t.transcript,
@@ -63,6 +73,8 @@ export function useDictation(): DictationView {
           statusMessage: t.status_message,
           errorMessage: t.error_message,
           canToggle: t.can_toggle,
+          isRecording: t.is_recording,
+          ticks: prev.ticks + 1,
         };
       });
     });

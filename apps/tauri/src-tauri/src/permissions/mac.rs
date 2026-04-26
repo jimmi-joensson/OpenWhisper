@@ -33,30 +33,42 @@ extern "C" {
 
 pub fn request_microphone() {
     unsafe {
-        if !AXIsProcessTrusted() {
+        let trusted = AXIsProcessTrusted();
+        eprintln!("permissions: AX trusted = {trusted}");
+        if !trusted {
             // Match Swift sequencing — wait for AX before prompting mic.
             // User restarts after granting AX, then mic prompt fires here.
             return;
         }
 
-        let cls = match AnyClass::get(c"AVCaptureDevice") {
-            Some(c) => c,
-            None => {
-                eprintln!("permissions: AVCaptureDevice class missing");
-                return;
-            }
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+            eprintln!("permissions: AVCaptureDevice class not loaded");
+            return;
         };
+
         let media: *const AnyObject = AVMediaTypeAudio;
+        if media.is_null() {
+            eprintln!("permissions: AVMediaTypeAudio symbol is null");
+            return;
+        }
 
         let status: i64 = msg_send![cls, authorizationStatusForMediaType: media];
+        eprintln!(
+            "permissions: mic auth status = {status} \
+             (0=NotDetermined, 1=Restricted, 2=Denied, 3=Authorized)"
+        );
         if status != AV_NOT_DETERMINED {
             return;
         }
 
-        let block = RcBlock::new(|_granted: Bool| {
-            // No-op. New state is read by cpal on next start_capture.
+        let block = RcBlock::new(|granted: Bool| {
+            eprintln!(
+                "permissions: mic prompt completed, granted = {}",
+                granted.as_bool()
+            );
         });
 
+        eprintln!("permissions: firing AVCaptureDevice.requestAccessForMediaType:audio");
         let _: () = msg_send![
             cls,
             requestAccessForMediaType: media,

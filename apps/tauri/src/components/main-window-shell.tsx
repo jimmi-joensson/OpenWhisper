@@ -101,7 +101,7 @@ export function MainWindowShell({
           <HealthBanner
             message={hotkeyError}
             onRetry={onHotkeyRetry}
-            retryLabel="Retry"
+            retryLabel="Restart"
           />
         </div>
       ) : null}

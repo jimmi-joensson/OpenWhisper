@@ -36,12 +36,15 @@ REPO_ROOT="$( cd "$TAURI_DIR/../.." && pwd )"
 # the SwiftUI shipped app + its debug variant in the Accessibility list.
 DEV_CONFIG="$TAURI_DIR/src-tauri/tauri.dev.conf.json"
 BUNDLE_ID="com.openwhisper.app.dev"
-APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
+BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
+INSTALLED_APP_PATH="/Applications/OpenWhisper Dev Tauri.app"
 
 echo "==> Killing any running OpenWhisper (Tauri) instances"
 pkill -f "OpenWhisper Dev Tauri.app/Contents/MacOS/" 2>/dev/null || true
 pkill -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
 pkill -f "target/debug/openwhisper-tauri" 2>/dev/null || true
+# Wait for the process to actually exit so we can replace the .app cleanly.
+sleep 0.3
 
 # Reset every OpenWhisper variant we know of, every cycle. Ad-hoc rebuilds
 # drift their cdhash and leave stale entries; clearing them keeps the
@@ -95,16 +98,26 @@ for i in $(seq 1 60); do
     sleep 0.5
 done
 
-echo "==> tauri build --debug --config $DEV_CONFIG"
-pnpm tauri build --debug --config "$DEV_CONFIG"
+echo "==> tauri build --debug --bundles app --config $DEV_CONFIG"
+# `--bundles app` skips the DMG step (slow, fails on dev cdhash drift, and
+# we don't need it for local launch).
+pnpm tauri build --debug --bundles app --config "$DEV_CONFIG"
 
-if [[ ! -d "$APP_PATH" ]]; then
-    echo "error: built app not found at $APP_PATH" >&2
+if [[ ! -d "$BUILT_APP_PATH" ]]; then
+    echo "error: built app not found at $BUILT_APP_PATH" >&2
     exit 1
 fi
 
-echo "==> open $APP_PATH"
-open "$APP_PATH"
+# Install to /Applications so the launch path is stable + user-discoverable
+# (Spotlight, Dock launcher, etc). TCC still re-prompts each cycle because
+# ad-hoc cdhash drifts, but at least the path under
+# /Applications/OpenWhisper Dev Tauri.app doesn't change between cycles.
+echo "==> Copying to $INSTALLED_APP_PATH"
+rm -rf "$INSTALLED_APP_PATH"
+cp -R "$BUILT_APP_PATH" "$INSTALLED_APP_PATH"
+
+echo "==> open $INSTALLED_APP_PATH"
+open "$INSTALLED_APP_PATH"
 
 cat <<EOF
 

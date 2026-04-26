@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "dev:tauri": "./scripts/dev-run.sh",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui",
     "test:ui:headed": "playwright test --headed",

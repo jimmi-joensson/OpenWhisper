@@ -40,8 +40,10 @@ fn core_version() -> String {
     openwhisper_core::core_version()
 }
 
-#[tauri::command]
-fn dictation_toggle() -> Result<(), String> {
+/// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
+/// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
+/// machine in the core decides whether the toggle starts or stops recording.
+pub(crate) fn do_toggle() -> Result<(), String> {
     let action = dictation::dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {
@@ -76,11 +78,21 @@ fn dictation_toggle() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn dictation_cancel() -> bool {
+/// Shared cancel path. See [`do_toggle`].
+pub(crate) fn do_cancel() -> bool {
     audio::audio_stop_capture();
     let _ = audio::audio_drain_samples();
     dictation::dictation_request_cancel()
+}
+
+#[tauri::command]
+fn dictation_toggle() -> Result<(), String> {
+    do_toggle()
+}
+
+#[tauri::command]
+fn dictation_cancel() -> bool {
+    do_cancel()
 }
 
 // Decode samples on a worker thread (recognizer call blocks until done).

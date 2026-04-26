@@ -39,11 +39,21 @@ BUNDLE_ID="com.openwhisper.app.dev"
 BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
 INSTALLED_APP_PATH="/Applications/OpenWhisper Dev Tauri.app"
 
-echo "==> Killing any running OpenWhisper (Tauri) instances"
-pkill -f "OpenWhisper Dev Tauri.app/Contents/MacOS/" 2>/dev/null || true
-pkill -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
-pkill -f "target/debug/openwhisper-tauri" 2>/dev/null || true
-# Wait for the process to actually exit so we can replace the .app cleanly.
+echo "==> Quitting any running OpenWhisper (Tauri) instances"
+# Try graceful Quit first (lets the app clean up: unhook hotkey, save, etc).
+osascript -e 'tell application "OpenWhisper Dev Tauri" to quit' 2>/dev/null || true
+osascript -e 'tell application "OpenWhisper" to quit' 2>/dev/null || true
+
+# Wait up to 3 s for graceful exit; force-kill anything still alive.
+for _ in 1 2 3 4 5 6; do
+    if ! pgrep -f "OpenWhisper Dev Tauri.app/Contents/MacOS/|OpenWhisper.app/Contents/MacOS/|target/debug/openwhisper-tauri" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.5
+done
+pkill -9 -f "OpenWhisper Dev Tauri.app/Contents/MacOS/" 2>/dev/null || true
+pkill -9 -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
+pkill -9 -f "target/debug/openwhisper-tauri" 2>/dev/null || true
 sleep 0.3
 
 # Reset every OpenWhisper variant we know of, every cycle. Ad-hoc rebuilds
@@ -112,7 +122,13 @@ fi
 # (Spotlight, Dock launcher, etc). TCC still re-prompts each cycle because
 # ad-hoc cdhash drifts, but at least the path under
 # /Applications/OpenWhisper Dev Tauri.app doesn't change between cycles.
-echo "==> Copying to $INSTALLED_APP_PATH"
+echo "==> Replacing $INSTALLED_APP_PATH"
+# Final guard: if anything is still holding the bundle, force-kill it.
+# APFS lets us unlink files held by running processes, but `open` would
+# then bring the still-running old instance to front instead of launching
+# the freshly-copied bundle (same bundle id wins).
+pkill -9 -f "$INSTALLED_APP_PATH/Contents/MacOS/" 2>/dev/null || true
+sleep 0.2
 rm -rf "$INSTALLED_APP_PATH"
 cp -R "$BUILT_APP_PATH" "$INSTALLED_APP_PATH"
 

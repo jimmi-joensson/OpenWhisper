@@ -12,8 +12,11 @@ const { spawn } = require("node:child_process");
 const path = require("node:path");
 
 const isMac = process.platform === "darwin";
+const isWin = process.platform === "win32";
 
-const cmd = isMac ? "bash" : "pnpm";
+// On Windows, pnpm is shipped as pnpm.cmd. Calling that directly avoids
+// `shell: true` and the DEP0190 deprecation warning Node 22+ throws.
+const cmd = isMac ? "bash" : isWin ? "pnpm.cmd" : "pnpm";
 const args = isMac
     ? [path.join(__dirname, "dev-run.sh")]
     : ["tauri", "dev"];
@@ -21,7 +24,6 @@ const args = isMac
 const child = spawn(cmd, args, {
     stdio: "inherit",
     cwd: path.join(__dirname, ".."),
-    shell: process.platform === "win32", // pnpm.cmd resolution on Windows
 });
 
 child.on("exit", (code, signal) => {

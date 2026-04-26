@@ -1,0 +1,13 @@
+[package]
+name = "bench-sherpa"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench-sherpa"
+path = "src/main.rs"
+
+[dependencies]
+openwhisper-core = { path = "../../../core", default-features = false, features = ["recognizer"] }
+sherpa-onnx = "1.12.40"

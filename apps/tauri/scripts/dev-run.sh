@@ -39,6 +39,12 @@ for SERVICE in Accessibility Microphone ListenEvent; do
     tccutil reset "$SERVICE" "$BUNDLE_ID" 2>/dev/null || true
 done
 
+# System Settings caches the Accessibility list and ignores tccutil's mutations
+# until the app is restarted. Kicking it forces the next open to re-read TCC,
+# so stale "OpenWhisper" entries from prior rebuilds disappear from the UI.
+echo "==> Refreshing System Settings cache"
+osascript -e 'tell application "System Settings" to quit' 2>/dev/null || true
+
 echo "==> pnpm tauri build --debug (produces $APP_PATH)"
 cd "$TAURI_DIR"
 pnpm tauri build --debug

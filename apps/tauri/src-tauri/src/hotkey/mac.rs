@@ -177,20 +177,18 @@ fn run_tap_thread(
             let exe = std::env::current_exe()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "?".into());
+            // Diagnostic to stderr — keeps the banner short.
+            eprintln!("hotkey: CGEventTap failed (trusted={trusted} pid={pid} exe={exe})");
+
             let msg = if trusted {
-                format!(
-                    "Accessibility granted but CGEventTap still failing — \
-                     kernel cache stale. Click Retry to relaunch and apply. \
-                     [pid={pid} exe={exe}]"
-                )
+                "Accessibility granted but the hotkey tap is still blocked — \
+                 click Retry to relaunch the app and apply the grant."
             } else {
-                format!(
-                    "Accessibility permission needed — System Settings → \
-                     Privacy & Security → Accessibility. Add this binary, \
-                     toggle on, click Retry. [pid={pid} exe={exe}]"
-                )
+                "Accessibility permission needed. Open System Settings → \
+                 Privacy & Security → Accessibility, toggle OpenWhisper on, \
+                 then click Retry."
             };
-            let _ = ready.send(Err(msg));
+            let _ = ready.send(Err(msg.into()));
             return;
         }
     };

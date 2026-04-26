@@ -23,7 +23,17 @@ export function HealthBanner({ message, onRetry, retryLabel = "Retry" }: HealthB
       <span style={{ display: "inline-flex", alignItems: "center", height: "1.4em", flexShrink: 0 }}>
         <InfoGlyph />
       </span>
-      <span style={{ flex: 1, lineHeight: 1.4 }}>{message}</span>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          lineHeight: 1.4,
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
+        }}
+      >
+        {message}
+      </span>
       {onRetry && (
         <button
           onClick={onRetry}

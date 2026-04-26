@@ -8,11 +8,13 @@
 //! completion block is a no-op — cpal queries the latest state on the
 //! next `audio_start_capture`, so we don't need to act on the result.
 //!
-//! Unlike the Swift PermissionsCoordinator, we DON'T gate the mic
-//! prompt on AX trust. TCC serializes overlapping prompts itself, and
-//! gating loses the mic dialog whenever AXIsProcessTrusted false-
-//! negatives (which it does on every dev-run.sh because ad-hoc cdhash
-//! drift invalidates TCC's trusted record — see project_tcc_dev_pain).
+//! AX gating is done by the caller (lib.rs), keyed on
+//! `hotkey::hotkey_status_current()` rather than `AXIsProcessTrusted`.
+//! The TCC flag false-negatives in dev because ad-hoc cdhash drift
+//! invalidates TCC's trusted record on every rebuild
+//! (project_tcc_dev_pain), but a successful CGEventTap install proves
+//! AX is operationally trusted regardless of what TCC's bookkeeping
+//! says — which is the signal that actually matters.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -51,25 +53,12 @@ extern "C" {
     static AVMediaTypeAudio: *const AnyObject;
 }
 
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXIsProcessTrusted() -> bool;
-}
-
 pub fn request_microphone() {
     // Truncate at each call so the file holds one boot's trace, not
     // accumulating noise from previous launches.
     let _ = std::fs::write(LOG_PATH, "");
     dbg_log("permissions: request_microphone() entered");
     unsafe {
-        let trusted = AXIsProcessTrusted();
-        dbg_log(&format!("permissions: AX trusted = {trusted}"));
-        // Don't gate on AX. TCC sequences overlapping prompts itself; the
-        // alternative ("wait for AX before mic") loses the mic dialog
-        // entirely whenever AXIsProcessTrusted false-negatives, which it
-        // does on every dev-run.sh because ad-hoc cdhash drift invalidates
-        // TCC's "trusted" record (see project_tcc_dev_pain memory).
-
         let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
             dbg_log("permissions: AVCaptureDevice class not loaded");
             return;

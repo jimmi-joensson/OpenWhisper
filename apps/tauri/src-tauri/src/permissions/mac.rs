@@ -37,6 +37,7 @@ extern "C" {
 /// Probe + emit. Folds AVAuthorizationStatus into the UI-facing
 /// `(mic_ok, mic_state, error)` tuple.
 fn emit_for_status(app: &AppHandle, status: i64) {
+    let app_name = crate::product_name(app);
     match status {
         AV_AUTHORIZED => emit_status(app, true, "authorized", ""),
         // NotDetermined: the user hasn't been asked yet. Treat as ok so
@@ -46,13 +47,17 @@ fn emit_for_status(app: &AppHandle, status: i64) {
             app,
             false,
             "denied",
-            "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
+            format!(
+                "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen {app_name}."
+            ),
         ),
         AV_RESTRICTED => emit_status(
             app,
             false,
             "restricted",
-            "Microphone access is restricted (parental controls or MDM). OpenWhisper can't record on this device.",
+            format!(
+                "Microphone access is restricted (parental controls or MDM). {app_name} can't record on this device."
+            ),
         ),
         _ => emit_status(app, false, "unknown", format!("Unknown mic auth status: {status}")),
     }

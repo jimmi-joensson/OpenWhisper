@@ -44,11 +44,17 @@ extern "C" {
     static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
-/// Ask AX whether we're trusted, popping the system prompt if not. Trusted
-/// apps return true silently; untrusted apps get the OS dialog AND the
-/// `com.openwhisper.app` entry added to System Settings → Privacy →
-/// Accessibility, where the user can flip it on.
-fn ax_check_trust_with_prompt() -> bool {
+/// Ask AX whether we're trusted. Silent check first — if already granted,
+/// no modal fires. Only when AXIsProcessTrusted() reports untrusted do
+/// we escalate to AXIsProcessTrustedWithOptions(prompt=true), which
+/// registers the bundle in Privacy → Accessibility AND shows the system
+/// "would like to control your computer" dialog. Avoids the post-grant
+/// double-prompt where the silent state already says trusted but the
+/// prompt-enabled call would fire a redundant modal anyway.
+fn ax_trust_check() -> bool {
+    if unsafe { AXIsProcessTrusted() } {
+        return true;
+    }
     let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
     let value = CFBoolean::true_value();
     let opts = CFDictionary::from_CFType_pairs(&[(key, value)]);
@@ -99,24 +105,24 @@ fn slot() -> &'static Mutex<Option<TapHandles>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn install(_app: &AppHandle) -> Result<(), String> {
+pub fn install(app: &AppHandle) -> Result<(), String> {
     teardown_existing();
+    let app_name = crate::product_name(app);
 
     // Check AX trust first — and prompt the user if needed. The prompt
-    // adds OpenWhisper to System Settings → Privacy & Security →
-    // Accessibility (if not already there) and shows the standard
-    // "would like to control your computer" dialog. Skips the tap attempt
-    // when trust is missing so we surface a clear actionable error
-    // instead of "CGEventTap creation failed".
-    if !ax_check_trust_with_prompt() {
-        return Err(
+    // adds the app to System Settings → Privacy & Security → Accessibility
+    // (if not already there) and shows the standard "would like to control
+    // your computer" dialog. Skips the tap attempt when trust is missing
+    // so we surface a clear actionable error instead of "CGEventTap
+    // creation failed".
+    if !ax_trust_check() {
+        return Err(format!(
             "Accessibility permission needed. System Settings just opened — \
-             toggle OpenWhisper on, then click Restart."
-                .into(),
-        );
+             toggle {app_name} on, then click Restart."
+        ));
     }
 
-    spawn_tap()
+    spawn_tap(app_name)
 }
 
 /// Stop the CGEventTap and watchdog without re-installing. Used by the
@@ -143,7 +149,7 @@ fn teardown_existing() {
     }
 }
 
-fn spawn_tap() -> Result<(), String> {
+fn spawn_tap(app_name: String) -> Result<(), String> {
     let (tx, rx) = mpsc::channel::<Result<(usize, usize), String>>();
     let state = Arc::new(TapMutState::default());
     let port_ptr: Arc<AtomicPtr<core::ffi::c_void>> = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
@@ -153,7 +159,7 @@ fn spawn_tap() -> Result<(), String> {
 
     let thread = thread::Builder::new()
         .name("openwhisper-cgeventtap".into())
-        .spawn(move || run_tap_thread(tx, state_for_thread, port_ptr_for_thread))
+        .spawn(move || run_tap_thread(tx, state_for_thread, port_ptr_for_thread, app_name))
         .map_err(|e| format!("spawn tap thread: {e}"))?;
 
     let (run_loop_handle, _mach_port_handle) = rx
@@ -182,6 +188,7 @@ fn run_tap_thread(
     ready: mpsc::Sender<Result<(usize, usize), String>>,
     state: Arc<TapMutState>,
     port_ptr: Arc<AtomicPtr<core::ffi::c_void>>,
+    app_name: String,
 ) {
     let port_ptr_cb = port_ptr.clone();
     let state_cb = state.clone();
@@ -224,15 +231,18 @@ fn run_tap_thread(
             // Diagnostic to stderr — keeps the banner short.
             eprintln!("hotkey: CGEventTap failed (trusted={trusted} pid={pid} exe={exe})");
 
-            let msg = if trusted {
+            let msg: String = if trusted {
                 "Accessibility granted but the hotkey tap is still blocked — \
                  click Restart to relaunch the app and apply the grant."
+                    .into()
             } else {
-                "Accessibility permission needed. Open System Settings → \
-                 Privacy & Security → Accessibility, toggle OpenWhisper on, \
-                 then click Restart."
+                format!(
+                    "Accessibility permission needed. Open System Settings → \
+                     Privacy & Security → Accessibility, toggle {app_name} on, \
+                     then click Restart."
+                )
             };
-            let _ = ready.send(Err(msg.into()));
+            let _ = ready.send(Err(msg));
             return;
         }
     };

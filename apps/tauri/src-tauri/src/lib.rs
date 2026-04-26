@@ -19,6 +19,19 @@ mod tray;
 pub(crate) const TICK_MS: u64 = 50;
 const SAMPLE_RATE_HZ: u64 = 16_000;
 
+// Resolve the running bundle's productName at runtime so user-visible copy
+// (window title, tray menus, error banners) reflects whether this is the
+// release ("OpenWhisper") or the dev overlay ("OpenWhisper Dev"). Single
+// source of truth = tauri.conf.json `productName`, optionally overridden
+// by tauri.dev.conf.json. Falls back to "OpenWhisper" if the field is
+// absent (shouldn't happen in practice).
+pub(crate) fn product_name(app: &tauri::AppHandle) -> String {
+    app.config()
+        .product_name
+        .clone()
+        .unwrap_or_else(|| "OpenWhisper".to_string())
+}
+
 #[derive(Serialize, Clone)]
 struct DictationTick {
     phase: u32,
@@ -312,6 +325,14 @@ pub fn run() {
             // (project_swiftui_window_lsuielement). Pill window isn't
             // user-closeable so it's untouched here.
             if let Some(main) = app.get_webview_window("main") {
+                // Window title bar reflects productName so dev overlays as
+                // "OpenWhisper Dev" while release stays "OpenWhisper".
+                // tauri.conf.json `app.windows[0].title` is the static
+                // fallback; we overwrite at runtime so a single config
+                // override in tauri.dev.conf.json's productName drives
+                // both the bundle name AND the visible chrome.
+                let _ = main.set_title(&product_name(app.handle()));
+
                 let main_clone = main.clone();
                 main.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {

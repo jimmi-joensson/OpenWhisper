@@ -51,6 +51,7 @@ async function installTauriShim(page: Page) {
       },
       invoke: async (cmd: string, args?: Record<string, unknown>) => {
         if (cmd === "core_version") return "0.1.0-test";
+        if (cmd === "plugin:app|name") return "OpenWhisper Dev";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
         if (cmd === "hotkey_status_current") return null;

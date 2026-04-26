@@ -16,6 +16,7 @@ import { RecordButton } from "./record-button";
 export type Platform = "macos" | "windows";
 
 interface MainWindowShellProps {
+  title?: string;
   phase?: number;
   status?: PillStatus;
   levels?: number[];
@@ -49,6 +50,7 @@ const PHASE_NAMES: Record<number, string> = {
 };
 
 export function MainWindowShell({
+  title = "OpenWhisper",
   phase = 0,
   status = "idle",
   levels = [],
@@ -99,7 +101,7 @@ export function MainWindowShell({
           margin: "4px 0 18px",
         }}
       >
-        OpenWhisper Dev
+        {title}
       </h1>
 
       {hotkeyError ? (

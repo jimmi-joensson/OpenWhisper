@@ -54,26 +54,65 @@ const MIC_RECTS: &[(u32, u32, u32, u32)] = &[
 ];
 const VIEW_BOX: f32 = 792.0;
 
-/// Tray default size — 18 px matches the shipped Mac NSStatusItem.
-const ICON_SIZE: u32 = 18;
+/// Tray bitmap size — rasterized at 2× the shipped 18-pt logical menubar
+/// size so the 12×12 mic-rect grid lands on integer pixel boundaries (3 px
+/// per grid cell). Tauri hands this to NSStatusItem as an NSImage with
+/// logical-size = pixel-size; the button cell scales 0.5× down to fit the
+/// 22-pt menubar, yielding a crisp 1:1 retina render.
+///
+/// Apps/macos sidesteps this by drawing into NSImage via a closure that
+/// the system invokes at the live device scale — vector-style, no fixed
+/// pixel buffer. We can't do that through Tauri's `Image` API, so we
+/// ship a high-enough-resolution raster instead.
+const ICON_SIZE: u32 = 36;
 
 /// Render the mic glyph as a Tauri [`Image`] (raw RGBA) at `size × size`.
+/// Uses 4× supersampling + a 4×4 box filter to smooth the rect edges; the
+/// 64-px-wide grid cells in `MIC_RECTS` rasterize to clean 3-px squares at
+/// ICON_SIZE=36, so AA matters mostly at glyph perimeters.
 fn render_glyph(size: u32, rgba: [u8; 4]) -> Image<'static> {
-    let mut buf = vec![0u8; (size * size * 4) as usize];
-    let scale = size as f32 / VIEW_BOX;
+    const SUPER: u32 = 4;
+    let hi = size * SUPER;
+    let scale = hi as f32 / VIEW_BOX;
+
+    let mut hi_buf = vec![0u8; (hi * hi * 4) as usize];
     for &(rx, ry, rw, rh) in MIC_RECTS {
         let x0 = (rx as f32 * scale).round() as u32;
         let y0 = (ry as f32 * scale).round() as u32;
-        let x1 = ((rx + rw) as f32 * scale).round().min(size as f32) as u32;
-        let y1 = ((ry + rh) as f32 * scale).round().min(size as f32) as u32;
+        let x1 = ((rx + rw) as f32 * scale).round().min(hi as f32) as u32;
+        let y1 = ((ry + rh) as f32 * scale).round().min(hi as f32) as u32;
         for y in y0..y1 {
             for x in x0..x1 {
-                let i = ((y * size + x) * 4) as usize;
-                buf[i] = rgba[0];
-                buf[i + 1] = rgba[1];
-                buf[i + 2] = rgba[2];
-                buf[i + 3] = rgba[3];
+                let i = ((y * hi + x) * 4) as usize;
+                hi_buf[i] = rgba[0];
+                hi_buf[i + 1] = rgba[1];
+                hi_buf[i + 2] = rgba[2];
+                hi_buf[i + 3] = rgba[3];
             }
+        }
+    }
+
+    let mut buf = vec![0u8; (size * size * 4) as usize];
+    let n = (SUPER * SUPER) as u32;
+    for y in 0..size {
+        for x in 0..size {
+            let mut sums = [0u32; 4];
+            for dy in 0..SUPER {
+                for dx in 0..SUPER {
+                    let sx = x * SUPER + dx;
+                    let sy = y * SUPER + dy;
+                    let i = ((sy * hi + sx) * 4) as usize;
+                    sums[0] += hi_buf[i] as u32;
+                    sums[1] += hi_buf[i + 1] as u32;
+                    sums[2] += hi_buf[i + 2] as u32;
+                    sums[3] += hi_buf[i + 3] as u32;
+                }
+            }
+            let i = ((y * size + x) * 4) as usize;
+            buf[i] = (sums[0] / n) as u8;
+            buf[i + 1] = (sums[1] / n) as u8;
+            buf[i + 2] = (sums[2] / n) as u8;
+            buf[i + 3] = (sums[3] / n) as u8;
         }
     }
     Image::new_owned(buf, size, size)

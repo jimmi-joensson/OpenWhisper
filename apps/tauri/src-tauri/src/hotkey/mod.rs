@@ -60,6 +60,28 @@ pub(crate) fn emit_status(app: &AppHandle, ok: bool, error: impl Into<String>) {
     }
 }
 
+/// Toggle the global hotkey on/off. Used by the fullscreen-aware path:
+/// when a fullscreen app takes the foreground we tear down the system
+/// surface entirely (Mac CGEventTap, Win Ctrl+Space chord + Escape hook)
+/// so the fullscreen app receives those keystrokes normally and
+/// OpenWhisper doesn't activate. Re-armed on fullscreen exit.
+///
+/// Status events are NOT emitted for fullscreen-driven flips — the user
+/// hasn't lost permission, they just opened a fullscreen app. The pill
+/// hides at the same time so the absence of dictation is unambiguous.
+pub fn set_active(app: &AppHandle, active: bool) {
+    if active {
+        install(app);
+    } else {
+        #[cfg(target_os = "macos")]
+        mac::teardown();
+        #[cfg(target_os = "windows")]
+        windows::teardown(app);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = app;
+    }
+}
+
 /// Install platform-specific hotkey + escape hook. Idempotent — calling
 /// twice tears down and reinstalls. Used both at boot and from
 /// `hotkey_retry`.

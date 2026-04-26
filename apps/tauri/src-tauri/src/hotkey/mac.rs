@@ -119,6 +119,15 @@ pub fn install(_app: &AppHandle) -> Result<(), String> {
     spawn_tap()
 }
 
+/// Stop the CGEventTap and watchdog without re-installing. Used by the
+/// fullscreen-aware path: when the user enters a fullscreen app we don't
+/// want OpenWhisper to even respond to Right Cmd taps, so we drop the
+/// system-wide tap entirely. Re-installed via [`install`] on fullscreen
+/// exit.
+pub fn teardown() {
+    teardown_existing();
+}
+
 fn teardown_existing() {
     let prev = slot().lock().unwrap().take();
     if let Some(prev) = prev {

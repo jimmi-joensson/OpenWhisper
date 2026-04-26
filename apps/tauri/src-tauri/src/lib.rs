@@ -237,6 +237,18 @@ pub fn run() {
             ));
             tray::install(app.handle())?;
             hotkey::install(app.handle());
+
+            // Fullscreen-aware: when the user enters a fullscreen app, drop
+            // the global hotkey so the fullscreen app receives Right Cmd /
+            // Ctrl+Space normally, AND hide the pill so we don't paint over
+            // games / videos / presentations. Re-arm on exit.
+            let app_for_fullscreen = app.handle().clone();
+            fullscreen::install(move |is_fullscreen| {
+                hotkey::set_active(&app_for_fullscreen, !is_fullscreen);
+                if let Some(pill) = app_for_fullscreen.get_webview_window("pill") {
+                    let _ = if is_fullscreen { pill.hide() } else { pill.show() };
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

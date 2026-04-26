@@ -3,6 +3,16 @@
 # wait for sampler to finish, dump ANE/GPU/CPU lines.
 #
 # Run from repo root. Needs sudo (powermetrics is root-only).
+#
+# TODO: bring this in line with the Windows port (smoke-with-wpr.ps1):
+#   - iterate scripts/bench/clips/*.wav instead of hardcoding smoke-test.wav
+#   - swap runner from `--example recognizer_smoke` to `cargo run -p bench-sherpa`
+#     so both platforms parse the same JSON shape
+#   - emit scripts/bench/results/<host>-<date>.txt with the same fixed-width
+#     table layout (clip / clip_s / load_ms / decode_ms / rt_x / avg_cpu% /
+#     peak_cpu% / peak_rss_mb / energy_J), populating energy_J from
+#     powermetrics CPU/GPU/ANE power integration.
+# Until that lands, Mac vs Windows results are NOT 1:1 comparable.
 
 set -euo pipefail
 

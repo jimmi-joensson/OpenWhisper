@@ -262,6 +262,19 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /
+            // the shipped SwiftUI app (which calls
+            // NSApp.setActivationPolicy(.accessory) in
+            // applicationWillFinishLaunching to avoid the icon flash).
+            // Tauri's setup() runs after applicationDidFinishLaunching, so
+            // a brief Dock-icon flash on cold boot is the trade-off vs.
+            // baking LSUIElement = true into Info.plist; the latter would
+            // also remove the app from Force Quit / Activity Monitor's
+            // application list, which we want to keep so users can recover
+            // from a wedged process.
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             spawn_dictation_emitter(app.handle().clone());
             spawn_recognizer_warmup();
 

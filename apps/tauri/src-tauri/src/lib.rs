@@ -178,6 +178,20 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
         .expect("spawn dictation emitter");
 }
 
+/// Bring the main window forward — invoked when the pill is clicked in
+/// idle state. Mirrors the tray's `open_main` behavior so both entry points
+/// behave identically.
+#[tauri::command]
+async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    main.show().map_err(|e| e.to_string())?;
+    main.unminimize().map_err(|e| e.to_string())?;
+    main.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn set_pill_click_through(
     app: tauri::AppHandle,
@@ -191,9 +205,10 @@ async fn set_pill_click_through(
 }
 
 /// Place the pill bottom-center of its current monitor. The 80 px bottom
-/// margin clears the Dock / taskbar in the default-layout case; Phase 7
-/// will replace this with true work-area math (NSScreen.visibleFrame on
-/// Mac, GetMonitorInfo rcWork on Windows).
+/// margin is measured from the visible capsule edge, not the window edge —
+/// the window includes transparent padding so the CSS drop-shadow has room
+/// to render. Phase 7 will replace this with true work-area math
+/// (NSScreen.visibleFrame on Mac, GetMonitorInfo rcWork on Windows).
 #[tauri::command]
 async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String> {
     let pill = app
@@ -214,12 +229,19 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
     let mon_x = monitor.position().x as f64 / scale;
     let mon_y = monitor.position().y as f64 / scale;
 
-    const PILL_W: f64 = 70.0;
-    const PILL_H: f64 = 22.0;
-    const BOTTOM_MARGIN: f64 = 80.0;
+    // Window dimensions (must match tauri.conf.json pill window). Capsule
+    // is centered inside the window via flex so the shadow has room on all
+    // four sides — capsule visible bottom is `CAPSULE_BELOW_PAD` from the
+    // window's bottom edge.
+    const PILL_WIN_W: f64 = 130.0;
+    const PILL_WIN_H: f64 = 82.0;
+    const CAPSULE_H: f64 = 22.0;
+    const CAPSULE_BELOW_PAD: f64 = (PILL_WIN_H - CAPSULE_H) / 2.0;
+    const VISUAL_BOTTOM_MARGIN: f64 = 80.0;
 
-    let x = mon_x + (mon_w - PILL_W) / 2.0;
-    let y = mon_y + mon_h - PILL_H - BOTTOM_MARGIN;
+    let x = mon_x + (mon_w - PILL_WIN_W) / 2.0;
+    // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = mon_h - VISUAL_BOTTOM_MARGIN
+    let y = mon_y + mon_h - VISUAL_BOTTOM_MARGIN - PILL_WIN_H + CAPSULE_BELOW_PAD;
 
     pill.set_position(LogicalPosition::new(x, y))
         .map_err(|e| e.to_string())
@@ -339,6 +361,7 @@ pub fn run() {
             dictation_cancel,
             set_pill_click_through,
             position_pill_bottom_center,
+            show_main_window,
             hotkey::hotkey_retry,
             hotkey::hotkey_status_current,
             permissions::permissions_status_current,

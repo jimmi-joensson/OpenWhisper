@@ -10,6 +10,7 @@
     "tauri": "tauri",
     "dev:tauri": "node scripts/dev-run.cjs",
     "setup:ort": "node scripts/fetch-ort.cjs",
+    "vendor:natives": "node scripts/vendor-natives.cjs",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui",
     "test:ui:headed": "playwright test --headed",

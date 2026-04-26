@@ -120,6 +120,15 @@ export async function emitTick(page: Page, tick: MockTick): Promise<number> {
   );
 }
 
+// Wait for useHotkeyStatus's listener to attach. Probe by emitting an ok=true
+// status and looking for delivered > 0; harmless because that's the default.
+export async function waitForHotkeyStatusListener(page: Page) {
+  await page.waitForFunction(
+    () => window.__owEmit("hotkey_status", { ok: true, error: "" }) > 0,
+    { timeout: 3000 },
+  );
+}
+
 // Wait for the dictation hook's listener to have been registered before the
 // first tick lands. Otherwise the emit returns 0 and React state stays at INITIAL.
 export async function waitForTickListener(page: Page) {

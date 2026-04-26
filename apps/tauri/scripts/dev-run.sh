@@ -31,27 +31,27 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 TAURI_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
 REPO_ROOT="$( cd "$TAURI_DIR/../.." && pwd )"
 
-# Dev overlay (tauri.dev.conf.json) renames the bundle to "OpenWhisper Dev
-# Tauri" with id "com.openwhisper.app.dev" so it's visually distinct from
-# the SwiftUI shipped app + its debug variant in the Accessibility list.
+# Dev overlay (tauri.dev.conf.json) renames the bundle to "OpenWhisper Dev"
+# with id "com.openwhisper.app.dev" so it's visually distinct from the
+# release Tauri app in the Accessibility list.
 DEV_CONFIG="$TAURI_DIR/src-tauri/tauri.dev.conf.json"
 BUNDLE_ID="com.openwhisper.app.dev"
-BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
-INSTALLED_APP_PATH="/Applications/OpenWhisper Dev Tauri.app"
+BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev.app"
+INSTALLED_APP_PATH="/Applications/OpenWhisper Dev.app"
 
 echo "==> Quitting any running OpenWhisper (Tauri) instances"
 # Try graceful Quit first (lets the app clean up: unhook hotkey, save, etc).
-osascript -e 'tell application "OpenWhisper Dev Tauri" to quit' 2>/dev/null || true
+osascript -e 'tell application "OpenWhisper Dev" to quit' 2>/dev/null || true
 osascript -e 'tell application "OpenWhisper" to quit' 2>/dev/null || true
 
 # Wait up to 3 s for graceful exit; force-kill anything still alive.
 for _ in 1 2 3 4 5 6; do
-    if ! pgrep -f "OpenWhisper Dev Tauri.app/Contents/MacOS/|OpenWhisper.app/Contents/MacOS/|target/debug/openwhisper-tauri" >/dev/null 2>&1; then
+    if ! pgrep -f "OpenWhisper Dev.app/Contents/MacOS/|OpenWhisper.app/Contents/MacOS/|target/debug/openwhisper-tauri" >/dev/null 2>&1; then
         break
     fi
     sleep 0.5
 done
-pkill -9 -f "OpenWhisper Dev Tauri.app/Contents/MacOS/" 2>/dev/null || true
+pkill -9 -f "OpenWhisper Dev.app/Contents/MacOS/" 2>/dev/null || true
 pkill -9 -f "OpenWhisper.app/Contents/MacOS/" 2>/dev/null || true
 pkill -9 -f "target/debug/openwhisper-tauri" 2>/dev/null || true
 sleep 0.3
@@ -62,9 +62,7 @@ sleep 0.3
 echo "==> Resetting TCC grants for all OpenWhisper variants"
 for VARIANT_BID in \
     "com.openwhisper.app.dev"     `# Tauri dev (this script)` \
-    "com.openwhisper.app"         `# Tauri release` \
-    "com.openwhisper.OpenWhisper" `# SwiftUI release` \
-    "com.openwhisper.OpenWhisper.dev" `# SwiftUI debug`; do
+    "com.openwhisper.app"         `# Tauri release`; do
     for SERVICE in Accessibility Microphone ListenEvent; do
         tccutil reset "$SERVICE" "$VARIANT_BID" 2>/dev/null || true
     done
@@ -121,7 +119,7 @@ fi
 # Install to /Applications so the launch path is stable + user-discoverable
 # (Spotlight, Dock launcher, etc). TCC still re-prompts each cycle because
 # ad-hoc cdhash drifts, but at least the path under
-# /Applications/OpenWhisper Dev Tauri.app doesn't change between cycles.
+# /Applications/OpenWhisper Dev.app doesn't change between cycles.
 echo "==> Replacing $INSTALLED_APP_PATH"
 # Final guard: if anything is still holding the bundle, force-kill it.
 # APFS lets us unlink files held by running processes, but `open` would
@@ -137,7 +135,7 @@ open "$INSTALLED_APP_PATH"
 
 cat <<EOF
 
-Tauri dev run ready. App: OpenWhisper Dev Tauri (com.openwhisper.app.dev)
+Tauri dev run ready. App: OpenWhisper Dev (com.openwhisper.app.dev)
 
 Re-grant on first launch:
   1) Accessibility   → approve  (Right Cmd hotkey + paste)

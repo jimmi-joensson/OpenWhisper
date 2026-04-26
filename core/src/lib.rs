@@ -1,6 +1,8 @@
 pub mod audio;
 pub mod dictation;
 mod ffi_c;
+#[cfg(feature = "recognizer")]
+pub mod recognizer;
 pub mod transcript;
 
 #[cfg(feature = "macos-shell")]

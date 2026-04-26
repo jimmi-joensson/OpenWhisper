@@ -120,6 +120,14 @@ recordings/
 !docs/**/*.wav
 !tests/**/fixtures/**
 !apps/macos/Resources/samples/**
+# Bench clips + reference transcripts may contain PII / personal voice —
+# always local, never committed.
+scripts/bench/clips/*.wav
+scripts/bench/clips/*.ref.txt
+
+# SwiftPM build artifacts for the FluidAudio Rust↔Swift bridge.
+core/swift/**/.build/
+core/swift/**/.swiftpm/
 
 # Misc
 tmp/

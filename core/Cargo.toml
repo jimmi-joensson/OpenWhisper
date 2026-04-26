@@ -18,15 +18,40 @@ default = ["macos-shell"]
 # swift-bridge FFI for the shipped macOS SwiftUI app. Off when a pure-Rust
 # consumer (Tauri) links core as a path dep.
 macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
-# Marker selected by the Tauri shell. Empty today; future Tauri-only code
-# can cfg-gate on it without flipping macos-shell on.
-tauri = []
+# Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
+# pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
+# compiles sherpa-onnx.
+tauri = ["recognizer"]
+# In-core ASR via sherpa-onnx (upstream). Separate from `tauri` so a
+# future bench binary or test can enable it without flipping the shell
+# feature on. CoreML EP is selected at runtime, not via a Cargo feature.
+recognizer = ["dep:sherpa-onnx", "dep:ureq", "dep:tar", "dep:bzip2", "dep:dirs"]
 
 [dependencies]
 swift-bridge = { version = "0.1.59", optional = true }
 cpal = "0.17"
 rubato = "0.16"
 regex = "1.11"
+# Upstream sherpa-onnx Rust crate. NOT thewh1teagle/sherpa-rs (deprecated).
+#
+# `shared` (NOT default `static`) is required on macOS: the static prebuilt
+# defines SHERPA_ONNX_DISABLE_COREML in cmake/onnxruntime-osx-arm64-static.cmake
+# because the static onnxruntime build doesn't include the CoreML EP. The
+# shared variant pulls the official Microsoft onnxruntime dylib, which does
+# include CoreML EP. Cost: ships libonnxruntime.dylib + libsherpa-onnx-c-api.dylib
+# next to the binary (Tauri bundle puts them under Contents/Frameworks/).
+sherpa-onnx = { version = "1.12.40", optional = true, default-features = false, features = ["shared"] }
+# Parakeet v3 model archive download + extract (same .tar.bz2 the Windows
+# shell consumes from k2-fsa/sherpa-onnx releases).
+ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
+tar = { version = "0.4", optional = true }
+bzip2 = { version = "0.4", optional = true }
+dirs = { version = "5", optional = true }
+
+[dev-dependencies]
+# Portable WAV reader for the recognizer smoke example (cross-platform —
+# avoids dragging sherpa-onnx into the Mac smoke path just for I/O).
+hound = "3.5"
 
 [build-dependencies]
 swift-bridge-build = { version = "0.1.59", optional = true }

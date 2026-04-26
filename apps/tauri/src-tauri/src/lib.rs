@@ -5,13 +5,12 @@ use openwhisper_core::audio;
 use openwhisper_core::dictation::{
     self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
+use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
 const TICK_MS: u64 = 50;
 const SAMPLE_RATE_HZ: u64 = 16_000;
-const STUB_RECOGNIZER_MS: u64 = 1_500;
-const STUB_TRANSCRIPT: &str = "[recognizer pending — TASK-33]";
 
 #[derive(Serialize, Clone)]
 struct DictationTick {
@@ -46,6 +45,20 @@ fn dictation_toggle() -> Result<(), String> {
     let action = dictation::dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {
+            // Kick off model load lazily on first record so the UI's
+            // "loading model" phase reflects real work. ensure_loaded is
+            // idempotent — subsequent toggles short-circuit.
+            dictation::dictation_mark_loading_model();
+            thread::Builder::new()
+                .name("openwhisper-recognizer-load".into())
+                .spawn(|| {
+                    if let Err(e) = recognizer::recognizer_ensure_loaded() {
+                        dictation::dictation_deliver_error(&format!(
+                            "recognizer load failed: {e}"
+                        ));
+                    }
+                })
+                .expect("spawn recognizer loader");
             audio::audio_start_capture()?;
             dictation::dictation_mark_capture_started();
         }
@@ -55,7 +68,7 @@ fn dictation_toggle() -> Result<(), String> {
             let count = samples.len() as u64;
             dictation::dictation_mark_capture_stopped(count);
             if count > 0 {
-                spawn_stub_recognizer();
+                spawn_recognizer(samples);
             }
         }
         _ => {}
@@ -70,13 +83,27 @@ fn dictation_cancel() -> bool {
     dictation::dictation_request_cancel()
 }
 
-// Real recognizer (TASK-33) replaces this. For now, sleep 1.5 s then deliver a
-// placeholder so the phase machine actually reaches DONE and the UI clears.
-fn spawn_stub_recognizer() {
-    thread::spawn(|| {
-        thread::sleep(Duration::from_millis(STUB_RECOGNIZER_MS));
-        dictation::dictation_deliver_transcript(STUB_TRANSCRIPT, 1.0);
-    });
+// Decode samples on a worker thread (recognizer call blocks until done).
+// Mac path = FluidAudio + ANE; Win path = sherpa-onnx + CPU. See
+// core/src/recognizer/mod.rs for the OS-conditional impl.
+fn spawn_recognizer(samples: Vec<f32>) {
+    thread::Builder::new()
+        .name("openwhisper-recognizer-decode".into())
+        .spawn(move || {
+            // Defensive: recognizer_transcribe requires the engine to be
+            // initialized. Loader was kicked off at recording start, but
+            // a slow first-load might still be in flight — re-call
+            // ensure_loaded so we block until it's ready.
+            if let Err(e) = recognizer::recognizer_ensure_loaded() {
+                dictation::dictation_deliver_error(&format!("recognizer load: {e}"));
+                return;
+            }
+            match recognizer::recognizer_transcribe(&samples) {
+                Ok(res) => dictation::dictation_deliver_transcript(&res.text, res.confidence),
+                Err(e) => dictation::dictation_deliver_error(&format!("transcribe: {e}")),
+            }
+        })
+        .expect("spawn recognizer decoder");
 }
 
 fn spawn_dictation_emitter(app: tauri::AppHandle) {

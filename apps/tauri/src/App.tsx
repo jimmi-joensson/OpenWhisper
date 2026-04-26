@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo } from "@tauri-apps/api/event";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { useDictation } from "./lib/use-dictation";
+import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { PILL_STATE_EVENT, type PillState } from "./lib/pill-state";
 import "./App.css";
 
@@ -18,6 +19,7 @@ function App() {
   const [coreError, setCoreError] = useState<string | null>(null);
   const platform = detectPlatform();
   const dictation = useDictation();
+  const hotkey = useHotkeyStatus();
 
   useEffect(() => {
     invoke<string>("core_version")
@@ -52,6 +54,8 @@ function App() {
       onToggle={() => void dictation.toggle()}
       coreVersion={coreVersion}
       coreError={coreError}
+      hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+      onHotkeyRetry={() => void hotkey.retry()}
     />
   );
 }

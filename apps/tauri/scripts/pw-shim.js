@@ -26,6 +26,11 @@ async (page) => {
         if (cmd === "core_version") return "0.1.0-pwcli";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
+        if (cmd === "hotkey_status_current") return null;
+        if (cmd === "hotkey_retry") {
+          window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = args ?? {};
           if (!handlers.has(event)) handlers.set(event, new Set());

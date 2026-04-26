@@ -9,7 +9,10 @@ use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
-const TICK_MS: u64 = 50;
+mod hotkey;
+mod tray;
+
+pub(crate) const TICK_MS: u64 = 50;
 const SAMPLE_RATE_HZ: u64 = 16_000;
 
 #[derive(Serialize, Clone)]
@@ -40,8 +43,10 @@ fn core_version() -> String {
     openwhisper_core::core_version()
 }
 
-#[tauri::command]
-fn dictation_toggle() -> Result<(), String> {
+/// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
+/// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
+/// machine in the core decides whether the toggle starts or stops recording.
+pub(crate) fn do_toggle() -> Result<(), String> {
     let action = dictation::dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {
@@ -76,11 +81,21 @@ fn dictation_toggle() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn dictation_cancel() -> bool {
+/// Shared cancel path. See [`do_toggle`].
+pub(crate) fn do_cancel() -> bool {
     audio::audio_stop_capture();
     let _ = audio::audio_drain_samples();
     dictation::dictation_request_cancel()
+}
+
+#[tauri::command]
+fn dictation_toggle() -> Result<(), String> {
+    do_toggle()
+}
+
+#[tauri::command]
+fn dictation_cancel() -> bool {
+    do_cancel()
 }
 
 // Decode samples on a worker thread (recognizer call blocks until done).
@@ -209,11 +224,30 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(target_os = "windows")]
+    let builder = {
+        use tauri_plugin_global_shortcut::ShortcutState;
+        builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Err(e) = do_toggle() {
+                            eprintln!("global shortcut toggle failed: {e}");
+                        }
+                    }
+                })
+                .build(),
+        )
+    };
+
+    builder
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
             spawn_recognizer_warmup();
+            tray::install(app.handle())?;
+            hotkey::install(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -221,7 +255,9 @@ pub fn run() {
             dictation_toggle,
             dictation_cancel,
             set_pill_click_through,
-            position_pill_bottom_center
+            position_pill_bottom_center,
+            hotkey::hotkey_retry,
+            hotkey::hotkey_status_current,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

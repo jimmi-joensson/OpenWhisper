@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenWhisper Dev Tauri",
+  "identifier": "com.openwhisper.app.dev",
+  "build": {
+    "frontendDist": "http://localhost:1420",
+    "beforeBuildCommand": ""
+  }
+}

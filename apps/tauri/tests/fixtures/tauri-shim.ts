@@ -53,6 +53,12 @@ async function installTauriShim(page: Page) {
         if (cmd === "core_version") return "0.1.0-test";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
+        if (cmd === "hotkey_status_current") return null;
+        if (cmd === "hotkey_retry") {
+          (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount =
+            ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;
@@ -111,6 +117,15 @@ export async function emitTick(page: Page, tick: MockTick): Promise<number> {
   return page.evaluate(
     (payload) => window.__owEmit("dictation_tick", payload),
     merged,
+  );
+}
+
+// Wait for useHotkeyStatus's listener to attach. Probe by emitting an ok=true
+// status and looking for delivered > 0; harmless because that's the default.
+export async function waitForHotkeyStatusListener(page: Page) {
+  await page.waitForFunction(
+    () => window.__owEmit("hotkey_status", { ok: true, error: "" }) > 0,
+    { timeout: 3000 },
   );
 }
 

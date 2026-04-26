@@ -1,10 +1,12 @@
 //! Post-process raw Parakeet transcripts before injection.
 //!
-//! Mirrors the Swift `TranscriptProcessor` exactly — replacing the Swift
-//! pipeline with a Rust call should be zero behavior diff. Three passes:
+//! Four passes:
 //!   1. Strip filler words (um/uh/øh/…) using a per-language register.
 //!   2. Apply user substitutions ("open whisper" → "OpenWhisper").
-//!   3. Normalize whitespace (collapse runs, strip before punctuation,
+//!   3. Collapse adjacent duplicate words ("let's let's" → "let's").
+//!      Punctuation between words protects intentional repetition
+//!      ("really, really nice" stays; "no. No problem" stays).
+//!   4. Normalize whitespace (collapse runs, strip before punctuation,
 //!      merge comma runs left by filler removal).
 //!
 //! The EN/DA asymmetry around "er" is deliberate: "er" is English
@@ -90,6 +92,7 @@ pub fn process(text: &str) -> String {
     let lang = detect_lang(text);
     let out = strip_fillers(text, &lang);
     let out = apply_subs(&out);
+    let out = dedupe_repeats(&out);
     normalize_whitespace(&out)
 }
 
@@ -107,6 +110,24 @@ fn apply_subs(text: &str) -> String {
         out = re.replace_all(&out, *value).into_owned();
     }
     out
+}
+
+// Collapse runs of the same word separated by whitespace only. Punctuation
+// glued to either token (e.g. "really," or "No.") breaks the match, so
+// rhetorical doubling and sentence-boundary repeats survive. Comparison is
+// case-insensitive; first occurrence's casing wins.
+fn dedupe_repeats(text: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut prev_lower: Option<String> = None;
+    for tok in text.split_whitespace() {
+        let lower = tok.to_lowercase();
+        if prev_lower.as_deref() == Some(lower.as_str()) {
+            continue;
+        }
+        prev_lower = Some(lower);
+        out.push(tok);
+    }
+    out.join(" ")
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -168,5 +189,37 @@ mod tests {
     #[test]
     fn preserves_oh_interjection() {
         assert_eq!(process("Oh, I didn't know that"), "Oh, I didn't know that");
+    }
+
+    #[test]
+    fn dedupes_adjacent_word_repeats() {
+        assert_eq!(process("let's let's check this"), "let's check this");
+        assert_eq!(process("boat boat fish fish"), "boat fish");
+        assert_eq!(process("ha ha ha"), "ha");
+    }
+
+    #[test]
+    fn dedupe_preserves_first_casing() {
+        assert_eq!(process("Let's let's go"), "Let's go");
+        assert_eq!(process("BOAT boat"), "BOAT");
+    }
+
+    #[test]
+    fn dedupe_case_insensitive_match() {
+        assert_eq!(process("OpenWhisper openwhisper"), "OpenWhisper");
+    }
+
+    #[test]
+    fn dedupe_punctuation_protects_repetition() {
+        // Comma between words = intentional (rhetorical emphasis).
+        assert_eq!(process("really, really nice"), "really, really nice");
+        // Period between words = sentence boundary.
+        assert_eq!(process("no. No problem"), "no. No problem");
+    }
+
+    #[test]
+    fn dedupe_after_substitution() {
+        // "open whisper open whisper" -> subs run first, then dedupe collapses.
+        assert_eq!(process("open whisper open whisper"), "OpenWhisper");
     }
 }

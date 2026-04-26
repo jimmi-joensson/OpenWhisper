@@ -39,6 +39,9 @@ build/
 out/
 .next/
 .nuxt/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
 .turbo/
 .cache/
 coverage/

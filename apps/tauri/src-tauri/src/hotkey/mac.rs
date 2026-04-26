@@ -32,6 +32,11 @@ use core_graphics::event::{
 };
 use tauri::AppHandle;
 
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
 use crate::{do_cancel, do_toggle};
 
 // Bit set inside CGEventFlags when Right Command is held. See
@@ -167,12 +172,25 @@ fn run_tap_thread(
     } {
         Ok(t) => t,
         Err(()) => {
-            let _ = ready.send(Err(
-                "Accessibility permission needed — grant in System Settings → \
-                 Privacy & Security → Accessibility, then click Retry. The app \
-                 will relaunch to apply the grant."
-                    .into(),
-            ));
+            let trusted = unsafe { AXIsProcessTrusted() };
+            let pid = std::process::id();
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "?".into());
+            let msg = if trusted {
+                format!(
+                    "Accessibility granted but CGEventTap still failing — \
+                     kernel cache stale. Click Retry to relaunch and apply. \
+                     [pid={pid} exe={exe}]"
+                )
+            } else {
+                format!(
+                    "Accessibility permission needed — System Settings → \
+                     Privacy & Security → Accessibility. Add this binary, \
+                     toggle on, click Retry. [pid={pid} exe={exe}]"
+                )
+            };
+            let _ = ready.send(Err(msg));
             return;
         }
     };

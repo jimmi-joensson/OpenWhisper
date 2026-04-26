@@ -1,35 +1,62 @@
 #!/usr/bin/env bash
 # One-command dev cycle for the Tauri shell on macOS.
 #
-# Tauri debug builds use ad-hoc codesigning. Each rebuild produces a new
-# signature, and macOS TCC silently invalidates prior Accessibility /
-# Microphone / Input Monitoring grants whenever the signing identity
-# drifts. System Settings can still *show* the toggle on while the grant
-# is dead. This script resets the TCC record cleanly, kills any running
-# instance, then hands off to `pnpm tauri dev`.
+# Why NOT `pnpm tauri dev`: that runs the bare cargo binary at
+# `target/debug/openwhisper-tauri`, with no .app bundle and no
+# Info.plist. TCC can't key Accessibility / Input Monitoring grants
+# to a bare binary cleanly, so CGEventTap creation fails and the
+# hotkey banner stays stuck even after granting in System Settings.
 #
-# Mirrors `scripts/dev-run.sh` (the shipped SwiftUI flow). Different
-# bundle id — Tauri uses `com.openwhisper.app` per `tauri.conf.json`.
+# Instead: `tauri build --debug` produces a real `OpenWhisper.app`
+# at target/debug/bundle/macos/, with bundle id `com.openwhisper.app`
+# and the signing identity TCC needs. We `open` that bundle.
+#
+# Trade-off: no HMR on Rust changes — every backend edit needs
+# another `dev-run.sh` cycle. Frontend changes still hot-reload
+# inside the bundled WebView.
+#
+# Ad-hoc codesigning still drifts each rebuild, so we always
+# tccutil reset before launch — re-grant on first launch each cycle,
+# matching the SwiftUI flow in `scripts/dev-run.sh`.
 #
 # Usage:
 #   apps/tauri/scripts/dev-run.sh
-#   (or `pnpm dev:tauri` if added to package.json)
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 TAURI_DIR="$( cd "$SCRIPT_DIR/.." && pwd )"
+REPO_ROOT="$( cd "$TAURI_DIR/../.." && pwd )"
 
 BUNDLE_ID="com.openwhisper.app"
+APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper.app"
 
 echo "==> Killing any running OpenWhisper (Tauri) instances"
 pkill -f "OpenWhisper.app/Contents/MacOS/OpenWhisper" 2>/dev/null || true
-pkill -f "openwhisper-tauri" 2>/dev/null || true
+pkill -f "target/debug/openwhisper-tauri" 2>/dev/null || true
 
 echo "==> Resetting TCC grants for $BUNDLE_ID"
 for SERVICE in Accessibility Microphone ListenEvent; do
     tccutil reset "$SERVICE" "$BUNDLE_ID" 2>/dev/null || true
 done
 
-echo "==> pnpm tauri dev"
+echo "==> pnpm tauri build --debug (produces $APP_PATH)"
 cd "$TAURI_DIR"
-exec pnpm tauri dev "$@"
+pnpm tauri build --debug
+
+if [[ ! -d "$APP_PATH" ]]; then
+    echo "error: built app not found at $APP_PATH" >&2
+    exit 1
+fi
+
+echo "==> open $APP_PATH"
+open "$APP_PATH"
+
+cat <<EOF
+
+Tauri dev run ready. Re-grant on first launch:
+  1) Accessibility   → approve  (Right Cmd hotkey + paste)
+  2) Microphone      → approve  (audio capture)
+
+After grant, click Retry in the banner — the app will relaunch
+once and the tap should install cleanly.
+EOF

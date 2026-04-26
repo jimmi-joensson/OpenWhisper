@@ -1,10 +1,11 @@
 ---
 id: TASK-39
 title: Recognizer perf bench on real-GPU hardware (RTX 3070)
-status: To Do
+status: Done
 assignee:
   - claude
 created_date: '2026-04-26 13:00'
+updated_date: '2026-04-26 20:15'
 labels:
   - recognizer
   - bench
@@ -33,13 +34,13 @@ Outcome decides whether to ship a CUDA-enabled OpenWhisper variant for NVIDIA us
 ## Acceptance Criteria
 
 <!-- AC:BEGIN -->
-- [ ] #1 num_threads sweep run at 1/2/4/6/8 on RTX 3070 host, results appended to scripts/bench/results/<host>-<date>.txt
-- [ ] #2 Default num_threads in core/src/recognizer/sherpa.rs reviewed (kept or changed) based on the sweep winner
-- [ ] #3 sherpa-onnx-v1.12.40-cuda-12.x-cudnn-9.x-win-x64-cuda.tar.bz2 placed under SHERPA_ONNX_ARCHIVE_DIR, bench-sherpa rebuilt without errors
-- [ ] #4 OPENWHISPER_PROVIDER=cuda decode run on the smoke clip; nvidia-smi sample captured during decode (must show non-zero GPU utilization to count)
-- [ ] #5 5-run CUDA sweep result archived in the bench log alongside the CPU sweep
-- [ ] #6 Decision recorded in backlog/decisions/recognizer-cuda-decision-<date>.md: ship CUDA variant, defer, or fallback to DML investigation
-- [ ] #7 If shipping CUDA: follow-up task scaffolded for runtime EP detection + Tauri bundling story (CUDA runtime DLLs, archive size, NVIDIA-only release channel)
+- [x] #1 num_threads sweep run at 1/2/4/6/8 on RTX 3070 host (extended to 10/12 to confirm peak), results in scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt
+- [x] #2 Default num_threads changed from hardcoded 2 to `min(num_cpus::get_physical(), 8)` in core/src/recognizer/sherpa.rs (8 won the sweep on this 6c12t Ryzen by 36% over 2; new default produces 6 threads here, validated at 677 ms)
+- [x] #3 CUDA tarball placed under C:\sherpa-onnx-archives; used SHERPA_ONNX_LIB_DIR (not SHERPA_ONNX_ARCHIVE_DIR — sherpa-onnx-sys hardcodes the archive name) with a merged lib dir containing CUDA prebuilt DLLs + onnxruntime.lib stub from CPU prebuilt + CUDA Toolkit 12.4 + cuDNN 9.9 runtime DLLs. bench-sherpa rebuilt without errors.
+- [x] #4 OPENWHISPER_PROVIDER=cuda decode run; nvidia-smi dmon captured non-zero GPU util (peak 4-8% SM) — CUDA EP loaded successfully, just didn't carry the workload
+- [x] #5 CUDA sweep (threads=2/4/6/8) archived in scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt under "Arm 2"
+- [x] #6 Decision recorded: backlog/decisions/recognizer-cuda-decision-2026-04-26.md — defer (CUDA 41% slower than CPU on this hardware; ~2.5 GB DLL bloat for a regression)
+- [x] #7 N/A — not shipping CUDA, no follow-up scaffold needed
 <!-- AC:END -->
 
 ## Handover prompt

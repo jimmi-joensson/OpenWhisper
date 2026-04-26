@@ -1,4 +1,10 @@
-import { emitTick, expect, test, waitForTickListener } from "./fixtures/tauri-shim";
+import {
+  emitTick,
+  expect,
+  test,
+  waitForHotkeyStatusListener,
+  waitForTickListener,
+} from "./fixtures/tauri-shim";
 
 test.describe("main window", () => {
   test("renders header + all four cards", async ({ page }) => {
@@ -110,6 +116,43 @@ test.describe("phase transitions drive RecordButton", () => {
     // back to idle: "Record"
     await emitTick(page, { phase: 0, status: "idle", can_toggle: true });
     await expect(page.getByRole("button", { name: /^Record$/ })).toBeEnabled();
+  });
+});
+
+test.describe("hotkey banner", () => {
+  test("hidden when status ok, visible with error when not, retry invokes hotkey_retry", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForHotkeyStatusListener(page);
+
+    // Default state: ok=true was last emit (from the wait probe). No banner.
+    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
+
+    // Failure surfaces the banner with the exact error text.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_status", {
+        ok: false,
+        error: "AX denied — grant Accessibility, then click Retry.",
+      }),
+    );
+    const banner = page.getByTestId("hotkey-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("AX denied");
+    await expect(banner.getByRole("button", { name: "Retry" })).toBeVisible();
+
+    // Retry click invokes hotkey_retry exactly once.
+    await banner.getByRole("button", { name: "Retry" }).click();
+    const retryCount = await page.evaluate(
+      () => (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0,
+    );
+    expect(retryCount).toBe(1);
+
+    // Recovery clears the banner.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_status", { ok: true, error: "" }),
+    );
+    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
   });
 });
 

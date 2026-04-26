@@ -168,8 +168,9 @@ fn run_tap_thread(
         Ok(t) => t,
         Err(()) => {
             let _ = ready.send(Err(
-                "CGEventTap creation failed — grant Accessibility in System Settings → \
-                 Privacy & Security → Accessibility, then click Retry."
+                "Accessibility permission needed — grant in System Settings → \
+                 Privacy & Security → Accessibility, then click Retry. The app \
+                 will relaunch to apply the grant."
                     .into(),
             ));
             return;

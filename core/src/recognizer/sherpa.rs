@@ -83,12 +83,22 @@ impl Recognizer for SherpaParakeet {
         };
         model_config.tokens = Some(path_for_sherpa(&paths.tokens));
         model_config.model_type = Some("nemo_transducer".to_string());
-        model_config.num_threads = 1;
-        // Runtime EP selection. `"coreml"` → CoreML EP, which decides
-        // CPU/GPU/ANE per op (MLComputeUnits.all). On non-Mac builds the
-        // C++ side falls back to CPU and logs a warning — fine for
-        // bench-tooling that compiles on Linux/Win.
-        model_config.provider = Some("coreml".to_string());
+        // ONNXRuntime CPU EP intra-op thread count. Sweep on a 4-core
+        // Xeon (RDP VM, 2026-04-26) showed 2 = 1.32×, 4 = 1.30×, 8 =
+        // 0.68× (oversubscription cliff). 2 is safe on every modern
+        // CPU class; tune higher per host via the env var.
+        model_config.num_threads = std::env::var("OPENWHISPER_NUM_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(2);
+        // Runtime EP selection. Default `"coreml"` for Mac (which decides
+        // CPU/GPU/ANE per op via MLComputeUnits.all). On non-Mac the C++
+        // side falls back to CPU and logs a warning — fine for the
+        // shared bench harness. Override via env to try `directml`,
+        // `cuda`, etc. on Windows.
+        model_config.provider = Some(
+            std::env::var("OPENWHISPER_PROVIDER").unwrap_or_else(|_| "coreml".to_string()),
+        );
         config.model_config = model_config;
         config.decoding_method = Some("greedy_search".to_string());
 

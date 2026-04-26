@@ -25,7 +25,7 @@ tauri = ["recognizer"]
 # In-core ASR via sherpa-onnx (upstream). Separate from `tauri` so a
 # future bench binary or test can enable it without flipping the shell
 # feature on. CoreML EP is selected at runtime, not via a Cargo feature.
-recognizer = ["dep:sherpa-onnx", "dep:ureq", "dep:tar", "dep:bzip2", "dep:dirs"]
+recognizer = ["dep:sherpa-onnx", "dep:ureq", "dep:tar", "dep:bzip2", "dep:dirs", "dep:num_cpus"]
 
 [dependencies]
 swift-bridge = { version = "0.1.59", optional = true }
@@ -47,6 +47,11 @@ ureq = { version = "2.12", default-features = false, features = ["tls"], optiona
 tar = { version = "0.4", optional = true }
 bzip2 = { version = "0.4", optional = true }
 dirs = { version = "5", optional = true }
+# Physical core count (not logical) for the recognizer's intra-op default.
+# Sweeps on 4c4t Xeon and 6c12t Ryzen showed performance cratered when
+# num_threads >= num_logical_cpus (SMT oversubscription). Physical-core
+# count is the safer ceiling — see TASK-39 bench notes.
+num_cpus = { version = "1.16", optional = true }
 
 [dev-dependencies]
 # Portable WAV reader for the recognizer smoke example (cross-platform —

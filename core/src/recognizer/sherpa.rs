@@ -83,14 +83,18 @@ impl Recognizer for SherpaParakeet {
         };
         model_config.tokens = Some(path_for_sherpa(&paths.tokens));
         model_config.model_type = Some("nemo_transducer".to_string());
-        // ONNXRuntime CPU EP intra-op thread count. Sweep on a 4-core
-        // Xeon (RDP VM, 2026-04-26) showed 2 = 1.32×, 4 = 1.30×, 8 =
-        // 0.68× (oversubscription cliff). 2 is safe on every modern
-        // CPU class; tune higher per host via the env var.
+        // ONNXRuntime CPU EP intra-op thread count. Defaults to
+        // min(physical_cores, 8): sweeps across 4c4t Xeon (best at 2,
+        // tied with 4) and 6c12t Ryzen (best at 8) showed perf cratered
+        // once threads ≥ logical_cpus (SMT oversubscription cliff).
+        // Capping at physical cores avoids that cliff; capping at 8
+        // avoids ONNXRuntime's per-thread coordination overhead on
+        // very-high-core-count workstations. Override via env when
+        // tuning per host (TASK-39 results in scripts/bench/results/).
         model_config.num_threads = std::env::var("OPENWHISPER_NUM_THREADS")
             .ok()
             .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(2);
+            .unwrap_or_else(|| num_cpus::get_physical().min(8) as i32);
         // Runtime EP selection. Default `"coreml"` for Mac (which decides
         // CPU/GPU/ANE per op via MLComputeUnits.all). On non-Mac the C++
         // side falls back to CPU and logs a warning — fine for the

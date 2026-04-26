@@ -24,6 +24,17 @@ mod mac;
 #[cfg(target_os = "windows")]
 mod windows;
 
+// On macOS the kernel-side TCC cache for Accessibility doesn't refresh until
+// the process relaunches. Granting in System Settings while we're running
+// flips `AXIsProcessTrusted` to true but `CGEventTapCreate` keeps returning
+// nil — so a manual Retry can't recover. We detect this case in
+// `hotkey_retry` and call `app.restart()`.
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
 /// Pushed to the front-end on registration success / failure / watchdog
 /// re-enable. `error` is empty when `ok = true`. UI shows a HealthBanner
 /// when `ok = false`.
@@ -76,6 +87,24 @@ pub fn install(app: &AppHandle) {
 #[tauri::command]
 pub fn hotkey_retry(app: AppHandle) {
     install(&app);
+
+    #[cfg(target_os = "macos")]
+    {
+        // If install still fails AND the user has now granted Accessibility
+        // (TCC says trusted), the kernel-side cache is what's stale — only
+        // a relaunch fixes it. Restart so the new grant lands.
+        let needs_restart = {
+            let still_failing = LAST_STATUS
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| !s.ok))
+                .unwrap_or(false);
+            still_failing && unsafe { AXIsProcessTrusted() }
+        };
+        if needs_restart {
+            app.restart();
+        }
+    }
 }
 
 /// Returns the last status emitted via `hotkey_status`. UI calls this on

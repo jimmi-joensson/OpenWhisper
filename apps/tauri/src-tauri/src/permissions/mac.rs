@@ -8,8 +8,11 @@
 //! completion block is a no-op — cpal queries the latest state on the
 //! next `audio_start_capture`, so we don't need to act on the result.
 //!
-//! AX gating matches Swift: don't prompt mic until AX is trusted, so
-//! the user never sees both dialogs at once.
+//! Unlike the Swift PermissionsCoordinator, we DON'T gate the mic
+//! prompt on AX trust. TCC serializes overlapping prompts itself, and
+//! gating loses the mic dialog whenever AXIsProcessTrusted false-
+//! negatives (which it does on every dev-run.sh because ad-hoc cdhash
+//! drift invalidates TCC's trusted record — see project_tcc_dev_pain).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -61,11 +64,11 @@ pub fn request_microphone() {
     unsafe {
         let trusted = AXIsProcessTrusted();
         dbg_log(&format!("permissions: AX trusted = {trusted}"));
-        if !trusted {
-            // Match Swift sequencing — wait for AX before prompting mic.
-            // User restarts after granting AX, then mic prompt fires here.
-            return;
-        }
+        // Don't gate on AX. TCC sequences overlapping prompts itself; the
+        // alternative ("wait for AX before mic") loses the mic dialog
+        // entirely whenever AXIsProcessTrusted false-negatives, which it
+        // does on every dev-run.sh because ad-hoc cdhash drift invalidates
+        // TCC's "trusted" record (see project_tcc_dev_pain memory).
 
         let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
             dbg_log("permissions: AVCaptureDevice class not loaded");

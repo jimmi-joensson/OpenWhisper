@@ -2,7 +2,7 @@
 //
 // The Rust side calls these via extern "C" from
 // core/src/recognizer/fluidaudio.rs. Mirror of
-// apps/macos/App/DictationService.swift's load + transcribe flow without
+// archive/macos/App/DictationService.swift's load + transcribe flow without
 // the AppKit / @MainActor wrappers — this is shell-agnostic.
 //
 // Memory contract:

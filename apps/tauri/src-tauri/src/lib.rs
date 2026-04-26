@@ -9,6 +9,7 @@ use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
+mod fullscreen;
 mod hotkey;
 mod injection;
 mod tray;

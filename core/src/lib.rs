@@ -42,68 +42,67 @@ mod ffi {
     }
 }
 
-fn process_transcript(text: &str) -> String {
-    transcript::process(text)
-}
-
-use dictation::DictationSnapshot;
-
-fn dictation_snapshot() -> DictationSnapshot {
-    dictation::dictation_snapshot()
-}
-
-fn dictation_request_toggle() -> u32 {
-    dictation::dictation_request_toggle()
-}
-
-fn dictation_request_cancel() -> bool {
-    dictation::dictation_request_cancel()
-}
-
-fn dictation_mark_loading_model() {
-    dictation::dictation_mark_loading_model()
-}
-
-fn dictation_mark_capture_started() {
-    dictation::dictation_mark_capture_started()
-}
-
-fn dictation_mark_capture_stopped(sample_count: u64) {
-    dictation::dictation_mark_capture_stopped(sample_count)
-}
-
-fn dictation_deliver_transcript(text: &str, confidence: f32) {
-    dictation::dictation_deliver_transcript(text, confidence)
-}
-
-fn dictation_deliver_error(message: &str) {
-    dictation::dictation_deliver_error(message)
-}
-
-fn hello_from_rust() -> String {
-    "Hello from openwhisper-core (Rust)".to_string()
-}
-
 pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-fn audio_start_capture() -> Result<(), String> {
-    audio::audio_start_capture()
+// Thin shims required because `swift_bridge::bridge` resolves names at the
+// parent module scope; gated to the SwiftUI shell so they don't appear as
+// dead code in pure-Rust (Tauri) builds.
+#[cfg(feature = "macos-shell")]
+mod swift_shims {
+    use super::{audio, dictation, transcript};
+    pub use dictation::DictationSnapshot;
+
+    pub fn process_transcript(text: &str) -> String {
+        transcript::process(text)
+    }
+
+    pub fn dictation_snapshot() -> DictationSnapshot {
+        dictation::dictation_snapshot()
+    }
+    pub fn dictation_request_toggle() -> u32 {
+        dictation::dictation_request_toggle()
+    }
+    pub fn dictation_request_cancel() -> bool {
+        dictation::dictation_request_cancel()
+    }
+    pub fn dictation_mark_loading_model() {
+        dictation::dictation_mark_loading_model()
+    }
+    pub fn dictation_mark_capture_started() {
+        dictation::dictation_mark_capture_started()
+    }
+    pub fn dictation_mark_capture_stopped(sample_count: u64) {
+        dictation::dictation_mark_capture_stopped(sample_count)
+    }
+    pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
+        dictation::dictation_deliver_transcript(text, confidence)
+    }
+    pub fn dictation_deliver_error(message: &str) {
+        dictation::dictation_deliver_error(message)
+    }
+
+    pub fn hello_from_rust() -> String {
+        "Hello from openwhisper-core (Rust)".to_string()
+    }
+
+    pub fn audio_start_capture() -> Result<(), String> {
+        audio::audio_start_capture()
+    }
+    pub fn audio_stop_capture() {
+        audio::audio_stop_capture()
+    }
+    pub fn audio_drain_samples() -> Vec<f32> {
+        audio::audio_drain_samples()
+    }
+    pub fn audio_is_capturing() -> bool {
+        audio::audio_is_capturing()
+    }
+    pub fn audio_current_level() -> f32 {
+        audio::audio_current_level()
+    }
 }
 
-fn audio_stop_capture() {
-    audio::audio_stop_capture()
-}
-
-fn audio_drain_samples() -> Vec<f32> {
-    audio::audio_drain_samples()
-}
-
-fn audio_is_capturing() -> bool {
-    audio::audio_is_capturing()
-}
-
-fn audio_current_level() -> f32 {
-    audio::audio_current_level()
-}
+#[cfg(feature = "macos-shell")]
+use swift_shims::*;

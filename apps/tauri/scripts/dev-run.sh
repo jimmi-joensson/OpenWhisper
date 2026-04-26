@@ -30,7 +30,7 @@ REPO_ROOT="$( cd "$TAURI_DIR/../.." && pwd )"
 # Dev overlay (tauri.dev.conf.json) renames the bundle to "OpenWhisper Dev
 # Tauri" with id "com.openwhisper.app.dev" so it's visually distinct from
 # the SwiftUI shipped app + its debug variant in the Accessibility list.
-DEV_CONFIG="../src-tauri/tauri.dev.conf.json"
+DEV_CONFIG="$TAURI_DIR/src-tauri/tauri.dev.conf.json"
 BUNDLE_ID="com.openwhisper.app.dev"
 APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev Tauri.app"
 

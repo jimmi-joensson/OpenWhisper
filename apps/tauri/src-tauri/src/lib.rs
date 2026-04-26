@@ -9,6 +9,7 @@ use openwhisper_core::recognizer;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager};
 
+mod hotkey;
 mod tray;
 
 pub(crate) const TICK_MS: u64 = 50;
@@ -205,11 +206,29 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+
+    #[cfg(target_os = "windows")]
+    let builder = {
+        use tauri_plugin_global_shortcut::ShortcutState;
+        builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|_app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        if let Err(e) = do_toggle() {
+                            eprintln!("global shortcut toggle failed: {e}");
+                        }
+                    }
+                })
+                .build(),
+        )
+    };
+
+    builder
         .setup(|app| {
             spawn_dictation_emitter(app.handle().clone());
             tray::install(app.handle())?;
+            hotkey::install(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -217,7 +236,8 @@ pub fn run() {
             dictation_toggle,
             dictation_cancel,
             set_pill_click_through,
-            position_pill_bottom_center
+            position_pill_bottom_center,
+            hotkey::hotkey_retry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

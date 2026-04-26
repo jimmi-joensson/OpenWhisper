@@ -54,6 +54,7 @@ async function installTauriShim(page: Page) {
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
         if (cmd === "hotkey_status_current") return null;
+        if (cmd === "permissions_status_current") return null;
         if (cmd === "hotkey_retry") {
           (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount =
             ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
@@ -125,6 +126,20 @@ export async function emitTick(page: Page, tick: MockTick): Promise<number> {
 export async function waitForHotkeyStatusListener(page: Page) {
   await page.waitForFunction(
     () => window.__owEmit("hotkey_status", { ok: true, error: "" }) > 0,
+    { timeout: 3000 },
+  );
+}
+
+// Wait for usePermissionsStatus's listener to attach. Probe by emitting an
+// authorized status — same harmless-default trick as the hotkey probe.
+export async function waitForPermissionsStatusListener(page: Page) {
+  await page.waitForFunction(
+    () =>
+      window.__owEmit("permissions_status", {
+        mic_ok: true,
+        mic_state: "authorized",
+        error: "",
+      }) > 0,
     { timeout: 3000 },
   );
 }

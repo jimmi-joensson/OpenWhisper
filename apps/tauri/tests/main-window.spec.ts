@@ -3,6 +3,7 @@ import {
   expect,
   test,
   waitForHotkeyStatusListener,
+  waitForPermissionsStatusListener,
   waitForTickListener,
 } from "./fixtures/tauri-shim";
 
@@ -153,6 +154,79 @@ test.describe("hotkey banner", () => {
       window.__owEmit("hotkey_status", { ok: true, error: "" }),
     );
     await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
+  });
+});
+
+test.describe("mic permission banner", () => {
+  test("hidden when authorized, visible when denied, recovers when authorized again", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPermissionsStatusListener(page);
+
+    // Default state: probe emitted ok=true. No banner.
+    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
+
+    // Denial surfaces the banner with the System Settings copy.
+    await page.evaluate(() =>
+      window.__owEmit("permissions_status", {
+        mic_ok: false,
+        mic_state: "denied",
+        error:
+          "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
+      }),
+    );
+    const banner = page.getByTestId("mic-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("Microphone access denied");
+    // Mic banner is informational — no Retry button (recovery is via
+    // System Settings, not an in-app button).
+    await expect(banner.getByRole("button")).toHaveCount(0);
+
+    // Recovery clears the banner (e.g., user grants access then reopens).
+    await page.evaluate(() =>
+      window.__owEmit("permissions_status", {
+        mic_ok: true,
+        mic_state: "authorized",
+        error: "",
+      }),
+    );
+    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
+  });
+});
+
+test.describe("recognizer-load banner", () => {
+  test("appears on PHASE_ERROR with recognizer load prefix; transcribe-prefix errors stay in debug only", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+
+    // Boot baseline: no banner.
+    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
+
+    // PHASE_ERROR with "recognizer load" prefix → banner.
+    await emitTick(page, {
+      phase: 5,
+      status: "idle",
+      can_toggle: true,
+      error_message:
+        "recognizer load failed: failed to read model file model.int8.onnx",
+    });
+    const banner = page.getByTestId("recognizer-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("recognizer load failed");
+
+    // Per-utterance transcribe failure (different prefix) → debug KV only,
+    // no banner. Confirms the prefix-based gating discriminates the two
+    // error sources correctly.
+    await emitTick(page, {
+      phase: 5,
+      status: "idle",
+      can_toggle: true,
+      error_message: "transcribe: empty audio buffer",
+    });
+    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
   });
 });
 

@@ -1,6 +1,6 @@
 [package]
 name = "openwhisper-tauri"
-version = "0.1.0"
+version = "0.3.0"
 description = "OpenWhisper cross-platform dictation shell (Tauri)"
 authors = ["Jimmi Joensson"]
 edition = "2021"

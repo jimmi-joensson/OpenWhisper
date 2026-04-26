@@ -1,11 +1,14 @@
 /*
- * Pill HUD — Phase 1 spike.
+ * Pill HUD — single 12-particle SVG morph across three states.
  *
- * Mirrors apps/macos/App/PillOverlay.swift:
- *  - 70x22 capsule, black 55% bg + thin material blur, 1px white 8% border.
- *  - Three states: idle dots, orange 12-bar meter, transcribing spinner+meter.
+ * Capsule geometry: 22px tall, radius 11, width animated 38↔70 by RAF
+ * (writes capsuleRef.current.style.width directly — no React state per frame).
+ * Particle positions / sizes / opacity / fill are mutated on the <rect> nodes
+ * inside the same RAF loop. No CSS transitions on those properties; they
+ * would fight the RAF.
  *
- * The window itself is transparent; this CSS draws the visible capsule.
+ * The window itself is transparent + click-through-toggleable; this CSS only
+ * draws the visible capsule.
  */
 
 html,
@@ -15,6 +18,10 @@ body,
   padding: 0;
   background: transparent;
   overflow: hidden;
+  /* Suppress WebKit's grey tap-highlight when the click-through window is
+   * receiving a click in idle state — otherwise the highlight flashes on
+   * the capsule + bleeds into the shadow region. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .pill-root {
@@ -24,15 +31,18 @@ body,
   align-items: center;
   justify-content: center;
   background: transparent;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
 }
 
 .pill-capsule {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
   height: 22px;
   padding: 0 8px;
-  border-radius: 9999px;
+  border-radius: 11px;
   background: rgba(0, 0, 0, 0.55);
   -webkit-backdrop-filter: blur(20px) saturate(140%);
   backdrop-filter: blur(20px) saturate(140%);
@@ -40,13 +50,25 @@ body,
     inset 0 0 0 1px rgba(255, 255, 255, 0.08),
     0 4px 14px rgba(0, 0, 0, 0.35);
   color: white;
-  /* Disable user-select; pill is a HUD, not text. */
   user-select: none;
   -webkit-user-select: none;
+  overflow: hidden;
+  /* Width animated by RAF — keep on the compositor. */
+  will-change: width;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+  /* Pointer cursor only visible while click-through is OFF (idle state) —
+   * during recording/transcribing the OS routes the cursor past the pill. */
+  cursor: pointer;
 }
 
-/* Material falls back to flat when the OS reports reduced transparency
-   (notably Windows RDP, where DWM blur is disabled). */
+.pill-capsule:focus,
+.pill-capsule:focus-visible,
+.pill-capsule:active {
+  outline: none;
+}
+
+/* Reduced transparency (notably Windows RDP, where DWM blur is disabled). */
 @media (prefers-reduced-transparency: reduce) {
   .pill-capsule {
     -webkit-backdrop-filter: none;
@@ -55,56 +77,10 @@ body,
   }
 }
 
-/* Idle: three muted dots. */
-.pill-idle-dots {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  height: 10px;
-  padding: 0 6px;
-}
-
-.pill-idle-dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.4);
-}
-
-/* Level meter: 12 vertical bars; scaleY drives the live amplitude. */
-.pill-meter {
-  display: flex;
-  align-items: center;
-  gap: 1.5px;
-  height: 10px;
-}
-
-.pill-meter-bar {
-  width: 2px;
-  height: 10px;
-  border-radius: 1px;
-  background: var(--primary, #e07000);
-  transform-origin: center;
-  transition: transform 50ms linear;
-}
-
-.pill-meter-bar.is-muted {
-  background: rgba(255, 255, 255, 0.55);
-}
-
-/* Spinner used during transcription. Tiny, subtle. */
-.pill-spinner {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 1.25px solid rgba(255, 255, 255, 0.25);
-  border-top-color: rgba(255, 255, 255, 0.9);
-  animation: pill-spin 0.7s linear infinite;
-}
-
-@keyframes pill-spin {
-  to {
-    transform: rotate(360deg);
-  }
+/* SVG holds 12 particles laid out within a fixed 54×12 canvas. flex-shrink:0
+ * lets it overflow when the capsule narrows; capsule's overflow:hidden +
+ * border-radius clip the spillover so dots vanish past the capsule edge. */
+.pill-svg {
+  overflow: visible;
+  flex-shrink: 0;
 }

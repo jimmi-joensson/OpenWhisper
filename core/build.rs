@@ -20,7 +20,13 @@ fn run_swift_bridge_codegen(crate_dir: &Path) {
     let repo_root = crate_dir
         .parent()
         .expect("core crate must live under the repo root");
-    let out_dir = repo_root.join("apps").join("macos").join("Generated");
+    // Codegen lives next to its only consumer — the archived SwiftUI
+    // shell at `archive/macos/`. The Tauri shell disables `macos-shell`
+    // via `default-features = false`, so this path only fires when
+    // someone explicitly builds core with default features (e.g.
+    // running `cargo test -p openwhisper-core` against the archived
+    // bridge). Output is gitignored.
+    let out_dir = repo_root.join("archive").join("macos").join("Generated");
 
     let bridges = vec!["src/lib.rs"];
     for path in &bridges {

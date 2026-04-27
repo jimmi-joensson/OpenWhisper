@@ -116,6 +116,15 @@ if [[ ! -d "$BUILT_APP_PATH" ]]; then
     exit 1
 fi
 
+# Strip hardened runtime that Tauri's signing step adds. Hardened runtime
+# + ad-hoc breaks CGEventTapCreate on Sequoia 15: tap returns nil even
+# with Accessibility granted, the app never auto-registers in Input
+# Monitoring, and the boot mic prompt (gated on hotkey-install success)
+# never fires. Re-sign with plain ad-hoc to keep sealed resources but
+# drop the runtime flag.
+echo "==> Re-signing $BUILT_APP_PATH without hardened runtime"
+codesign --force --deep --sign - "$BUILT_APP_PATH"
+
 # Install to /Applications so the launch path is stable + user-discoverable
 # (Spotlight, Dock launcher, etc). TCC still re-prompts each cycle because
 # ad-hoc cdhash drifts, but at least the path under

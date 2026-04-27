@@ -69,6 +69,7 @@ pub fn resolve_ep(encoder_path: &Path) -> Result<EpChoice, String> {
 
     // Live probe — ascend the priority list, keep the first success.
     let candidates = ["tensorrt", "cuda", "directml", "cpu"];
+    let mut probe_errs: Vec<String> = Vec::new();
     for label in candidates {
         let Some(choice) = ep_for_label(label) else {
             continue; // EP not compiled into this build, try next.
@@ -81,11 +82,31 @@ pub fn resolve_ep(encoder_path: &Path) -> Result<EpChoice, String> {
             }
             Err(e) => {
                 eprintln!("[recognizer/ort] EP={label} probe failed: {e}");
+                probe_errs.push(format!("{label}: {e}"));
             }
         }
     }
 
-    Err("no execution provider available (CPU should always succeed — investigate)".to_string())
+    // All probes failed. The probe error chain is the only signal we have
+    // — `eprintln!` lines above are invisible in installed Tauri builds, so
+    // the returned Err must carry enough to diagnose without re-running.
+    // Encoder size matters because a truncated/corrupt model is a common
+    // cause (the ~650 MB int8 archive survives reinstall via ~/.cache).
+    let enc_meta = match fs::metadata(encoder_path) {
+        Ok(m) => format!("{} bytes", m.len()),
+        Err(e) => format!("metadata error: {e}"),
+    };
+    Err(format!(
+        "no execution provider succeeded. Encoder: {} ({}). Compiled EPs: {}. Probe errors: {}",
+        encoder_path.display(),
+        enc_meta,
+        compiled_eps().join("+"),
+        if probe_errs.is_empty() {
+            "none attempted (no EPs compiled into this build)".to_string()
+        } else {
+            probe_errs.join(" | ")
+        },
+    ))
 }
 
 fn try_build_session(path: &Path, eps: &[ExecutionProviderDispatch]) -> Result<(), String> {

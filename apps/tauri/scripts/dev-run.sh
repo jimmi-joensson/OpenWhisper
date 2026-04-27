@@ -139,8 +139,27 @@ sleep 0.2
 rm -rf "$INSTALLED_APP_PATH"
 cp -R "$BUILT_APP_PATH" "$INSTALLED_APP_PATH"
 
-echo "==> open $INSTALLED_APP_PATH"
-open "$INSTALLED_APP_PATH"
+# `open` IPCs to LaunchServices, which spawns the app under its own
+# context — env vars set in this shell do not propagate. When verbose
+# mode is requested (OPENWHISPER_VERBOSE set by dev-run.cjs --verbose),
+# launch the bundle's main executable directly so it inherits our env,
+# and detach so this script can return. The log path is passed in via
+# OPENWHISPER_VERBOSE_LOG so it stays in sync with the Windows path
+# resolved in dev-run.cjs (defaults to .openwhisper-verbose.log next to
+# this script). Otherwise fall through to `open` so behavior matches the
+# pre-verbose flow exactly.
+if [[ -n "${OPENWHISPER_VERBOSE:-}" ]]; then
+    APP_BIN_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" \
+        "$INSTALLED_APP_PATH/Contents/Info.plist")
+    APP_BIN="$INSTALLED_APP_PATH/Contents/MacOS/$APP_BIN_NAME"
+    LOG_PATH="${OPENWHISPER_VERBOSE_LOG:-$TAURI_DIR/.openwhisper-verbose.log}"
+    echo "==> Launching $APP_BIN with OPENWHISPER_VERBOSE=1"
+    echo "    Verbose logs: $LOG_PATH (tail -f and grep '\\[ow\\.')"
+    "$APP_BIN" >>"$LOG_PATH" 2>&1 &
+else
+    echo "==> open $INSTALLED_APP_PATH"
+    open "$INSTALLED_APP_PATH"
+fi
 
 cat <<EOF
 

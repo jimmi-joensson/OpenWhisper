@@ -4,6 +4,7 @@ mod ffi_c;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
 pub mod transcript;
+pub mod verbose;
 
 #[cfg(feature = "macos-shell")]
 #[swift_bridge::bridge]

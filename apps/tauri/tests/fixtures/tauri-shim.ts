@@ -13,6 +13,8 @@ export interface MockTick {
   can_toggle?: boolean;
   is_recording?: boolean;
   level?: number;
+  download_bytes_done?: number;
+  download_bytes_total?: number;
 }
 
 export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
@@ -25,6 +27,8 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
   can_toggle: true,
   is_recording: false,
   level: 0,
+  download_bytes_done: 0,
+  download_bytes_total: 0,
 };
 
 declare global {
@@ -162,6 +166,8 @@ export async function waitForTickListener(page: Page) {
         can_toggle: true,
         is_recording: false,
         level: 0,
+        download_bytes_done: 0,
+        download_bytes_total: 0,
       });
       return ok > 0;
     },

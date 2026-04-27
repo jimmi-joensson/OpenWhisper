@@ -45,6 +45,8 @@ struct DictationTick {
     can_toggle: bool,
     is_recording: bool,
     level: f32,
+    download_bytes_done: u64,
+    download_bytes_total: u64,
 }
 
 fn phase_to_status(phase: u32) -> &'static str {
@@ -148,12 +150,25 @@ fn spawn_recognizer(samples: Vec<f32>) {
 // recognizer_ensure_loaded is idempotent, so a slow warmup overlapping a
 // fast first Record still yields the same correct result — spawn_recognizer
 // blocks on it.
+//
+// Phase ownership during warmup: we flip dictation phase to LOADING_MODEL
+// on entry so the UI surfaces the boot-time download (~487 MB on first
+// run). On success we hand control back to IDLE via dictation_mark_loaded
+// — that helper only flips IDLE if phase is still LOADING_MODEL, so a
+// user-driven recording start that overlaps with the warmup completion
+// isn't clobbered. On failure we route through deliver_error so the
+// recognizer banner picks it up.
 fn spawn_recognizer_warmup() {
     thread::Builder::new()
         .name("openwhisper-recognizer-warmup".into())
         .spawn(|| {
-            if let Err(e) = recognizer::recognizer_ensure_loaded() {
-                eprintln!("[warmup] recognizer load failed: {e}");
+            dictation::dictation_mark_loading_model();
+            match recognizer::recognizer_ensure_loaded() {
+                Ok(()) => dictation::dictation_mark_loaded(),
+                Err(e) => {
+                    eprintln!("[warmup] recognizer load failed: {e}");
+                    dictation::dictation_deliver_error(&format!("recognizer load: {e}"));
+                }
             }
         })
         .expect("spawn recognizer warmup");
@@ -186,6 +201,8 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                     can_toggle: snap.can_toggle(),
                     is_recording: snap.is_recording(),
                     level,
+                    download_bytes_done: snap.download_bytes_done(),
+                    download_bytes_total: snap.download_bytes_total(),
                 };
                 if app.emit("dictation_tick", payload).is_err() {
                     break;

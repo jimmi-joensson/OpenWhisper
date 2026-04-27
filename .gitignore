@@ -134,6 +134,9 @@ scripts/bench/results/
 core/swift/**/.build/
 core/swift/**/.swiftpm/
 
+# Claude Code project-local state (scheduled task locks, etc.)
+.claude/
+
 # Misc
 tmp/
 temp/

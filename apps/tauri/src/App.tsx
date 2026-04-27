@@ -121,6 +121,8 @@ function App() {
         errorMessage={dictation.errorMessage}
         canToggle={dictation.canToggle}
         isRecording={dictation.isRecording}
+        downloadBytesDone={dictation.downloadBytesDone}
+        downloadBytesTotal={dictation.downloadBytesTotal}
         platform={platform}
         onToggle={() => void dictation.toggle()}
         coreVersion={coreVersion}

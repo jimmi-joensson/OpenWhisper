@@ -42,6 +42,13 @@ struct State {
     sample_count: u64,
     record_start: Option<Instant>,
     error_message: String,
+    /// Bytes downloaded so far for the current model fetch. 0 when no
+    /// download is in progress. Reset to 0 on `mark_loaded` / error so
+    /// the UI doesn't keep a stale 100 % bar around after success.
+    download_bytes_done: u64,
+    /// Total bytes expected for the current model fetch (Content-Length).
+    /// 0 when unknown or no download in progress.
+    download_bytes_total: u64,
 }
 
 impl State {
@@ -54,6 +61,8 @@ impl State {
             sample_count: 0,
             record_start: None,
             error_message: String::new(),
+            download_bytes_done: 0,
+            download_bytes_total: 0,
         }
     }
 
@@ -78,6 +87,8 @@ pub struct DictationSnapshot {
     error_message: String,
     can_toggle: bool,
     is_recording: bool,
+    download_bytes_done: u64,
+    download_bytes_total: u64,
 }
 
 impl DictationSnapshot {
@@ -108,6 +119,12 @@ impl DictationSnapshot {
     pub fn is_recording(&self) -> bool {
         self.is_recording
     }
+    pub fn download_bytes_done(&self) -> u64 {
+        self.download_bytes_done
+    }
+    pub fn download_bytes_total(&self) -> u64 {
+        self.download_bytes_total
+    }
 }
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -132,6 +149,8 @@ pub fn dictation_snapshot() -> DictationSnapshot {
         error_message: s.error_message.clone(),
         can_toggle: s.can_toggle(),
         is_recording: s.phase == PHASE_RECORDING,
+        download_bytes_done: s.download_bytes_done,
+        download_bytes_total: s.download_bytes_total,
     })
 }
 
@@ -173,7 +192,68 @@ pub fn dictation_request_cancel() -> bool {
 pub fn dictation_mark_loading_model() {
     with_state(|s| {
         s.phase = PHASE_LOADING_MODEL;
-        s.status_message = "loading Parakeet model (first run ~500 MB)…".to_string();
+        // Neutral default — recognizer will overwrite to "downloading…"
+        // once it sees a missing cache (and the % updates flow in via
+        // `dictation_set_download_progress`), or to "loading model into
+        // memory…" once it reaches session build. Cached-model boots stay
+        // on this string for the brief window before session build kicks in.
+        s.status_message = "loading model…".to_string();
+    })
+}
+
+/// Bridge for the recognizer's download path. Callers may invoke this many
+/// times per second (one per chunk write), so it must stay cheap. `total = 0`
+/// means Content-Length wasn't reported — UI shows an indeterminate state.
+pub fn dictation_set_download_progress(done: u64, total: u64) {
+    set_progress_internal("downloading model", done, total);
+}
+
+/// Bridge for the recognizer's archive-extract path. Same shape as
+/// download progress (drives the same bar), different verb. `done` is
+/// bytes consumed from the compressed archive — gives a roughly linear
+/// fill since bzip2 decompression is CPU-bound and reads the input
+/// sequentially.
+pub fn dictation_set_extract_progress(done: u64, total: u64) {
+    set_progress_internal("extracting model", done, total);
+}
+
+fn set_progress_internal(verb: &str, done: u64, total: u64) {
+    with_state(|s| {
+        s.download_bytes_done = done;
+        s.download_bytes_total = total;
+        if total > 0 {
+            let pct = ((done as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+            let done_mb = done / 1_048_576;
+            let total_mb = total / 1_048_576;
+            s.status_message = format!("{verb}… {done_mb}/{total_mb} MB ({pct:.0}%)");
+        } else {
+            s.status_message = format!("{verb}…");
+        }
+    })
+}
+
+/// Recognizer is fully loaded (sessions built, ready to transcribe). Clears
+/// the download progress and returns the phase to IDLE — but only if it's
+/// still LOADING_MODEL, so a user-initiated transition (started recording
+/// while warmup was in flight) isn't clobbered.
+pub fn dictation_mark_loaded() {
+    with_state(|s| {
+        s.download_bytes_done = 0;
+        s.download_bytes_total = 0;
+        if s.phase == PHASE_LOADING_MODEL {
+            s.phase = PHASE_IDLE;
+            s.status_message = "idle — tap Record, speak, tap again".to_string();
+        }
+    })
+}
+
+/// Recognizer has finished downloading the archive and is now extracting /
+/// loading sessions. Status string only — no phase transition (still LOADING).
+pub fn dictation_mark_loading_session() {
+    with_state(|s| {
+        s.download_bytes_done = 0;
+        s.download_bytes_total = 0;
+        s.status_message = "loading model into memory…".to_string();
     })
 }
 
@@ -242,6 +322,8 @@ pub fn dictation_deliver_error(message: &str) {
         s.status_message = message.to_string();
         s.phase = PHASE_ERROR;
         s.record_start = None;
+        s.download_bytes_done = 0;
+        s.download_bytes_total = 0;
     })
 }
 

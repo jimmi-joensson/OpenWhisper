@@ -29,6 +29,8 @@ interface MainWindowShellProps {
   errorMessage?: string;
   canToggle?: boolean;
   isRecording?: boolean;
+  downloadBytesDone?: number;
+  downloadBytesTotal?: number;
   platform?: Platform;
   onToggle?: () => void;
   coreVersion?: string | null;
@@ -63,6 +65,8 @@ export function MainWindowShell({
   errorMessage = "",
   canToggle = true,
   isRecording = false,
+  downloadBytesDone = 0,
+  downloadBytesTotal = 0,
   platform = "macos",
   onToggle,
   coreVersion,
@@ -176,15 +180,22 @@ export function MainWindowShell({
         />
 
         <div style={{ marginTop: 12 }}>
-          <LevelMeter
-            bars={32}
-            levels={levels}
-            active={status}
-            height={36}
-            minHeight={4}
-            gap={2}
-            fill
-          />
+          {phase === PHASE_LOADING_MODEL ? (
+            <ModelLoadProgress
+              done={downloadBytesDone}
+              total={downloadBytesTotal}
+            />
+          ) : (
+            <LevelMeter
+              bars={32}
+              levels={levels}
+              active={status}
+              height={36}
+              minHeight={4}
+              gap={2}
+              fill
+            />
+          )}
         </div>
 
         <div style={{ marginTop: 14 }}>
@@ -227,6 +238,67 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       </CardHeader>
       <CardContent>{children}</CardContent>
     </Card>
+  );
+}
+
+// Visual complement to the `status:` KV row when phase=LOADING_MODEL. The
+// row already carries the human text ("downloading model… 234/487 MB (48%)"),
+// so this stays bar-only — determinate fill when Content-Length is known,
+// indeterminate stripe otherwise (or during post-download extract / session
+// load when bytes_total resets to 0).
+function ModelLoadProgress({
+  done,
+  total,
+}: {
+  done: number;
+  total: number;
+}) {
+  const determinate = total > 0;
+  const pct = determinate ? Math.min(100, (done / total) * 100) : 0;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        height: 36,
+        justifyContent: "center",
+      }}
+    >
+      <div
+        style={{
+          height: 6,
+          background: "color-mix(in oklch, var(--muted) 70%, transparent)",
+          borderRadius: 3,
+          overflow: "hidden",
+          position: "relative",
+        }}
+      >
+        {determinate ? (
+          <div
+            style={{
+              width: `${pct}%`,
+              height: "100%",
+              background: "var(--primary)",
+              transition: "width 120ms linear",
+            }}
+          />
+        ) : (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              width: "35%",
+              background:
+                "linear-gradient(90deg, transparent 0%, var(--primary) 50%, transparent 100%)",
+              animation: "ow-indeterminate 1.4s ease-in-out infinite",
+            }}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 

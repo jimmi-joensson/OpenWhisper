@@ -27,6 +27,7 @@ use ort::value::TensorRef;
 use super::ep_probe::{EpChoice, resolve_ep};
 use super::mel::{MelExtractor, N_MELS};
 use super::{Recognizer, TranscribeResult, download, ort_lib};
+use crate::dictation;
 
 /// `<blk>` index in `tokens.txt`, last entry. RNN-T blank.
 const BLANK_ID: i32 = 8192;
@@ -118,6 +119,11 @@ impl Recognizer for OrtParakeet {
         init_ort_runtime()?;
         let paths = download::ensure_model()?;
         self.tokens = load_tokens(&paths.tokens)?;
+        // Surface the session-build phase to the UI for both cached and
+        // post-download boots: ~2.5 s on Windows CPU, longer on cold cache.
+        // Without this the user would still see "loading model…" or the
+        // tail of "downloading 100%" while ORT actually grinds.
+        dictation::dictation_mark_loading_session();
 
         // Build all three sessions with the *same* EP list so a partial
         // fallback (e.g. encoder on DML + decoder on CPU) isn't accidental.

@@ -23,6 +23,8 @@ use std::thread;
 use std::time::Duration;
 
 use arboard::Clipboard;
+#[cfg(target_os = "windows")]
+use arboard::SetExtWindows;
 use openwhisper_core::dictation::Injector;
 use tauri::{AppHandle, Manager};
 
@@ -31,10 +33,14 @@ mod mac;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// Matches `TextInjector.swift`'s 200 ms restore delay. Shorter intervals
-/// occasionally clobber the paste — the target hasn't finished reading
-/// the pasteboard yet.
-const RESTORE_DELAY: Duration = Duration::from_millis(200);
+/// Wait before restoring the previous clipboard. Chromium/Electron hosts
+/// (Slack, Outlook, browsers) read multiple clipboard formats asynchronously
+/// after Ctrl+V — restoring too soon races their reads and the paste either
+/// stalls or retries, which is what GitHub issue #6 reports. SuperWhisper
+/// uses 3 s for the same reason; 2 s is a 10× margin over Chromium's
+/// observed read window without parking the transcript on the clipboard
+/// long enough to feel laggy if the user re-dictates.
+const RESTORE_DELAY: Duration = Duration::from_millis(2000);
 
 /// Tauri-side `Injector` impl. Registered with the core at boot via
 /// `dictation::set_injector`. Core calls `inject(text)` after a transcript
@@ -74,7 +80,7 @@ fn do_inject(app: AppHandle, text: &str) {
 
     let saved = clipboard.get_text().ok();
 
-    if let Err(e) = clipboard.set_text(text.to_string()) {
+    if let Err(e) = set_clipboard_text(&mut clipboard, text.to_string()) {
         eprintln!("inject: clipboard set failed: {e}");
         return;
     }
@@ -91,9 +97,25 @@ fn do_inject(app: AppHandle, text: &str) {
     thread::sleep(RESTORE_DELAY);
 
     if let Some(prev) = saved {
-        if let Err(e) = clipboard.set_text(prev) {
+        if let Err(e) = set_clipboard_text(&mut clipboard, prev) {
             eprintln!("inject: clipboard restore failed: {e}");
         }
+    }
+}
+
+/// Set clipboard text, opting out of Windows clipboard-history (Win+V),
+/// cloud-clipboard sync, and clipboard-monitor processing on Windows.
+/// Both the transcript and the restore go through this so neither shows
+/// up in clipboard managers — same approach SuperWhisper shipped in v2.10
+/// ("prevent pollution of clipboard managers") and Wispr Flow documents.
+fn set_clipboard_text(clipboard: &mut Clipboard, text: String) -> Result<(), arboard::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        clipboard.set().exclude_from_monitoring().text(text)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        clipboard.set_text(text)
     }
 }
 

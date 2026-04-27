@@ -44,31 +44,21 @@ open /Applications/OpenWhisper.app
 
 ## 3. Grant permissions
 
-OpenWhisper needs three permissions. Two are prompted automatically, one you must add manually.
+OpenWhisper needs two permissions. Both are prompted automatically — grant Accessibility first; the Microphone prompt only fires after the global hotkey installs successfully.
+
+### Accessibility (prompted)
+
+Needed for the Right Command hotkey and to paste transcribed text into the focused app.
+
+1. On first launch, OpenWhisper shows the macOS *"OpenWhisper would like to control this computer"* dialog. Click **Open System Settings**.
+2. In **Privacy & Security → Accessibility**, toggle **OpenWhisper** on.
+3. Click **Restart** in the OpenWhisper banner (or quit + relaunch from `/Applications`). macOS only sees the new grant on a fresh process.
 
 ### Microphone (prompted)
 
-On first recording attempt, macOS asks for mic access. Click **Allow**.
+After Accessibility is granted and the app has restarted, macOS asks for mic access automatically. Click **Allow**.
 
-If missed: **System Settings → Privacy & Security → Microphone** → toggle OpenWhisper on.
-
-### Accessibility (manual)
-
-Needed to paste transcribed text into the focused app.
-
-1. **System Settings → Privacy & Security → Accessibility**.
-2. Click `+`, navigate to `/Applications/OpenWhisper.app`, add it.
-3. Toggle it on.
-
-### Input Monitoring (manual)
-
-Needed to detect the global dictation hotkey (default: Right Command).
-
-1. **System Settings → Privacy & Security → Input Monitoring**.
-2. Click `+`, add `/Applications/OpenWhisper.app`.
-3. Toggle it on.
-
-macOS may ask you to relaunch OpenWhisper after granting these — do it.
+If missed: **System Settings → Privacy & Security → Microphone** → toggle OpenWhisper on, then relaunch.
 
 ## 4. First use
 
@@ -89,9 +79,9 @@ log stream --predicate 'subsystem == "com.openwhisper.OpenWhisper"' --level debu
 
 ## Troubleshooting
 
-**Hotkey doesn't do anything.** Input Monitoring not granted, or OpenWhisper wasn't relaunched after granting it. Check System Settings → Privacy & Security → Input Monitoring; relaunch app.
+**Hotkey doesn't do anything, or text doesn't paste.** Accessibility not granted, or OpenWhisper wasn't relaunched after the grant. Check System Settings → Privacy & Security → Accessibility, toggle OpenWhisper on, then quit + relaunch.
 
-**Text doesn't paste.** Accessibility not granted. Same fix path.
+**No mic prompt fires after granting Accessibility.** The mic prompt is gated on hotkey-install success — if Accessibility shows toggled on but the hotkey still doesn't work, quit OpenWhisper, then `tccutil reset Accessibility com.openwhisper.app` in Terminal and relaunch to start the prompt cycle fresh.
 
 **"App is damaged and can't be opened".** The DMG lost its signature metadata in transit (e.g. re-zipped by email/Slack). Re-download from Releases, or run `xattr -dr com.apple.quarantine /Applications/OpenWhisper.app`.
 

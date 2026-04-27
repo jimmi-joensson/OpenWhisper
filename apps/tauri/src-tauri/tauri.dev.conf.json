@@ -5,5 +5,34 @@
   "build": {
     "frontendDist": "http://localhost:1420",
     "beforeBuildCommand": ""
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenWhisper Dev",
+        "width": 720,
+        "height": 820,
+        "minWidth": 480,
+        "minHeight": 600
+      },
+      {
+        "label": "pill",
+        "url": "index.html",
+        "width": 130,
+        "height": 82,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": false,
+        "titleBarStyle": "Transparent"
+      }
+    ]
   }
 }

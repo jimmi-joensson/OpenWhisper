@@ -12,6 +12,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
 
 /// VK_V from the Windows virtual-key set. Not exposed by the windows crate's
 /// VIRTUAL_KEY constants (only the named keys are), so spell it out.
@@ -31,6 +32,30 @@ pub fn synthesize_paste() {
             "inject: SendInput Ctrl+V sent {sent}/{} (expected all 4)",
             inputs.len()
         );
+    }
+}
+
+/// True when the foreground window is a Chromium/Electron host. Detected
+/// by class name — Electron + Chrome/Edge/Brave/Opera all use
+/// `Chrome_WidgetWin_1` (occasionally `_0`). Used by injection/mod.rs to
+/// gate the long post-paste delay: only Chromium reads clipboard formats
+/// asynchronously after Ctrl+V (the bug GitHub issue #6 reports), so
+/// native Win32 controls (Notepad, cmd, Windows Terminal, WinForms) and
+/// non-Chromium browsers (Firefox = `MozillaWindowClass`) get the short
+/// 200 ms restore window instead of paying the 2 s margin.
+pub fn foreground_is_chromium() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let mut buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, &mut buf);
+        if len <= 0 {
+            return false;
+        }
+        let class = String::from_utf16_lossy(&buf[..len as usize]);
+        class.starts_with("Chrome_WidgetWin")
     }
 }
 

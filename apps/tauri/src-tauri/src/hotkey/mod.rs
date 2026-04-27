@@ -2,13 +2,15 @@
 //!
 //! Per-platform because activation gestures differ deliberately:
 //! - **Mac**: Right Command tap-not-hold (Right Cmd held as a chord modifier
-//!   does *not* fire), via a `core-graphics` CGEventTap. Plugin can't do it.
-//! - **Windows**: `Ctrl+Space` chord via `tauri-plugin-global-shortcut`.
+//!   does *not* fire), via a `core-graphics` CGEventTap.
+//! - **Windows**: `Ctrl+Space` via a `WH_KEYBOARD_LL` hook (issue #7 — the
+//!   higher-level `RegisterHotKey` approach bleeds the chord into Electron
+//!   apps that install their own hooks ahead of us in the chain).
 //!
 //! Escape-to-cancel rides on the same OS-level keyboard surface in both
-//! cases. Core's `dictation_request_cancel` is phase-gated, so the hook
-//! never has to know whether we're recording — fire on every Escape, core
-//! ignores when irrelevant.
+//! cases. Hooks consume Escape only while `dictation::is_recording()` is
+//! true so the focused app still receives Escape outside of an active
+//! recording.
 //!
 //! Status surface: `hotkey_status` Tauri event (see [`HotkeyStatus`]) and
 //! the `hotkey_retry` command. UI listens to the event and shows the

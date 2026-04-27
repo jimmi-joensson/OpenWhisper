@@ -16,6 +16,7 @@
 //! Windows), it'll live behind a trait that drains audio internally and
 //! calls `deliver_transcript` without round-tripping through the shell.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -129,6 +130,21 @@ impl DictationSnapshot {
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
+/// Lock-free mirror of `phase == PHASE_RECORDING`. OS-level hot paths
+/// (Windows `WH_KEYBOARD_LL` callback with a 300 ms LowLevelHooksTimeout
+/// budget; macOS `CGEventTap` callback with a ~1 s budget) read this on
+/// every key event to decide whether to swallow Escape — taking the
+/// dictation Mutex there is allowed but unnecessary, and a stuck lock
+/// would silently unload the Windows hook. Updated by the same code paths
+/// that flip `State::phase`.
+static IS_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Read-only accessor for the recording mirror. Safe to call from any
+/// thread, including OS-level keyboard hooks.
+pub fn is_recording() -> bool {
+    IS_RECORDING.load(Ordering::Relaxed)
+}
+
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mutex = STATE.get_or_init(|| Mutex::new(State::new()));
     let mut guard = mutex.lock().expect("dictation state poisoned");
@@ -175,7 +191,7 @@ pub fn dictation_request_toggle() -> u32 {
 }
 
 pub fn dictation_request_cancel() -> bool {
-    with_state(|s| {
+    let cancelled = with_state(|s| {
         if s.phase != PHASE_RECORDING {
             return false;
         }
@@ -186,10 +202,15 @@ pub fn dictation_request_cancel() -> bool {
         s.status_message = "cancelled".to_string();
         s.phase = PHASE_IDLE;
         true
-    })
+    });
+    if cancelled {
+        IS_RECORDING.store(false, Ordering::Relaxed);
+    }
+    cancelled
 }
 
 pub fn dictation_mark_loading_model() {
+    IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
         s.phase = PHASE_LOADING_MODEL;
         // Neutral default — recognizer will overwrite to "downloading…"
@@ -262,7 +283,8 @@ pub fn dictation_mark_capture_started() {
         s.phase = PHASE_RECORDING;
         s.status_message = "recording — tap again to stop".to_string();
         s.record_start = Some(Instant::now());
-    })
+    });
+    IS_RECORDING.store(true, Ordering::Relaxed);
 }
 
 /// Optimistic phase flip the shell calls the instant the stop hotkey
@@ -274,6 +296,7 @@ pub fn dictation_mark_capture_started() {
 /// case (mic produced nothing → PHASE_DONE) without re-touching phase
 /// in the populated case.
 pub fn dictation_mark_transcribing_pending() {
+    IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
         s.phase = PHASE_TRANSCRIBING;
         s.status_message = "transcribing…".to_string();
@@ -281,6 +304,7 @@ pub fn dictation_mark_transcribing_pending() {
 }
 
 pub fn dictation_mark_capture_stopped(sample_count: u64) {
+    IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
         s.sample_count = sample_count;
         if sample_count == 0 {
@@ -295,6 +319,7 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
 }
 
 pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
+    IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
         s.transcript = text.to_string();
         s.confidence = confidence;
@@ -332,6 +357,7 @@ pub fn set_injector(injector: Box<dyn Injector>) {
 }
 
 pub fn dictation_deliver_error(message: &str) {
+    IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
         s.error_message = message.to_string();
         s.status_message = message.to_string();
@@ -356,6 +382,7 @@ mod tests {
     fn start() -> MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         with_state(|s| *s = State::new());
+        IS_RECORDING.store(false, Ordering::Relaxed);
         guard
     }
 
@@ -402,6 +429,33 @@ mod tests {
         dictation_mark_capture_started();
         assert!(dictation_request_cancel()); // recording → true
         assert_eq!(dictation_snapshot().phase(), PHASE_IDLE);
+    }
+
+    #[test]
+    fn is_recording_mirror_tracks_phase() {
+        let _lock = start();
+        assert!(!is_recording());
+        let _ = dictation_request_toggle();
+        // Toggle alone doesn't flip the mirror — capture_started does.
+        assert!(!is_recording());
+        dictation_mark_capture_started();
+        assert!(is_recording());
+        let _ = dictation_request_cancel();
+        assert!(!is_recording());
+
+        // Stop path: start → transcribing_pending clears mirror.
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        assert!(is_recording());
+        dictation_mark_transcribing_pending();
+        assert!(!is_recording());
+
+        // Error path also clears.
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        assert!(is_recording());
+        dictation_deliver_error("boom");
+        assert!(!is_recording());
     }
 
     #[test]

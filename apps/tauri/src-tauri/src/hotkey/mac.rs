@@ -6,9 +6,16 @@
 //! and any keyDown event with Right Cmd held marks the press as a chord,
 //! suppressing the toggle on release.
 //!
-//! Escape is observed on the same tap and fires `do_cancel`. Core's phase
-//! machine ignores cancel when not recording, so the hook never has to
-//! gate.
+//! Event consumption (issue #7):
+//! - Right Command `FlagsChanged` events are always swallowed so the
+//!   focused app never sees a bare Right-Cmd press/release. Cmd+X chords
+//!   still work because the modifier bit travels on the chorded KeyDown
+//!   itself; the chord-detection branch then does NOT fire `do_toggle`.
+//! - Escape `KeyDown` is swallowed only while recording (gated on the
+//!   lock-free `dictation::is_recording` mirror). Outside a recording
+//!   Escape passes through normally. The matching `KeyUp` is also
+//!   swallowed when we swallowed the KeyDown so we never deliver an
+//!   orphan KeyUp to the focused app.
 //!
 //! Threading: tap installs on a dedicated thread w/ `CFRunLoopRun`. Main
 //! thread can stop it via `CFRunLoopStop` (thread-safe per Apple). A 5 s
@@ -64,6 +71,7 @@ fn ax_trust_check() -> bool {
 }
 
 use crate::{do_cancel, do_toggle};
+use openwhisper_core::dictation;
 
 // Bit set inside CGEventFlags when Right Command is held. See
 // `IOKit/hidsystem/ev_keymap.h` `NX_DEVICERCMDKEYMASK`. Same magic as the
@@ -83,6 +91,10 @@ extern "C" {
 struct TapMutState {
     right_command_down: AtomicBool,
     other_pressed_while_held: AtomicBool,
+    /// Set when we swallow an Escape KeyDown so the matching KeyUp is
+    /// also swallowed. Otherwise the focused app would see an orphan
+    /// KeyUp and could leave shift/escape state dangling.
+    escape_swallowed_down: AtomicBool,
 }
 
 struct TapHandles {
@@ -207,9 +219,11 @@ fn run_tap_thread(
             return CallbackResult::Keep;
         }
 
-        handle_event(&state_cb, etype, event);
-        // Always pass through — observe, never swallow.
-        CallbackResult::Keep
+        if handle_event(&state_cb, etype, event) {
+            CallbackResult::Drop
+        } else {
+            CallbackResult::Keep
+        }
     };
 
     let tap = match unsafe {
@@ -217,7 +231,11 @@ fn run_tap_thread(
             CGEventTapLocation::Session,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::Default,
-            vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
+            vec![
+                CGEventType::FlagsChanged,
+                CGEventType::KeyDown,
+                CGEventType::KeyUp,
+            ],
             callback,
         )
     } {
@@ -275,7 +293,9 @@ fn run_tap_thread(
     port_ptr.store(std::ptr::null_mut(), Ordering::Relaxed);
 }
 
-fn handle_event(state: &TapMutState, etype: CGEventType, event: &CGEvent) {
+/// Returns `true` if the event should be dropped (swallowed) so it does
+/// not propagate to the focused app, `false` to pass through.
+fn handle_event(state: &TapMutState, etype: CGEventType, event: &CGEvent) -> bool {
     let flags = event.get_flags().bits();
     let right_down = (flags & RIGHT_COMMAND_MASK) != 0;
     let key_code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
@@ -286,6 +306,10 @@ fn handle_event(state: &TapMutState, etype: CGEventType, event: &CGEvent) {
             if right_down && !was_down {
                 state.right_command_down.store(true, Ordering::Relaxed);
                 state.other_pressed_while_held.store(false, Ordering::Relaxed);
+                // Right Cmd transition: only swallow if it's a Right-Cmd
+                // edge — other modifiers (Shift, Option, …) hit
+                // FlagsChanged too and must pass through unchanged.
+                is_right_cmd_edge(key_code)
             } else if !right_down && was_down {
                 state.right_command_down.store(false, Ordering::Relaxed);
                 let chord = state.other_pressed_while_held.swap(false, Ordering::Relaxed);
@@ -297,18 +321,48 @@ fn handle_event(state: &TapMutState, etype: CGEventType, event: &CGEvent) {
                         eprintln!("Right Cmd toggle failed: {e}");
                     }
                 }
+                is_right_cmd_edge(key_code)
+            } else {
+                false
             }
         }
         CGEventType::KeyDown => {
             if state.right_command_down.load(Ordering::Relaxed) {
                 state.other_pressed_while_held.store(true, Ordering::Relaxed);
             }
-            if key_code == KV_ESCAPE {
-                let _ = do_cancel();
+            if key_code == KV_ESCAPE && dictation::is_recording() {
+                // Off-thread: do_cancel takes the audio mutex briefly.
+                // Tap callback budget is ~1 s but we keep it tight.
+                std::thread::spawn(|| {
+                    let _ = do_cancel();
+                });
+                state.escape_swallowed_down.store(true, Ordering::Relaxed);
+                true
+            } else {
+                false
             }
         }
-        _ => {}
+        CGEventType::KeyUp => {
+            if key_code == KV_ESCAPE
+                && state.escape_swallowed_down.swap(false, Ordering::Relaxed)
+            {
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
     }
+}
+
+/// True when the FlagsChanged event's keycode is the Right Command key
+/// itself (kVK_RightCommand = 0x36). Other modifiers fire FlagsChanged
+/// with a different keycode while Right Cmd happens to be held; those
+/// must pass through, otherwise we'd silently swallow Shift / Option /
+/// Control transitions for the focused app.
+fn is_right_cmd_edge(key_code: i64) -> bool {
+    const KV_RIGHT_COMMAND: i64 = 0x36;
+    key_code == KV_RIGHT_COMMAND
 }
 
 fn run_watchdog(stop: Arc<AtomicBool>, port_ptr: Arc<AtomicPtr<core::ffi::c_void>>) {

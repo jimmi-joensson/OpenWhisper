@@ -329,22 +329,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init());
 
-    #[cfg(target_os = "windows")]
-    let builder = {
-        use tauri_plugin_global_shortcut::ShortcutState;
-        builder.plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|_app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if let Err(e) = do_toggle() {
-                            eprintln!("global shortcut toggle failed: {e}");
-                        }
-                    }
-                })
-                .build(),
-        )
-    };
-
     builder
         .setup(|app| {
             // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /

@@ -99,9 +99,13 @@ Build:
 
 ```sh
 cd apps/tauri
-PATH="$HOME/.cargo/bin:$PATH" pnpm tauri build
+PATH="$HOME/.cargo/bin:$PATH" pnpm release:mac
 # → target/release/bundle/dmg/OpenWhisper_0.3.0_aarch64.dmg
 # → target/release/bundle/macos/OpenWhisper.app
+#
+# `release:mac` runs `tauri build` then re-signs without hardened runtime.
+# Hardened runtime + ad-hoc breaks CGEventTapCreate on Sequoia 15 — see
+# scripts/sign-mac.cjs header.
 ```
 
 Sanity checks:

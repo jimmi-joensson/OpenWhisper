@@ -7,6 +7,7 @@ use openwhisper_core::dictation::{
 };
 use openwhisper_core::recognizer;
 use openwhisper_core::transcript;
+use openwhisper_core::verbose_log;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 
@@ -87,13 +88,15 @@ pub(crate) fn do_toggle() -> Result<(), String> {
             dictation::dictation_mark_capture_started();
         }
         TOGGLE_STOP_RECORDING => {
+            // Stop capture is cheap (cpal stream teardown). The expensive
+            // bit — sinc resampling the buffer to 16 kHz — used to run
+            // here on the hotkey thread, blocking the phase transition
+            // and freezing the UI on "recording" for ~1–2 s on Windows.
+            // Now we flip phase optimistically and let the worker thread
+            // drain + resample as the first step of transcription.
             audio::audio_stop_capture();
-            let samples = audio::audio_drain_samples();
-            let count = samples.len() as u64;
-            dictation::dictation_mark_capture_stopped(count);
-            if count > 0 {
-                spawn_recognizer(samples);
-            }
+            dictation::dictation_mark_transcribing_pending();
+            spawn_stop_pipeline();
         }
         _ => {}
     }
@@ -117,30 +120,56 @@ fn dictation_cancel() -> bool {
     do_cancel()
 }
 
-// Decode samples on a worker thread (recognizer call blocks until done).
+// Drain the captured buffer (downmix + sinc resample to 16 kHz) and run
+// the recognizer, both on a worker thread. The hotkey thread has already
+// flipped phase to TRANSCRIBING via dictation_mark_transcribing_pending,
+// so the UI redraws *before* this work starts.
+//
 // Mac path = FluidAudio + ANE; Win path = sherpa-onnx + CPU. See
 // core/src/recognizer/mod.rs for the OS-conditional impl.
-fn spawn_recognizer(samples: Vec<f32>) {
+fn spawn_stop_pipeline() {
     thread::Builder::new()
-        .name("openwhisper-recognizer-decode".into())
+        .name("openwhisper-stop-pipeline".into())
         .spawn(move || {
+            let t_drain = std::time::Instant::now();
+            let samples = audio::audio_drain_samples();
+            let count = samples.len() as u64;
+            let drain_ms = t_drain.elapsed().as_millis();
+            // Empty mic → mark_capture_stopped flips phase back to DONE
+            // with "no audio captured". Populated → updates sample_count
+            // and reaffirms TRANSCRIBING (no-op vs the optimistic flip).
+            dictation::dictation_mark_capture_stopped(count);
+            if count == 0 {
+                verbose_log!("[ow.dictation] stop empty drain_ms={drain_ms}");
+                return;
+            }
             // Defensive: recognizer_transcribe requires the engine to be
             // initialized. Loader was kicked off at recording start, but
             // a slow first-load might still be in flight — re-call
             // ensure_loaded so we block until it's ready.
+            let t_load = std::time::Instant::now();
             if let Err(e) = recognizer::recognizer_ensure_loaded() {
                 dictation::dictation_deliver_error(&format!("recognizer load: {e}"));
                 return;
             }
+            let load_ms = t_load.elapsed().as_millis();
+            let t_tx = std::time::Instant::now();
             match recognizer::recognizer_transcribe(&samples) {
                 Ok(res) => {
+                    let transcribe_ms = t_tx.elapsed().as_millis();
                     let cleaned = transcript::process(&res.text);
+                    verbose_log!(
+                        "[ow.dictation] stop drain_ms={drain_ms} ensure_loaded_ms={load_ms} \
+                         transcribe_ms={transcribe_ms} samples={count} chars={} confidence={:.2}",
+                        cleaned.len(),
+                        res.confidence
+                    );
                     dictation::dictation_deliver_transcript(&cleaned, res.confidence);
                 }
                 Err(e) => dictation::dictation_deliver_error(&format!("transcribe: {e}")),
             }
         })
-        .expect("spawn recognizer decoder");
+        .expect("spawn stop pipeline");
 }
 
 // Cold-loading the recognizer takes ~2.5s on Windows (sherpa-onnx + Parakeet

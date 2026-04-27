@@ -218,8 +218,8 @@ fn drain_and_resample(capture: &Capture) -> Vec<f32> {
     };
 
     let dt = t0.elapsed();
-    eprintln!(
-        "[openwhisper-core] drained raw={} mono_out={} native={}Hz took={:.1}ms",
+    crate::verbose_log!(
+        "[ow.audio] drain raw={} mono_out={} native={}Hz ms={:.1}",
         raw.len(),
         out.len(),
         capture.native_rate,

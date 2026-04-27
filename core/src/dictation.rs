@@ -265,6 +265,21 @@ pub fn dictation_mark_capture_started() {
     })
 }
 
+/// Optimistic phase flip the shell calls the instant the stop hotkey
+/// fires — *before* draining/resampling the audio buffer. Without this,
+/// the heavy sinc resample (~1–2 s for a 30 s clip on Windows) runs on
+/// the hotkey thread and the UI sits frozen on "recording" until it
+/// finishes. Pairs with a follow-up [`dictation_mark_capture_stopped`]
+/// call once the worker has the sample count, which corrects the empty
+/// case (mic produced nothing → PHASE_DONE) without re-touching phase
+/// in the populated case.
+pub fn dictation_mark_transcribing_pending() {
+    with_state(|s| {
+        s.phase = PHASE_TRANSCRIBING;
+        s.status_message = "transcribing…".to_string();
+    })
+}
+
 pub fn dictation_mark_capture_stopped(sample_count: u64) {
     with_state(|s| {
         s.sample_count = sample_count;

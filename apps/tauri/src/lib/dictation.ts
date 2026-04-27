@@ -11,6 +11,8 @@ export interface DictationTick {
   can_toggle: boolean;
   is_recording: boolean;
   level: number;
+  download_bytes_done: number;
+  download_bytes_total: number;
 }
 
 export const DICTATION_TICK_EVENT = "dictation_tick";

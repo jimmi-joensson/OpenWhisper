@@ -23,6 +23,8 @@ export interface DictationView {
   errorMessage: string;
   canToggle: boolean;
   isRecording: boolean;
+  downloadBytesDone: number;
+  downloadBytesTotal: number;
   toggle: () => Promise<void>;
   cancel: () => Promise<void>;
 }
@@ -40,6 +42,8 @@ const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
   errorMessage: "",
   canToggle: true,
   isRecording: false,
+  downloadBytesDone: 0,
+  downloadBytesTotal: 0,
 };
 
 export function useDictation(): DictationView {
@@ -72,6 +76,8 @@ export function useDictation(): DictationView {
           errorMessage: t.error_message,
           canToggle: t.can_toggle,
           isRecording: t.is_recording,
+          downloadBytesDone: t.download_bytes_done,
+          downloadBytesTotal: t.download_bytes_total,
         };
       });
     });

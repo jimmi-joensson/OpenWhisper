@@ -11,6 +11,7 @@ use openwhisper_core::verbose_log;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 
+mod focus;
 mod fullscreen;
 mod hotkey;
 mod injection;
@@ -396,6 +397,10 @@ pub fn run() {
                 injection::TauriInjector::new(app.handle().clone()),
             ));
             tray::install(app.handle())?;
+            // AX-grant watcher: polls `AXIsProcessTrusted()` and brings
+            // main forward when the user finishes granting AX in System
+            // Settings. No-op on non-Mac platforms.
+            focus::install_ax_watcher(app.handle().clone());
             // Load saved hotkeys before install so the backends pick up the
             // user's bindings instead of the platform defaults. First-run
             // returns the default and persists nothing — the file is only

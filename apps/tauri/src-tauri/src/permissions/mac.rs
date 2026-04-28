@@ -94,6 +94,11 @@ pub fn request_microphone(app: &AppHandle) {
             return;
         }
 
+        // Status is NotDetermined → the prompt is about to fire. Bring
+        // main forward so the user sees OW's chrome behind the system
+        // mic dialog.
+        crate::focus::bring_main_to_front(app);
+
         let app_for_block = app.clone();
         let block = RcBlock::new(move |_granted: Bool| {
             // Re-probe after the user's choice — `granted` is the bool the

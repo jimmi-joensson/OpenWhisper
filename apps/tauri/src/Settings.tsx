@@ -9,7 +9,19 @@ import {
   type HotkeySettings,
   type HotkeyTarget,
 } from "./lib/use-global-hotkey";
+import { LevelMeter } from "./components/level-meter";
+import { useDictation } from "./lib/use-dictation";
 import "./Settings.css";
+
+// Live preview meter geometry — same 32-bar count and bar height as the
+// main-window meter card so the visual reads identically across surfaces.
+const PREVIEW_BAR_COUNT = 32;
+// 20 ticks × 50 ms = 1 s rolling window. The KV "peak" row reports the
+// loudest sample seen in that window, smoothing single-frame transients
+// that would otherwise make the readout flicker.
+const PEAK_WINDOW_TICKS = 20;
+const PREVIEW_FLOOR_DB = -55;
+const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 
 // Sidebar items mirror the design (project_recognizer_tauri / screens.jsx
 // SettingsSidebarLayout). Order matters — General is the landing pane.
@@ -85,7 +97,7 @@ export function SettingsShell() {
         aria-labelledby={active}
       >
         {active === "general" && <PaneStub title="General" />}
-        {active === "audio" && <PaneStub title="Audio" />}
+        {active === "audio" && <AudioPane />}
         {active === "models" && <PaneStub title="Models" />}
         {active === "shortcuts" && <ShortcutsPane />}
       </div>
@@ -98,6 +110,267 @@ function PaneStub({ title }: { title: string }) {
     <div className="ow-settings__pane-stub">
       <h2>{title}</h2>
       <p>Coming soon.</p>
+    </div>
+  );
+}
+
+interface AudioDevice {
+  name: string;
+  is_default: boolean;
+}
+
+// Audio pane — device picker + opt-in test meter (TASK-53).
+//
+// Lifecycle: the meter does NOT start automatically — the user clicks
+// "Test microphone" to open a meter-only stream in core
+// (`preview=true` in `core::audio::begin_capture`, which suppresses
+// sample buffering). Clicking again stops it. Unmounting always stops
+// any in-flight test, even if the user navigated away mid-test.
+//
+// Why opt-in: the auto-start version meant the app was always listening
+// while the Audio pane was open, which surprised users. The button gives
+// an explicit on/off so people don't feel tracked.
+//
+// Mutual exclusion with recording is enforced on the Rust side: starting
+// a recording auto-stops the test stream, and `audio_preview_start`
+// refuses if a recording is already in flight (AC #3 in task-53).
+function AudioPane() {
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  // Empty string maps to the "System default" option in the <select> AND to
+  // `None` in core's selector (host default at begin_capture time).
+  const [selected, setSelected] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const dictation = useDictation();
+
+  // Rolling 32-bar buffer, fed from `dictation.level` at the 20 Hz tick
+  // emit cadence. Matching the main-window meter geometry so users build a
+  // single mental model for "what the meter looks like when it's working".
+  const [levels, setLevels] = useState<number[]>(() =>
+    new Array(PREVIEW_BAR_COUNT).fill(0),
+  );
+  // Rolling 1 s peak — written through a ref so we don't re-render purely
+  // because of bookkeeping. The displayed value lives in state and only
+  // updates when the rounded dB readout actually changes.
+  const peakWindowRef = useRef<number[]>([]);
+  const [peakDb, setPeakDb] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [list, current] = await Promise.all([
+          invoke<AudioDevice[] | null>("audio_list_devices"),
+          invoke<string | null>("audio_get_device"),
+        ]);
+        if (!alive) return;
+        setDevices(list ?? []);
+        setSelected(current ?? "");
+      } catch (e) {
+        if (alive) setError(String(e));
+      }
+    })();
+    return () => {
+      alive = false;
+      // Always tear down the preview stream on unmount, even if the user
+      // navigated away mid-test. audio_preview_stop is a no-op when
+      // nothing is running.
+      void invoke("audio_preview_stop").catch(() => {});
+    };
+  }, []);
+
+  // Slide the rolling buffers on every dictation tick. The dependency is
+  // `dictation.levels` (a fresh array reference each tick), NOT
+  // `dictation.level` — when the level stays at the same primitive value
+  // (e.g. a virtual mic that produces zero callbacks, leaving level
+  // pinned at 0 forever), useEffect would skip its rerun and the bar
+  // buffer would freeze on the last sampled values. Using the array
+  // reference guarantees the effect fires on every emit, draining the
+  // bars to baseline whenever new audio stops arriving.
+  useEffect(() => {
+    const lvl = testing ? dictation.level : 0;
+    setLevels((prev) => {
+      const next = prev.slice(1);
+      next.push(lvl);
+      return next;
+    });
+    if (!testing) return;
+    const w = peakWindowRef.current;
+    w.push(lvl);
+    if (w.length > PEAK_WINDOW_TICKS) w.shift();
+    let max = 0;
+    for (const v of w) if (v > max) max = v;
+    if (max <= 0) {
+      setPeakDb((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const db = 20 * Math.log10(Math.max(max, 1e-6));
+    // Round to one decimal so the readout doesn't churn on every frame.
+    const rounded = Math.round(db * 10) / 10;
+    setPeakDb((prev) => (prev === rounded ? prev : rounded));
+  }, [dictation.levels, dictation.level, testing]);
+
+  const startTest = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      await invoke("audio_preview_start");
+      peakWindowRef.current = [];
+      setPeakDb(null);
+      setTesting(true);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const stopTest = useCallback(async () => {
+    setBusy(true);
+    try {
+      await invoke("audio_preview_stop");
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setTesting(false);
+      setPeakDb(null);
+      setBusy(false);
+    }
+  }, []);
+
+  // Switching device: persist immediately. If we're currently testing,
+  // bounce the stream so the meter jumps cleanly to the new mic instead
+  // of "sticking" on the prior level. If not testing, just persist —
+  // the next test (or recording) will pick up the new device.
+  //
+  // Why snap-to-zero up front: switching to a slow-to-activate device
+  // (Continuity Camera mic / iPhone microphone) holds cpal's
+  // `begin_capture` for several seconds while CoreAudio negotiates the
+  // route. During that window no audio callbacks fire, so the prior
+  // mic's bar pattern would otherwise sit frozen at the right edge of
+  // the meter for ~1.6 s before sliding out at the 20 Hz tick rate.
+  // Resetting the buffer + peak window synchronously on click gives
+  // immediate "I heard you, retuning…" feedback instead.
+  const onChange = useCallback(
+    async (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const name = e.target.value;
+      setSelected(name);
+      setError(null);
+      setBusy(true);
+      setLevels(new Array(PREVIEW_BAR_COUNT).fill(0));
+      peakWindowRef.current = [];
+      setPeakDb(null);
+      try {
+        const wasTesting = testing;
+        if (wasTesting) {
+          await invoke("audio_preview_stop");
+          setTesting(false);
+        }
+        await invoke("audio_set_device", { name: name === "" ? null : name });
+        if (wasTesting) {
+          await invoke("audio_preview_start");
+          setTesting(true);
+        }
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [testing],
+  );
+
+  // Status flag for the LevelMeter: while testing, treat the meter as
+  // "recording" so it picks up the recording-color tokens. Idle styling
+  // would lock the bars to minHeight.
+  const meterStatus = testing ? "recording" : "idle";
+
+  return (
+    <div className="ow-audio">
+      <header className="ow-audio__header">
+        <h2>Audio</h2>
+        <p>
+          Pick a microphone, then press Test to confirm OpenWhisper is
+          picking up your voice. Input gain, suppression, AGC, channels,
+          and sample rate aren't configurable yet — captures always run
+          at the device's native rate and resample to 16 kHz mono
+          internally.
+        </p>
+      </header>
+
+      <section className="ow-audio__row">
+        <div className="ow-audio__row-label">
+          <div className="ow-audio__row-title">Microphone</div>
+          <div className="ow-audio__row-hint">
+            {dictation.isRecording
+              ? "Locked while a recording is in flight — stop dictation to change device."
+              : "Choose the device OpenWhisper listens on."}
+          </div>
+        </div>
+        <div className="ow-audio__row-control">
+          <select
+            className="ow-audio__select"
+            value={selected}
+            onChange={onChange}
+            disabled={busy || dictation.isRecording}
+            aria-label="Microphone device"
+          >
+            <option value="">System default</option>
+            {devices.map((d) => (
+              <option key={d.name} value={d.name}>
+                {d.name}
+                {d.is_default ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
+      <section className="ow-audio__preview">
+        <div className="ow-audio__preview-head">
+          <div className="ow-audio__preview-label">Test microphone</div>
+          <button
+            type="button"
+            className={
+              "ow-audio__btn" +
+              (testing ? " ow-audio__btn--active" : "")
+            }
+            onClick={() => void (testing ? stopTest() : startTest())}
+            disabled={busy || dictation.isRecording}
+            aria-pressed={testing}
+          >
+            {testing ? "Stop test" : "Start test"}
+          </button>
+        </div>
+        <dl className="ow-audio__kv">
+          <div className="ow-audio__kv-row">
+            <dt>floor</dt>
+            <dd>{PREVIEW_FLOOR_DB} dBFS</dd>
+          </div>
+          <div className="ow-audio__kv-row">
+            <dt>peak</dt>
+            <dd>{peakDb === null ? "—" : `${peakDb.toFixed(1)} dBFS`}</dd>
+          </div>
+          <div className="ow-audio__kv-row">
+            <dt>sample rate</dt>
+            <dd>{(PREVIEW_SAMPLE_RATE_HZ / 1000).toFixed(0)} kHz</dd>
+          </div>
+        </dl>
+        <div className="ow-audio__meter">
+          <LevelMeter
+            bars={PREVIEW_BAR_COUNT}
+            levels={levels}
+            active={meterStatus}
+            height={36}
+            minHeight={4}
+            gap={2}
+            fill
+          />
+        </div>
+      </section>
+
+      {error && <div className="ow-audio__error">{error}</div>}
     </div>
   );
 }

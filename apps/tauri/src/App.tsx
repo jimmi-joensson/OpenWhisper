@@ -150,6 +150,15 @@ function App() {
 
   return (
     <div className="ow-app">
+      {/* Drag region — `data-tauri-drag-region` on the strip + on the
+          h1 (Tauri 2.10's drag.js only checks `e.target.getAttribute`,
+          not ancestors, so descendants must opt in individually). The
+          back button explicitly opts OUT via `="false"` so its onClick
+          still fires (per tauri#9901). The whole drag flow only works
+          because the main window has `acceptFirstMouse: true` set in
+          tauri.conf.json — without it, WKWebView swallows the first
+          NSLeftMouseDown and AppKit never sees a chance to start the
+          window drag (tauri#9503). */}
       <header
         className={`ow-titlebar ow-titlebar--${view}`}
         data-tauri-drag-region
@@ -161,10 +170,13 @@ function App() {
               className="ow-titlebar__back"
               onClick={goBack}
               aria-label="Back to main"
+              data-tauri-drag-region="false"
             >
               <span aria-hidden="true">←</span>
             </button>
-            <h1 className="ow-titlebar__title">Settings</h1>
+            <h1 className="ow-titlebar__title" data-tauri-drag-region>
+              Settings
+            </h1>
           </>
         )}
       </header>

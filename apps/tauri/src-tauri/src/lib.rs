@@ -122,6 +122,39 @@ fn dictation_cancel() -> bool {
     do_cancel()
 }
 
+#[derive(Serialize, Clone)]
+pub struct AudioDevice {
+    name: String,
+    is_default: bool,
+}
+
+#[tauri::command]
+fn audio_list_devices() -> Vec<AudioDevice> {
+    audio::audio_list_input_devices()
+        .into_iter()
+        .map(|d| AudioDevice { name: d.name, is_default: d.is_default })
+        .collect()
+}
+
+#[tauri::command]
+fn audio_preview_start() -> Result<(), String> {
+    // AC #3: preview is mutually exclusive with an active recording.
+    // The hotkey path can't slip in between this check and start_preview
+    // because audio_start_capture itself stops the preview, but if a
+    // recording IS already in flight we'd otherwise get a confusing
+    // "preview rejected" error from the worker — return the precise
+    // reason here instead.
+    if dictation::is_recording() {
+        return Err("recording in progress".into());
+    }
+    audio::audio_preview_start()
+}
+
+#[tauri::command]
+fn audio_preview_stop() {
+    audio::audio_preview_stop();
+}
+
 // Drain the captured buffer (downmix + sinc resample to 16 kHz) and run
 // the recognizer, both on a worker thread. The hotkey thread has already
 // flipped phase to TRANSCRIBING via dictation_mark_transcribing_pending,
@@ -406,6 +439,12 @@ pub fn run() {
             // returns the default and persists nothing — the file is only
             // written on explicit save.
             let _ = settings::load_settings(app.handle());
+            // Same shape for the audio block: hydrate the in-memory cache
+            // and propagate the saved device name into the core's selector
+            // so the very first recording opens the user's preferred mic
+            // (rather than whatever cpal's default is on this boot).
+            let audio_settings = settings::load_audio_settings(app.handle());
+            audio::audio_set_selected_device(audio_settings.device_name);
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before
@@ -453,6 +492,11 @@ pub fn run() {
             settings::settings_reset_hotkey,
             settings::settings_capture_hotkey_start,
             settings::settings_capture_hotkey_cancel,
+            settings::audio_get_device,
+            settings::audio_set_device,
+            audio_list_devices,
+            audio_preview_start,
+            audio_preview_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

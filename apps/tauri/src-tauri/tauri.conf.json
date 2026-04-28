@@ -20,7 +20,8 @@
         "minWidth": 480,
         "minHeight": 600,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
       },
       {
         "label": "pill",

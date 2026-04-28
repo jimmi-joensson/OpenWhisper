@@ -2728,6 +2728,7 @@ name = "openwhisper-core"
 version = "0.3.0"
 dependencies = [
  "bzip2",
+ "coreaudio-rs",
  "cpal",
  "dirs 5.0.1",
  "hound",

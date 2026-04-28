@@ -12,10 +12,10 @@
 //! user sees the Restart banner. Edge-only firing (no focus theft on
 //! every tick).
 
-use std::thread;
-use std::time::Duration;
+use tauri::AppHandle;
 
-use tauri::{AppHandle, Manager};
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -26,6 +26,7 @@ extern "C" {
 /// Show + unminimize + focus the main window. Tauri's `set_focus` calls
 /// `[NSApp activateIgnoringOtherApps:YES]` underneath, which works for
 /// accessory-policy apps even without a Dock icon.
+#[cfg(target_os = "macos")]
 pub fn bring_main_to_front(app: &AppHandle) {
     let Some(main) = app.get_webview_window("main") else {
         return;
@@ -40,7 +41,7 @@ pub fn bring_main_to_front(app: &AppHandle) {
 pub fn install_ax_watcher(app: AppHandle) {
     #[cfg(target_os = "macos")]
     {
-        thread::Builder::new()
+        std::thread::Builder::new()
             .name("openwhisper-ax-watcher".into())
             .spawn(move || ax_watch_loop(app))
             .expect("spawn AX watcher");
@@ -53,11 +54,12 @@ pub fn install_ax_watcher(app: AppHandle) {
 
 #[cfg(target_os = "macos")]
 fn ax_watch_loop(app: AppHandle) {
+    use std::time::Duration;
     // Seed the state so we don't fire on the first tick if AX was
     // already granted at boot.
     let mut last = unsafe { AXIsProcessTrusted() };
     loop {
-        thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(1500));
         let now = unsafe { AXIsProcessTrusted() };
         if now == last {
             continue;

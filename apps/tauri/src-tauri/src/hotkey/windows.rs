@@ -13,8 +13,21 @@
 //! Capture mode: when `crate::hotkey::is_capture_active()` is true the hook
 //! diverts to capture-only — every keyboard event is swallowed; the first
 //! non-modifier KeyDown emits a chord descriptor.
+//!
+//! Re-install policy: install once at boot + on every settings save; never
+//! on a periodic timer. An earlier watchdog tried reinstalling every 3 s
+//! to defend chain order, which under sustained churn corrupted the
+//! kernel input thread state on Windows (stuck modifier flags + scancode
+//! reordering surviving process exit). Manual recovery is via the
+//! existing `hotkey_retry` Tauri command.
+//!
+//! Logging policy: actual errors (e.g. spawned `do_toggle()` failed) use
+//! always-on `eprintln!`. Per-event diagnostics (install slots, hook
+//! liveness, chord match, capture, mod mismatch, per-keydown trace) are
+//! gated behind `verbose_log!` so a normal `pnpm dev:tauri` console stays
+//! quiet. Run with `pnpm dev:tauri --verbose` to see them.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
@@ -30,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::settings::{HotkeyConfig, HotkeyKind, HotkeySettings};
 use crate::{do_cancel, do_toggle};
-use openwhisper_core::dictation;
+use openwhisper_core::{dictation, verbose_log};
 
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
@@ -41,6 +54,11 @@ const MOD_CTRL: u32 = 1 << 0;
 const MOD_SHIFT: u32 = 1 << 1;
 const MOD_ALT: u32 = 1 << 2;
 const MOD_WIN: u32 = 1 << 3;
+
+/// Global event counter — incremented on every callback invocation. Powers
+/// the "first event received" diagnostic eprintln so we can confirm the
+/// hook is alive.
+static EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Per-slot compiled binding read lock-free from the hook callback.
 /// `vk = 0` means "slot disabled" (compile failed → install errored).
@@ -98,6 +116,10 @@ pub fn install(_app: &AppHandle, settings: &HotkeySettings) -> Result<(), String
     })?;
     TOGGLE.set(tvk, tmods);
     CANCEL.set(cvk, cmods);
+    verbose_log!(
+        "[ow.hotkey/win] install: toggle vk=0x{:02X} mods=0x{:02X}, cancel vk=0x{:02X} mods=0x{:02X}",
+        tvk, tmods, cvk, cmods
+    );
     install_hook()
 }
 
@@ -197,6 +219,10 @@ unsafe fn current_mod_mask() -> u32 {
 
 unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     if n_code >= 0 {
+        let prev = EVENT_COUNT.fetch_add(1, Ordering::Relaxed);
+        if prev == 0 {
+            verbose_log!("[ow.hotkey/win] hook alive — first event received");
+        }
         let msg = w_param.0 as u32;
         let info = unsafe { *(l_param.0 as *const KBDLLHOOKSTRUCT) };
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -207,6 +233,10 @@ unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: L
                 if let Some(code) = vk_to_chord_name(info.vkCode) {
                     let mods = unsafe { current_mod_mask() };
                     let mod_names = mods_to_names(mods);
+                    verbose_log!(
+                        "[ow.hotkey/win] capture: vk=0x{:02X} ({}) mods=0x{:02X} ({:?})",
+                        info.vkCode, code, mods, mod_names
+                    );
                     crate::hotkey::deliver_capture(HotkeyConfig::chord(code, &mod_names));
                 }
             }
@@ -215,8 +245,25 @@ unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: L
 
         let held = unsafe { current_mod_mask() };
 
+        // Per-keydown trace, gated behind --verbose. Diagnoses chord
+        // detection: shows the exact vk + held-mod mask the hook sees on
+        // every press so we can compare it to the configured
+        // (TOGGLE.vk, TOGGLE.mods) / (CANCEL.vk, CANCEL.mods) values.
+        if is_down {
+            verbose_log!(
+                "[ow.hotkey/win] keydown vk=0x{:02X} held_mods=0x{:02X} \
+                 toggle_vk=0x{:02X}/mods=0x{:02X} cancel_vk=0x{:02X}/mods=0x{:02X}",
+                info.vkCode,
+                held,
+                TOGGLE.vk.load(Ordering::Relaxed),
+                TOGGLE.mods.load(Ordering::Relaxed),
+                CANCEL.vk.load(Ordering::Relaxed),
+                CANCEL.mods.load(Ordering::Relaxed)
+            );
+        }
+
         // Toggle slot.
-        if try_match_slot(&TOGGLE, info.vkCode, is_down, is_up, held, false) {
+        if try_match_slot(&TOGGLE, info.vkCode, is_down, is_up, held, false, "toggle") {
             return LRESULT(1);
         }
         // Cancel slot — gate on recording.
@@ -227,6 +274,7 @@ unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: L
             is_up,
             held,
             true, /* gate_on_recording */
+            "cancel",
         ) {
             return LRESULT(1);
         }
@@ -241,17 +289,33 @@ fn try_match_slot(
     is_up: bool,
     held: u32,
     gate_on_recording: bool,
+    label: &'static str,
 ) -> bool {
     let target = slot.vk.load(Ordering::Relaxed);
     if target == 0 || vk != target {
         return false;
     }
     let required = slot.mods.load(Ordering::Relaxed);
+    if is_down && held != required && held != 0 {
+        // Target vk arrived under SOME modifier(s) but not the configured
+        // mask — e.g., you bound Ctrl+Space but pressed Shift+Space. Skip
+        // the bare-vk case (held == 0) so the log doesn't fire on every
+        // word-separator space typed in prose.
+        verbose_log!(
+            "[ow.hotkey/win] {label}: target vk=0x{:02X} arrived but mods mismatch \
+             (held=0x{:02X}, need=0x{:02X})",
+            vk, held, required
+        );
+    }
     if is_down && held == required {
         if gate_on_recording && !dictation::is_recording() {
             return false;
         }
         if !slot.fired.swap(true, Ordering::Relaxed) {
+            verbose_log!(
+                "[ow.hotkey/win] {label}: chord matched (vk=0x{:02X} mods=0x{:02X}) — firing",
+                vk, held
+            );
             // Pick the action by slot identity. Comparing static
             // refs is the simplest tag — both pointers are unique
             // and stable for the program's lifetime.
@@ -260,7 +324,7 @@ fn try_match_slot(
             if std::ptr::eq(slot_ptr, toggle_ptr) {
                 thread::spawn(|| {
                     if let Err(e) = do_toggle() {
-                        eprintln!("hotkey toggle failed: {e}");
+                        eprintln!("[hotkey/win] toggle action failed: {e}");
                     }
                 });
             } else {

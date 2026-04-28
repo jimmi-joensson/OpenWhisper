@@ -34,6 +34,11 @@ pub struct HotkeyConfig {
 }
 
 impl HotkeyConfig {
+    // ModifierTap is only used for the Mac default (RightCommand). The
+    // Windows hotkey backend doesn't accept it, so this constructor is
+    // dead on the Windows build — silence the warning rather than
+    // sprinkle cfg gates at every call site.
+    #[allow(dead_code)]
     pub fn modifier_tap(code: &str) -> Self {
         Self {
             kind: HotkeyKind::ModifierTap,

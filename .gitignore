@@ -141,6 +141,10 @@ core/swift/**/.swiftpm/
 
 # Claude Code project-local state (scheduled task locks, etc.)
 .claude/
+# ...but project skills are part of the repo
+!apps/tauri/.claude/
+!apps/tauri/.claude/skills/
+!apps/tauri/.claude/skills/**
 
 # Misc
 tmp/

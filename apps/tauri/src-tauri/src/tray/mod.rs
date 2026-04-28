@@ -18,7 +18,7 @@ use openwhisper_core::dictation::{self, PHASE_RECORDING};
 use tauri::image::Image;
 use tauri::menu::{MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use crate::{do_toggle, TICK_MS};
 
@@ -139,6 +139,17 @@ fn open_main(app: &AppHandle) {
     }
 }
 
+fn open_settings(app: &AppHandle) {
+    // Settings is an in-window route — bring main forward and emit
+    // `ow_navigate` so the React tree swaps to the Settings shell.
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit("ow_navigate", "settings");
+}
+
 fn quit(app: &AppHandle) {
     app.exit(0);
 }
@@ -189,24 +200,39 @@ impl Phase {
     }
 }
 
+/// IDs returned by [`build_menu`] so the menu-event handler can tell which
+/// item fired without string-matching scattered constants.
+struct MenuIds {
+    open: String,
+    toggle: String,
+    preferences: String,
+    quit: String,
+}
+
 /// Build the right-click context menu. Rebuilt on every phase change so the
 /// "Start / Stop / Loading…" label + enabled state stay current. Cheap
-/// enough — menu has 3 items.
+/// enough — menu has 4 items + separators.
 fn build_menu(
     app: &AppHandle,
     phase: Phase,
     app_name: &str,
-) -> tauri::Result<(tauri::menu::Menu<Wry>, String, String, String)> {
-    let open_id = "ow.open".to_string();
-    let toggle_id = "ow.toggle".to_string();
-    let quit_id = "ow.quit".to_string();
+) -> tauri::Result<(tauri::menu::Menu<Wry>, MenuIds)> {
+    let ids = MenuIds {
+        open: "ow.open".into(),
+        toggle: "ow.toggle".into(),
+        preferences: "ow.preferences".into(),
+        quit: "ow.quit".into(),
+    };
 
     let open_item: MenuItem<Wry> =
-        MenuItemBuilder::with_id(&open_id, format!("Open {app_name}")).build(app)?;
-    let toggle_item: MenuItem<Wry> = MenuItemBuilder::with_id(&toggle_id, phase.dictation_label())
+        MenuItemBuilder::with_id(&ids.open, format!("Open {app_name}")).build(app)?;
+    let toggle_item: MenuItem<Wry> = MenuItemBuilder::with_id(&ids.toggle, phase.dictation_label())
         .enabled(phase.dictation_enabled())
         .build(app)?;
-    let quit_item: MenuItem<Wry> = MenuItemBuilder::with_id(&quit_id, format!("Quit {app_name}"))
+    let prefs_item: MenuItem<Wry> = MenuItemBuilder::with_id(&ids.preferences, "Preferences…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+    let quit_item: MenuItem<Wry> = MenuItemBuilder::with_id(&ids.quit, format!("Quit {app_name}"))
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
 
@@ -215,9 +241,11 @@ fn build_menu(
         .separator()
         .item(&toggle_item)
         .separator()
+        .item(&prefs_item)
+        .separator()
         .item(&quit_item)
         .build()?;
-    Ok((menu, open_id, toggle_id, quit_id))
+    Ok((menu, ids))
 }
 
 /// Install the system tray + spawn the phase-watcher.
@@ -230,9 +258,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let app_name = crate::product_name(app);
     let initial_phase = Phase::from_core(dictation::dictation_snapshot().phase());
 
-    let (menu, open_id, toggle_id, quit_id) = build_menu(app, initial_phase, &app_name)?;
-    let menu_ids = Arc::new((open_id, toggle_id, quit_id));
-    let menu_ids_for_handler = Arc::clone(&menu_ids);
+    let (menu, ids) = build_menu(app, initial_phase, &app_name)?;
+    let ids = Arc::new(ids);
+    let ids_for_handler = Arc::clone(&ids);
 
     // Tray is owned by tauri's runtime via the registered id; we look it up
     // later via `app.tray_by_id("ow.tray")` rather than holding the builder
@@ -248,14 +276,16 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(move |app, event: MenuEvent| {
             let id = event.id().as_ref();
-            let (open_id, toggle_id, quit_id) = &*menu_ids_for_handler;
-            if id == open_id {
+            let ids = &*ids_for_handler;
+            if id == ids.open {
                 open_main(app);
-            } else if id == toggle_id {
+            } else if id == ids.toggle {
                 if let Err(e) = do_toggle() {
                     eprintln!("tray toggle failed: {e}");
                 }
-            } else if id == quit_id {
+            } else if id == ids.preferences {
+                open_settings(app);
+            } else if id == ids.quit {
                 quit(app);
             }
         })
@@ -298,7 +328,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                     let _ = tray.set_icon_as_template(snap.phase() != PHASE_RECORDING);
                     let _ = tray.set_tooltip(Some(now.tooltip(&app_name_for_thread)));
 
-                    if let Ok((menu, _, _, _)) = build_menu(&app_handle, now, &app_name_for_thread) {
+                    if let Ok((menu, _)) = build_menu(&app_handle, now, &app_name_for_thread) {
                         let _ = tray.set_menu(Some(menu));
                     }
                 }

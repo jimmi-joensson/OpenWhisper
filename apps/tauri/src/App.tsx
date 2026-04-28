@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emitTo } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getName } from "@tauri-apps/api/app";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { DevPillControls } from "./components/dev-pill-controls";
+import { SettingsShell } from "./Settings";
 import { useDictation } from "./lib/use-dictation";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
@@ -16,6 +17,8 @@ import {
 import { PHASE_ERROR } from "./lib/dictation";
 import "./App.css";
 
+type View = "main" | "settings";
+
 const PILL_BAR_COUNT = 12;
 
 function detectPlatform(): Platform {
@@ -26,6 +29,7 @@ function detectPlatform(): Platform {
 function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
+  const [view, setView] = useState<View>("main");
   // App productName from Tauri runtime — "OpenWhisper" (release) or
   // "OpenWhisper Dev" (per tauri.dev.conf.json overlay). Single source of
   // truth: the running bundle's CFBundleName.
@@ -65,6 +69,37 @@ function App() {
         // Keep default "OpenWhisper" if the API isn't available.
       });
   }, []);
+
+  // ⌘, switches the in-window route to Settings. Settings is no longer a
+  // separate window — it's a routed view inside the main window, so the
+  // keyboard shortcut just flips local state.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      if (cmdOrCtrl && e.key === ",") {
+        e.preventDefault();
+        setView("settings");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Tray Preferences… (and any other Rust-side trigger) emits `ow_navigate`
+  // with a target view. Listen here and swap routes.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    void listen<string>("ow_navigate", (evt) => {
+      if (evt.payload === "settings" || evt.payload === "main") {
+        setView(evt.payload);
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
+  const goBack = useCallback(() => setView("main"), []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
   // override is active so manual selections aren't immediately overwritten
@@ -106,49 +141,75 @@ function App() {
   }, [pillOverride.enabled, pillOverride.status]);
 
   return (
-    <>
-      <MainWindowShell
-        title={appName}
-        phase={dictation.phase}
-        status={dictation.status}
-        levels={dictation.levels}
-        level={dictation.level}
-        elapsed={dictation.elapsed}
-        samples={dictation.samples}
-        transcript={dictation.transcript}
-        confidence={dictation.confidence}
-        statusMessage={dictation.statusMessage}
-        errorMessage={dictation.errorMessage}
-        canToggle={dictation.canToggle}
-        isRecording={dictation.isRecording}
-        downloadBytesDone={dictation.downloadBytesDone}
-        downloadBytesTotal={dictation.downloadBytesTotal}
-        platform={platform}
-        onToggle={() => void dictation.toggle()}
-        coreVersion={coreVersion}
-        coreError={coreError}
-        hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-        onHotkeyRetry={() => void hotkey.retry()}
-        micError={
-          permissions.status && !permissions.status.mic_ok
-            ? permissions.status.error
-            : null
-        }
-        recognizerError={recognizerError}
-      />
-      {import.meta.env.DEV && (
-        <DevPillControls
-          enabled={pillOverride.enabled}
-          status={pillOverride.status}
-          onToggle={(enabled) =>
-            setPillOverride((prev) => ({ ...prev, enabled }))
-          }
-          onStatus={(status) =>
-            setPillOverride((prev) => ({ ...prev, status }))
-          }
-        />
-      )}
-    </>
+    <div className="ow-app">
+      <header
+        className={`ow-titlebar ow-titlebar--${view}`}
+        data-tauri-drag-region
+      >
+        {view === "settings" && (
+          <>
+            <button
+              type="button"
+              className="ow-titlebar__back"
+              onClick={goBack}
+              aria-label="Back to main"
+            >
+              <span aria-hidden="true">←</span>
+            </button>
+            <h1 className="ow-titlebar__title">Settings</h1>
+          </>
+        )}
+      </header>
+      <main className="ow-app__body">
+        {view === "settings" ? (
+          <SettingsShell />
+        ) : (
+          <>
+            <MainWindowShell
+              title={appName}
+              phase={dictation.phase}
+              status={dictation.status}
+              levels={dictation.levels}
+              level={dictation.level}
+              elapsed={dictation.elapsed}
+              samples={dictation.samples}
+              transcript={dictation.transcript}
+              confidence={dictation.confidence}
+              statusMessage={dictation.statusMessage}
+              errorMessage={dictation.errorMessage}
+              canToggle={dictation.canToggle}
+              isRecording={dictation.isRecording}
+              downloadBytesDone={dictation.downloadBytesDone}
+              downloadBytesTotal={dictation.downloadBytesTotal}
+              platform={platform}
+              onToggle={() => void dictation.toggle()}
+              coreVersion={coreVersion}
+              coreError={coreError}
+              hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+              onHotkeyRetry={() => void hotkey.retry()}
+              micError={
+                permissions.status && !permissions.status.mic_ok
+                  ? permissions.status.error
+                  : null
+              }
+              recognizerError={recognizerError}
+            />
+            {import.meta.env.DEV && (
+              <DevPillControls
+                enabled={pillOverride.enabled}
+                status={pillOverride.status}
+                onToggle={(enabled) =>
+                  setPillOverride((prev) => ({ ...prev, enabled }))
+                }
+                onStatus={(status) =>
+                  setPillOverride((prev) => ({ ...prev, status }))
+                }
+              />
+            )}
+          </>
+        )}
+      </main>
+    </div>
   );
 }
 

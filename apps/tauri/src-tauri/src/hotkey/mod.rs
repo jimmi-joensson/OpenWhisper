@@ -1,45 +1,73 @@
-//! Global hotkey + Escape-to-cancel.
+//! Global hotkey + cancel-while-recording.
 //!
-//! Per-platform because activation gestures differ deliberately:
-//! - **Mac**: Right Command tap-not-hold (Right Cmd held as a chord modifier
-//!   does *not* fire), via a `core-graphics` CGEventTap.
-//! - **Windows**: `Ctrl+Space` via a `WH_KEYBOARD_LL` hook (issue #7 — the
-//!   higher-level `RegisterHotKey` approach bleeds the chord into Electron
-//!   apps that install their own hooks ahead of us in the chain).
+//! Two configurable slots — toggle (start/stop dictation) and cancel
+//! (discard the current recording). Defaults: Right ⌘ / Esc on mac,
+//! Ctrl+Space / Esc on Windows. Both rebindable via Settings → Shortcuts.
 //!
-//! Escape-to-cancel rides on the same OS-level keyboard surface in both
-//! cases. Hooks consume Escape only while `dictation::is_recording()` is
-//! true so the focused app still receives Escape outside of an active
-//! recording.
+//! Per-platform because activation gestures differ:
+//! - **Mac**: `CGEventTap` — toggle supports both modifier-tap (default
+//!   Right Cmd: tap-not-hold) and chord; cancel supports the same.
+//! - **Windows**: `WH_KEYBOARD_LL` hook — chord-only for both slots.
 //!
 //! Status surface: `hotkey_status` Tauri event (see [`HotkeyStatus`]) and
-//! the `hotkey_retry` command. UI listens to the event and shows the
-//! HealthBanner with a Retry button when `ok = false`.
+//! the `hotkey_retry` command. UI shows a HealthBanner when `ok = false`.
+//!
+//! Capture surface: Settings flips [`set_capture_active`] true while the
+//! user clicks "press keys…". The next eligible event is delivered via
+//! the `hotkey_captured` Tauri event (payload `{ target, config }`) and
+//! capture mode auto-disables.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+
+use crate::settings::{HotkeyConfig, HotkeyTarget};
 
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// Pushed to the front-end on registration success / failure / watchdog
-/// re-enable. `error` is empty when `ok = true`. UI shows a HealthBanner
-/// when `ok = false`.
 #[derive(Serialize, Clone, Debug)]
 pub struct HotkeyStatus {
     pub ok: bool,
     pub error: String,
 }
 
-pub const HOTKEY_STATUS_EVENT: &str = "hotkey_status";
+#[derive(Serialize, Clone, Debug)]
+pub struct HotkeyCapturedPayload {
+    pub target: &'static str,
+    pub config: HotkeyConfig,
+}
 
-/// Last status — kept so newly mounted UI windows can pull the current
-/// state via a future `hotkey_status_current` command. Not used yet.
+pub const HOTKEY_STATUS_EVENT: &str = "hotkey_status";
+pub const HOTKEY_CAPTURED_EVENT: &str = "hotkey_captured";
+
 static LAST_STATUS: Mutex<Option<HotkeyStatus>> = Mutex::new(None);
+
+/// Stored at first install — backends emit capture results from worker
+/// threads so we cache the handle here rather than threading it through
+/// the per-platform tap state.
+static APP_HANDLE: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
+
+static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CAPTURE_TARGET: Mutex<Option<HotkeyTarget>> = Mutex::new(None);
+
+fn handle_slot() -> &'static Mutex<Option<AppHandle>> {
+    APP_HANDLE.get_or_init(|| Mutex::new(None))
+}
+
+fn store_handle(app: &AppHandle) {
+    if let Ok(mut g) = handle_slot().lock() {
+        *g = Some(app.clone());
+    }
+}
+
+fn cached_handle() -> Option<AppHandle> {
+    handle_slot().lock().ok().and_then(|g| g.clone())
+}
 
 pub(crate) fn emit_status(app: &AppHandle, ok: bool, error: impl Into<String>) {
     let status = HotkeyStatus { ok, error: error.into() };
@@ -51,15 +79,52 @@ pub(crate) fn emit_status(app: &AppHandle, ok: bool, error: impl Into<String>) {
     }
 }
 
-/// Toggle the global hotkey on/off. Used by the fullscreen-aware path:
-/// when a fullscreen app takes the foreground we tear down the system
-/// surface entirely (Mac CGEventTap, Win Ctrl+Space chord + Escape hook)
-/// so the fullscreen app receives those keystrokes normally and
-/// OpenWhisper doesn't activate. Re-armed on fullscreen exit.
-///
-/// Status events are NOT emitted for fullscreen-driven flips — the user
-/// hasn't lost permission, they just opened a fullscreen app. The pill
-/// hides at the same time so the absence of dictation is unambiguous.
+/// Toggle capture-mode on/off. While true, the next eligible hotkey event
+/// is captured and delivered via `hotkey_captured` rather than firing the
+/// real toggle/cancel. Backend-agnostic — both `mac.rs` and `windows.rs`
+/// poll this from their callbacks.
+pub fn set_capture_active(active: bool, target: Option<HotkeyTarget>) {
+    if active {
+        if let (true, Some(t)) = (active, target) {
+            if let Ok(mut g) = CAPTURE_TARGET.lock() {
+                *g = Some(t);
+            }
+        }
+    } else if let Ok(mut g) = CAPTURE_TARGET.lock() {
+        *g = None;
+    }
+    CAPTURE_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+pub fn is_capture_active() -> bool {
+    CAPTURE_ACTIVE.load(Ordering::Relaxed)
+}
+
+fn current_capture_target() -> Option<HotkeyTarget> {
+    CAPTURE_TARGET.lock().ok().and_then(|g| *g)
+}
+
+/// Emit a captured descriptor to the front-end and exit capture mode.
+/// Called by the per-platform backends from the hook/tap thread.
+pub(crate) fn deliver_capture(config: HotkeyConfig) {
+    let target = current_capture_target().unwrap_or(HotkeyTarget::Toggle);
+    CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
+    if let Ok(mut g) = CAPTURE_TARGET.lock() {
+        *g = None;
+    }
+    let Some(app) = cached_handle() else {
+        return;
+    };
+    let payload = HotkeyCapturedPayload {
+        target: target.as_str(),
+        config,
+    };
+    if let Err(e) = app.emit(HOTKEY_CAPTURED_EVENT, &payload) {
+        eprintln!("hotkey_captured emit failed: {e}");
+    }
+}
+
+/// Toggle the global hotkey on/off. Used by the fullscreen-aware path.
 pub fn set_active(app: &AppHandle, active: bool) {
     if active {
         install(app);
@@ -73,41 +138,36 @@ pub fn set_active(app: &AppHandle, active: bool) {
     }
 }
 
-/// Install platform-specific hotkey + escape hook. Idempotent — calling
-/// twice tears down and reinstalls. Used both at boot and from
-/// `hotkey_retry`.
+/// Install platform-specific hotkey + cancel hook. Idempotent — calling
+/// twice tears down and reinstalls. Used at boot, from `hotkey_retry`,
+/// and after any `settings_set_hotkey` save.
 pub fn install(app: &AppHandle) {
+    store_handle(app);
+    let settings =
+        crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings);
     #[cfg(target_os = "macos")]
     {
-        match mac::install(app) {
+        match mac::install(app, &settings) {
             Ok(()) => emit_status(app, true, ""),
             Err(e) => emit_status(app, false, e),
         }
     }
     #[cfg(target_os = "windows")]
     {
-        match windows::install(app) {
+        match windows::install(app, &settings) {
             Ok(()) => emit_status(app, true, ""),
             Err(e) => emit_status(app, false, e),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
+        let _ = settings;
         emit_status(app, false, "hotkey: platform not supported in MVP");
     }
 }
 
 #[tauri::command]
 pub fn hotkey_retry(app: AppHandle) {
-    // macOS: always restart on Retry. A full relaunch is the only reliable
-    // way to refresh the kernel-side TCC cache for Accessibility (Granting
-    // mid-session can flip AXIsProcessTrusted true while CGEventTapCreate
-    // keeps returning nil), AND it gives a clean post-grant boot state
-    // where the mic prompt fires via the regular boot path. Cheaper to
-    // restart than to track mid-session transitions.
-    //
-    // Windows: just re-attempt install — no kernel cache, no benefit to
-    // restarting.
     #[cfg(target_os = "macos")]
     {
         let _ = &app;
@@ -119,9 +179,6 @@ pub fn hotkey_retry(app: AppHandle) {
     }
 }
 
-/// Returns the last status emitted via `hotkey_status`. UI calls this on
-/// mount so it can render the right banner state without racing the boot
-/// install emit.
 #[tauri::command]
 pub fn hotkey_status_current() -> Option<HotkeyStatus> {
     LAST_STATUS.lock().ok().and_then(|g| g.clone())

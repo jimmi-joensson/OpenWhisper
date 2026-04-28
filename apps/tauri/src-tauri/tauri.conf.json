@@ -18,7 +18,9 @@
         "width": 720,
         "height": 820,
         "minWidth": 480,
-        "minHeight": 600
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       },
       {
         "label": "pill",

@@ -53,10 +53,15 @@ extern "C" {
     static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
-fn ax_trust_check() -> bool {
+fn ax_trust_check(app: &AppHandle) -> bool {
     if unsafe { AXIsProcessTrusted() } {
         return true;
     }
+    // Bring main forward right before the OS prompt fires — without
+    // this, an `accessory`-policy app stays behind whatever owned focus
+    // (often Terminal during dev, Finder for first-launch users), and
+    // the user misses OW's banner explaining the grant.
+    crate::focus::bring_main_to_front(app);
     let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
     let value = CFBoolean::true_value();
     let opts = CFDictionary::from_CFType_pairs(&[(key, value)]);
@@ -215,7 +220,7 @@ pub fn install(app: &AppHandle, settings: &HotkeySettings) -> Result<(), String>
     teardown_existing();
     let app_name = crate::product_name(app);
 
-    if !ax_trust_check() {
+    if !ax_trust_check(app) {
         return Err(format!(
             "Accessibility permission needed. System Settings just opened — \
              toggle {app_name} on, then click Restart."

@@ -139,12 +139,10 @@ scripts/bench/results/
 core/swift/**/.build/
 core/swift/**/.swiftpm/
 
-# Claude Code project-local state (scheduled task locks, etc.)
-.claude/
-# ...but project skills are part of the repo
-!.claude/
+# Claude Code project-local state (scheduled task locks, etc.) — but
+# project skills under .claude/skills/ are part of the repo.
+.claude/*
 !.claude/skills/
-!.claude/skills/**
 
 # Misc
 tmp/

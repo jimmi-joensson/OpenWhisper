@@ -1,6 +1,6 @@
 ---
-name: dev-workflow
-description: Build, dev-loop, and tooling conventions for OpenWhisper. READ before scripting dev commands, proposing build changes, picking a package manager, or shipping a Windows release bundle. Covers Node toolchain (fnm + pnpm), the release-Rust-core-in-dev rule, the Tauri release-bundle native-DLL vendoring requirement, and the Backlog.md task tracker.
+name: openwhisper-dev-workflow
+description: Build, dev-loop, and tooling conventions for OpenWhisper. READ before scripting dev commands, proposing build changes, picking a package manager, or shipping a Windows release bundle.
 ---
 
 # Dev workflow conventions

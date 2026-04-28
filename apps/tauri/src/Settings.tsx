@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  cancelJsCapture,
+  startJsCapture,
+  type HotkeyCapturedPayload,
+  type HotkeyConfig,
+  type HotkeySettings,
+  type HotkeyTarget,
+} from "./lib/use-global-hotkey";
 import "./Settings.css";
 
 // Sidebar items mirror the design (project_recognizer_tauri / screens.jsx
@@ -13,23 +21,6 @@ const PANES = [
 ] as const;
 
 type PaneId = (typeof PANES)[number]["id"];
-
-// Cross-platform hotkey descriptors — mirror the Rust types.
-export type HotkeyKind = "modifier-tap" | "chord";
-export interface HotkeyConfig {
-  kind: HotkeyKind;
-  code: string;
-  mods: string[];
-}
-export interface HotkeySettings {
-  toggle: HotkeyConfig;
-  cancel: HotkeyConfig;
-}
-export type HotkeyTarget = "toggle" | "cancel";
-export interface HotkeyCapturedPayload {
-  target: HotkeyTarget;
-  config: HotkeyConfig;
-}
 
 // SettingsShell renders the body only — sidebar + pane. The titlebar
 // (back-arrow + "Settings" title) lives at the window level in App.tsx
@@ -136,41 +127,71 @@ function ShortcutsPane() {
     };
   }, []);
 
+  // Apply a captured chord to the configured slot. Both capture paths
+  // (Rust LL hook, JS keydown fallback) funnel through this so the UI
+  // updates identically regardless of which fired first.
+  const applyCapture = useCallback((payload: HotkeyCapturedPayload) => {
+    const { target, config } = payload;
+    // Whichever path fired, also clear the other so a delayed event from
+    // the other source doesn't re-apply / re-trigger.
+    cancelJsCapture();
+    void invoke("settings_capture_hotkey_cancel").catch(() => {});
+    void invoke("settings_set_hotkey", { target, config })
+      .then(() => {
+        setSettings((prev) => (prev ? { ...prev, [target]: config } : prev));
+        setRecordingTarget(null);
+        setError(null);
+      })
+      .catch((e) => {
+        setError(String(e));
+        setRecordingTarget(null);
+      });
+  }, []);
+
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     void listen<HotkeyCapturedPayload>("hotkey_captured", (evt) => {
-      const { target, config } = evt.payload;
-      void invoke("settings_set_hotkey", { target, config })
-        .then(() => {
-          setSettings((prev) =>
-            prev ? { ...prev, [target]: config } : prev,
-          );
-          setRecordingTarget(null);
-          setError(null);
-        })
-        .catch((e) => {
-          setError(String(e));
-          setRecordingTarget(null);
-        });
+      applyCapture(evt.payload);
     }).then((fn) => {
       unlisten = fn;
     });
     return () => {
       unlisten?.();
     };
+  }, [applyCapture]);
+
+  // Cancel any in-flight capture if the pane unmounts (user navigates
+  // away mid-rebind). Otherwise a stray keydown would silently apply as
+  // a new binding.
+  useEffect(() => {
+    return () => {
+      cancelJsCapture();
+      void invoke("settings_capture_hotkey_cancel").catch(() => {});
+    };
   }, []);
 
-  const startCapture = useCallback((target: HotkeyTarget) => {
-    setError(null);
-    setRecordingTarget(target);
-    void invoke("settings_capture_hotkey_start", { target }).catch((e) => {
-      setError(String(e));
-      setRecordingTarget(null);
-    });
-  }, []);
+  const startCapture = useCallback(
+    (target: HotkeyTarget) => {
+      setError(null);
+      setRecordingTarget(target);
+      // JS path — handles the in-focus case where Chromium swallows
+      // events before our LL hook sees them. No-ops on macOS.
+      startJsCapture(target, applyCapture);
+      // Rust path — handles the unfocused case (user wants to capture a
+      // chord that's also a Chromium shortcut, e.g. Ctrl+J, by clicking
+      // 'press keys…' then alt-tabbing away before pressing it).
+      void invoke("settings_capture_hotkey_start", { target }).catch((e) => {
+        setError(String(e));
+        setRecordingTarget(null);
+        cancelJsCapture();
+      });
+    },
+    [applyCapture],
+  );
 
   const cancelCapture = useCallback(async () => {
     setRecordingTarget(null);
+    cancelJsCapture();
     try {
       await invoke("settings_capture_hotkey_cancel");
     } catch (e) {

@@ -6,6 +6,7 @@ import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SettingsShell } from "./Settings";
 import { useDictation } from "./lib/use-dictation";
+import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
 import {
@@ -38,6 +39,13 @@ function App() {
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
   const permissions = usePermissionsStatus();
+
+  // Windows-only fallback for the WebView2-focused case where the Rust
+  // WH_KEYBOARD_LL hook is bypassed by Chromium's raw-input registration
+  // (tauri-apps/tauri#13919). No-op on macOS — CGEventTap already
+  // captures in-focus events. Cancel binding gates on isRecording so Esc
+  // still works normally inside OW when idle.
+  useGlobalHotkey({ isRecording: dictation.isRecording });
 
   // Dev-only pill state override. When `enabled`, the auto-emit from the
   // dictation hook is suppressed and we drive the pill from the floating

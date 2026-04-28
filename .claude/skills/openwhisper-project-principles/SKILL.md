@@ -1,5 +1,5 @@
 ---
-name: project-principles
+name: openwhisper-project-principles
 description: OpenWhisper's product values and cross-platform UX rules. READ before proposing features, settings, paywalls, activation/hotkey changes, or anything that affects how the app feels to a user. Pulls together the constraints that make OpenWhisper "the open alternative to Superwhisper" rather than just-another-dictation-app.
 ---
 
@@ -67,7 +67,7 @@ Any feature whose value proposition is "reduce token cost for the user" must be 
 
 OpenWhisper must be visually and behaviorally recognizable as the *same product* across macOS, Windows, and (future) Linux. Shared design vocabulary: recording orange `#E07000`, HUD pill with level-meter states (idle dots → recording bars → transcribing spinner), tray/menubar icon state changes, auto-paste semantics, toggle UX.
 
-**Implementation strategy (since 2026-04-24):** single Tauri 2 shell with React + TypeScript + Tailwind + shadcn/ui, backed by the existing Rust `core/` (linked as a Cargo path dep, no FFI inside Tauri). The earlier "native UI per OS" stance was reversed after the WinUI 3 Windows port produced a visibly different pill / material / feel vs. Mac SwiftUI.
+**Implementation strategy:** single Tauri 2 shell with React + TypeScript + Tailwind + shadcn/ui, backed by the existing Rust `core/` (linked as a Cargo path dep, no FFI inside Tauri). History of the pivot away from the per-OS-native stance lives in `docs/tauri-port-handover.md`.
 
 **Mac is the source of truth** for behavior and visual spec. Tauri mirrors Mac. Mac itself may stay SwiftUI indefinitely or migrate to Tauri later. Pixel-perfect parity isn't the goal — "close + recognizable" is.
 

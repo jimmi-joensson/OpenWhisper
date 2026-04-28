@@ -1,5 +1,5 @@
 ---
-name: orchestration-in-rust
+name: openwhisper-orchestration-in-rust
 description: Architecture rule — state machines, phase transitions, gating logic, and status strings live in the Rust core, not the platform shell. READ before proposing where to put logic that touches the dictation state machine, phase transitions, gating rules, or anything the UI reacts to. The temptation on every new shell is to keep "just the UI-coupled bits" in the shell — resist.
 ---
 
@@ -28,5 +28,3 @@ Even though Tauri's shell is also Rust, the same rule still applies inside the T
 When proposing a feature, ask **"does this decision exist on macOS already?"** — if yes, the rule, status string, or transition belongs in `core/`, not in the shell. Resist the temptation to keep "just the UI-coupled bits" in the shell language. Accept the FFI / boundary overhead; don't argue "it's only 50 lines, duplicating is fine" — status strings, gating rules, error transitions, and edge cases (empty sample drain, cancel timing) accrete nuance.
 
 When you find logic that's drifted into a shell (an `if phase === 'recording'` check in React, an `INotifyPropertyChanged` setter that decides UI text), the right fix is usually to push it down into the snapshot type and have the shell read it, not extend the shell logic.
-
-If the user proposes "a Rust-native STT path inside core," check `docs/tauri-port-handover.md` first — TASK-22's original framing is obsolete; sherpa-rs is folded into `core/` but inference still runs there as the recognizer, separate from orchestration.

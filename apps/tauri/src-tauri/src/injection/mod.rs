@@ -48,6 +48,8 @@ const RESTORE_DELAY_FAST: Duration = Duration::from_millis(200);
 /// Ctrl+V, and restoring too soon races their reads so the paste stalls
 /// or retries (GitHub issue #6). SuperWhisper uses 3 s for the same
 /// reason; 2 s is a 10× margin over Chromium's observed read window.
+/// Only relevant on Windows — gated so the macOS build doesn't warn.
+#[cfg(target_os = "windows")]
 const RESTORE_DELAY_CHROMIUM: Duration = Duration::from_millis(2000);
 
 /// Pick the restore delay based on the foreground app. Goal: only pay

@@ -1,9 +1,10 @@
 ---
 id: TASK-11
 title: Settings window
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-22 21:11'
+updated_date: '2026-04-27 18:30'
 labels:
   - macos
   - ui
@@ -14,7 +15,7 @@ priority: medium
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-SwiftUI settings window with tabs: General (hotkey, pill position, launch-at-login), Models (picker, download/delete), Vocabulary, Advanced (VAD sensitivity, post-processing toggles), About (CC-BY-4.0 attribution).
+Superseded by TASK-49 (Settings shell) + TASK-51 (Shortcuts pane + rebind) + TASK-53 (Audio pane) + TASK-54 (General: Open at Login). Original SwiftUI scope no longer applies — Tauri is the sole shell post-port. Vocabulary tab folded into TASK-10. Models tab tracked in TASK-45. Attribution lives in INSTALL.md / About panel (TASK-13).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

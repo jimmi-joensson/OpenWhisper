@@ -225,6 +225,75 @@ body {
 
 #root {
   height: 100%;
+  overflow: hidden;
+}
+
+/* Window-level layout: titlebar strip on top, body fills the rest. The
+   titlebar is the OS title-bar overlay region — macOS draws traffic-light
+   buttons on top of it via `titleBarStyle: Overlay`, so we reserve ~80px
+   on the left for them. `data-tauri-drag-region` lets the user drag the
+   window from any non-button area inside the strip. */
+
+.ow-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.ow-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  height: 36px;
+  padding: 0 14px 0 80px;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ow-titlebar--main {
+  /* No content in the strip on the main view — just drag space. */
+  border-bottom-color: transparent;
+}
+
+.ow-titlebar__back {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 15px;
+  font-family: inherit;
+  padding: 0;
+}
+
+.ow-titlebar__back:hover {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+.ow-titlebar__back:focus-visible {
+  outline: none;
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 2px var(--info-bg);
+}
+
+.ow-titlebar__title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.ow-app__body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 

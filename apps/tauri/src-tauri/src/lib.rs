@@ -15,6 +15,7 @@ mod fullscreen;
 mod hotkey;
 mod injection;
 mod permissions;
+mod settings;
 mod tray;
 
 pub(crate) const TICK_MS: u64 = 50;
@@ -255,6 +256,22 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Navigate to the Settings view. Settings is now an in-window route
+/// rather than a separate window — bring the main window forward and
+/// emit `ow_navigate` so the React tree swaps to the Settings shell.
+#[tauri::command]
+async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    main.show().map_err(|e| e.to_string())?;
+    main.unminimize().map_err(|e| e.to_string())?;
+    main.set_focus().map_err(|e| e.to_string())?;
+    app.emit("ow_navigate", "settings")
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn set_pill_click_through(
     app: tauri::AppHandle,
@@ -379,6 +396,11 @@ pub fn run() {
                 injection::TauriInjector::new(app.handle().clone()),
             ));
             tray::install(app.handle())?;
+            // Load saved hotkeys before install so the backends pick up the
+            // user's bindings instead of the platform defaults. First-run
+            // returns the default and persists nothing — the file is only
+            // written on explicit save.
+            let _ = settings::load_settings(app.handle());
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before
@@ -417,9 +439,15 @@ pub fn run() {
             set_pill_click_through,
             position_pill_bottom_center,
             show_main_window,
+            open_settings_window,
             hotkey::hotkey_retry,
             hotkey::hotkey_status_current,
             permissions::permissions_status_current,
+            settings::settings_get_hotkeys,
+            settings::settings_set_hotkey,
+            settings::settings_reset_hotkey,
+            settings::settings_capture_hotkey_start,
+            settings::settings_capture_hotkey_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

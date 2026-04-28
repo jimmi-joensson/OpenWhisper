@@ -41,8 +41,8 @@ declare global {
 
 // Install the Tauri 2 internals stub before the SPA boots. Records emitted
 // `dictation_tick` events into a queue the test can replay.
-async function installTauriShim(page: Page) {
-  await page.addInitScript(() => {
+async function installTauriShim(page: Page, label: "main" = "main") {
+  await page.addInitScript((windowLabel) => {
     const handlers = new Map<string, Set<number>>();
     const callbacks = new Map<number, (payload: unknown) => void>();
     let nextId = 1;
@@ -50,8 +50,8 @@ async function installTauriShim(page: Page) {
 
     window.__TAURI_INTERNALS__ = {
       metadata: {
-        currentWindow: { label: "main" },
-        currentWebview: { label: "main", windowLabel: "main" },
+        currentWindow: { label: windowLabel },
+        currentWebview: { label: windowLabel, windowLabel },
       },
       invoke: async (cmd: string, args?: Record<string, unknown>) => {
         if (cmd === "core_version") return "0.1.0-test";
@@ -63,6 +63,65 @@ async function installTauriShim(page: Page) {
         if (cmd === "hotkey_retry") {
           (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount =
             ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "open_settings_window") {
+          (window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount =
+            ((window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "settings_get_hotkeys") {
+          const stored = (window as unknown as { __owHotkeys?: unknown }).__owHotkeys;
+          return (
+            stored ?? {
+              toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+              cancel: { kind: "chord", code: "Escape", mods: [] },
+            }
+          );
+        }
+        if (cmd === "settings_set_hotkey") {
+          const { target, config } = (args ?? {}) as {
+            target: "toggle" | "cancel";
+            config: unknown;
+          };
+          const w = window as unknown as { __owHotkeys?: Record<string, unknown> };
+          w.__owHotkeys = w.__owHotkeys ?? {
+            toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+            cancel: { kind: "chord", code: "Escape", mods: [] },
+          };
+          w.__owHotkeys[target] = config;
+          (window as unknown as { __owHotkeySetCount?: number }).__owHotkeySetCount =
+            ((window as unknown as { __owHotkeySetCount?: number }).__owHotkeySetCount ?? 0) + 1;
+          (window as unknown as { __owHotkeyLastTarget?: string }).__owHotkeyLastTarget = target;
+          return null;
+        }
+        if (cmd === "settings_reset_hotkey") {
+          const { target } = (args ?? {}) as { target: "toggle" | "cancel" };
+          const def =
+            target === "toggle"
+              ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
+              : { kind: "chord", code: "Escape", mods: [] };
+          const w = window as unknown as { __owHotkeys?: Record<string, unknown> };
+          w.__owHotkeys = w.__owHotkeys ?? {
+            toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+            cancel: { kind: "chord", code: "Escape", mods: [] },
+          };
+          w.__owHotkeys[target] = def;
+          (window as unknown as { __owHotkeyResetCount?: number }).__owHotkeyResetCount =
+            ((window as unknown as { __owHotkeyResetCount?: number }).__owHotkeyResetCount ?? 0) + 1;
+          (window as unknown as { __owHotkeyLastTarget?: string }).__owHotkeyLastTarget = target;
+          return def;
+        }
+        if (cmd === "settings_capture_hotkey_start") {
+          const { target } = (args ?? {}) as { target?: "toggle" | "cancel" };
+          (window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount =
+            ((window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount ?? 0) + 1;
+          (window as unknown as { __owCaptureLastTarget?: string }).__owCaptureLastTarget = target;
+          return null;
+        }
+        if (cmd === "settings_capture_hotkey_cancel") {
+          (window as unknown as { __owCaptureCancelCount?: number }).__owCaptureCancelCount =
+            ((window as unknown as { __owCaptureCancelCount?: number }).__owCaptureCancelCount ?? 0) + 1;
           return null;
         }
         if (cmd === "plugin:event|listen") {
@@ -115,7 +174,7 @@ async function installTauriShim(page: Page) {
       }
       return delivered;
     };
-  });
+  }, label);
 }
 
 export async function emitTick(page: Page, tick: MockTick): Promise<number> {

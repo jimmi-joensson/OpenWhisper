@@ -43,17 +43,19 @@ test.describe("main window", () => {
 });
 
 test.describe("scroll", () => {
-  test("#root scrolls when content overflows the viewport", async ({ page }) => {
+  test(".ow-app__body scrolls when content overflows the viewport", async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 500 });
     await page.goto("/");
     await page.waitForSelector("text=OpenWhisper Dev");
 
+    // Window titlebar strip stays fixed; scroll happens inside
+    // `.ow-app__body` so the strip never scrolls out of view.
     const probe = await page.evaluate(() => {
-      const root = document.getElementById("root")!;
+      const body = document.querySelector(".ow-app__body") as HTMLElement;
       return {
-        clientH: root.clientHeight,
-        scrollH: root.scrollHeight,
-        overflowY: getComputedStyle(root).overflowY,
+        clientH: body.clientHeight,
+        scrollH: body.scrollHeight,
+        overflowY: getComputedStyle(body).overflowY,
       };
     });
 
@@ -61,13 +63,12 @@ test.describe("scroll", () => {
     expect(probe.scrollH).toBeGreaterThan(probe.clientH);
 
     const scrolled = await page.evaluate(() => {
-      const root = document.getElementById("root")!;
-      root.scrollTop = root.scrollHeight;
-      return root.scrollTop;
+      const body = document.querySelector(".ow-app__body") as HTMLElement;
+      body.scrollTop = body.scrollHeight;
+      return body.scrollTop;
     });
     expect(scrolled).toBeGreaterThan(0);
 
-    // Bottom card should be visible after scroll-to-bottom.
     await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
   });
 

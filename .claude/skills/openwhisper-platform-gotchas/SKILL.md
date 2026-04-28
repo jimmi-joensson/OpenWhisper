@@ -1,5 +1,5 @@
 ---
-name: platform-gotchas
+name: openwhisper-platform-gotchas
 description: Platform-specific behaviors and prior regressions in OpenWhisper's Tauri shell. READ before touching input handling (global hotkeys, keyboard hooks), focus management, audio capture, text injection, or any code that crosses the Rust/WebView boundary differently between Windows and macOS. Each entry below was earned by a real bug — not speculation.
 ---
 

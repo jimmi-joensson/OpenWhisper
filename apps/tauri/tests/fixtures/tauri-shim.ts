@@ -124,6 +124,41 @@ async function installTauriShim(page: Page, label: "main" = "main") {
             ((window as unknown as { __owCaptureCancelCount?: number }).__owCaptureCancelCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "audio_list_devices") {
+          const w = window as unknown as { __owAudioDevices?: unknown };
+          return (
+            w.__owAudioDevices ?? [
+              { name: "MacBook Pro Microphone", is_default: true },
+              { name: "AirPods Pro", is_default: false },
+            ]
+          );
+        }
+        if (cmd === "audio_get_device") {
+          const w = window as unknown as { __owAudioDevice?: string | null };
+          return w.__owAudioDevice ?? null;
+        }
+        if (cmd === "audio_set_device") {
+          const { name } = (args ?? {}) as { name: string | null };
+          const w = window as unknown as {
+            __owAudioDevice?: string | null;
+            __owAudioSetCount?: number;
+            __owAudioLastSet?: string | null;
+          };
+          w.__owAudioDevice = name;
+          w.__owAudioLastSet = name;
+          w.__owAudioSetCount = (w.__owAudioSetCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "audio_preview_start") {
+          const w = window as unknown as { __owAudioPreviewStarts?: number };
+          w.__owAudioPreviewStarts = (w.__owAudioPreviewStarts ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "audio_preview_stop") {
+          const w = window as unknown as { __owAudioPreviewStops?: number };
+          w.__owAudioPreviewStops = (w.__owAudioPreviewStops ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;

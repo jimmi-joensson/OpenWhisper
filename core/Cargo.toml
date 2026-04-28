@@ -87,6 +87,15 @@ dirs = { version = "5", optional = true }
 # count is the safer ceiling — see TASK-39 bench notes.
 num_cpus = { version = "1.16", optional = true }
 
+# Mac-only — used to query CoreAudio kAudioDevicePropertyTransportType so we
+# can drop virtual mics (Microsoft Teams Audio, Zoom virtual device, Krisp,
+# BlackHole, etc.) from the picker. cpal classifies aggregate devices on
+# macOS but not virtual ones, so cpal's DeviceDescription alone isn't
+# enough. coreaudio-rs is already a transitive dep via cpal — promoting it
+# to a direct dep on Mac doesn't grow the lockfile.
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-rs = { version = "0.14", default-features = false, features = ["core_audio"] }
+
 [dev-dependencies]
 # Portable WAV reader for the recognizer smoke example (cross-platform —
 # avoids dragging sherpa-onnx into the Mac smoke path just for I/O).

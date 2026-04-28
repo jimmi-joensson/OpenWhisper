@@ -104,16 +104,32 @@ pub fn default_settings() -> HotkeySettings {
 
 /// On-disk schema. `hotkey` is the legacy single-slot field — kept for
 /// migration on first load after upgrading. `hotkeys` is the current
-/// shape; we always write that.
+/// shape; we always write that. `audio` is a sibling block that holds
+/// non-hotkey settings; absent on first run and on upgrades from the
+/// hotkey-only schema.
 #[derive(Serialize, Deserialize, Default)]
 struct SettingsFile {
     #[serde(default)]
     hotkey: Option<HotkeyConfig>,
     #[serde(default)]
     hotkeys: Option<HotkeySettings>,
+    #[serde(default)]
+    audio: Option<AudioSettings>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioSettings {
+    /// Selected input-device name. `None` = "use the host default".
+    /// Stored as a name (cpal `description().name`) rather than a stable
+    /// id so the file remains readable; cpal's input_devices list is the
+    /// source of truth at lookup time, with a fallback to the host
+    /// default if the saved name no longer matches anything present.
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
+static AUDIO_CURRENT: Mutex<Option<AudioSettings>> = Mutex::new(None);
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -172,12 +188,52 @@ pub fn current_settings() -> Option<HotkeySettings> {
 }
 
 fn save_settings(app: &AppHandle, settings: HotkeySettings) -> Result<(), String> {
+    let audio = current_audio_settings();
     let file = SettingsFile {
         hotkey: None,
         hotkeys: Some(settings.clone()),
+        audio,
     };
     write_file(app, &file)?;
     if let Ok(mut g) = CURRENT.lock() {
+        *g = Some(settings);
+    }
+    Ok(())
+}
+
+pub fn current_audio_settings() -> Option<AudioSettings> {
+    AUDIO_CURRENT.lock().ok().and_then(|g| g.clone())
+}
+
+/// Load the audio block from disk on the first call, then cache. Returns
+/// the default (no device selected) if the file is absent or the audio
+/// block is missing — matches the migration path for a user upgrading
+/// from a hotkey-only `settings.json`.
+pub fn load_audio_settings(app: &AppHandle) -> AudioSettings {
+    if let Some(s) = AUDIO_CURRENT.lock().ok().and_then(|g| g.clone()) {
+        return s;
+    }
+    let file = read_file(app);
+    let settings = file.audio.unwrap_or_default();
+    if let Ok(mut g) = AUDIO_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+fn save_audio_settings(app: &AppHandle, settings: AudioSettings) -> Result<(), String> {
+    // Re-read the on-disk file so we don't clobber an audio-or-hotkey
+    // block that is newer than our cache. Hotkeys may have been written
+    // by the user since boot.
+    let file = read_file(app);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio: Some(settings.clone()),
+    };
+    write_file(app, &merged)?;
+    if let Ok(mut g) = AUDIO_CURRENT.lock() {
         *g = Some(settings);
     }
     Ok(())
@@ -234,4 +290,21 @@ pub fn settings_capture_hotkey_start(target: HotkeyTarget) {
 #[tauri::command]
 pub fn settings_capture_hotkey_cancel() {
     crate::hotkey::set_capture_active(false, None);
+}
+
+#[tauri::command]
+pub fn audio_get_device(app: AppHandle) -> Option<String> {
+    load_audio_settings(&app).device_name
+}
+
+#[tauri::command]
+pub fn audio_set_device(app: AppHandle, name: Option<String>) -> Result<(), String> {
+    let normalized = name.and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    });
+    let settings = AudioSettings { device_name: normalized.clone() };
+    save_audio_settings(&app, settings)?;
+    openwhisper_core::audio::audio_set_selected_device(normalized);
+    Ok(())
 }

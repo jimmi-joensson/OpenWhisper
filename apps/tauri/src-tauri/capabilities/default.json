@@ -17,6 +17,7 @@
     "core:window:allow-current-monitor",
     "core:window:allow-primary-monitor",
     "core:window:allow-available-monitors",
+    "core:window:allow-start-dragging",
     "opener:default"
   ]
 }

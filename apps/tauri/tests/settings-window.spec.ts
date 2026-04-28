@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/tauri-shim";
+import { emitTick, expect, test, waitForTickListener } from "./fixtures/tauri-shim";
 
 // Settings is now an in-window route inside App, not a separate window.
 // All specs mount the main App tree and navigate via ⌘, or the
@@ -224,6 +224,204 @@ test.describe("settings — shortcuts pane", () => {
     await toggleChip.click();
     await expect(toggleChip).toHaveText("press keys…");
     await expect(cancelChip).toBeDisabled();
+  });
+});
+
+test.describe("settings — audio pane", () => {
+  test("renders device picker, KV stats, and meter container", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await expect(page.getByRole("heading", { name: "Audio" })).toBeVisible();
+    await expect(
+      page.getByRole("combobox", { name: "Microphone device" }),
+    ).toBeVisible();
+    // KV stats — floor and sample rate are constants, peak starts at "—".
+    // Match inside the KV block specifically so the intro paragraph's
+    // "16 kHz" mention doesn't double-resolve the locator.
+    const kv = page.locator(".ow-audio__kv");
+    await expect(kv.getByText("-55 dBFS")).toBeVisible();
+    await expect(kv.getByText("16 kHz")).toBeVisible();
+  });
+
+  test("does not auto-start preview; Start test button toggles it", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    // Mounting the pane no longer triggers a preview — the user has to
+    // explicitly press the button. Wait a little to make sure the mount
+    // effect has had a chance to run.
+    await page.waitForTimeout(200);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __owAudioPreviewStarts?: number })
+            .__owAudioPreviewStarts ?? 0,
+      ),
+    ).toBe(0);
+    await page.getByRole("button", { name: "Start test" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioPreviewStarts?: number })
+              .__owAudioPreviewStarts ?? 0,
+        ),
+      )
+      .toBe(1);
+    await page.getByRole("button", { name: "Stop test" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioPreviewStops?: number })
+              .__owAudioPreviewStops ?? 0,
+        ),
+      )
+      .toBeGreaterThan(0);
+  });
+
+  test("unmount stops an in-flight test", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await page.getByRole("button", { name: "Start test" }).click();
+    await expect(page.getByRole("button", { name: "Stop test" })).toBeVisible();
+    // Navigate away — pane unmounts, stop is invoked even without an
+    // explicit click.
+    await page.getByRole("tab", { name: "General" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioPreviewStops?: number })
+              .__owAudioPreviewStops ?? 0,
+        ),
+      )
+      .toBeGreaterThan(0);
+  });
+
+  test("changing the device persists; restarts preview only if testing", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    // Idle change — should persist but NOT start the preview.
+    await select.selectOption("AirPods Pro");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioLastSet?: string })
+              .__owAudioLastSet,
+        ),
+      )
+      .toBe("AirPods Pro");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __owAudioPreviewStarts?: number })
+            .__owAudioPreviewStarts ?? 0,
+      ),
+    ).toBe(0);
+    // Start a test, then change again — that path SHOULD bounce the stream.
+    await page.getByRole("button", { name: "Start test" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioPreviewStarts?: number })
+              .__owAudioPreviewStarts ?? 0,
+        ),
+      )
+      .toBe(1);
+    await select.selectOption("MacBook Pro Microphone");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioPreviewStarts?: number })
+              .__owAudioPreviewStarts ?? 0,
+        ),
+      )
+      .toBe(2);
+  });
+
+  test("device picker + Test button are disabled while recording", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    // Simulate a recording in flight via the dictation tick.
+    await waitForTickListener(page);
+    await emitTick(page, {
+      phase: 2,
+      status: "recording",
+      is_recording: true,
+      level: 0.4,
+    });
+    await expect(
+      page.getByRole("combobox", { name: "Microphone device" }),
+    ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Start test" })).toBeDisabled();
+    // Stop recording — controls re-enable.
+    await emitTick(page, {
+      phase: 0,
+      status: "idle",
+      is_recording: false,
+      level: 0,
+    });
+    await expect(
+      page.getByRole("combobox", { name: "Microphone device" }),
+    ).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Start test" })).toBeEnabled();
+  });
+
+  test("System default option clears the saved device name", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
+        "AirPods Pro";
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    await expect(select).toHaveValue("AirPods Pro");
+    await select.selectOption("");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioLastSet?: string | null })
+              .__owAudioLastSet,
+        ),
+      )
+      .toBeNull();
+  });
+
+  test("level ticks update the peak readout while testing", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    // Peak starts at "—" because the test isn't running yet.
+    const peakRow = page.locator(".ow-audio__kv-row").nth(1);
+    await expect(peakRow).toContainText("—");
+    await page.getByRole("button", { name: "Start test" }).click();
+    await waitForTickListener(page);
+    await emitTick(page, { phase: 0, status: "idle", level: 0.6 });
+    // Peak readout updates from the rolling window — value is dB-converted
+    // from 0.6 → roughly -4.4 dBFS, and we display one decimal.
+    await expect(peakRow).toContainText("dBFS");
+    await expect(peakRow).not.toContainText("—");
   });
 });
 

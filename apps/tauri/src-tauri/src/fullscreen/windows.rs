@@ -82,33 +82,40 @@ fn window_class_name(hwnd: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
-pub fn is_fullscreen_now() -> bool {
+/// Foreground HWND + its window rect + the MONITORINFO of the
+/// containing monitor — `Some` only when no skip condition fires
+/// (invalid HWND, OW's own pid, shell-class window, or any GDI call
+/// failing). Both `is_fullscreen_now` and `focused_window_monitor`
+/// route through this; the HWND is in the tuple so the chromeless
+/// branch in `is_fullscreen_now` reads style bits from the same window
+/// that produced the rect (no second `GetForegroundWindow` race).
+fn foreground_monitor_info() -> Option<(HWND, RECT, MONITORINFO)> {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() {
-            return false;
+            return None;
         }
 
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(fg, Some(&mut pid));
         if pid == GetCurrentProcessId() {
-            return false;
+            return None;
         }
 
         if let Some(class) = window_class_name(fg) {
             if SHELL_CLASSES.iter().any(|c| *c == class) {
-                return false;
+                return None;
             }
         }
 
         let mut win_rect = RECT::default();
         if GetWindowRect(fg, &mut win_rect).is_err() {
-            return false;
+            return None;
         }
 
         let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
         if monitor.is_invalid() {
-            return false;
+            return None;
         }
 
         let mut mi = MONITORINFO {
@@ -116,28 +123,47 @@ pub fn is_fullscreen_now() -> bool {
             ..Default::default()
         };
         if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
-            return false;
+            return None;
         }
 
-        let covers_monitor = win_rect.left <= mi.rcMonitor.left
-            && win_rect.top <= mi.rcMonitor.top
-            && win_rect.right >= mi.rcMonitor.right
-            && win_rect.bottom >= mi.rcMonitor.bottom;
-        if !covers_monitor {
-            return false;
-        }
+        Some((fg, win_rect, mi))
+    }
+}
 
-        let chromeless = mi.rcWork.left == mi.rcMonitor.left
-            && mi.rcWork.top == mi.rcMonitor.top
-            && mi.rcWork.right == mi.rcMonitor.right
-            && mi.rcWork.bottom == mi.rcMonitor.bottom;
-        if !chromeless {
-            return true;
-        }
+pub fn is_fullscreen_now() -> bool {
+    let Some((fg, win_rect, mi)) = foreground_monitor_info() else {
+        return false;
+    };
 
+    let covers_monitor = win_rect.left <= mi.rcMonitor.left
+        && win_rect.top <= mi.rcMonitor.top
+        && win_rect.right >= mi.rcMonitor.right
+        && win_rect.bottom >= mi.rcMonitor.bottom;
+    if !covers_monitor {
+        return false;
+    }
+
+    let chromeless = mi.rcWork.left == mi.rcMonitor.left
+        && mi.rcWork.top == mi.rcMonitor.top
+        && mi.rcWork.right == mi.rcMonitor.right
+        && mi.rcWork.bottom == mi.rcMonitor.bottom;
+    if !chromeless {
+        return true;
+    }
+
+    unsafe {
         let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
         let is_maximized = style & WS_MAXIMIZE.0 != 0;
         let has_chrome = style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0;
         !(is_maximized && has_chrome)
     }
+}
+
+/// Origin `(left, top)` of the monitor hosting the foreground window,
+/// in physical-px virtual-screen coordinates (same space as
+/// `MONITORINFO.rcMonitor`). Returns `None` when no foreground window
+/// qualifies — same skip list as `is_fullscreen_now`.
+#[allow(dead_code)]
+pub fn focused_window_monitor() -> Option<(i32, i32)> {
+    foreground_monitor_info().map(|(_, _, mi)| (mi.rcMonitor.left, mi.rcMonitor.top))
 }

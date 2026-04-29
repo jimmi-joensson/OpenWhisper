@@ -263,6 +263,35 @@ body {
   box-shadow: 0 0 0 2px var(--info-bg);
 }
 
+.ow-titlebar__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+}
+
+.ow-titlebar__icon--end {
+  margin-left: auto;
+}
+
+.ow-titlebar__icon:hover {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.ow-titlebar__icon:focus-visible {
+  outline: none;
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 2px var(--info-bg);
+}
+
 .ow-titlebar__title {
   margin: 0;
   font-size: 13.5px;

@@ -7,17 +7,37 @@
 //! used as the comparison basis; that would also catch ordinary
 //! maximized windows, which should NOT gate dictation off.
 //!
-//! `WS_MAXIMIZE` early-out: the rect-vs-`rcMonitor` test alone is not
-//! enough on a monitor without a taskbar (auto-hidden, removed by a
-//! third-party shell, or a secondary display with the taskbar disabled
-//! in Settings → Personalization → Taskbar). On those screens
-//! `rcWork == rcMonitor`, so a normally-maximized browser/IDE/Slack
-//! matches the geometry and trips the check — the user sees the pill
-//! disappear and the hotkey deactivate the moment they switch to that
-//! screen. Style-bit check sidesteps it: the OS sets `WS_MAXIMIZE` on
-//! every maximized window, and never on real fullscreen apps
-//! (D3D-exclusive games, F11/borderless, PowerPoint slideshow,
-//! Win+Shift+Enter terminal full-screen).
+//! Chromeless-monitor edge case: the rect-vs-`rcMonitor` test alone is
+//! not enough on a monitor without a taskbar (third-party shell, or a
+//! secondary display with the taskbar disabled in Settings →
+//! Personalization → Taskbar → "Show my taskbar on all displays" off).
+//! On those screens `rcWork == rcMonitor`, so a normally-maximized
+//! browser/IDE/Slack matches the geometry and trips the check — the
+//! user sees the pill disappear and the hotkey deactivate the moment
+//! they switch to that screen.
+//!
+//! Strategy: check `rcWork == rcMonitor` BEFORE applying any style-bit
+//! filter. On a normal screen with a taskbar, `rcWork < rcMonitor`, so
+//! a maximized normal window only reaches `rcWork`; if `win_rect`
+//! reaches `rcMonitor` we know it must be fullscreen and we return
+//! true with no further checks. Style bits are consulted only on
+//! chromeless screens, where maximized and fullscreen both reach
+//! `rcMonitor` and we need a tiebreaker.
+//!
+//! Tiebreaker on chromeless screens: `WS_MAXIMIZE` plus chrome bits
+//! (`WS_CAPTION` titlebar or `WS_THICKFRAME` sizing border). Real
+//! maximized windows always retain at least one chrome bit; popup-style
+//! fullscreen flows (Chromium F11, D3D-exclusive games, PowerPoint
+//! slideshow, Win+Shift+Enter terminal full-screen) strip both, so the
+//! tiebreaker excludes them correctly.
+//!
+//! Known limitation: UWP fullscreen apps (Minecraft Bedrock, Xbox app)
+//! run inside `ApplicationFrameWindow` which keeps WS_MAXIMIZE *and*
+//! chrome bits even in fullscreen. They are detected correctly on any
+//! screen with a visible taskbar (rcWork-vs-rcMonitor short-circuit),
+//! but mis-detected as "maximized normal" if the user runs them
+//! fullscreen on a chromeless secondary monitor. Documented; not
+//! chased without a reproduction request.
 //!
 //! Self-window check uses the foreground window's process id (via
 //! GetWindowThreadProcessId) compared to GetCurrentProcessId, rather
@@ -41,7 +61,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, GWL_STYLE, WS_MAXIMIZE,
+    GetWindowThreadProcessId, GWL_STYLE, WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
 };
 
 /// Window classes for the Windows desktop + taskbar — never treat them
@@ -81,11 +101,6 @@ pub fn is_fullscreen_now() -> bool {
             }
         }
 
-        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
-        if style & WS_MAXIMIZE.0 != 0 {
-            return false;
-        }
-
         let mut win_rect = RECT::default();
         if GetWindowRect(fg, &mut win_rect).is_err() {
             return false;
@@ -104,9 +119,25 @@ pub fn is_fullscreen_now() -> bool {
             return false;
         }
 
-        win_rect.left <= mi.rcMonitor.left
+        let covers_monitor = win_rect.left <= mi.rcMonitor.left
             && win_rect.top <= mi.rcMonitor.top
             && win_rect.right >= mi.rcMonitor.right
-            && win_rect.bottom >= mi.rcMonitor.bottom
+            && win_rect.bottom >= mi.rcMonitor.bottom;
+        if !covers_monitor {
+            return false;
+        }
+
+        let chromeless = mi.rcWork.left == mi.rcMonitor.left
+            && mi.rcWork.top == mi.rcMonitor.top
+            && mi.rcWork.right == mi.rcMonitor.right
+            && mi.rcWork.bottom == mi.rcMonitor.bottom;
+        if !chromeless {
+            return true;
+        }
+
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        let is_maximized = style & WS_MAXIMIZE.0 != 0;
+        let has_chrome = style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0;
+        !(is_maximized && has_chrome)
     }
 }

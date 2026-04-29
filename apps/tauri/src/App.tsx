@@ -9,6 +9,7 @@ import { useDictation } from "./lib/use-dictation";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
+import { ThemeProvider } from "./lib/use-theme";
 import {
   EMPTY_LEVELS,
   PILL_STATE_EVENT,
@@ -149,6 +150,7 @@ function App() {
   }, [pillOverride.enabled, pillOverride.status]);
 
   return (
+    <ThemeProvider>
     <div className="ow-app">
       {/* Drag region — `data-tauri-drag-region` on the strip + on the
           h1 (Tauri 2.10's drag.js only checks `e.target.getAttribute`,
@@ -230,6 +232,7 @@ function App() {
         )}
       </main>
     </div>
+    </ThemeProvider>
   );
 }
 

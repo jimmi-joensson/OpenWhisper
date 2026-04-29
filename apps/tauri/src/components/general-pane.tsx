@@ -11,12 +11,11 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
-
-type Theme = "system" | "light" | "dark";
+import { useTheme } from "@/lib/use-theme";
 
 export function GeneralPane() {
   const [launchAtLogin, setLaunchAtLogin] = useState(true);
-  const [theme, setTheme] = useState<Theme>("system");
+  const { theme, setTheme } = useTheme();
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {

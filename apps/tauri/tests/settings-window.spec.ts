@@ -782,4 +782,14 @@ test.describe("main window — settings entry point", () => {
       page.getByRole("heading", { name: "Settings" }),
     ).toBeHidden();
   });
+
+  test("titlebar gear button opens settings", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForSelector("text=OpenWhisper Dev");
+    await expect(
+      page.getByRole("heading", { name: "Settings" }),
+    ).toBeHidden();
+    await page.getByRole("button", { name: "Open settings" }).click();
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  });
 });

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getName } from "@tauri-apps/api/app";
+import { Settings as SettingsIcon } from "lucide-react";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SettingsShell } from "./Settings";
@@ -109,6 +110,7 @@ function App() {
   }, []);
 
   const goBack = useCallback(() => setView("main"), []);
+  const openSettings = useCallback(() => setView("settings"), []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
   // override is active so manual selections aren't immediately overwritten
@@ -165,7 +167,7 @@ function App() {
         className={`ow-titlebar ow-titlebar--${view}`}
         data-tauri-drag-region
       >
-        {view === "settings" && (
+        {view === "settings" ? (
           <>
             <button
               type="button"
@@ -180,6 +182,17 @@ function App() {
               Settings
             </h1>
           </>
+        ) : (
+          <button
+            type="button"
+            className="ow-titlebar__icon ow-titlebar__icon--end"
+            onClick={openSettings}
+            aria-label="Open settings"
+            data-testid="open-settings-button"
+            data-tauri-drag-region="false"
+          >
+            <SettingsIcon size={15} aria-hidden="true" />
+          </button>
         )}
       </header>
       <main className="ow-app__body">

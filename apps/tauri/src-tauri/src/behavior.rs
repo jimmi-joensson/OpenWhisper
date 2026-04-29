@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::{self, BehaviorSettings};
 
@@ -23,6 +23,21 @@ pub fn show_in_fullscreen() -> bool {
 
 pub fn set_show_in_fullscreen_cache(value: bool) {
     SHOW_IN_FULLSCREEN.store(value, Ordering::Relaxed);
+}
+
+/// Mirror `show_in_fullscreen` onto the pill window's `visibleOnAllWorkspaces`
+/// collection-behavior bit. On macOS this is the AppKit
+/// `canJoinAllSpaces`/`fullScreenAuxiliary` combo that lets the pill draw
+/// over fullscreen Spaces — without it, a normal-level window stays trapped
+/// in its origin Space and is invisible while a fullscreen app owns the
+/// screen. Tauri documents the call as a no-op on platforms that don't
+/// support it (Windows virtual desktops are a different model and the
+/// pill follows the active desktop already), so this is safe to call
+/// unconditionally.
+pub fn apply_collection_behavior(app: &AppHandle, show: bool) {
+    if let Some(pill) = app.get_webview_window("pill") {
+        let _ = pill.set_visible_on_all_workspaces(show);
+    }
 }
 
 #[tauri::command]

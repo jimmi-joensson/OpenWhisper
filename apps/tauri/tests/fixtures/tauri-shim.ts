@@ -202,6 +202,28 @@ async function installTauriShim(page: Page, label: "main" = "main") {
           w.__owAudioPreviewStops = (w.__owAudioPreviewStops ?? 0) + 1;
           return null;
         }
+        if (cmd === "settings_get_pill") {
+          const stored = (window as unknown as { __owPillFollow?: boolean })
+            .__owPillFollow;
+          return { follow_active_screen: stored ?? true };
+        }
+        if (cmd === "settings_set_pill_follow") {
+          const { follow } = (args ?? {}) as { follow: boolean };
+          const w = window as unknown as {
+            __owPillFollow?: boolean;
+            __owPillSetCount?: number;
+            __owPillLastFollow?: boolean;
+          };
+          w.__owPillFollow = follow;
+          w.__owPillLastFollow = follow;
+          w.__owPillSetCount = (w.__owPillSetCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "reposition_pill") {
+          // PillOverlay's mount-effect calls this; stub returns OK so the
+          // catch path doesn't surface in unrelated specs.
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;

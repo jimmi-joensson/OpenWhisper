@@ -579,9 +579,17 @@ pub fn run() {
             audio::audio_set_selected_device_id(audio_settings.device_id);
             // Hydrate the behavior AtomicBool cache before the fullscreen
             // detector thread starts so the very first transition reads
-            // the persisted value rather than the default false.
+            // the persisted value rather than the default false. Apply
+            // the pill's `visibleOnAllWorkspaces` collection-behavior at
+            // the same time so users who previously enabled the toggle
+            // get the expected over-fullscreen rendering on relaunch
+            // without having to flip the Switch again.
             let behavior_settings = settings::load_behavior_settings(app.handle());
             behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
+            behavior::apply_collection_behavior(
+                app.handle(),
+                behavior_settings.show_in_fullscreen,
+            );
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before
@@ -624,7 +632,10 @@ pub fn run() {
             // the hotkey without restarting OW; flipping off with a
             // recording in flight aborts it.
             let app_for_behavior_event = app.handle().clone();
-            app.handle().listen("behavior_show_in_fullscreen_changed", move |_event| {
+            app.handle().listen("behavior_show_in_fullscreen_changed", move |event| {
+                let enabled = serde_json::from_str::<bool>(event.payload())
+                    .unwrap_or_else(|_| behavior::show_in_fullscreen());
+                behavior::apply_collection_behavior(&app_for_behavior_event, enabled);
                 apply_fullscreen_state(
                     &app_for_behavior_event,
                     fullscreen::is_active(),

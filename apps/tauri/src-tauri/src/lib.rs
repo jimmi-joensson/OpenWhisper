@@ -126,29 +126,28 @@ fn dictation_cancel() -> bool {
 
 #[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AudioDevice {
-    name: String,
+    /// Stable cpal device id (Display form). Persisted by the picker; survives
+    /// reboots and reconnections, so a saved selection rebinds even if the
+    /// device's friendly name changes (driver reinstall, OS rename).
+    id: String,
+    /// Discord/Windows-Sound-style label. On Windows this is the
+    /// `PKEY_Device_FriendlyName` (e.g. "Microphone (SteelSeries Arctis 5
+    /// Chat)"); on other platforms it's the cpal description name.
+    label: String,
     is_default: bool,
 }
 
-#[tauri::command]
-fn audio_list_devices() -> Vec<AudioDevice> {
-    audio::audio_list_input_devices()
-        .into_iter()
-        .map(|d| AudioDevice { name: d.name, is_default: d.is_default })
-        .collect()
-}
-
-// Snapshot the React Audio pane subscribes to. `selected_present` and
-// `default_name` let the UI render a "(disconnected — using System default)"
-// row without re-walking the device list itself, and let the "(default)"
-// tag follow live when the host default changes (Bluetooth route, AirPods
-// auto-connect).
+// Snapshot the React Audio pane subscribes to. `selected_present` lets the
+// UI render the picker as System default when the saved device isn't
+// enumerable, and `default_label` powers the Discord-style
+// "System default (<device label>)" row so the user can see which device
+// the system default currently resolves to.
 #[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AudioDeviceState {
     devices: Vec<AudioDevice>,
-    selected_name: Option<String>,
+    selected_id: Option<String>,
     selected_present: bool,
-    default_name: Option<String>,
+    default_label: Option<String>,
 }
 
 fn audio_device_state_snapshot() -> AudioDeviceState {
@@ -156,23 +155,23 @@ fn audio_device_state_snapshot() -> AudioDeviceState {
     // queries on enumerate. Sequoia's TCC has fired the mic dialog from
     // those reads when Accessibility is still mid-prompt — racing the
     // boot prompt sequence (AX → mic). While not authorized we return a
-    // safe placeholder: empty device list, saved name preserved, no
+    // safe placeholder: empty device list, saved id preserved, no
     // disconnected marker. The next emitter tick after authorization
     // pushes the real state and the UI catches up via its subscription.
     if !permissions::is_mic_authorized() {
         return AudioDeviceState {
             devices: Vec::new(),
-            selected_name: audio::audio_get_selected_device(),
+            selected_id: audio::audio_get_selected_device_id(),
             selected_present: true,
-            default_name: None,
+            default_label: None,
         };
     }
     let devices: Vec<AudioDevice> = audio::audio_list_input_devices()
         .into_iter()
-        .map(|d| AudioDevice { name: d.name, is_default: d.is_default })
+        .map(|d| AudioDevice { id: d.id, label: d.label, is_default: d.is_default })
         .collect();
-    let selected_name = audio::audio_get_selected_device();
-    let default_name = audio::audio_default_input_name();
+    let selected_id = audio::audio_get_selected_device_id();
+    let default_label = audio::audio_default_input_label();
     let selected_present = match audio::audio_selected_device_status() {
         audio::SelectedDeviceStatus::Present => true,
         audio::SelectedDeviceStatus::MissingFallbackToDefault => false,
@@ -180,7 +179,7 @@ fn audio_device_state_snapshot() -> AudioDeviceState {
         // the UI doesn't render a disconnected marker on the empty option.
         audio::SelectedDeviceStatus::NoneSelectedUsingDefault => true,
     };
-    AudioDeviceState { devices, selected_name, selected_present, default_name }
+    AudioDeviceState { devices, selected_id, selected_present, default_label }
 }
 
 #[tauri::command]
@@ -524,7 +523,7 @@ pub fn run() {
             // so the very first recording opens the user's preferred mic
             // (rather than whatever cpal's default is on this boot).
             let audio_settings = settings::load_audio_settings(app.handle());
-            audio::audio_set_selected_device(audio_settings.device_name);
+            audio::audio_set_selected_device_id(audio_settings.device_id);
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before
@@ -572,9 +571,7 @@ pub fn run() {
             settings::settings_reset_hotkey,
             settings::settings_capture_hotkey_start,
             settings::settings_capture_hotkey_cancel,
-            settings::audio_get_device,
             settings::audio_set_device,
-            audio_list_devices,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

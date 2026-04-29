@@ -104,9 +104,9 @@ pub fn default_settings() -> HotkeySettings {
 
 /// On-disk schema. `hotkey` is the legacy single-slot field — kept for
 /// migration on first load after upgrading. `hotkeys` is the current
-/// shape; we always write that. `audio` is a sibling block that holds
-/// non-hotkey settings; absent on first run and on upgrades from the
-/// hotkey-only schema.
+/// shape; we always write that. `audio` and `behavior` are sibling blocks
+/// that hold non-hotkey settings; absent on first run and on upgrades
+/// from the hotkey-only schema.
 #[derive(Serialize, Deserialize, Default)]
 struct SettingsFile {
     #[serde(default)]
@@ -115,6 +115,8 @@ struct SettingsFile {
     hotkeys: Option<HotkeySettings>,
     #[serde(default)]
     audio: Option<AudioSettings>,
+    #[serde(default)]
+    behavior: Option<BehaviorSettings>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -129,8 +131,20 @@ pub struct AudioSettings {
     pub device_id: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct BehaviorSettings {
+    /// When true, OpenWhisper stays active over fullscreen apps — pill
+    /// remains visible (best-effort), hotkey stays armed. Default false
+    /// preserves the historical "step aside for games and video"
+    /// behavior. Read by the fullscreen detector callback via the
+    /// `behavior::SHOW_IN_FULLSCREEN` AtomicBool cache.
+    #[serde(default)]
+    pub show_in_fullscreen: bool,
+}
+
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
 static AUDIO_CURRENT: Mutex<Option<AudioSettings>> = Mutex::new(None);
+static BEHAVIOR_CURRENT: Mutex<Option<BehaviorSettings>> = Mutex::new(None);
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -190,10 +204,12 @@ pub fn current_settings() -> Option<HotkeySettings> {
 
 fn save_settings(app: &AppHandle, settings: HotkeySettings) -> Result<(), String> {
     let audio = current_audio_settings();
+    let behavior = current_behavior_settings();
     let file = SettingsFile {
         hotkey: None,
         hotkeys: Some(settings.clone()),
         audio,
+        behavior,
     };
     write_file(app, &file)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -228,13 +244,57 @@ fn save_audio_settings(app: &AppHandle, settings: AudioSettings) -> Result<(), S
     // by the user since boot.
     let file = read_file(app);
     let hotkeys = file.hotkeys.or_else(current_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio: Some(settings.clone()),
+        behavior,
     };
     write_file(app, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
+        *g = Some(settings);
+    }
+    Ok(())
+}
+
+pub fn current_behavior_settings() -> Option<BehaviorSettings> {
+    BEHAVIOR_CURRENT.lock().ok().and_then(|g| g.clone())
+}
+
+/// Load the behavior block from disk on the first call, then cache.
+/// Returns the default (show_in_fullscreen=false) when the file is
+/// absent or the behavior block is missing — same migration shape as
+/// `load_audio_settings`.
+pub fn load_behavior_settings(app: &AppHandle) -> BehaviorSettings {
+    if let Some(s) = BEHAVIOR_CURRENT.lock().ok().and_then(|g| g.clone()) {
+        return s;
+    }
+    let file = read_file(app);
+    let settings = file.behavior.unwrap_or_default();
+    if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+pub fn save_behavior_settings(
+    app: &AppHandle,
+    settings: BehaviorSettings,
+) -> Result<(), String> {
+    // Re-read for the same reason as `save_audio_settings`: avoid
+    // clobbering hotkey/audio blocks that may be newer than our cache.
+    let file = read_file(app);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior: Some(settings.clone()),
+    };
+    write_file(app, &merged)?;
+    if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
         *g = Some(settings);
     }
     Ok(())

@@ -1,9 +1,11 @@
 ---
 id: TASK-58.1
 title: 'Plan Task 1: Settings schema + Rust commands + in-process cache'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-04-29 18:05'
+updated_date: '2026-04-29 18:46'
 labels:
   - 58-impl
 dependencies: []

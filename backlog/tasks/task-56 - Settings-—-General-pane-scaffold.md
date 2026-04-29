@@ -1,10 +1,10 @@
 ---
 id: TASK-56
 title: Settings — General pane scaffold
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-29 08:24'
-updated_date: '2026-04-29 08:26'
+updated_date: '2026-04-29 13:34'
 labels: []
 dependencies: []
 documentation:
@@ -21,10 +21,16 @@ Replace the PaneStub at Settings.tsx:99 with a real GeneralPane built from shadc
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 PaneStub for General is replaced with a real GeneralPane component
-- [ ] #2 Pane uses shadcn Switch, ToggleGroup, Field family, and Separator — no custom toggle markup
-- [ ] #3 Three sections render: Startup (Launch at login placeholder Switch), Appearance (Theme stub ToggleGroup), Updates (live current version)
-- [ ] #4 Switch's checked state paints in the design's info-blue, not shadcn's default primary
+- [x] #1 PaneStub for General is replaced with a real GeneralPane component
+- [x] #2 Pane uses shadcn Switch, ToggleGroup, Field family, and Separator — no custom toggle markup
+- [x] #3 Three sections render: Startup (Launch at login placeholder Switch), Appearance (Theme stub ToggleGroup), Updates (live current version)
+- [x] #4 Switch's checked state paints in the design's info-blue, not shadcn's default primary
 - [ ] #5 Lucide icons used for sidebar items if iconography lands in scope (else deferred)
-- [ ] #6 Existing Settings landing-on-General + sidebar tests still pass; new tests cover the section structure
+- [x] #6 Existing Settings landing-on-General + sidebar tests still pass; new tests cover the section structure
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+General pane scaffold landed — 4 subtasks done, 39/39 Playwright tests pass. AC#5 (lucide sidebar icons) deferred: sidebar already shipped with emoji glyphs (project_recognizer_tauri PANES const), no iconography refactor in scope. Subsequent feature tasks (TASK-54 launch-at-login, TASK-55.6 follow-active-screen) now land into a real pane.
+<!-- SECTION:FINAL_SUMMARY:END -->

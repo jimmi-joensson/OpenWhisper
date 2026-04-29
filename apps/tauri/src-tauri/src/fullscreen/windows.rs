@@ -7,6 +7,18 @@
 //! used as the comparison basis; that would also catch ordinary
 //! maximized windows, which should NOT gate dictation off.
 //!
+//! `WS_MAXIMIZE` early-out: the rect-vs-`rcMonitor` test alone is not
+//! enough on a monitor without a taskbar (auto-hidden, removed by a
+//! third-party shell, or a secondary display with the taskbar disabled
+//! in Settings → Personalization → Taskbar). On those screens
+//! `rcWork == rcMonitor`, so a normally-maximized browser/IDE/Slack
+//! matches the geometry and trips the check — the user sees the pill
+//! disappear and the hotkey deactivate the moment they switch to that
+//! screen. Style-bit check sidesteps it: the OS sets `WS_MAXIMIZE` on
+//! every maximized window, and never on real fullscreen apps
+//! (D3D-exclusive games, F11/borderless, PowerPoint slideshow,
+//! Win+Shift+Enter terminal full-screen).
+//!
 //! Self-window check uses the foreground window's process id (via
 //! GetWindowThreadProcessId) compared to GetCurrentProcessId, rather
 //! than tracking individual HWNDs. Same effect, less bookkeeping —
@@ -28,7 +40,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+    GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, GWL_STYLE, WS_MAXIMIZE,
 };
 
 /// Window classes for the Windows desktop + taskbar — never treat them
@@ -66,6 +79,11 @@ pub fn is_fullscreen_now() -> bool {
             if SHELL_CLASSES.iter().any(|c| *c == class) {
                 return false;
             }
+        }
+
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        if style & WS_MAXIMIZE.0 != 0 {
+            return false;
         }
 
         let mut win_rect = RECT::default();

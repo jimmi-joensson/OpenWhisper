@@ -6,8 +6,8 @@
 //!   to drop the global hotkey and hide the pill while the user is in
 //!   a fullscreen app.
 //! - Pill-follow callback (`install_pill_follow`) — registered by
-//!   `lib.rs` to reposition the pill HUD onto the monitor hosting the
-//!   focused app. Gated by `settings::follow_active_screen()` so the
+//!   `lib.rs` to reposition the pill HUD onto the monitor under the
+//!   user's cursor. Gated by `settings::follow_active_screen()` so the
 //!   user's opt-out toggle is honored without restart.
 //!
 //! Implementation is poll-based (500 ms tick on a dedicated thread)
@@ -75,9 +75,9 @@ where
 }
 
 /// Register the pill-follow callback. Fires `cb(Some(origin))` only
-/// when the focused window's hosting monitor's origin tuple changes
-/// AND the user has not opted out via `settings::follow_active_screen`.
-/// First-call-wins for the spawn; subsequent calls re-register.
+/// when the cursor's monitor origin tuple changes AND the user has
+/// not opted out via `settings::follow_active_screen`. First-call-wins
+/// for the spawn; subsequent calls re-register.
 pub fn install_pill_follow<F>(on_change: F)
 where
     F: Fn(Option<(i32, i32)>) + Send + Sync + 'static,
@@ -115,7 +115,7 @@ fn spawn_poller() {
             // back on therefore only fires when the user genuinely
             // changes monitor afterwards.
             if crate::settings::follow_active_screen() {
-                if let Some(origin) = focused_window_monitor() {
+                if let Some(origin) = cursor_monitor() {
                     let mut last = LAST_MONITOR.lock().unwrap();
                     if *last != Some(origin) {
                         *last = Some(origin);
@@ -145,17 +145,17 @@ fn detect_now() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn focused_window_monitor() -> Option<(i32, i32)> {
-    mac::focused_window_monitor()
+fn cursor_monitor() -> Option<(i32, i32)> {
+    mac::cursor_monitor()
 }
 
 #[cfg(target_os = "windows")]
-fn focused_window_monitor() -> Option<(i32, i32)> {
-    windows::focused_window_monitor()
+fn cursor_monitor() -> Option<(i32, i32)> {
+    windows::cursor_monitor()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn focused_window_monitor() -> Option<(i32, i32)> {
+fn cursor_monitor() -> Option<(i32, i32)> {
     None
 }
 

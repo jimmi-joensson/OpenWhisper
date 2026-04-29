@@ -502,12 +502,36 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
 fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
     let suppress = is_fullscreen && !behavior::show_in_fullscreen();
     hotkey::set_active(app, !suppress);
-    if let Some(pill) = app.get_webview_window("pill") {
-        let _ = if suppress { pill.hide() } else { pill.show() };
-    }
-    if suppress && dictation::is_recording() {
+    let was_recording = suppress && dictation::is_recording();
+    if was_recording {
         let _ = do_cancel();
     }
+    let Some(pill) = app.get_webview_window("pill") else {
+        return;
+    };
+    if !suppress {
+        let _ = pill.show();
+        return;
+    }
+    if !was_recording {
+        let _ = pill.hide();
+        return;
+    }
+    // Cancel ran but the pill webview is still rendering the recording
+    // frame. NSWindow orderOut caches the last-painted frame, so an
+    // immediate hide here means the next show — when the user exits
+    // fullscreen — paints those orange bars for one frame before
+    // React's IDLE tick lands. Defer the hide a couple of dictation
+    // ticks so React renders IDLE *while still visible*; the cached
+    // frame is then clean.
+    let pill_clone = pill.clone();
+    thread::Builder::new()
+        .name("openwhisper-pill-deferred-hide".into())
+        .spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            let _ = pill_clone.hide();
+        })
+        .expect("spawn pill deferred hide");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -3,6 +3,9 @@ name = "openwhisper-tauri"
 version = "0.3.0"
 description = "OpenWhisper cross-platform dictation shell (Tauri)"
 authors = ["Jimmi Joensson"]
+license = "MIT"
+repository = "https://github.com/jimmi-joensson/OpenWhisper"
+homepage = "https://github.com/jimmi-joensson/OpenWhisper"
 edition = "2021"
 publish = false
 

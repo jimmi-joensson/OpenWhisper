@@ -30,7 +30,7 @@ Hotkey defaults to match Superwhisper's for familiarity; fully rebindable in set
 
 - **Local-first, free by default.** Strong local transcription with no paywall.
 - **BYO keys.** Any cloud model integration uses the user's own API credentials.
-- **No dark patterns.** Paid tiers only exist for features that genuinely cost us money (hosted sync, subscription infra, etc.), never for gating local capability.
+- **No dark patterns.** Transparent pricing, opt-in upgrades, no manipulative trial expirations or hidden upsells.
 - **Correctable.** Custom vocabulary, post-processing, and prompt shaping are first-class — not afterthoughts.
 
 ## Install (pre-built)

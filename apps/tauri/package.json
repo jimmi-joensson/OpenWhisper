@@ -2,6 +2,17 @@
   "name": "openwhisper-tauri",
   "private": true,
   "version": "0.3.0",
+  "description": "OpenWhisper — local-first hotkey dictation for macOS and Windows.",
+  "license": "MIT",
+  "author": "Jimmi Joensson",
+  "homepage": "https://github.com/jimmi-joensson/OpenWhisper",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jimmi-joensson/OpenWhisper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jimmi-joensson/OpenWhisper/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

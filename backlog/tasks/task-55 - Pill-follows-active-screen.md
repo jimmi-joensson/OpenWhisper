@@ -4,9 +4,10 @@ title: Pill follows active screen
 status: To Do
 assignee: []
 created_date: '2026-04-29 07:57'
-updated_date: '2026-04-29 08:01'
+updated_date: '2026-04-29 18:08'
 labels: []
-dependencies: []
+dependencies:
+  - TASK-58
 documentation:
   - docs/superpowers/specs/2026-04-29-pill-follows-active-screen.md
   - docs/superpowers/plans/2026-04-29-pill-follows-active-screen.md

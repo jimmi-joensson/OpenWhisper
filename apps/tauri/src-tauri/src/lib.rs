@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -150,7 +151,20 @@ pub struct AudioDeviceState {
     default_label: Option<String>,
 }
 
-fn audio_device_state_snapshot() -> AudioDeviceState {
+// Latest computed device-state snapshot. The emitter recomputes every 2 s;
+// the on-demand `audio_get_device_state` command returns this cache so the
+// React Audio pane mount doesn't pay the cpal enumerate cost (which on
+// macOS adds up to ~1 s — three CoreAudio property scans per call before
+// this cache landed). First-mount-before-first-tick falls through to a
+// synchronous compute that seeds the cache.
+static CACHED_AUDIO_DEVICE_STATE: Mutex<Option<AudioDeviceState>> = Mutex::new(None);
+
+// One cpal enumerate, derive everything (default label, selected_present)
+// from the result. Three sequential enumerations was the thing making the
+// pane sluggish on macOS — `default_input_config()` is per-device CoreAudio
+// I/O and Bluetooth/Continuity Camera devices are particularly slow to
+// answer.
+fn compute_audio_device_state() -> AudioDeviceState {
     // Boot-time gate: cpal's macOS backend touches CoreAudio property
     // queries on enumerate. Sequoia's TCC has fired the mic dialog from
     // those reads when Accessibility is still mid-prompt — racing the
@@ -171,20 +185,37 @@ fn audio_device_state_snapshot() -> AudioDeviceState {
         .map(|d| AudioDevice { id: d.id, label: d.label, is_default: d.is_default })
         .collect();
     let selected_id = audio::audio_get_selected_device_id();
-    let default_label = audio::audio_default_input_label();
-    let selected_present = match audio::audio_selected_device_status() {
-        audio::SelectedDeviceStatus::Present => true,
-        audio::SelectedDeviceStatus::MissingFallbackToDefault => false,
+    let default_label = devices
+        .iter()
+        .find(|d| d.is_default)
+        .map(|d| d.label.clone());
+    let selected_present = match selected_id.as_deref() {
+        Some(id) => devices.iter().any(|d| d.id == id),
         // No selection = capture uses host default. Treat as "present" so
         // the UI doesn't render a disconnected marker on the empty option.
-        audio::SelectedDeviceStatus::NoneSelectedUsingDefault => true,
+        None => true,
     };
     AudioDeviceState { devices, selected_id, selected_present, default_label }
 }
 
+// Recompute and write through to the cache. Used by the emitter loop;
+// the Tauri command reads the cache without recomputing.
+fn refresh_audio_device_state_cache() -> AudioDeviceState {
+    let state = compute_audio_device_state();
+    if let Ok(mut g) = CACHED_AUDIO_DEVICE_STATE.lock() {
+        *g = Some(state.clone());
+    }
+    state
+}
+
 #[tauri::command]
 fn audio_get_device_state() -> AudioDeviceState {
-    audio_device_state_snapshot()
+    if let Some(cached) = CACHED_AUDIO_DEVICE_STATE.lock().ok().and_then(|g| g.clone()) {
+        return cached;
+    }
+    // First mount before the emitter has had a chance to seed the cache.
+    // Pay the cpal enumerate cost once and warm the cache for next time.
+    refresh_audio_device_state_cache()
 }
 
 #[tauri::command]
@@ -341,7 +372,7 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                     break;
                 }
                 if tick_count % DEVICE_STATE_TICK_DIVISOR == 0 {
-                    let state = audio_device_state_snapshot();
+                    let state = refresh_audio_device_state_cache();
                     let hash = hash_device_state(&state);
                     if last_device_hash != Some(hash) {
                         last_device_hash = Some(hash);

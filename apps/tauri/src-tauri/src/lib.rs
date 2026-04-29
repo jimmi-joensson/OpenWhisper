@@ -12,7 +12,7 @@ use openwhisper_core::recognizer;
 use openwhisper_core::transcript;
 use openwhisper_core::verbose_log;
 use serde::Serialize;
-use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
+use tauri::{Emitter, Listener, LogicalPosition, Manager, WindowEvent};
 
 mod behavior;
 mod focus;
@@ -472,6 +472,27 @@ async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
+/// Apply the gating side-effects for the current `(is_fullscreen, behavior::show_in_fullscreen)`
+/// pair. Called both from the fullscreen detector callback (on every
+/// transition) and from the `behavior_show_in_fullscreen_changed` event
+/// listener (when the user toggles the setting while focused on a
+/// fullscreen app). Suppression is the conjunction of "fullscreen
+/// detected" and "user has not opted out" — when suppressed, the pill
+/// hides, the global hotkey detaches, and an in-flight recording is
+/// silently aborted (`do_cancel` drops the audio buffer + transitions
+/// to IDLE without emitting a transcript, matching the spec's "don't
+/// surprise-paste into a fullscreen game" rule).
+fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
+    let suppress = is_fullscreen && !behavior::show_in_fullscreen();
+    hotkey::set_active(app, !suppress);
+    if let Some(pill) = app.get_webview_window("pill") {
+        let _ = if suppress { pill.hide() } else { pill.show() };
+    }
+    if suppress && dictation::is_recording() {
+        let _ = do_cancel();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Single-instance MUST register on the Builder before .setup() runs:
@@ -583,12 +604,31 @@ pub fn run() {
             // the global hotkey so the fullscreen app receives Right Cmd /
             // Ctrl+Space normally, AND hide the pill so we don't paint over
             // games / videos / presentations. Re-arm on exit.
+            //
+            // Override: when `behavior.show_in_fullscreen` is true, the
+            // detector still observes transitions but the side-effects
+            // are skipped — pill stays visible, hotkey stays armed.
+            // Mid-recording fullscreen entry with the setting off aborts
+            // the recording silently (see `apply_fullscreen_state`).
             let app_for_fullscreen = app.handle().clone();
             fullscreen::install(move |is_fullscreen| {
-                hotkey::set_active(&app_for_fullscreen, !is_fullscreen);
-                if let Some(pill) = app_for_fullscreen.get_webview_window("pill") {
-                    let _ = if is_fullscreen { pill.hide() } else { pill.show() };
-                }
+                apply_fullscreen_state(&app_for_fullscreen, is_fullscreen);
+            });
+
+            // Reconcile pill + hotkey state when the user toggles
+            // `behavior.show_in_fullscreen` while a fullscreen app is
+            // currently focused. The setter has already updated the
+            // AtomicBool cache before emitting, so we just re-run the
+            // same logic against the latest detector state — flipping
+            // on while in fullscreen brings the pill back and re-arms
+            // the hotkey without restarting OW; flipping off with a
+            // recording in flight aborts it.
+            let app_for_behavior_event = app.handle().clone();
+            app.handle().listen("behavior_show_in_fullscreen_changed", move |_event| {
+                apply_fullscreen_state(
+                    &app_for_behavior_event,
+                    fullscreen::is_active(),
+                );
             });
             Ok(())
         })

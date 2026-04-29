@@ -119,6 +119,62 @@ test.describe("settings view", () => {
     await expect(sw).toBeChecked();
   });
 
+  // Manual multi-monitor smoke (NOT covered here — these tests cover the
+  // toggle UI half only):
+  // 1. With Follow active screen ON, focus an app on display 1, then on
+  //    display 2 — pill should jump bottom-center of display 2 within
+  //    ~500 ms.
+  // 2. Mid-recording switch: start recording on display 1, focus an app
+  //    on display 2 — pill follows; level meter and SVG tween continue
+  //    without flicker.
+  // 3. With the toggle OFF, the pill stays on whichever monitor it last
+  //    landed on through arbitrary focus changes.
+
+  test("Follow active screen Switch defaults to ON", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Follow active screen" }),
+    ).toBeChecked();
+  });
+
+  test("flipping Follow active screen invokes settings_set_pill_follow with false", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Follow active screen" });
+    await expect(sw).toBeChecked();
+    await sw.click();
+    await expect(sw).not.toBeChecked();
+    const lastFollow = await page.evaluate(
+      () =>
+        (window as unknown as { __owPillLastFollow?: boolean })
+          .__owPillLastFollow,
+    );
+    expect(lastFollow).toBe(false);
+    const setCount = await page.evaluate(
+      () =>
+        (window as unknown as { __owPillSetCount?: number }).__owPillSetCount ??
+        0,
+    );
+    expect(setCount).toBe(1);
+  });
+
+  test("Follow active screen hydrates from stored OFF value", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owPillFollow?: boolean }).__owPillFollow =
+        false;
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Follow active screen" }),
+    ).not.toBeChecked();
+  });
+
   test("Theme picker flips the dark/light class on <html>", async ({
     page,
   }) => {

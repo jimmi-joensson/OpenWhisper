@@ -723,6 +723,8 @@ pub fn run() {
             settings::settings_capture_hotkey_start,
             settings::settings_capture_hotkey_cancel,
             settings::audio_set_device,
+            settings::settings_get_pill,
+            settings::settings_set_pill_follow,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

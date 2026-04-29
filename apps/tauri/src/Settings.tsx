@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "./components/ui/select";
 import { useDictation } from "./lib/use-dictation";
+import { GeneralPane } from "./components/general-pane";
 import "./Settings.css";
 
 // Live preview meter geometry — same 32-bar count and bar height as the
@@ -104,7 +105,7 @@ export function SettingsShell() {
         role="tabpanel"
         aria-labelledby={active}
       >
-        {active === "general" && <PaneStub title="General" />}
+        {active === "general" && <GeneralPane />}
         {active === "audio" && <AudioPane />}
         {active === "models" && <PaneStub title="Models" />}
         {active === "shortcuts" && <ShortcutsPane />}

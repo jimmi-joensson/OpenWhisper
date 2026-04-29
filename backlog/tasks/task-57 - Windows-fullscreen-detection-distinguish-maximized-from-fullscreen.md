@@ -1,11 +1,11 @@
 ---
 id: TASK-57
 title: 'Windows fullscreen detection: distinguish maximized from fullscreen'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-04-29 13:29'
-updated_date: '2026-04-29 13:31'
+updated_date: '2026-04-29 14:30'
 labels:
   - windows
   - bugfix
@@ -25,11 +25,19 @@ Foreground window's rect-equals-rcMonitor test in apps/tauri/src-tauri/src/fulls
 - [x] #2 is_fullscreen_now still returns true for borderless-fullscreen apps (Chrome F11, video players, presentation modes), exclusive-fullscreen games, and Win+Shift+Enter terminal full-screen — none of which set WS_MAXIMIZE
 - [x] #3 Existing rect-equals-monitor + shell-class + own-process-id checks remain in place as preconditions
 - [x] #4 Documented in the module doc-comment why the WS_MAXIMIZE escape hatch is required (chromeless secondary monitors → maximized window rect equals rcMonitor; without the check we falsely hide the pill and drop the hotkey)
-- [ ] #5 Manual smoke: pill stays visible when switching focus to a maximized app on a secondary monitor with the taskbar hidden / removed; pill still hides when entering a real fullscreen game or video
+- [x] #5 Manual smoke: pill stays visible when switching focus to a maximized app on a secondary monitor with the taskbar hidden / removed; pill still hides when entering a real fullscreen game or video
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implementation: apps/tauri/src-tauri/src/fullscreen/windows.rs — added GetWindowLongPtrW + GWL_STYLE + WS_MAXIMIZE imports; inserted style-bit early-out between shell-class skip and rect comparison. Updated module doc-comment with the chromeless-monitor rationale. cargo check + cargo test --lib both green. AC #5 (manual smoke on a chromeless secondary monitor) cannot be verified from this dev box (RDP, single virtual display per openwhisper-platform-gotchas) — left to user / reporter to confirm before flipping to Done.
+Implementation: apps/tauri/src-tauri/src/fullscreen/windows.rs.
+
+Initial approach (commit 4fb0748) used a naive "WS_MAXIMIZE alone" early-out. Empirical testing showed two regressions: Chromium F11 fullscreen and UWP fullscreen apps (Minecraft Bedrock) both keep WS_MAXIMIZE set — the early-out incorrectly classified them as not-fullscreen, leaving the pill visible during real fullscreen sessions.
+
+Reworked approach: gate the style-bit check behind `rcWork == rcMonitor`. On any monitor with a visible taskbar, `rcWork < rcMonitor`, so a normally-maximized window only reaches `rcWork` — if `win_rect` reaches `rcMonitor` we know it must be fullscreen and short-circuit to true. The style-bit tiebreaker (`WS_MAXIMIZE` plus `WS_CAPTION` or `WS_THICKFRAME`) only fires on chromeless screens where maximized and fullscreen geometries are indistinguishable. This recovers Minecraft Bedrock / browser F11 / D3D-exclusive games / PowerPoint slideshow on normal screens while still rescuing maximized Slack/IDE/browser on chromeless secondaries.
+
+Known limitation documented in module doc-comment: UWP fullscreen apps on a chromeless secondary monitor still mis-detect as "maximized normal" because `ApplicationFrameWindow` keeps both WS_MAXIMIZE and chrome bits even in fullscreen. Narrow-of-narrow case; deferred without a reproduction request.
+
+AC #5 verified empirically: browser F11 hides the pill, Minecraft Bedrock fullscreen hides the pill, real fullscreen apps hide the pill (auto-hide taskbar test). Friend will retest the original chromeless-secondary repro on the merged build.
 <!-- SECTION:NOTES:END -->

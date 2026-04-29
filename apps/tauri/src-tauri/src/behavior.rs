@@ -11,7 +11,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
+#[cfg(not(target_os = "macos"))]
+use tauri::Manager;
 
 use crate::settings::{self, BehaviorSettings};
 
@@ -25,18 +27,43 @@ pub fn set_show_in_fullscreen_cache(value: bool) {
     SHOW_IN_FULLSCREEN.store(value, Ordering::Relaxed);
 }
 
-/// Mirror `show_in_fullscreen` onto the pill window's `visibleOnAllWorkspaces`
-/// collection-behavior bit. On macOS this is the AppKit
-/// `canJoinAllSpaces`/`fullScreenAuxiliary` combo that lets the pill draw
-/// over fullscreen Spaces — without it, a normal-level window stays trapped
-/// in its origin Space and is invisible while a fullscreen app owns the
-/// screen. Tauri documents the call as a no-op on platforms that don't
-/// support it (Windows virtual desktops are a different model and the
-/// pill follows the active desktop already), so this is safe to call
-/// unconditionally.
+/// Mirror `show_in_fullscreen` onto the pill panel's collection-behavior
+/// so it can render over other apps' fullscreen Spaces on macOS.
+///
+/// On macOS the pill is converted to an NSPanel at boot (see
+/// `lib.rs::setup`) and we drive its collection-behavior through the
+/// `tauri-nspanel` API rather than the underlying NSWindow's
+/// `set_visible_on_all_workspaces`: plain NSWindow with the same bits
+/// is unreliable on Sonoma+ when the fullscreen Space owner is
+/// another app (Apple Developer Forums #26677). The panel's
+/// `nonactivating_panel` style + `full_screen_auxiliary` +
+/// `can_join_all_spaces` is the canonical recipe shipped by Cap,
+/// Screenpipe, Hyprnote, Wispr Flow.
+///
+/// On non-macOS targets we fall back to the Tauri call, which is a
+/// no-op on platforms that don't support the workspace concept (the
+/// pill follows the active virtual desktop on Windows already).
 pub fn apply_collection_behavior(app: &AppHandle, show: bool) {
-    if let Some(pill) = app.get_webview_window("pill") {
-        let _ = pill.set_visible_on_all_workspaces(show);
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::{CollectionBehavior, ManagerExt};
+        let Ok(panel) = app.get_webview_panel("pill") else {
+            return;
+        };
+        let cb = if show {
+            CollectionBehavior::new()
+                .can_join_all_spaces()
+                .full_screen_auxiliary()
+        } else {
+            CollectionBehavior::new()
+        };
+        panel.set_collection_behavior(cb.into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(pill) = app.get_webview_window("pill") {
+            let _ = pill.set_visible_on_all_workspaces(show);
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import {
   emitDeviceState,
+  emitShowInFullscreenChanged,
   emitTick,
   expect,
   test,
@@ -72,6 +73,50 @@ test.describe("settings view", () => {
     await expect(
       page.getByRole("switch", { name: "Launch at login" }),
     ).toBeChecked();
+  });
+
+  test("Show in fullscreen Switch reflects behavior_get on mount", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owShowInFullscreen?: boolean }).__owShowInFullscreen =
+        true;
+    });
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Show in fullscreen apps" }),
+    ).toBeChecked();
+  });
+
+  test("Toggling the Show in fullscreen Switch invokes behavior_set with the new value", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Show in fullscreen apps" });
+    await expect(sw).not.toBeChecked();
+    await sw.click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owShowInFullscreenLastSet?: boolean })
+              .__owShowInFullscreenLastSet,
+        ),
+      )
+      .toBe(true);
+  });
+
+  test("behavior_show_in_fullscreen_changed event updates the Show in fullscreen Switch", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Show in fullscreen apps" });
+    await expect(sw).not.toBeChecked();
+    await emitShowInFullscreenChanged(page, true);
+    await expect(sw).toBeChecked();
   });
 
   test("Theme picker flips the dark/light class on <html>", async ({

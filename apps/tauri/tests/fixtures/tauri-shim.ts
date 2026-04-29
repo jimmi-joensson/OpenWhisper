@@ -175,6 +175,23 @@ async function installTauriShim(page: Page, label: "main" = "main") {
           w.__owAudioSetCount = (w.__owAudioSetCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "behavior_get_show_in_fullscreen") {
+          const w = window as unknown as { __owShowInFullscreen?: boolean };
+          return w.__owShowInFullscreen ?? false;
+        }
+        if (cmd === "behavior_set_show_in_fullscreen") {
+          const { enabled } = (args ?? {}) as { enabled: boolean };
+          const w = window as unknown as {
+            __owShowInFullscreen?: boolean;
+            __owShowInFullscreenLastSet?: boolean;
+            __owShowInFullscreenSetCount?: number;
+          };
+          w.__owShowInFullscreen = enabled;
+          w.__owShowInFullscreenLastSet = enabled;
+          w.__owShowInFullscreenSetCount =
+            (w.__owShowInFullscreenSetCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "audio_preview_start") {
           const w = window as unknown as { __owAudioPreviewStarts?: number };
           w.__owAudioPreviewStarts = (w.__owAudioPreviewStarts ?? 0) + 1;
@@ -236,6 +253,18 @@ async function installTauriShim(page: Page, label: "main" = "main") {
       return delivered;
     };
   }, label);
+}
+
+// Push a `behavior_show_in_fullscreen_changed` event at the
+// useShowInFullscreen subscriber. Mirrors the Rust setter's emit.
+export async function emitShowInFullscreenChanged(
+  page: Page,
+  enabled: boolean,
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("behavior_show_in_fullscreen_changed", value),
+    enabled,
+  );
 }
 
 export async function emitTick(page: Page, tick: MockTick): Promise<number> {

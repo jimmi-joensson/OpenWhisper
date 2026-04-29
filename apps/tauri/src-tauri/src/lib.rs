@@ -404,32 +404,41 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
         .expect("spawn dictation emitter");
 }
 
-/// Center the main window on the monitor under the user's cursor
-/// before showing it. Without this, the main window reappears on
-/// whichever monitor it was last hidden on, which is jarring when the
-/// user clicks the pill on a different display.
+/// Center the main window on the monitor that hosts the pill (the
+/// screen the user just clicked from). Falls back to the cursor's
+/// monitor — and finally the pill's reported `current_monitor` — so
+/// non-follow users (no `LAST_MONITOR` recorded) still get centered
+/// placement instead of "wherever main was last hidden".
 ///
 /// MUST be called on the main thread — `available_monitors()` and
 /// `outer_size()` go through main-thread-only paths on macOS.
-fn center_main_on_cursor_monitor(app: &tauri::AppHandle) {
+fn center_main_on_pill_monitor(app: &tauri::AppHandle) {
     let Some(main) = app.get_webview_window("main") else {
         return;
     };
-    let Some(origin) = fullscreen::cursor_monitor() else {
-        return;
-    };
-    let Some(monitor) = fullscreen::find_tauri_monitor(app, origin) else {
-        return;
-    };
-    let scale = monitor.scale_factor();
-    let mon_w = monitor.size().width as f64 / scale;
-    let mon_h = monitor.size().height as f64 / scale;
-    let mon_x = monitor.position().x as f64 / scale;
-    let mon_y = monitor.position().y as f64 / scale;
+    let pill = app.get_webview_window("pill");
+    let monitor = fullscreen::last_pill_monitor()
+        .and_then(|origin| fullscreen::find_tauri_monitor(app, origin))
+        .or_else(|| {
+            fullscreen::cursor_monitor()
+                .and_then(|origin| fullscreen::find_tauri_monitor(app, origin))
+        })
+        .or_else(|| pill.as_ref().and_then(|p| p.current_monitor().ok().flatten()));
+    let Some(monitor) = monitor else { return };
+    // Monitor geometry uses the destination monitor's scale; the window's
+    // current size must use its OWN scale because `outer_size()` returns
+    // physical px relative to the monitor it's drawn on right now (which
+    // may differ from the destination — e.g. primary @2x → secondary @1x).
+    let mon_scale = monitor.scale_factor();
+    let mon_w = monitor.size().width as f64 / mon_scale;
+    let mon_h = monitor.size().height as f64 / mon_scale;
+    let mon_x = monitor.position().x as f64 / mon_scale;
+    let mon_y = monitor.position().y as f64 / mon_scale;
 
     let Ok(size) = main.outer_size() else { return };
-    let win_w = size.width as f64 / scale;
-    let win_h = size.height as f64 / scale;
+    let win_scale = main.scale_factor().unwrap_or(mon_scale);
+    let win_w = size.width as f64 / win_scale;
+    let win_h = size.height as f64 / win_scale;
 
     let x = mon_x + (mon_w - win_w) / 2.0;
     let y = mon_y + (mon_h - win_h) / 2.0;
@@ -446,7 +455,7 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
     let app_clone = app.clone();
     let _ = app
-        .run_on_main_thread(move || center_main_on_cursor_monitor(&app_clone))
+        .run_on_main_thread(move || center_main_on_pill_monitor(&app_clone))
         .map_err(|e| e.to_string());
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
@@ -464,7 +473,7 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
     let app_clone = app.clone();
     let _ = app
-        .run_on_main_thread(move || center_main_on_cursor_monitor(&app_clone))
+        .run_on_main_thread(move || center_main_on_pill_monitor(&app_clone))
         .map_err(|e| e.to_string());
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
@@ -530,6 +539,9 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
     let scale = monitor.scale_factor();
     let mon_w = monitor.size().width as f64 / scale;
     let mon_x = monitor.position().x as f64 / scale;
+    let mon_y = monitor.position().y as f64 / scale;
+    let mon_h = monitor.size().height as f64 / scale;
+    let mon_bottom = mon_y + mon_h;
 
     // Window dimensions (must match tauri.conf.json pill window). Capsule
     // is centered inside the window via flex so the shadow has room on all
@@ -540,14 +552,25 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
     const CAPSULE_H: f64 = 22.0;
     const CAPSULE_BELOW_PAD: f64 = (PILL_WIN_H - CAPSULE_H) / 2.0;
     /// Pixels between the visible capsule's bottom edge and the top
-    /// of the Dock / taskbar (or screen bottom when neither is here).
+    /// of the Dock / taskbar when one is present.
     const ABOVE_DOCK_GAP: f64 = 24.0;
+    /// Larger gap when there's no Dock / taskbar on this screen — the
+    /// pill needs visible margin above the screen's bottom edge so it
+    /// doesn't sit at the seam between stacked monitors.
+    const ABOVE_BARE_EDGE_GAP: f64 = 80.0;
 
     let work_area_bottom = fullscreen::work_area_bottom_y(&monitor);
+    // No Dock / taskbar on this screen when the work area reaches the
+    // screen's actual bottom edge. Use the bigger gap in that case.
+    let gap = if (work_area_bottom - mon_bottom).abs() < 1.0 {
+        ABOVE_BARE_EDGE_GAP
+    } else {
+        ABOVE_DOCK_GAP
+    };
 
     let x = mon_x + (mon_w - PILL_WIN_W) / 2.0;
-    // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = work_area_bottom - ABOVE_DOCK_GAP
-    let y = work_area_bottom - ABOVE_DOCK_GAP - PILL_WIN_H + CAPSULE_BELOW_PAD;
+    // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = work_area_bottom - gap
+    let y = work_area_bottom - gap - PILL_WIN_H + CAPSULE_BELOW_PAD;
 
     {
         let mut last = LAST_PILL_POSITION.lock().unwrap();
@@ -829,8 +852,9 @@ pub fn run() {
                     }
                     let app = app_for_refresh.clone();
                     let app_inner = app.clone();
+                    let origin = fullscreen::last_pill_monitor();
                     let _ = app.run_on_main_thread(move || {
-                        if let Err(e) = place_pill(&app_inner, None) {
+                        if let Err(e) = place_pill(&app_inner, origin) {
                             eprintln!("[pill-refresh] {e}");
                         }
                     });

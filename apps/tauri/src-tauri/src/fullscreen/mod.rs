@@ -63,6 +63,17 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Watcher's last-emitted monitor origin (the display under the cursor at
+/// the most recent change). The periodic pill-refresh task uses this so it
+/// re-evaluates work-area changes (Dock resize) on the same display the
+/// watcher last followed — passing `None` would route through
+/// `pill.current_monitor()`, which on macOS can return the primary even
+/// after `set_position` placed the pill on the secondary, snapping the
+/// pill back every refresh tick.
+pub fn last_pill_monitor() -> Option<(i32, i32)> {
+    *LAST_MONITOR.lock().unwrap()
+}
+
 /// Register the fullscreen-state change callback and start the poll
 /// thread. First caller wins; subsequent calls re-register the
 /// callback but no-op the spawn.

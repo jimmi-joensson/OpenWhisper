@@ -23,6 +23,23 @@ mod permissions;
 mod settings;
 mod tray;
 
+// The pill needs to be a real NSPanel (not NSWindow) so it can render
+// over other apps' fullscreen Spaces on macOS Sonoma+. tauri-nspanel
+// swizzles the window's class in place; the macro below declares the
+// panel config the conversion uses.
+#[cfg(target_os = "macos")]
+tauri_nspanel::tauri_panel! {
+    panel!(PillPanel {
+        config: {
+            // Pill never takes keyboard focus — the user's typing target
+            // is the app behind it. nonactivating style mask is set
+            // separately at conversion time.
+            can_become_key_window: false,
+            is_floating_panel: true
+        }
+    })
+}
+
 pub(crate) const TICK_MS: u64 = 50;
 const SAMPLE_RATE_HZ: u64 = 16_000;
 
@@ -512,6 +529,9 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init());
 
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
     builder
         .setup(|app| {
             // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /
@@ -577,13 +597,32 @@ pub fn run() {
             // (rather than whatever cpal's default is on this boot).
             let audio_settings = settings::load_audio_settings(app.handle());
             audio::audio_set_selected_device_id(audio_settings.device_id);
+            // Convert the pill window to an NSPanel before any
+            // collection-behavior call — plain NSWindow can't reliably
+            // render on another app's fullscreen Space on Sonoma+
+            // regardless of the bits we set, so the swizzle has to
+            // happen first. Floating level + nonactivating style mask
+            // matches the Cap / Screenpipe / Hyprnote pattern.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_nspanel::{PanelLevel, StyleMask, WebviewWindowExt};
+                if let Some(pill_win) = app.get_webview_window("pill") {
+                    if let Ok(panel) = pill_win.to_panel::<PillPanel>() {
+                        panel.set_level(PanelLevel::Floating.value());
+                        panel.set_style_mask(
+                            StyleMask::empty().nonactivating_panel().into(),
+                        );
+                    }
+                }
+            }
+
             // Hydrate the behavior AtomicBool cache before the fullscreen
             // detector thread starts so the very first transition reads
             // the persisted value rather than the default false. Apply
-            // the pill's `visibleOnAllWorkspaces` collection-behavior at
-            // the same time so users who previously enabled the toggle
-            // get the expected over-fullscreen rendering on relaunch
-            // without having to flip the Switch again.
+            // the pill's collection-behavior at the same time so users
+            // who previously enabled the toggle get the expected
+            // over-fullscreen rendering on relaunch without having to
+            // flip the Switch again.
             let behavior_settings = settings::load_behavior_settings(app.handle());
             behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
             behavior::apply_collection_behavior(

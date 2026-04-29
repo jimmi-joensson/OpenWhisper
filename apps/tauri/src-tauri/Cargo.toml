@@ -38,6 +38,13 @@ core-foundation = "0.10"
 # completion handler.
 objc2 = "0.6"
 block2 = "0.6"
+# Convert the pill webview window to a real NSPanel via objc class
+# swizzle so it can render over other apps' fullscreen Spaces. Plain
+# NSWindow + collection-behavior is unreliable cross-app on Sonoma+
+# (Apple Developer Forums #26677); tauri-nspanel is the canonical fix
+# used by Cap, Screenpipe, Hyprnote, Wispr Flow. v2.1 branch tracks
+# Tauri 2.10+.
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

@@ -190,12 +190,11 @@ pub fn cursor_monitor() -> Option<(i32, i32)> {
     }
 }
 
-/// Y coordinate (logical points; Quartz / virtual-screen top-left
-/// origin) of the bottom of the given monitor's work area — i.e. the
-/// top edge of the taskbar on this monitor, or the screen's bottom
-/// edge when the taskbar isn't present here. Falls back to the
-/// monitor's own bottom edge if `MonitorFromPoint` /
-/// `GetMonitorInfoW` fails.
+/// Y coordinate (logical points, unified primary-relative coord space)
+/// of the bottom of the given monitor's work area — i.e. the top edge
+/// of the taskbar on this monitor, or the screen's bottom edge when
+/// the taskbar isn't here. Falls back to the monitor's own bottom edge
+/// if `MonitorFromPoint` / `GetMonitorInfoW` fails.
 pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
     let scale = monitor.scale_factor();
     let mon_x = monitor.position().x;
@@ -220,8 +219,8 @@ pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
         if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
             return fallback;
         }
-        // rcWork is in physical pixels in virtual-screen coords; the
-        // pill placement math is in logical points.
+        // rcWork is in physical px in virtual-screen coords; pill placement
+        // math runs in logical pts.
         mi.rcWork.bottom as f64 / scale
     }
 }

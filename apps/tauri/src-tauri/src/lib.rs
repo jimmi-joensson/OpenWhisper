@@ -12,7 +12,11 @@ use openwhisper_core::recognizer;
 use openwhisper_core::transcript;
 use openwhisper_core::verbose_log;
 use serde::Serialize;
-use tauri::{Emitter, Listener, LogicalPosition, Manager, WindowEvent};
+use tauri::{Emitter, Listener, Manager, WindowEvent};
+#[cfg(target_os = "macos")]
+use tauri::LogicalPosition;
+#[cfg(not(target_os = "macos"))]
+use tauri::PhysicalPosition;
 
 mod behavior;
 mod focus;
@@ -425,24 +429,60 @@ fn center_main_on_pill_monitor(app: &tauri::AppHandle) {
         })
         .or_else(|| pill.as_ref().and_then(|p| p.current_monitor().ok().flatten()));
     let Some(monitor) = monitor else { return };
-    // Monitor geometry uses the destination monitor's scale; the window's
-    // current size must use its OWN scale because `outer_size()` returns
-    // physical px relative to the monitor it's drawn on right now (which
-    // may differ from the destination — e.g. primary @2x → secondary @1x).
+    // Math in unified logical pts. See `place_pill` for why we dispatch
+    // `set_position` per platform via `set_window_at_logical`.
     let mon_scale = monitor.scale_factor();
-    let mon_w = monitor.size().width as f64 / mon_scale;
-    let mon_h = monitor.size().height as f64 / mon_scale;
     let mon_x = monitor.position().x as f64 / mon_scale;
     let mon_y = monitor.position().y as f64 / mon_scale;
+    let mon_w = monitor.size().width as f64 / mon_scale;
+    let mon_h = monitor.size().height as f64 / mon_scale;
 
     let Ok(size) = main.outer_size() else { return };
+    // `outer_size()` is physical px on the window's CURRENT monitor.
+    // Convert via the window's own scale to get logical-pt size — the
+    // value is invariant across monitors (Tauri auto-resizes on cross-DPI
+    // moves to keep logical dims constant).
     let win_scale = main.scale_factor().unwrap_or(mon_scale);
     let win_w = size.width as f64 / win_scale;
     let win_h = size.height as f64 / win_scale;
 
     let x = mon_x + (mon_w - win_w) / 2.0;
     let y = mon_y + (mon_h - win_h) / 2.0;
-    let _ = main.set_position(LogicalPosition::new(x, y));
+    let _ = set_window_at_logical(&main, x, y, mon_scale);
+}
+
+/// Position a window at logical-pt coords in the unified primary-relative
+/// coord space (top-left of primary = (0, 0), Y-down). Platform-aware
+/// because Tao's `set_outer_position` scales differently:
+///
+/// - macOS: takes a `LogicalPosition` verbatim (Cocoa Y conversion uses
+///   the primary screen's logical height — `CGDisplay::main().pixels_high`
+///   returns logical pts on Mac despite the name).
+/// - Windows: scales the position by the **window's current** scale
+///   factor, which is the *source* monitor's scale on a cross-DPI move.
+///   Pre-multiplying by the *destination* scale and passing
+///   `PhysicalPosition` sidesteps that.
+fn set_window_at_logical(
+    window: &tauri::WebviewWindow,
+    x_log: f64,
+    y_log: f64,
+    dest_scale: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = dest_scale;
+        window
+            .set_position(LogicalPosition::new(x_log, y_log))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let x_phys = (x_log * dest_scale).round() as i32;
+        let y_phys = (y_log * dest_scale).round() as i32;
+        window
+            .set_position(PhysicalPosition::new(x_phys, y_phys))
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Bring the main window forward — invoked when the pill is clicked in
@@ -536,32 +576,38 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
         .or_else(|| pill.primary_monitor().ok().flatten())
         .ok_or_else(|| "no monitor available".to_string())?;
 
+    // Math in unified LOGICAL pts (primary's top-left = origin, Y-down) —
+    // the same space `monitor.position() / monitor.scale_factor()` lands
+    // in. We dispatch `set_position` per-platform: Mac via
+    // `LogicalPosition` (Tao passes it verbatim and Cocoa Y is converted
+    // via primary's logical height), Win via `PhysicalPosition` computed
+    // from the *destination* monitor's scale (Tao on Win would otherwise
+    // scale a `LogicalPosition` by the **window's current** DPI factor —
+    // wrong axis when the window crosses monitors).
     let scale = monitor.scale_factor();
-    let mon_w = monitor.size().width as f64 / scale;
     let mon_x = monitor.position().x as f64 / scale;
     let mon_y = monitor.position().y as f64 / scale;
+    let mon_w = monitor.size().width as f64 / scale;
     let mon_h = monitor.size().height as f64 / scale;
     let mon_bottom = mon_y + mon_h;
 
-    // Window dimensions (must match tauri.conf.json pill window). Capsule
-    // is centered inside the window via flex so the shadow has room on all
-    // four sides — capsule visible bottom is `CAPSULE_BELOW_PAD` from the
-    // window's bottom edge.
+    // Pill window dimensions in logical points (must match tauri.conf.json).
+    // Capsule is centered inside the window via flex so the shadow has room
+    // on all four sides — capsule visible bottom is `CAPSULE_BELOW_PAD`
+    // from the window's bottom edge.
     const PILL_WIN_W: f64 = 130.0;
     const PILL_WIN_H: f64 = 82.0;
     const CAPSULE_H: f64 = 22.0;
     const CAPSULE_BELOW_PAD: f64 = (PILL_WIN_H - CAPSULE_H) / 2.0;
-    /// Pixels between the visible capsule's bottom edge and the top
-    /// of the Dock / taskbar when one is present.
+    /// Logical-pt gap between the capsule's bottom edge and the Dock /
+    /// taskbar when one is present on this screen.
     const ABOVE_DOCK_GAP: f64 = 24.0;
-    /// Larger gap when there's no Dock / taskbar on this screen — the
-    /// pill needs visible margin above the screen's bottom edge so it
-    /// doesn't sit at the seam between stacked monitors.
+    /// Logical-pt gap when no Dock / taskbar — the pill needs visible
+    /// margin above the screen's bottom edge so it doesn't sit at the
+    /// seam between stacked monitors.
     const ABOVE_BARE_EDGE_GAP: f64 = 80.0;
 
     let work_area_bottom = fullscreen::work_area_bottom_y(&monitor);
-    // No Dock / taskbar on this screen when the work area reaches the
-    // screen's actual bottom edge. Use the bigger gap in that case.
     let gap = if (work_area_bottom - mon_bottom).abs() < 1.0 {
         ABOVE_BARE_EDGE_GAP
     } else {
@@ -584,7 +630,7 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
         *last = Some((x, y));
     }
 
-    pill.set_position(LogicalPosition::new(x, y))
+    set_window_at_logical(&pill, x, y, scale)
         .map_err(|e| e.to_string())
 }
 

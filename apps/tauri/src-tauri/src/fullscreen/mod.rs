@@ -191,10 +191,14 @@ pub fn find_tauri_monitor(_app: &AppHandle, _origin: (i32, i32)) -> Option<Monit
     None
 }
 
-/// Y coordinate (logical points, Quartz top-left origin) of the
-/// bottom edge of the given monitor's work area. The pill anchors a
-/// fixed offset above this. Falls back to the monitor's own bottom
-/// edge if the platform query fails.
+/// Y coordinate (logical points, unified primary-relative coord space —
+/// top-left of primary = (0, 0), Y-down) of the bottom edge of the given
+/// monitor's work area. The pill anchors a fixed offset above this.
+/// Falls back to the monitor's own bottom edge if the platform query
+/// fails.
+///
+/// Logical-pt unit is load-bearing: callers using `LogicalPosition` /
+/// the platform-aware position helper expect this coord space.
 ///
 /// MUST be called on the main thread on macOS (NSScreen requirement);
 /// no thread restriction on Windows.

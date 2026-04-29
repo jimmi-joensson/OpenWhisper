@@ -31,6 +31,8 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use tauri::{AppHandle, Monitor};
+
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "windows")]
@@ -72,16 +74,10 @@ where
     ensure_poller_started();
 }
 
-/// Temporary alias — keeps `lib.rs`'s existing `fullscreen::install`
-/// call site compiling until TASK-55.5 swaps it for the new
-/// two-callback wiring.
-pub use install_fullscreen as install;
-
 /// Register the pill-follow callback. Fires `cb(Some(origin))` only
 /// when the focused window's hosting monitor's origin tuple changes
 /// AND the user has not opted out via `settings::follow_active_screen`.
 /// First-call-wins for the spawn; subsequent calls re-register.
-#[allow(dead_code)] // wired from lib.rs in TASK-55.5
 pub fn install_pill_follow<F>(on_change: F)
 where
     F: Fn(Option<(i32, i32)>) + Send + Sync + 'static,
@@ -160,5 +156,26 @@ fn focused_window_monitor() -> Option<(i32, i32)> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn focused_window_monitor() -> Option<(i32, i32)> {
+    None
+}
+
+/// Look up a `tauri::Monitor` by the origin tuple emitted by the
+/// watcher. Coordinate-space contract is opaque between layers — the
+/// platform module that produces the tuple is the same one that
+/// consumes it here, so each side handles its own physical/logical
+/// conversion. Caller must be on the main thread (mac path may go
+/// through `NSScreen.screens`).
+#[cfg(target_os = "macos")]
+pub fn find_tauri_monitor(app: &AppHandle, origin: (i32, i32)) -> Option<Monitor> {
+    mac::find_tauri_monitor(app, origin)
+}
+
+#[cfg(target_os = "windows")]
+pub fn find_tauri_monitor(app: &AppHandle, origin: (i32, i32)) -> Option<Monitor> {
+    windows::find_tauri_monitor(app, origin)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn find_tauri_monitor(_app: &AppHandle, _origin: (i32, i32)) -> Option<Monitor> {
     None
 }

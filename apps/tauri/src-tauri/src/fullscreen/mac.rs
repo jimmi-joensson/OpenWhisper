@@ -25,6 +25,7 @@ use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::{CGPoint, CGSize};
+use tauri::{AppHandle, Monitor};
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -170,4 +171,28 @@ pub fn focused_window_monitor() -> Option<(i32, i32)> {
         }
         None
     }
+}
+
+/// Convert the watcher's origin tuple (logical points from
+/// `CGDisplayBounds.origin`) into the `tauri::Monitor` whose position
+/// matches. Tauri's `Monitor::position()` is physical px, so we
+/// convert the Tauri side to logical points by `/ scale_factor` and
+/// round — same form the watcher emits. Returns `None` if no monitor
+/// matches (e.g. display was unplugged between watcher tick and this
+/// call); the caller then falls back to `pill.current_monitor()`.
+///
+/// MUST be called on the main thread: Tauri's `available_monitors()`
+/// may go through `NSScreen.screens` internally, which is
+/// main-thread-only.
+pub fn find_tauri_monitor(app: &AppHandle, origin: (i32, i32)) -> Option<Monitor> {
+    let monitors = app.available_monitors().ok()?;
+    for m in monitors {
+        let scale = m.scale_factor();
+        let mx = (m.position().x as f64 / scale).round() as i32;
+        let my = (m.position().y as f64 / scale).round() as i32;
+        if (mx, my) == origin {
+            return Some(m);
+        }
+    }
+    None
 }

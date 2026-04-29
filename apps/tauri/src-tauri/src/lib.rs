@@ -446,24 +446,34 @@ async fn set_pill_click_through(
         .map_err(|e| e.to_string())
 }
 
-/// Place the pill bottom-center of its current monitor. The 80 px bottom
-/// margin is measured from the visible capsule edge, not the window edge —
-/// the window includes transparent padding so the CSS drop-shadow has room
-/// to render. Phase 7 will replace this with true work-area math
-/// (NSScreen.visibleFrame on Mac, GetMonitorInfo rcWork on Windows).
-#[tauri::command]
-async fn position_pill_bottom_center(app: tauri::AppHandle) -> Result<(), String> {
+/// Place the pill bottom-center of a chosen monitor. The 80 px bottom
+/// margin is measured from the visible capsule edge, not the window
+/// edge — the window includes transparent padding so the CSS
+/// drop-shadow has room to render. Phase 7 will replace this with true
+/// work-area math (NSScreen.visibleFrame on Mac, GetMonitorInfo rcWork
+/// on Windows).
+///
+/// `monitor_origin` is opaque to this function: when `Some`, it gets
+/// passed straight to `fullscreen::find_tauri_monitor` which knows how
+/// to turn it back into a `tauri::Monitor` per platform (mac side
+/// converts logical→physical to match Tauri's coordinate space; win
+/// compares directly). On no-match — e.g. display unplugged between
+/// the watcher tick and this call — falls back to `current_monitor()`,
+/// then `primary_monitor()`, so the pill always lands somewhere.
+///
+/// MUST be called on the main thread: `available_monitors()` may go
+/// through `NSScreen.screens` on macOS. Both the Tauri command wrapper
+/// and the watcher callback dispatch via `app.run_on_main_thread`.
+fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Result<(), String> {
     let pill = app
         .get_webview_window("pill")
         .ok_or_else(|| "pill window not found".to_string())?;
 
-    let monitor = match pill.current_monitor().map_err(|e| e.to_string())? {
-        Some(m) => m,
-        None => pill
-            .primary_monitor()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no monitor available".to_string())?,
-    };
+    let monitor = monitor_origin
+        .and_then(|origin| fullscreen::find_tauri_monitor(app, origin))
+        .or_else(|| pill.current_monitor().ok().flatten())
+        .or_else(|| pill.primary_monitor().ok().flatten())
+        .ok_or_else(|| "no monitor available".to_string())?;
 
     let scale = monitor.scale_factor();
     let mon_w = monitor.size().width as f64 / scale;
@@ -532,6 +542,20 @@ fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
             let _ = pill_clone.hide();
         })
         .expect("spawn pill deferred hide");
+}
+
+#[tauri::command]
+async fn reposition_pill(
+    app: tauri::AppHandle,
+    monitor_origin: Option<(i32, i32)>,
+) -> Result<(), String> {
+    let app_clone = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = place_pill(&app_clone, monitor_origin) {
+            eprintln!("[reposition_pill] {e}");
+        }
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -682,7 +706,7 @@ pub fn run() {
             // Mid-recording fullscreen entry with the setting off aborts
             // the recording silently (see `apply_fullscreen_state`).
             let app_for_fullscreen = app.handle().clone();
-            fullscreen::install(move |is_fullscreen| {
+            fullscreen::install_fullscreen(move |is_fullscreen| {
                 apply_fullscreen_state(&app_for_fullscreen, is_fullscreen);
             });
 
@@ -704,6 +728,23 @@ pub fn run() {
                     fullscreen::is_active(),
                 );
             });
+
+            // Pill-follow: reposition the HUD onto the monitor hosting the
+            // focused app whenever it changes. The watcher already gates
+            // itself on settings::follow_active_screen() so we don't have
+            // to. run_on_main_thread is load-bearing — Tauri's
+            // available_monitors() may reach NSScreen.screens internally
+            // on macOS, which is main-thread-only.
+            let app_for_pill = app.handle().clone();
+            fullscreen::install_pill_follow(move |origin| {
+                let app = app_for_pill.clone();
+                let app_inner = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Err(e) = place_pill(&app_inner, origin) {
+                        eprintln!("[pill-follow] {e}");
+                    }
+                });
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -711,7 +752,7 @@ pub fn run() {
             dictation_toggle,
             dictation_cancel,
             set_pill_click_through,
-            position_pill_bottom_center,
+            reposition_pill,
             show_main_window,
             open_settings_window,
             hotkey::hotkey_retry,

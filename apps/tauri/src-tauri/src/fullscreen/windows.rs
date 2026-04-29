@@ -54,6 +54,7 @@
 
 use std::mem::size_of;
 
+use tauri::{AppHandle, Monitor};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -165,4 +166,19 @@ pub fn is_fullscreen_now() -> bool {
 /// qualifies — same skip list as `is_fullscreen_now`.
 pub fn focused_window_monitor() -> Option<(i32, i32)> {
     foreground_monitor_info().map(|(_, _, mi)| (mi.rcMonitor.left, mi.rcMonitor.top))
+}
+
+/// Look up the `tauri::Monitor` whose position matches the watcher's
+/// origin tuple. Both sides are physical px in virtual-screen
+/// coordinates on Windows, so a direct compare is correct — no
+/// conversion needed (unlike the macOS sibling).
+pub fn find_tauri_monitor(app: &AppHandle, origin: (i32, i32)) -> Option<Monitor> {
+    let monitors = app.available_monitors().ok()?;
+    for m in monitors {
+        let p = m.position();
+        if (p.x, p.y) == origin {
+            return Some(m);
+        }
+    }
+    None
 }

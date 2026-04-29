@@ -198,9 +198,9 @@ export function PillOverlay() {
   }, [renderedStatus]);
 
   useEffect(() => {
-    invoke("position_pill_bottom_center").catch(
+    invoke("reposition_pill", { monitor_origin: null }).catch(
       // eslint-disable-next-line no-console
-      (e) => console.warn("position_pill_bottom_center failed", e),
+      (e) => console.warn("reposition_pill failed", e),
     );
   }, []);
 

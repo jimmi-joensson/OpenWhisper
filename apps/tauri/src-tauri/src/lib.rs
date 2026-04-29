@@ -14,6 +14,7 @@ use openwhisper_core::verbose_log;
 use serde::Serialize;
 use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 
+mod behavior;
 mod focus;
 mod fullscreen;
 mod hotkey;
@@ -555,6 +556,11 @@ pub fn run() {
             // (rather than whatever cpal's default is on this boot).
             let audio_settings = settings::load_audio_settings(app.handle());
             audio::audio_set_selected_device_id(audio_settings.device_id);
+            // Hydrate the behavior AtomicBool cache before the fullscreen
+            // detector thread starts so the very first transition reads
+            // the persisted value rather than the default false.
+            let behavior_settings = settings::load_behavior_settings(app.handle());
+            behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before
@@ -606,6 +612,8 @@ pub fn run() {
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,
+            behavior::behavior_get_show_in_fullscreen,
+            behavior::behavior_set_show_in_fullscreen,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

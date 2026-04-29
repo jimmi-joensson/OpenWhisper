@@ -38,6 +38,10 @@ core-foundation = "0.10"
 # completion handler.
 objc2 = "0.6"
 block2 = "0.6"
+# NSScreen.visibleFrame for Dock-aware pill placement. Already in the
+# tree transitively via tauri-nspanel; promoted to a direct dep so we
+# can `use objc2_app_kit::NSScreen` without a re-export.
+objc2-app-kit = "0.3"
 # Convert the pill webview window to a real NSPanel via objc class
 # swizzle so it can render over other apps' fullscreen Spaces. Plain
 # NSWindow + collection-behavior is unreliable cross-app on Sonoma+

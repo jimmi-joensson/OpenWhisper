@@ -190,6 +190,42 @@ pub fn cursor_monitor() -> Option<(i32, i32)> {
     }
 }
 
+/// Y coordinate (logical points; Quartz / virtual-screen top-left
+/// origin) of the bottom of the given monitor's work area — i.e. the
+/// top edge of the taskbar on this monitor, or the screen's bottom
+/// edge when the taskbar isn't present here. Falls back to the
+/// monitor's own bottom edge if `MonitorFromPoint` /
+/// `GetMonitorInfoW` fails.
+pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
+    let scale = monitor.scale_factor();
+    let mon_x = monitor.position().x;
+    let mon_y = monitor.position().y;
+    let mon_w = monitor.size().width as i32;
+    let mon_h = monitor.size().height as i32;
+    let fallback = (mon_y + mon_h) as f64 / scale;
+
+    let center = POINT {
+        x: mon_x + mon_w / 2,
+        y: mon_y + mon_h / 2,
+    };
+    unsafe {
+        let hmon = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_invalid() {
+            return fallback;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return fallback;
+        }
+        // rcWork is in physical pixels in virtual-screen coords; the
+        // pill placement math is in logical points.
+        mi.rcWork.bottom as f64 / scale
+    }
+}
+
 /// Look up the `tauri::Monitor` whose position matches the watcher's
 /// origin tuple. Both sides are physical px in virtual-screen
 /// coordinates on Windows, so a direct compare is correct — no

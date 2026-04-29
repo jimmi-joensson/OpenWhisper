@@ -28,6 +28,8 @@ use core_foundation::boolean::{CFBoolean, CFBooleanRef};
 use core_foundation::string::CFString;
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::CGPoint;
+use objc2::MainThreadMarker;
+use objc2_app_kit::NSScreen;
 use tauri::{AppHandle, Monitor};
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -121,6 +123,56 @@ pub fn cursor_monitor() -> Option<(i32, i32)> {
         }
         None
     }
+}
+
+/// Y coordinate (logical-points, Quartz top-left origin, Y-down) of
+/// the bottom edge of the given monitor's work area — i.e. the top of
+/// the Dock when the Dock is on this screen, or the screen's bottom
+/// edge when not. Used by `place_pill` to anchor 24 px above the
+/// Dock. Falls back to the screen's own bottom edge if NSScreen
+/// enumeration can't match the given monitor.
+///
+/// MUST be called on the main thread: NSScreen is documented as
+/// main-thread-only by Apple.
+pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
+    let scale = monitor.scale_factor();
+    let mon_x_log = monitor.position().x as f64 / scale;
+    let mon_y_log = monitor.position().y as f64 / scale;
+    let mon_h_log = monitor.size().height as f64 / scale;
+    // Fallback used in every "can't determine work area" branch — the
+    // bottom edge of the monitor itself, which is what `place_pill`
+    // historically anchored to (minus a fixed 80 px margin).
+    let fallback = mon_y_log + mon_h_log;
+
+    // SAFETY: contract — caller is on the main thread (place_pill is
+    // dispatched via run_on_main_thread; the periodic refresh task
+    // also dispatches there).
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let screens = NSScreen::screens(mtm);
+    let Some(primary) = screens.firstObject() else {
+        return fallback;
+    };
+    // Cocoa coordinate origin is the bottom-left of the primary
+    // screen's frame; we use that height to convert between Cocoa
+    // (Y-up) and Quartz (Y-down).
+    let primary_height_cocoa = primary.frame().size.height;
+    let mon_bottom_cocoa_y = primary_height_cocoa - (mon_y_log + mon_h_log);
+
+    for screen in screens.iter() {
+        let frame = screen.frame();
+        if (frame.origin.x - mon_x_log).abs() < 1.0
+            && (frame.origin.y - mon_bottom_cocoa_y).abs() < 1.0
+        {
+            // visibleFrame.origin.y in Cocoa is the Y of the *bottom*
+            // edge of the work area (Cocoa is Y-up; the work area's
+            // origin is at its bottom-left). Converting that to Quartz
+            // gives the Y of where the Dock starts (or the screen
+            // bottom when no Dock is on this screen).
+            let vf = screen.visibleFrame();
+            return primary_height_cocoa - vf.origin.y;
+        }
+    }
+    fallback
 }
 
 /// Convert the watcher's origin tuple (logical points from

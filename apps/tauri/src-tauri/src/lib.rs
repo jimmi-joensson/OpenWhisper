@@ -404,6 +404,38 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
         .expect("spawn dictation emitter");
 }
 
+/// Center the main window on the monitor under the user's cursor
+/// before showing it. Without this, the main window reappears on
+/// whichever monitor it was last hidden on, which is jarring when the
+/// user clicks the pill on a different display.
+///
+/// MUST be called on the main thread — `available_monitors()` and
+/// `outer_size()` go through main-thread-only paths on macOS.
+fn center_main_on_cursor_monitor(app: &tauri::AppHandle) {
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let Some(origin) = fullscreen::cursor_monitor() else {
+        return;
+    };
+    let Some(monitor) = fullscreen::find_tauri_monitor(app, origin) else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let mon_w = monitor.size().width as f64 / scale;
+    let mon_h = monitor.size().height as f64 / scale;
+    let mon_x = monitor.position().x as f64 / scale;
+    let mon_y = monitor.position().y as f64 / scale;
+
+    let Ok(size) = main.outer_size() else { return };
+    let win_w = size.width as f64 / scale;
+    let win_h = size.height as f64 / scale;
+
+    let x = mon_x + (mon_w - win_w) / 2.0;
+    let y = mon_y + (mon_h - win_h) / 2.0;
+    let _ = main.set_position(LogicalPosition::new(x, y));
+}
+
 /// Bring the main window forward — invoked when the pill is clicked in
 /// idle state. Mirrors the tray's `open_main` behavior so both entry points
 /// behave identically.
@@ -412,6 +444,10 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
+    let app_clone = app.clone();
+    let _ = app
+        .run_on_main_thread(move || center_main_on_cursor_monitor(&app_clone))
+        .map_err(|e| e.to_string());
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
     main.set_focus().map_err(|e| e.to_string())?;
@@ -426,6 +462,10 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
+    let app_clone = app.clone();
+    let _ = app
+        .run_on_main_thread(move || center_main_on_cursor_monitor(&app_clone))
+        .map_err(|e| e.to_string());
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
     main.set_focus().map_err(|e| e.to_string())?;
@@ -446,12 +486,18 @@ async fn set_pill_click_through(
         .map_err(|e| e.to_string())
 }
 
-/// Place the pill bottom-center of a chosen monitor. The 80 px bottom
-/// margin is measured from the visible capsule edge, not the window
-/// edge — the window includes transparent padding so the CSS
-/// drop-shadow has room to render. Phase 7 will replace this with true
-/// work-area math (NSScreen.visibleFrame on Mac, GetMonitorInfo rcWork
-/// on Windows).
+/// Last (x, y) we passed to `pill.set_position` — used by `place_pill`
+/// to no-op when the periodic refresh task ticks but nothing changed.
+/// Logical points, Quartz top-left origin (matches `LogicalPosition`
+/// units passed to Tauri).
+static LAST_PILL_POSITION: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+
+/// Place the pill bottom-center of a chosen monitor, anchored 24 px
+/// above the bottom edge of that monitor's *work area* — the top of
+/// the Dock on Mac, the top of the taskbar on Windows, or the screen's
+/// bottom edge when neither is on this monitor. Tracks Dock/taskbar
+/// resize via `fullscreen::work_area_bottom_y` (NSScreen.visibleFrame
+/// on Mac, MONITORINFO.rcWork on Windows).
 ///
 /// `monitor_origin` is opaque to this function: when `Some`, it gets
 /// passed straight to `fullscreen::find_tauri_monitor` which knows how
@@ -461,9 +507,15 @@ async fn set_pill_click_through(
 /// the watcher tick and this call — falls back to `current_monitor()`,
 /// then `primary_monitor()`, so the pill always lands somewhere.
 ///
-/// MUST be called on the main thread: `available_monitors()` may go
-/// through `NSScreen.screens` on macOS. Both the Tauri command wrapper
-/// and the watcher callback dispatch via `app.run_on_main_thread`.
+/// Self-dedupes via `LAST_PILL_POSITION`: skips the `set_position`
+/// call when the computed target equals the last one we set. The
+/// periodic refresh task in `setup()` therefore costs nothing while
+/// the user isn't moving the cursor or resizing the Dock.
+///
+/// MUST be called on the main thread: `available_monitors()` and
+/// `NSScreen.visibleFrame` are main-thread-only on macOS. Both the
+/// Tauri command wrapper and the watcher / refresh callbacks dispatch
+/// via `app.run_on_main_thread`.
 fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Result<(), String> {
     let pill = app
         .get_webview_window("pill")
@@ -477,9 +529,7 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
 
     let scale = monitor.scale_factor();
     let mon_w = monitor.size().width as f64 / scale;
-    let mon_h = monitor.size().height as f64 / scale;
     let mon_x = monitor.position().x as f64 / scale;
-    let mon_y = monitor.position().y as f64 / scale;
 
     // Window dimensions (must match tauri.conf.json pill window). Capsule
     // is centered inside the window via flex so the shadow has room on all
@@ -489,11 +539,27 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
     const PILL_WIN_H: f64 = 82.0;
     const CAPSULE_H: f64 = 22.0;
     const CAPSULE_BELOW_PAD: f64 = (PILL_WIN_H - CAPSULE_H) / 2.0;
-    const VISUAL_BOTTOM_MARGIN: f64 = 80.0;
+    /// Pixels between the visible capsule's bottom edge and the top
+    /// of the Dock / taskbar (or screen bottom when neither is here).
+    const ABOVE_DOCK_GAP: f64 = 24.0;
+
+    let work_area_bottom = fullscreen::work_area_bottom_y(&monitor);
 
     let x = mon_x + (mon_w - PILL_WIN_W) / 2.0;
-    // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = mon_h - VISUAL_BOTTOM_MARGIN
-    let y = mon_y + mon_h - VISUAL_BOTTOM_MARGIN - PILL_WIN_H + CAPSULE_BELOW_PAD;
+    // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = work_area_bottom - ABOVE_DOCK_GAP
+    let y = work_area_bottom - ABOVE_DOCK_GAP - PILL_WIN_H + CAPSULE_BELOW_PAD;
+
+    {
+        let mut last = LAST_PILL_POSITION.lock().unwrap();
+        // Sub-pixel jitter would otherwise cause needless `set_position`
+        // churn during periodic refresh. 0.5 px is below user-visible.
+        if let Some((lx, ly)) = *last {
+            if (lx - x).abs() < 0.5 && (ly - y).abs() < 0.5 {
+                return Ok(());
+            }
+        }
+        *last = Some((x, y));
+    }
 
     pill.set_position(LogicalPosition::new(x, y))
         .map_err(|e| e.to_string())
@@ -745,6 +811,31 @@ pub fn run() {
                     }
                 });
             });
+
+            // Dock / taskbar resize tracker. The cursor watcher fires
+            // on screen-cross only — but the user can grow/shrink the
+            // Mac Dock (or Win taskbar in auto-hide states) without
+            // ever crossing screens, in which case the pill would
+            // drift. Re-running place_pill on a 500 ms cadence picks
+            // up work-area changes; place_pill self-dedupes via
+            // LAST_PILL_POSITION so this is free when nothing moved.
+            let app_for_refresh = app.handle().clone();
+            thread::Builder::new()
+                .name("openwhisper-pill-refresh".into())
+                .spawn(move || loop {
+                    thread::sleep(Duration::from_millis(500));
+                    if !settings::follow_active_screen() {
+                        continue;
+                    }
+                    let app = app_for_refresh.clone();
+                    let app_inner = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Err(e) = place_pill(&app_inner, None) {
+                            eprintln!("[pill-refresh] {e}");
+                        }
+                    });
+                })
+                .expect("spawn pill refresh");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -137,6 +137,38 @@ async function installTauriShim(page: Page, label: "main" = "main") {
           const w = window as unknown as { __owAudioDevice?: string | null };
           return w.__owAudioDevice ?? null;
         }
+        if (cmd === "audio_get_device_state") {
+          // Source state from the same window stash the legacy commands
+          // use so existing fixtures (e.g. setting __owAudioDevice before
+          // opening the pane) keep working without bespoke setup.
+          const w = window as unknown as {
+            __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
+            __owAudioDevice?: string | null;
+            __owAudioDefaultName?: string | null;
+            __owAudioSelectedPresent?: boolean;
+          };
+          const devices = w.__owAudioDevices ?? [
+            { name: "MacBook Pro Microphone", is_default: true },
+            { name: "AirPods Pro", is_default: false },
+          ];
+          const selectedName = w.__owAudioDevice ?? null;
+          const defaultName =
+            w.__owAudioDefaultName ??
+            devices.find((d) => d.is_default)?.name ??
+            null;
+          // Honour an explicit override (used by disconnect tests). Otherwise
+          // derive presence from whether the saved name is enumerable.
+          const selectedPresent =
+            w.__owAudioSelectedPresent ??
+            (selectedName === null ||
+              devices.some((d) => d.name === selectedName));
+          return {
+            devices,
+            selected_name: selectedName,
+            selected_present: selectedPresent,
+            default_name: defaultName,
+          };
+        }
         if (cmd === "audio_set_device") {
           const { name } = (args ?? {}) as { name: string | null };
           const w = window as unknown as {
@@ -264,6 +296,81 @@ export async function waitForTickListener(page: Page) {
         download_bytes_total: 0,
       });
       return ok > 0;
+    },
+    { timeout: 3000 },
+  );
+}
+
+// Push a fresh `audio_device_state` snapshot at the AudioPane subscriber.
+// Mirrors `AudioDeviceState` in apps/tauri/src-tauri/src/lib.rs. Defaults
+// follow the shim's seeded device fixture so the helper composes cleanly
+// with `__owAudioDevice` overrides set earlier in a test.
+export interface MockAudioDeviceState {
+  devices?: Array<{ name: string; is_default: boolean }>;
+  selected_name?: string | null;
+  selected_present?: boolean;
+  default_name?: string | null;
+}
+
+export async function emitDeviceState(
+  page: Page,
+  state: MockAudioDeviceState = {},
+): Promise<number> {
+  return page.evaluate((partial) => {
+    const w = window as unknown as {
+      __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
+      __owAudioDevice?: string | null;
+    };
+    const devices = partial.devices ??
+      w.__owAudioDevices ?? [
+        { name: "MacBook Pro Microphone", is_default: true },
+        { name: "AirPods Pro", is_default: false },
+      ];
+    const selectedName = partial.selected_name ?? w.__owAudioDevice ?? null;
+    const defaultName =
+      partial.default_name ??
+      devices.find((d) => d.is_default)?.name ??
+      null;
+    const selectedPresent =
+      partial.selected_present ??
+      (selectedName === null ||
+        devices.some((d) => d.name === selectedName));
+    return window.__owEmit("audio_device_state", {
+      devices,
+      selected_name: selectedName,
+      selected_present: selectedPresent,
+      default_name: defaultName,
+    });
+  }, state);
+}
+
+// Wait for AudioPane's `audio_device_state` listener to attach. Probe by
+// emitting a benign snapshot and asserting at least one delivery — same
+// trick as `waitForTickListener`.
+export async function waitForDeviceStateListener(page: Page) {
+  await page.waitForFunction(
+    () => {
+      const w = window as unknown as {
+        __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
+        __owAudioDevice?: string | null;
+      };
+      const devices = w.__owAudioDevices ?? [
+        { name: "MacBook Pro Microphone", is_default: true },
+        { name: "AirPods Pro", is_default: false },
+      ];
+      const selectedName = w.__owAudioDevice ?? null;
+      const defaultName = devices.find((d) => d.is_default)?.name ?? null;
+      const selectedPresent =
+        selectedName === null ||
+        devices.some((d) => d.name === selectedName);
+      return (
+        window.__owEmit("audio_device_state", {
+          devices,
+          selected_name: selectedName,
+          selected_present: selectedPresent,
+          default_name: defaultName,
+        }) > 0
+      );
     },
     { timeout: 3000 },
   );

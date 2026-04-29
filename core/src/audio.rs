@@ -560,6 +560,50 @@ pub fn audio_get_selected_device() -> Option<String> {
     SELECTED_DEVICE.lock().ok().and_then(|g| g.clone())
 }
 
+/// Name of the host's current default input device, or `None` if no
+/// default is reported. The default can change while the app is running
+/// (user toggles a Bluetooth headset, AirPods auto-route on connect),
+/// so callers that surface "(default)" in the UI should poll this and
+/// refresh on change rather than caching the boot-time value.
+pub fn audio_default_input_name() -> Option<String> {
+    let host = cpal::default_host();
+    host.default_input_device().and_then(|d| device_name(&d))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectedDeviceStatus {
+    /// User has picked a device by name and it's currently enumerable.
+    Present,
+    /// User has picked a device by name but it's not in the current
+    /// input-device list (unplugged, renamed, virtual mic gone). The
+    /// next `begin_capture` will silently fall back to host default;
+    /// the saved name is preserved so a re-plug auto-resumes intent.
+    MissingFallbackToDefault,
+    /// No persisted selection — capture uses host default by design.
+    NoneSelectedUsingDefault,
+}
+
+/// Snapshot of whether the persisted device pick is currently usable.
+/// Cheap enough to call from a 0.5 Hz watcher (one cpal enumerate + a
+/// linear scan over the device list). Does NOT mutate `SELECTED_DEVICE`
+/// on a miss — preserving the saved name lets a re-plugged mic
+/// auto-rebind without the user re-picking.
+pub fn audio_selected_device_status() -> SelectedDeviceStatus {
+    let Some(name) = audio_get_selected_device() else {
+        return SelectedDeviceStatus::NoneSelectedUsingDefault;
+    };
+    let host = cpal::default_host();
+    let Ok(devices) = host.input_devices() else {
+        return SelectedDeviceStatus::MissingFallbackToDefault;
+    };
+    for d in devices {
+        if device_name(&d).as_deref() == Some(name.as_str()) {
+            return SelectedDeviceStatus::Present;
+        }
+    }
+    SelectedDeviceStatus::MissingFallbackToDefault
+}
+
 /// Returns the peak amplitude of the most recent audio callback, in [0, 1].
 /// Lock-free, safe to poll from a UI timer. Returns 0 if the most recent
 /// callback is older than `LEVEL_STALE_NS`, so a stream that suddenly

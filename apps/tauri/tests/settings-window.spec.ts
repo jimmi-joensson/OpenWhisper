@@ -1,4 +1,11 @@
-import { emitTick, expect, test, waitForTickListener } from "./fixtures/tauri-shim";
+import {
+  emitDeviceState,
+  emitTick,
+  expect,
+  test,
+  waitForDeviceStateListener,
+  waitForTickListener,
+} from "./fixtures/tauri-shim";
 
 // Settings is now an in-window route inside App, not a separate window.
 // All specs mount the main App tree and navigate via ⌘, or the
@@ -406,6 +413,131 @@ test.describe("settings — audio pane", () => {
         ),
       )
       .toBeNull();
+  });
+
+  test("disconnected mic flips picker to System default without clearing saved pref", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
+        "AirPods Pro";
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    await expect(select).toHaveValue("AirPods Pro");
+    // AirPods leaves the device list. Picker shows System default; saved
+    // preference stays in core (no audio_set_device call).
+    await waitForDeviceStateListener(page);
+    const setCountBefore = await page.evaluate(
+      () =>
+        (window as unknown as { __owAudioSetCount?: number })
+          .__owAudioSetCount ?? 0,
+    );
+    await emitDeviceState(page, {
+      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
+      selected_name: "AirPods Pro",
+      selected_present: false,
+      default_name: "MacBook Pro Microphone",
+    });
+    await expect(select).toHaveValue("");
+    await expect(select).not.toContainText("disconnected");
+    const setCountAfter = await page.evaluate(
+      () =>
+        (window as unknown as { __owAudioSetCount?: number })
+          .__owAudioSetCount ?? 0,
+    );
+    expect(setCountAfter).toBe(setCountBefore);
+  });
+
+  test("reconnecting the saved device auto-rebinds the picker", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
+        "AirPods Pro";
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    await waitForDeviceStateListener(page);
+    // Disconnect → picker shows System default.
+    await emitDeviceState(page, {
+      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
+      selected_name: "AirPods Pro",
+      selected_present: false,
+      default_name: "MacBook Pro Microphone",
+    });
+    await expect(select).toHaveValue("");
+    // Reconnect — saved preference auto-rebinds the picker, no click.
+    await emitDeviceState(page, {
+      devices: [
+        { name: "MacBook Pro Microphone", is_default: true },
+        { name: "AirPods Pro", is_default: false },
+      ],
+      selected_name: "AirPods Pro",
+      selected_present: true,
+      default_name: "MacBook Pro Microphone",
+    });
+    await expect(select).toHaveValue("AirPods Pro");
+  });
+
+  test("actively picking System default while disconnected clears saved pref", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
+        "AirPods Pro";
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    await waitForDeviceStateListener(page);
+    // Mic disconnects, picker effectively shows System default.
+    await emitDeviceState(page, {
+      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
+      selected_name: "AirPods Pro",
+      selected_present: false,
+      default_name: "MacBook Pro Microphone",
+    });
+    // User explicitly chooses System default → that's an intent override
+    // and should clear the saved preference, so reconnect doesn't snap
+    // back to AirPods.
+    await select.selectOption("");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAudioLastSet?: string | null })
+              .__owAudioLastSet,
+        ),
+      )
+      .toBeNull();
+  });
+
+  test("(default) tag follows the live host default", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    // Initial fixture has MacBook Pro Microphone as default.
+    await expect(select).toContainText("MacBook Pro Microphone (default)");
+    // Bluetooth headset connects, host default flips. Tag should follow.
+    await waitForDeviceStateListener(page);
+    await emitDeviceState(page, {
+      devices: [
+        { name: "MacBook Pro Microphone", is_default: false },
+        { name: "AirPods Pro", is_default: true },
+      ],
+      selected_name: null,
+      selected_present: true,
+      default_name: "AirPods Pro",
+    });
+    await expect(select).toContainText("AirPods Pro (default)");
+    await expect(select).not.toContainText("MacBook Pro Microphone (default)");
   });
 
   test("level ticks update the peak readout while testing", async ({ page }) => {

@@ -119,6 +119,18 @@ interface AudioDevice {
   is_default: boolean;
 }
 
+// Snapshot the Rust shell pushes via `audio_device_state`. Mirrors
+// `AudioDeviceState` in apps/tauri/src-tauri/src/lib.rs. `selected_present`
+// flips false when the persisted device is no longer enumerable (unplugged,
+// renamed) — capture transparently uses the host default in that case, but
+// the picker keeps the saved name selected so a re-plug auto-rebinds.
+interface AudioDeviceState {
+  devices: AudioDevice[];
+  selected_name: string | null;
+  selected_present: boolean;
+  default_name: string | null;
+}
+
 // Audio pane — device picker + opt-in test meter (TASK-53).
 //
 // Lifecycle: the meter does NOT start automatically — the user clicks
@@ -139,6 +151,11 @@ function AudioPane() {
   // Empty string maps to the "System default" option in the <select> AND to
   // `None` in core's selector (host default at begin_capture time).
   const [selected, setSelected] = useState<string>("");
+  // Tracks whether the currently selected device is still enumerable. False
+  // means the saved name doesn't match any present input device — capture
+  // transparently falls back to the host default. We keep the saved name
+  // in `selected` so a re-plug rebinds the user's choice without re-pick.
+  const [selectedPresent, setSelectedPresent] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -156,23 +173,53 @@ function AudioPane() {
   const peakWindowRef = useRef<number[]>([]);
   const [peakDb, setPeakDb] = useState<number | null>(null);
 
+  // Mount: pull initial state synchronously, then subscribe to live updates.
+  // The Rust shell emits `audio_device_state` from the dictation tick loop
+  // every ~2 s, but only when the snapshot hash changes — so an unplugged
+  // mic surfaces in the picker within 2 s, and a steady-state pane doesn't
+  // churn on every tick.
   useEffect(() => {
     let alive = true;
+    let unlisten: UnlistenFn | null = null;
+    const apply = (state: AudioDeviceState) => {
+      setDevices(
+        state.devices.map((d) => ({
+          name: d.name,
+          // Keep the "(default)" tag live: the host default can change
+          // mid-session (Bluetooth route, AirPods auto-connect), so we
+          // prefer the snapshot's `default_name` over each device's
+          // boot-time `is_default`.
+          is_default: state.default_name === d.name,
+        })),
+      );
+      setSelected(state.selected_name ?? "");
+      setSelectedPresent(state.selected_present);
+    };
     void (async () => {
       try {
-        const [list, current] = await Promise.all([
-          invoke<AudioDevice[] | null>("audio_list_devices"),
-          invoke<string | null>("audio_get_device"),
-        ]);
+        const initial = await invoke<AudioDeviceState>("audio_get_device_state");
         if (!alive) return;
-        setDevices(list ?? []);
-        setSelected(current ?? "");
+        apply(initial);
+      } catch (e) {
+        if (alive) setError(String(e));
+      }
+      try {
+        const off = await listen<AudioDeviceState>("audio_device_state", (evt) => {
+          if (!alive) return;
+          apply(evt.payload);
+        });
+        if (!alive) {
+          off();
+          return;
+        }
+        unlisten = off;
       } catch (e) {
         if (alive) setError(String(e));
       }
     })();
     return () => {
       alive = false;
+      if (unlisten) unlisten();
       // Always tear down the preview stream on unmount, even if the user
       // navigated away mid-test. audio_preview_stop is a no-op when
       // nothing is running.
@@ -311,7 +358,16 @@ function AudioPane() {
         <div className="ow-audio__row-control">
           <select
             className="ow-audio__select"
-            value={selected}
+            // Effective value: when the saved device isn't currently
+            // enumerable, render the picker as "System default" rather
+            // than a Frankenstein "device (disconnected)" entry. The
+            // saved preference (`selected`) is kept untouched in core, so
+            // a re-plug auto-rebinds the picker to that device on the
+            // next snapshot. If the user actively picks "System default"
+            // while disconnected, onChange writes null → clearing the
+            // saved preference (intent override, not just a display
+            // flip).
+            value={selectedPresent ? selected : ""}
             onChange={onChange}
             disabled={busy || dictation.isRecording}
             aria-label="Microphone device"

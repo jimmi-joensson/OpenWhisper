@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::thread;
 use std::time::Duration;
 
@@ -122,7 +124,7 @@ fn dictation_cancel() -> bool {
     do_cancel()
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 pub struct AudioDevice {
     name: String,
     is_default: bool,
@@ -134,6 +136,56 @@ fn audio_list_devices() -> Vec<AudioDevice> {
         .into_iter()
         .map(|d| AudioDevice { name: d.name, is_default: d.is_default })
         .collect()
+}
+
+// Snapshot the React Audio pane subscribes to. `selected_present` and
+// `default_name` let the UI render a "(disconnected — using System default)"
+// row without re-walking the device list itself, and let the "(default)"
+// tag follow live when the host default changes (Bluetooth route, AirPods
+// auto-connect).
+#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct AudioDeviceState {
+    devices: Vec<AudioDevice>,
+    selected_name: Option<String>,
+    selected_present: bool,
+    default_name: Option<String>,
+}
+
+fn audio_device_state_snapshot() -> AudioDeviceState {
+    // Boot-time gate: cpal's macOS backend touches CoreAudio property
+    // queries on enumerate. Sequoia's TCC has fired the mic dialog from
+    // those reads when Accessibility is still mid-prompt — racing the
+    // boot prompt sequence (AX → mic). While not authorized we return a
+    // safe placeholder: empty device list, saved name preserved, no
+    // disconnected marker. The next emitter tick after authorization
+    // pushes the real state and the UI catches up via its subscription.
+    if !permissions::is_mic_authorized() {
+        return AudioDeviceState {
+            devices: Vec::new(),
+            selected_name: audio::audio_get_selected_device(),
+            selected_present: true,
+            default_name: None,
+        };
+    }
+    let devices: Vec<AudioDevice> = audio::audio_list_input_devices()
+        .into_iter()
+        .map(|d| AudioDevice { name: d.name, is_default: d.is_default })
+        .collect();
+    let selected_name = audio::audio_get_selected_device();
+    let default_name = audio::audio_default_input_name();
+    let selected_present = match audio::audio_selected_device_status() {
+        audio::SelectedDeviceStatus::Present => true,
+        audio::SelectedDeviceStatus::MissingFallbackToDefault => false,
+        // No selection = capture uses host default. Treat as "present" so
+        // the UI doesn't render a disconnected marker on the empty option.
+        audio::SelectedDeviceStatus::NoneSelectedUsingDefault => true,
+    };
+    AudioDeviceState { devices, selected_name, selected_present, default_name }
+}
+
+#[tauri::command]
+fn audio_get_device_state() -> AudioDeviceState {
+    audio_device_state_snapshot()
 }
 
 #[tauri::command]
@@ -238,12 +290,30 @@ fn spawn_recognizer_warmup() {
         .expect("spawn recognizer warmup");
 }
 
+// One device-state poll every N dictation ticks. 50 ms tick × 40 = 2 s.
+// Slow enough that the cpal enumerate isn't a hot path; fast enough that
+// an unplugged mic surfaces in the picker before the user clicks Test.
+const DEVICE_STATE_TICK_DIVISOR: u64 = 40;
+
+fn hash_device_state(state: &AudioDeviceState) -> u64 {
+    let mut h = DefaultHasher::new();
+    state.hash(&mut h);
+    h.finish()
+}
+
 fn spawn_dictation_emitter(app: tauri::AppHandle) {
     thread::Builder::new()
         .name("openwhisper-dictation-emitter".into())
         .spawn(move || {
+            // Force an emit on the first device-state tick so React's
+            // listener replaces the initial `audio_get_device_state`
+            // snapshot with a live one (host-default may have changed
+            // between mount and first tick on a slow boot).
+            let mut last_device_hash: Option<u64> = None;
+            let mut tick_count: u64 = 0;
             loop {
                 thread::sleep(Duration::from_millis(TICK_MS));
+                tick_count = tick_count.wrapping_add(1);
                 let snap = dictation::dictation_snapshot();
                 let level = audio::audio_current_level();
                 // While recording, snapshot.sample_count is 0 until stop. Show a
@@ -270,6 +340,16 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                 };
                 if app.emit("dictation_tick", payload).is_err() {
                     break;
+                }
+                if tick_count % DEVICE_STATE_TICK_DIVISOR == 0 {
+                    let state = audio_device_state_snapshot();
+                    let hash = hash_device_state(&state);
+                    if last_device_hash != Some(hash) {
+                        last_device_hash = Some(hash);
+                        if app.emit("audio_device_state", state).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         })
@@ -495,6 +575,7 @@ pub fn run() {
             settings::audio_get_device,
             settings::audio_set_device,
             audio_list_devices,
+            audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,
         ])

@@ -85,3 +85,19 @@ pub fn request_microphone(app: &AppHandle) {
 pub fn permissions_status_current() -> Option<PermissionsStatus> {
     LAST_STATUS.lock().ok().and_then(|g| g.clone())
 }
+
+/// True iff the most recent permissions probe reported the mic as
+/// authorized. Background work that touches the audio HAL (cpal device
+/// enumeration, `default_input_config()` probes) reads this before
+/// running so we don't fire the macOS mic dialog out-of-sequence — the
+/// boot flow grants Accessibility first, then the mic prompt should
+/// land on its own. Treats "no probe yet" + "not_determined" + denied/
+/// restricted all as "not authorized" (only authorized opens the gate).
+pub fn is_mic_authorized() -> bool {
+    LAST_STATUS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|s| s.mic_state == "authorized")
+        .unwrap_or(false)
+}

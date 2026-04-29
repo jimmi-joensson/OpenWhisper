@@ -37,6 +37,15 @@ type Callback = Box<dyn Fn(bool) + Send + Sync + 'static>;
 static CALLBACK: OnceLock<Callback> = OnceLock::new();
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Last-detected fullscreen state. The poll thread updates this on every
+/// tick whether or not the value changed. Consumers that need to
+/// re-evaluate gating outside of a transition (e.g. when the user toggles
+/// `behavior.show_in_fullscreen` while a fullscreen app is currently
+/// focused) read this without restarting the poller.
+pub fn is_active() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 /// Register the change callback and start the poll thread. First call
 /// wins; subsequent calls are no-ops.
 pub fn install<F>(on_change: F)

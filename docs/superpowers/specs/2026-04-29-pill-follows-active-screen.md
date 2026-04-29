@@ -80,3 +80,33 @@ The pill should sit on whichever monitor hosts the currently-focused application
 - Existing watcher backbone: `apps/tauri/src-tauri/src/fullscreen/mod.rs`, `…/mac.rs`, `…/windows.rs`.
 - Current static-position command: `position_pill_bottom_center` in `apps/tauri/src-tauri/src/lib.rs:326`.
 - Project principles applied: zero-config-over-toggles (lead with auto-on), orchestration-in-rust (position decision lives in Rust shell, UI is dumb).
+
+---
+
+## Decision update — 2026-04-30: cursor-tracking, not focused-window
+
+The original implementation tracked the **focused window's centre** via the AX path (`AXFocusedApplication → AXFocusedWindow → kAXPositionAttribute + kAXSizeAttribute`). Manual smoke on a multi-monitor Mac surfaced two problems:
+
+1. **Electron apps silently dropped.** Figma, Discord, and VS Code don't reliably expose `kAXPositionAttribute` / `kAXSizeAttribute`, so the watcher returned `None` and the pill stayed put. Cocoa apps next to them on the same monitor triggered the follow correctly, which made the asymmetry obvious.
+2. **`set_position` on the swizzled NSPanel wedged Finder's app menu.** Rapid screen-switching with Finder briefly active left the Finder application menu painted on screen, undismissable. Toggling the setting OFF reproducibly stopped the wedge — confirming `set_position` is the trigger. The fix is to fire `set_position` less often, only on actual screen-crossings the user cares about.
+
+Switching to **cursor-monitor tracking** addresses both:
+
+- Cursor position is reported uniformly across Cocoa, Electron, Win32, UWP, and fullscreen contexts. No AX dependency for the pill-follow signal (AX is still used for fullscreen detection).
+- Users typically focus an app *by clicking it*, so cursor-on-target is a high-confidence proxy for "where the user is working." Matches Wispr Flow's pattern.
+- Cursor crossings are rarer than focus changes, which reduces `set_position` call frequency and makes the Finder-menu wedge harder to reproduce.
+
+### Implementation deltas vs the original spec
+
+| Original | Updated |
+|---|---|
+| `mac::focused_window_monitor()` walks AX → CG bounds | `mac::cursor_monitor()` reads `CGEventCreate(null)` + `CGEventGetLocation`, walks `CGDisplay::active_displays()` |
+| `windows::focused_window_monitor()` reuses `foreground_monitor_info()` | `windows::cursor_monitor()` uses `GetCursorPos()` + `MonitorFromPoint(MONITOR_DEFAULTTONEAREST)` |
+| Skip cases include AX-revoked, no focused window, shell classes | Skip cases reduce to "CG / Win API failure" — the others don't apply |
+| Spec said "the monitor whose rect contains the centre of the focused window" | Now: "the monitor whose rect contains the cursor" |
+
+The watcher backbone (`LAST_MONITOR` cache, gating on `settings::follow_active_screen()`, 500 ms poll) is unchanged. `find_tauri_monitor` is unchanged — coordinate-space contract is identical (cursor coords match the existing watcher tuple format on each platform).
+
+### What stayed in the AX module
+
+`is_fullscreen_now()` still uses the original AX walk (`AXFocusedApplication → AXFocusedWindow → kAXFullScreenAttribute`). That signal is unrelated to where the cursor is and works fine across all app frameworks for native NSWindow fullscreen detection.

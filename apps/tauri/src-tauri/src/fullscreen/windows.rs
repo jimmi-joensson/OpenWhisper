@@ -55,13 +55,14 @@
 use std::mem::size_of;
 
 use tauri::{AppHandle, Monitor};
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, GWL_STYLE, WS_CAPTION, WS_MAXIMIZE, WS_THICKFRAME,
 };
 
@@ -86,10 +87,9 @@ fn window_class_name(hwnd: HWND) -> Option<String> {
 /// Foreground HWND + its window rect + the MONITORINFO of the
 /// containing monitor — `Some` only when no skip condition fires
 /// (invalid HWND, OW's own pid, shell-class window, or any GDI call
-/// failing). Both `is_fullscreen_now` and `focused_window_monitor`
-/// route through this; the HWND is in the tuple so the chromeless
-/// branch in `is_fullscreen_now` reads style bits from the same window
-/// that produced the rect (no second `GetForegroundWindow` race).
+/// failing). Used by `is_fullscreen_now`; the HWND is in the tuple so
+/// the chromeless branch reads style bits from the same window that
+/// produced the rect (no second `GetForegroundWindow` race).
 fn foreground_monitor_info() -> Option<(HWND, RECT, MONITORINFO)> {
     unsafe {
         let fg = GetForegroundWindow();
@@ -160,12 +160,34 @@ pub fn is_fullscreen_now() -> bool {
     }
 }
 
-/// Origin `(left, top)` of the monitor hosting the foreground window,
-/// in physical-px virtual-screen coordinates (same space as
-/// `MONITORINFO.rcMonitor`). Returns `None` when no foreground window
-/// qualifies — same skip list as `is_fullscreen_now`.
-pub fn focused_window_monitor() -> Option<(i32, i32)> {
-    foreground_monitor_info().map(|(_, _, mi)| (mi.rcMonitor.left, mi.rcMonitor.top))
+/// Origin `(left, top)` of the monitor hosting the cursor, in
+/// physical-px virtual-screen coordinates (same space as
+/// `MONITORINFO.rcMonitor`). Returns `None` only on a `GetCursorPos`
+/// or `GetMonitorInfoW` failure (extremely rare).
+///
+/// Cursor-tracking replaced an earlier focused-window approach
+/// (TASK-55.3) which routed through `GetForegroundWindow` + AX-style
+/// window rect lookup. Cursor-based works uniformly across all app
+/// frameworks (Win32, Electron, UWP) and matches the macOS sibling.
+pub fn cursor_monitor() -> Option<(i32, i32)> {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            return None;
+        }
+        Some((mi.rcMonitor.left, mi.rcMonitor.top))
+    }
 }
 
 /// Look up the `tauri::Monitor` whose position matches the watcher's

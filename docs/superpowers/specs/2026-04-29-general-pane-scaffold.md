@@ -57,7 +57,7 @@ Section structure follows the design's three-column layout: 180px label column, 
 |---|---|
 | **Startup** | Launch at login (Switch, **placeholder** — local state only, no persistence; TASK-54 binds it) |
 | **Appearance** | Theme (ToggleGroup with `system` / `light` / `dark` items, **stub** — local state only, no theme-application logic per TASK-54 AC#4) |
-| **About** | Current version (live — `invoke<string>("core_version")` rendered in mono font using `font-mono` token) |
+| **Updates** | Current version (live — `invoke<string>("core_version")` rendered in mono font using `font-mono` token) |
 
 Sections explicitly **not** rendered:
 

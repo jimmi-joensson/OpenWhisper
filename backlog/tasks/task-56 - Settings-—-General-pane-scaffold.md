@@ -23,7 +23,7 @@ Replace the PaneStub at Settings.tsx:99 with a real GeneralPane built from shadc
 <!-- AC:BEGIN -->
 - [ ] #1 PaneStub for General is replaced with a real GeneralPane component
 - [ ] #2 Pane uses shadcn Switch, ToggleGroup, Field family, and Separator — no custom toggle markup
-- [ ] #3 Three sections render: Startup (Launch at login placeholder Switch), Appearance (Theme stub ToggleGroup), About (live current version)
+- [ ] #3 Three sections render: Startup (Launch at login placeholder Switch), Appearance (Theme stub ToggleGroup), Updates (live current version)
 - [ ] #4 Switch's checked state paints in the design's info-blue, not shadcn's default primary
 - [ ] #5 Lucide icons used for sidebar items if iconography lands in scope (else deferred)
 - [ ] #6 Existing Settings landing-on-General + sidebar tests still pass; new tests cover the section structure

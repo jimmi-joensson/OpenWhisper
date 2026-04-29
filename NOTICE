@@ -1,0 +1,17 @@
+OpenWhisper
+Copyright (c) 2026 Jimmi Joensson
+
+This product is licensed under the MIT License. See LICENSE for the full
+text.
+
+This product includes the following third-party components:
+
+  Parakeet TDT v3 (speech recognition model weights)
+  Copyright (c) NVIDIA Corporation
+  Licensed under the Creative Commons Attribution 4.0 International License
+  (CC-BY-4.0): https://creativecommons.org/licenses/by/4.0/
+  Source: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+
+  Attribution is required wherever the model is bundled or redistributed.
+  In OpenWhisper, this attribution is surfaced in-app (About screen) and
+  in this NOTICE file.

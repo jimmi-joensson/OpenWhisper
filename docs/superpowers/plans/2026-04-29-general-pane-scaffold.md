@@ -56,7 +56,7 @@ Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-56.N`. Sequential
 
 ### Task 2: Build the GeneralPane component
 
-**Goal.** New file `apps/tauri/src/components/general-pane.tsx` that renders the three sections (Startup / Appearance / About) using the shadcn primitives from Task 1. Local state for the placeholder Switch and stub ToggleGroup; live `core_version` invoke for the About row.
+**Goal.** New file `apps/tauri/src/components/general-pane.tsx` that renders the three sections (Startup / Appearance / Updates) using the shadcn primitives from Task 1. Local state for the placeholder Switch and stub ToggleGroup; live `core_version` invoke for the Updates row.
 
 **Files.** `apps/tauri/src/components/general-pane.tsx` (new).
 
@@ -101,7 +101,7 @@ Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-56.N`. Sequential
      <Separator />
 
      <FieldSet>
-       <FieldLegend>About</FieldLegend>
+       <FieldLegend>Updates</FieldLegend>
        <Field {...horizontal-orientation-from-Task-1}>
          <FieldLabel>Current version</FieldLabel>
          <span className="font-mono text-sm">{version ?? "—"}</span>
@@ -121,9 +121,9 @@ Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-56.N`. Sequential
 **Outcome ACs (Backlog).**
 
 - `general-pane.tsx` exports a `GeneralPane` component using only shadcn primitives + Tailwind layout classes.
-- Three sections render: Startup with one Switch row, Appearance with one ToggleGroup row, About with the live current-version readout.
+- Three sections render: Startup with one Switch row, Appearance with one ToggleGroup row, Updates with the live current-version readout.
 - No `space-y-*` / `space-x-*` classes; no raw color overrides on shadcn components; no `dark:` color modifiers.
-- Local-state-only for placeholder rows; About row reads `core_version` via `invoke`.
+- Local-state-only for placeholder rows; Updates row reads `core_version` via `invoke`.
 - `pnpm tsc --noEmit` clean.
 
 ---
@@ -159,14 +159,14 @@ Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-56.N`. Sequential
 
 **Steps.**
 
-1. Add to the existing `test.describe("settings view", ...)` block a new test "General pane renders Startup, Appearance, and About sections":
+1. Add to the existing `test.describe("settings view", ...)` block a new test "General pane renders Startup, Appearance, and Updates sections":
    ```ts
-   test("General pane renders Startup, Appearance, and About sections", async ({ page }) => {
+   test("General pane renders Startup, Appearance, and Updates sections", async ({ page }) => {
      await page.goto("/");
      await openSettings(page);
      await expect(page.getByText("Startup")).toBeVisible();
      await expect(page.getByText("Appearance")).toBeVisible();
-     await expect(page.getByText("About")).toBeVisible();
+     await expect(page.getByText("Updates")).toBeVisible();
      await expect(page.getByLabel("Launch at login")).toBeVisible();
      await expect(page.getByText("Theme")).toBeVisible();
      await expect(page.getByText("Current version")).toBeVisible();

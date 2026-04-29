@@ -18,7 +18,7 @@ Extend settings-window.spec.ts to assert the three section headers, the three fi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 New test asserts Startup, Appearance, About section headers and Launch at login / Theme / Current version labels render
+- [ ] #1 New test asserts Startup, Appearance, Updates section headers and Launch at login / Theme / Current version labels render
 - [ ] #2 Theme ToggleGroup default-selected value is 'system'
 - [ ] #3 Launch at login Switch starts checked
 - [ ] #4 Existing 'renders sidebar with all four panes' and 'General is the landing pane' tests still pass

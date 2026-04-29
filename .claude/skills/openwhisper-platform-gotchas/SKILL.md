@@ -56,6 +56,20 @@ Open Tauri issues for the symptom (note: most discussions land on `acceptFirstMo
 
 ---
 
+### Plain NSWindow can't render over another app's fullscreen Space
+
+**Symptom:** The pill window has `alwaysOnTop: true` (Tauri → `NSFloatingWindowLevel`) and we set `NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary | NSWindowCollectionBehaviorStationary` via objc2 `msg_send`, plus bumped the level to `NSStatusWindowLevel`. On Sonoma+ the pill still does not appear when another app is in fullscreen — it stays trapped on its origin Space and the fullscreen Space owner draws clean. Hotkey + paste flow still work; only the HUD doesn't render.
+
+**Root cause:** `fullScreenAuxiliary`'s documented contract is "may be shown on the same Space as the fullscreen window," not "above it" — see [Apple Developer Forums #26677](https://developer.apple.com/forums/thread/26677). Several panel-shape behaviors are silently ignored when set on `NSWindow` since Big Sur; the only reliable cross-app fullscreen-overlay path is to make the window a real `NSPanel` (subclass with `NSWindowStyleMask::nonactivatingPanel`) via objc class swizzle (`object_setClass`). Tauri's webview windows are `NSWindow`-backed by default; tao's `set_visible_on_all_workspaces` only flips the `canJoinAllSpaces` bit and doesn't touch the window class. Tauri's own issue tracker logs the same symptom ([tauri#11791](https://github.com/tauri-apps/tauri/issues/11791), closed as "use a panel"). Every shipping Tauri/Electron HUD that overlays cross-app fullscreen (Cap, Screenpipe, Hyprnote, Wispr Flow) goes through an NSPanel swizzle.
+
+**Fix in tree:** `apps/tauri/src-tauri/Cargo.toml` pulls `tauri-nspanel` (Mac-only, git dep on the `v2.1` branch). `apps/tauri/src-tauri/src/lib.rs` declares a `PillPanel` config via `tauri_panel!{}`, registers `tauri_nspanel::init()` on the builder, and converts the pill to a panel in `setup()` before any collection-behavior call (Floating level + nonactivating style mask). `apps/tauri/src-tauri/src/behavior.rs::apply_collection_behavior` drives the panel's `set_collection_behavior(can_join_all_spaces | full_screen_auxiliary)` when `behavior.show_in_fullscreen=true`, empty when false.
+
+**Windows impact:** None. Windows virtual desktops use a different model and `alwaysOnTop` already handles borderless-fullscreen overlay; exclusive-fullscreen DirectX is unsolvable from user-mode regardless. The `tauri-nspanel` dep is gated to `[target.'cfg(target_os = "macos")'.dependencies]`.
+
+**Do NOT** burn another iteration tweaking collection-behavior bits or window levels on a plain `NSWindow` if the symptom is "pill doesn't appear over another app's fullscreen". Two attempts (the `set_visible_on_all_workspaces` + objc2 `fullScreenAuxiliary` combo, then bumping to `NSStatusWindowLevel` + `Stationary`) confirmed both fail on Sonoma+ in this codebase before we found the real fix. The class swizzle is non-negotiable. Also do NOT hand-roll the swizzle in our own objc2 — `tauri-nspanel` is maintained, used by multiple shipping apps, and gives us free updates if Apple changes the underlying NSPanel ABI; rolling it ourselves trades ~30 lines we own for the same risk surface and no upside.
+
+---
+
 ## Cross-platform interface contracts
 
 When adding to this file, prefer the format:

@@ -11,11 +11,14 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
+import { useShowInFullscreen } from "@/lib/use-show-in-fullscreen";
 import { useTheme } from "@/lib/use-theme";
 
 export function GeneralPane() {
   const [launchAtLogin, setLaunchAtLogin] = useState(true);
   const { theme, setTheme } = useTheme();
+  const { enabled: showInFullscreen, setEnabled: setShowInFullscreen } =
+    useShowInFullscreen();
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -60,6 +63,29 @@ export function GeneralPane() {
           <ToggleGroupItem value="light">Light</ToggleGroupItem>
           <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
         </ToggleGroup>
+      </Field>
+
+      <Separator />
+
+      <SectionHeader>Behavior</SectionHeader>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor="show-in-fullscreen">
+            Show in fullscreen apps
+          </FieldLabel>
+          <FieldDescription>
+            Keeps the pill visible and the hotkey active even when another
+            app is in fullscreen. Off by default — most users want
+            OpenWhisper to step aside for games and video.
+          </FieldDescription>
+        </FieldContent>
+        <Switch
+          id="show-in-fullscreen"
+          checked={showInFullscreen}
+          onCheckedChange={(next) => {
+            void setShowInFullscreen(next);
+          }}
+        />
       </Field>
 
       <Separator />

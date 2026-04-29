@@ -370,3 +370,10 @@ body {
     @apply font-sans;
   }
 }
+
+/* Settings → General: design uses macOS info-blue for Switch on-state.
+   Customization via CSS variable (shadcn customization.md), not per-instance
+   className overrides. BaseUI exposes the on-state via [data-checked]. */
+[data-slot="switch"][data-checked] {
+  background-color: var(--info);
+}

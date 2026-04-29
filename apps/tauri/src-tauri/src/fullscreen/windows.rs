@@ -163,7 +163,6 @@ pub fn is_fullscreen_now() -> bool {
 /// in physical-px virtual-screen coordinates (same space as
 /// `MONITORINFO.rcMonitor`). Returns `None` when no foreground window
 /// qualifies — same skip list as `is_fullscreen_now`.
-#[allow(dead_code)]
 pub fn focused_window_monitor() -> Option<(i32, i32)> {
     foreground_monitor_info().map(|(_, _, mi)| (mi.rcMonitor.left, mi.rcMonitor.top))
 }

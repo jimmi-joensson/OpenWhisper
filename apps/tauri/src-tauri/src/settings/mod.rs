@@ -11,6 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -104,9 +105,9 @@ pub fn default_settings() -> HotkeySettings {
 
 /// On-disk schema. `hotkey` is the legacy single-slot field — kept for
 /// migration on first load after upgrading. `hotkeys` is the current
-/// shape; we always write that. `audio` and `behavior` are sibling blocks
-/// that hold non-hotkey settings; absent on first run and on upgrades
-/// from the hotkey-only schema.
+/// shape; we always write that. `audio`, `behavior`, and `pill` are
+/// sibling blocks that hold non-hotkey settings; absent on first run
+/// and on upgrades from the hotkey-only schema.
 #[derive(Serialize, Deserialize, Default)]
 struct SettingsFile {
     #[serde(default)]
@@ -117,6 +118,21 @@ struct SettingsFile {
     audio: Option<AudioSettings>,
     #[serde(default)]
     behavior: Option<BehaviorSettings>,
+    #[serde(default)]
+    pill: Option<PillSettings>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PillSettings {
+    /// Pill HUD jumps to the monitor hosting the focused app on every
+    /// foreground change. ON by default — opt-out toggle, not opt-in.
+    pub follow_active_screen: bool,
+}
+
+impl Default for PillSettings {
+    fn default() -> Self {
+        Self { follow_active_screen: true }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -145,6 +161,20 @@ pub struct BehaviorSettings {
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
 static AUDIO_CURRENT: Mutex<Option<AudioSettings>> = Mutex::new(None);
 static BEHAVIOR_CURRENT: Mutex<Option<BehaviorSettings>> = Mutex::new(None);
+/// Process-global mirror of `pill.follow_active_screen`. The watcher
+/// thread reads this lock-free on every 500 ms tick — a `Mutex` would
+/// be fine but the access pattern (read-mostly, write-on-toggle) makes
+/// `AtomicBool` the right primitive. Defaults to `true` so a fresh
+/// checkout (no settings.json) gets follow-on behavior.
+static FOLLOW_ACTIVE_SCREEN: AtomicBool = AtomicBool::new(true);
+
+pub fn follow_active_screen() -> bool {
+    FOLLOW_ACTIVE_SCREEN.load(Ordering::Relaxed)
+}
+
+pub fn current_pill_settings() -> PillSettings {
+    PillSettings { follow_active_screen: follow_active_screen() }
+}
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -186,11 +216,16 @@ fn merge_loaded(file: SettingsFile) -> HotkeySettings {
 
 /// Load saved hotkeys (with migration from the legacy single-slot field)
 /// or fall back to platform defaults. Caches the result for backends.
+/// Side-effect: hydrates `FOLLOW_ACTIVE_SCREEN` from the same on-disk
+/// read, so the pill watcher sees the persisted value on its first
+/// poll tick after boot.
 pub fn load_settings(app: &AppHandle) -> HotkeySettings {
     if let Some(s) = CURRENT.lock().ok().and_then(|g| g.clone()) {
         return s;
     }
     let file = read_file(app);
+    let pill = file.pill.clone().unwrap_or_default();
+    FOLLOW_ACTIVE_SCREEN.store(pill.follow_active_screen, Ordering::Relaxed);
     let settings = merge_loaded(file);
     if let Ok(mut g) = CURRENT.lock() {
         *g = Some(settings.clone());
@@ -210,6 +245,7 @@ fn save_settings(app: &AppHandle, settings: HotkeySettings) -> Result<(), String
         hotkeys: Some(settings.clone()),
         audio,
         behavior,
+        pill: Some(current_pill_settings()),
     };
     write_file(app, &file)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -239,17 +275,19 @@ pub fn load_audio_settings(app: &AppHandle) -> AudioSettings {
 }
 
 fn save_audio_settings(app: &AppHandle, settings: AudioSettings) -> Result<(), String> {
-    // Re-read the on-disk file so we don't clobber an audio-or-hotkey
-    // block that is newer than our cache. Hotkeys may have been written
-    // by the user since boot.
+    // Re-read the on-disk file so we don't clobber a sibling block that
+    // is newer than our cache. Hotkeys / behavior / pill may all have
+    // been written by the user since boot.
     let file = read_file(app);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio: Some(settings.clone()),
         behavior,
+        pill,
     };
     write_file(app, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -283,15 +321,18 @@ pub fn save_behavior_settings(
     settings: BehaviorSettings,
 ) -> Result<(), String> {
     // Re-read for the same reason as `save_audio_settings`: avoid
-    // clobbering hotkey/audio blocks that may be newer than our cache.
+    // clobbering hotkey/audio/pill blocks that may be newer than our
+    // cache.
     let file = read_file(app);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio,
         behavior: Some(settings.clone()),
+        pill,
     };
     write_file(app, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -363,4 +404,33 @@ pub fn audio_set_device(app: AppHandle, id: Option<String>) -> Result<(), String
     save_audio_settings(&app, settings)?;
     openwhisper_core::audio::audio_set_selected_device_id(normalized);
     Ok(())
+}
+
+fn save_pill_settings(app: &AppHandle, settings: PillSettings) -> Result<(), String> {
+    // Re-read disk so a hotkey/audio/behavior change written between
+    // boot and this call survives. Same shape as save_audio_settings.
+    let file = read_file(app);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill: Some(settings.clone()),
+    };
+    write_file(app, &merged)?;
+    FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn settings_get_pill(_app: AppHandle) -> PillSettings {
+    current_pill_settings()
+}
+
+#[tauri::command]
+pub fn settings_set_pill_follow(app: AppHandle, follow: bool) -> Result<(), String> {
+    save_pill_settings(&app, PillSettings { follow_active_screen: follow })
 }

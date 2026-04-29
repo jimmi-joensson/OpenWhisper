@@ -74,6 +74,30 @@ test.describe("settings view", () => {
     ).toBeChecked();
   });
 
+  test("Theme picker flips the dark/light class on <html>", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("button", { name: "Dark" }).click();
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.classList.contains("dark"),
+      ),
+    ).toBe(true);
+    await page.getByRole("button", { name: "Light" }).click();
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.classList.contains("light"),
+      ),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.classList.contains("dark"),
+      ),
+    ).toBe(false);
+  });
+
   test("clicking a sidebar item activates the pane", async ({ page }) => {
     await page.goto("/");
     await openSettings(page);

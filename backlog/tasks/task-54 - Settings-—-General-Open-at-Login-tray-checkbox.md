@@ -4,13 +4,13 @@ title: 'Settings — General: Open at Login + tray checkbox'
 status: To Do
 assignee: []
 created_date: '2026-04-27 15:29'
-updated_date: '2026-04-27 15:29'
+updated_date: '2026-04-29 08:26'
 labels:
   - ui
   - tauri
   - settings
 dependencies:
-  - TASK-49
+  - TASK-56
 priority: medium
 ---
 

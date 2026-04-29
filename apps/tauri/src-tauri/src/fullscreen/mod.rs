@@ -145,17 +145,17 @@ fn detect_now() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn cursor_monitor() -> Option<(i32, i32)> {
+pub fn cursor_monitor() -> Option<(i32, i32)> {
     mac::cursor_monitor()
 }
 
 #[cfg(target_os = "windows")]
-fn cursor_monitor() -> Option<(i32, i32)> {
+pub fn cursor_monitor() -> Option<(i32, i32)> {
     windows::cursor_monitor()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn cursor_monitor() -> Option<(i32, i32)> {
+pub fn cursor_monitor() -> Option<(i32, i32)> {
     None
 }
 
@@ -178,4 +178,27 @@ pub fn find_tauri_monitor(app: &AppHandle, origin: (i32, i32)) -> Option<Monitor
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn find_tauri_monitor(_app: &AppHandle, _origin: (i32, i32)) -> Option<Monitor> {
     None
+}
+
+/// Y coordinate (logical points, Quartz top-left origin) of the
+/// bottom edge of the given monitor's work area. The pill anchors a
+/// fixed offset above this. Falls back to the monitor's own bottom
+/// edge if the platform query fails.
+///
+/// MUST be called on the main thread on macOS (NSScreen requirement);
+/// no thread restriction on Windows.
+#[cfg(target_os = "macos")]
+pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
+    mac::work_area_bottom_y(monitor)
+}
+
+#[cfg(target_os = "windows")]
+pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
+    windows::work_area_bottom_y(monitor)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
+    let scale = monitor.scale_factor();
+    (monitor.position().y as f64 + monitor.size().height as f64) / scale
 }

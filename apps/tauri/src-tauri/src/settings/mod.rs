@@ -119,13 +119,14 @@ struct SettingsFile {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AudioSettings {
-    /// Selected input-device name. `None` = "use the host default".
-    /// Stored as a name (cpal `description().name`) rather than a stable
-    /// id so the file remains readable; cpal's input_devices list is the
-    /// source of truth at lookup time, with a fallback to the host
-    /// default if the saved name no longer matches anything present.
+    /// Stable cpal `DeviceId` (Display form: "host:device_id"). `None`
+    /// means "use the host default". Persisted as the cpal id rather than
+    /// the device's friendly name so a saved selection rebinds across
+    /// driver reinstalls and OS-level renames; we still fall back to the
+    /// host default at `begin_capture` time if no enumerable device
+    /// matches the saved id (mic unplugged, USB hub down, etc.).
     #[serde(default)]
-    pub device_name: Option<String>,
+    pub device_id: Option<String>,
 }
 
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
@@ -293,18 +294,13 @@ pub fn settings_capture_hotkey_cancel() {
 }
 
 #[tauri::command]
-pub fn audio_get_device(app: AppHandle) -> Option<String> {
-    load_audio_settings(&app).device_name
-}
-
-#[tauri::command]
-pub fn audio_set_device(app: AppHandle, name: Option<String>) -> Result<(), String> {
-    let normalized = name.and_then(|s| {
+pub fn audio_set_device(app: AppHandle, id: Option<String>) -> Result<(), String> {
+    let normalized = id.and_then(|s| {
         let trimmed = s.trim().to_string();
         if trimmed.is_empty() { None } else { Some(trimmed) }
     });
-    let settings = AudioSettings { device_name: normalized.clone() };
+    let settings = AudioSettings { device_id: normalized.clone() };
     save_audio_settings(&app, settings)?;
-    openwhisper_core::audio::audio_set_selected_device(normalized);
+    openwhisper_core::audio::audio_set_selected_device_id(normalized);
     Ok(())
 }

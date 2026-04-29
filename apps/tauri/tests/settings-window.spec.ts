@@ -235,6 +235,29 @@ test.describe("settings — shortcuts pane", () => {
 });
 
 test.describe("settings — audio pane", () => {
+  // The Microphone picker is a shadcn / BaseUI Select, not a native
+  // <select>, so Playwright's `selectOption` / `toHaveValue` don't apply.
+  // These helpers click the trigger, then a portaled option by its
+  // accessible name. Matchers can be a substring or a regex; matching
+  // is case-insensitive.
+  function micTrigger(page: import("@playwright/test").Page) {
+    return page.getByRole("combobox", { name: "Microphone device" });
+  }
+
+  async function pickMicOption(
+    page: import("@playwright/test").Page,
+    matcher: string | RegExp,
+  ) {
+    await micTrigger(page).click();
+    // String matchers default to exact — needed because the default
+    // option's accessible name concatenates the platform prefix with the
+    // resolved device label ("Windows Default MacBook Pro Microphone"),
+    // which would otherwise collide with the explicit "MacBook Pro
+    // Microphone" device row on a substring match.
+    const exact = typeof matcher === "string";
+    await page.getByRole("option", { name: matcher, exact }).click();
+  }
+
   test("renders device picker, KV stats, and meter container", async ({
     page,
   }) => {
@@ -318,9 +341,9 @@ test.describe("settings — audio pane", () => {
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
-    const select = page.getByRole("combobox", { name: "Microphone device" });
-    // Idle change — should persist but NOT start the preview.
-    await select.selectOption("AirPods Pro");
+    // Idle change — should persist but NOT start the preview. We persist
+    // the cpal device id; the visible option label is "AirPods Pro".
+    await pickMicOption(page, "AirPods Pro");
     await expect
       .poll(() =>
         page.evaluate(
@@ -329,7 +352,7 @@ test.describe("settings — audio pane", () => {
               .__owAudioLastSet,
         ),
       )
-      .toBe("AirPods Pro");
+      .toBe("airpods-pro");
     expect(
       await page.evaluate(
         () =>
@@ -348,7 +371,7 @@ test.describe("settings — audio pane", () => {
         ),
       )
       .toBe(1);
-    await select.selectOption("MacBook Pro Microphone");
+    await pickMicOption(page, "MacBook Pro Microphone");
     await expect
       .poll(() =>
         page.evaluate(
@@ -391,19 +414,22 @@ test.describe("settings — audio pane", () => {
     await expect(page.getByRole("button", { name: "Start test" })).toBeEnabled();
   });
 
-  test("System default option clears the saved device name", async ({
-    page,
-  }) => {
+  test("default option clears the saved device id", async ({ page }) => {
+    await fakePlatform(page, "MacIntel");
     await page.goto("/");
     await page.evaluate(() => {
       (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
-        "AirPods Pro";
+        "airpods-pro";
     });
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
-    const select = page.getByRole("combobox", { name: "Microphone device" });
-    await expect(select).toHaveValue("AirPods Pro");
-    await select.selectOption("");
+    const select = micTrigger(page);
+    // Trigger label reflects the persisted selection's items[].label.
+    await expect(select).toContainText("AirPods Pro");
+    // Pick the default row — its accessible name is the platform prefix
+    // followed by the resolved device label, both inside the two-line
+    // option layout.
+    await pickMicOption(page, /macOS Default/);
     await expect
       .poll(() =>
         page.evaluate(
@@ -415,20 +441,21 @@ test.describe("settings — audio pane", () => {
       .toBeNull();
   });
 
-  test("disconnected mic flips picker to System default without clearing saved pref", async ({
+  test("disconnected mic flips picker to default option without clearing saved pref", async ({
     page,
   }) => {
+    await fakePlatform(page, "MacIntel");
     await page.goto("/");
     await page.evaluate(() => {
       (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
-        "AirPods Pro";
+        "airpods-pro";
     });
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
-    const select = page.getByRole("combobox", { name: "Microphone device" });
-    await expect(select).toHaveValue("AirPods Pro");
-    // AirPods leaves the device list. Picker shows System default; saved
-    // preference stays in core (no audio_set_device call).
+    const select = micTrigger(page);
+    await expect(select).toContainText("AirPods Pro");
+    // AirPods leaves the device list. Picker shows the platform default;
+    // saved preference stays in core (no audio_set_device call).
     await waitForDeviceStateListener(page);
     const setCountBefore = await page.evaluate(
       () =>
@@ -436,12 +463,19 @@ test.describe("settings — audio pane", () => {
           .__owAudioSetCount ?? 0,
     );
     await emitDeviceState(page, {
-      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
-      selected_name: "AirPods Pro",
+      devices: [
+        {
+          id: "default-mic",
+          label: "MacBook Pro Microphone",
+          is_default: true,
+        },
+      ],
+      selected_id: "airpods-pro",
       selected_present: false,
-      default_name: "MacBook Pro Microphone",
+      default_label: "MacBook Pro Microphone",
     });
-    await expect(select).toHaveValue("");
+    await expect(select).toContainText("macOS Default");
+    await expect(select).not.toContainText("AirPods Pro");
     await expect(select).not.toContainText("disconnected");
     const setCountAfter = await page.evaluate(
       () =>
@@ -454,59 +488,77 @@ test.describe("settings — audio pane", () => {
   test("reconnecting the saved device auto-rebinds the picker", async ({
     page,
   }) => {
+    await fakePlatform(page, "MacIntel");
     await page.goto("/");
     await page.evaluate(() => {
       (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
-        "AirPods Pro";
+        "airpods-pro";
     });
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
-    const select = page.getByRole("combobox", { name: "Microphone device" });
+    const select = micTrigger(page);
     await waitForDeviceStateListener(page);
-    // Disconnect → picker shows System default.
+    // Disconnect → picker shows the platform default.
     await emitDeviceState(page, {
-      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
-      selected_name: "AirPods Pro",
+      devices: [
+        {
+          id: "default-mic",
+          label: "MacBook Pro Microphone",
+          is_default: true,
+        },
+      ],
+      selected_id: "airpods-pro",
       selected_present: false,
-      default_name: "MacBook Pro Microphone",
+      default_label: "MacBook Pro Microphone",
     });
-    await expect(select).toHaveValue("");
+    await expect(select).toContainText("macOS Default");
     // Reconnect — saved preference auto-rebinds the picker, no click.
     await emitDeviceState(page, {
       devices: [
-        { name: "MacBook Pro Microphone", is_default: true },
-        { name: "AirPods Pro", is_default: false },
+        {
+          id: "default-mic",
+          label: "MacBook Pro Microphone",
+          is_default: true,
+        },
+        { id: "airpods-pro", label: "AirPods Pro", is_default: false },
       ],
-      selected_name: "AirPods Pro",
+      selected_id: "airpods-pro",
       selected_present: true,
-      default_name: "MacBook Pro Microphone",
+      default_label: "MacBook Pro Microphone",
     });
-    await expect(select).toHaveValue("AirPods Pro");
+    await expect(select).toContainText("AirPods Pro");
+    await expect(select).not.toContainText("macOS Default");
   });
 
-  test("actively picking System default while disconnected clears saved pref", async ({
+  test("actively picking default option while disconnected clears saved pref", async ({
     page,
   }) => {
+    await fakePlatform(page, "MacIntel");
     await page.goto("/");
     await page.evaluate(() => {
       (window as unknown as { __owAudioDevice?: string | null }).__owAudioDevice =
-        "AirPods Pro";
+        "airpods-pro";
     });
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
-    const select = page.getByRole("combobox", { name: "Microphone device" });
     await waitForDeviceStateListener(page);
-    // Mic disconnects, picker effectively shows System default.
+    // Mic disconnects, picker effectively shows the platform default.
     await emitDeviceState(page, {
-      devices: [{ name: "MacBook Pro Microphone", is_default: true }],
-      selected_name: "AirPods Pro",
+      devices: [
+        {
+          id: "default-mic",
+          label: "MacBook Pro Microphone",
+          is_default: true,
+        },
+      ],
+      selected_id: "airpods-pro",
       selected_present: false,
-      default_name: "MacBook Pro Microphone",
+      default_label: "MacBook Pro Microphone",
     });
-    // User explicitly chooses System default → that's an intent override
-    // and should clear the saved preference, so reconnect doesn't snap
-    // back to AirPods.
-    await select.selectOption("");
+    // User explicitly picks the default option → that's an intent
+    // override and should clear the saved preference, so reconnect
+    // doesn't snap back to AirPods.
+    await pickMicOption(page, /macOS Default/);
     await expect
       .poll(() =>
         page.evaluate(
@@ -518,26 +570,75 @@ test.describe("settings — audio pane", () => {
       .toBeNull();
   });
 
-  test("(default) tag follows the live host default", async ({ page }) => {
+  // Override `navigator.platform` so the platform-aware "<Platform> Default"
+  // prefix is deterministic regardless of the host the suite runs on.
+  // Mirrors the existing `navigator.platform` regex check in App.tsx /
+  // use-global-hotkey.ts — we read it once at module load so the override
+  // must fire before the SPA boots (init script, not a runtime mutation).
+  async function fakePlatform(
+    page: import("@playwright/test").Page,
+    value: string,
+  ) {
+    await page.addInitScript((v) => {
+      Object.defineProperty(navigator, "platform", {
+        value: v,
+        configurable: true,
+      });
+    }, value);
+  }
+
+  test("default option reveals the live default device label and follows host changes", async ({
+    page,
+  }) => {
+    await fakePlatform(page, "MacIntel");
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Audio" }).click();
     const select = page.getByRole("combobox", { name: "Microphone device" });
-    // Initial fixture has MacBook Pro Microphone as default.
-    await expect(select).toContainText("MacBook Pro Microphone (default)");
-    // Bluetooth headset connects, host default flips. Tag should follow.
+    // Initial fixture: MacBook Pro Microphone is the host default, so the
+    // default row reads "macOS Default (MacBook Pro Microphone)".
+    await expect(select).toContainText(
+      "macOS Default (MacBook Pro Microphone)",
+    );
+    // The default device row shows just its bare label — no "(default)"
+    // suffix, mirroring Discord's picker.
+    await expect(select).not.toContainText("MacBook Pro Microphone (default)");
+    // Bluetooth headset connects, host default flips. The default line
+    // follows.
     await waitForDeviceStateListener(page);
     await emitDeviceState(page, {
       devices: [
-        { name: "MacBook Pro Microphone", is_default: false },
-        { name: "AirPods Pro", is_default: true },
+        {
+          id: "default-mic",
+          label: "MacBook Pro Microphone",
+          is_default: false,
+        },
+        { id: "airpods-pro", label: "AirPods Pro", is_default: true },
       ],
-      selected_name: null,
+      selected_id: null,
       selected_present: true,
-      default_name: "AirPods Pro",
+      default_label: "AirPods Pro",
     });
-    await expect(select).toContainText("AirPods Pro (default)");
-    await expect(select).not.toContainText("MacBook Pro Microphone (default)");
+    await expect(select).toContainText("macOS Default (AirPods Pro)");
+    await expect(select).not.toContainText(
+      "macOS Default (MacBook Pro Microphone)",
+    );
+  });
+
+  test("default option uses the Windows-specific prefix on Windows", async ({
+    page,
+  }) => {
+    await fakePlatform(page, "Win32");
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const select = page.getByRole("combobox", { name: "Microphone device" });
+    await expect(select).toContainText(
+      "Windows Default (MacBook Pro Microphone)",
+    );
+    await expect(select).not.toContainText(
+      "macOS Default (MacBook Pro Microphone)",
+    );
   });
 
   test("level ticks update the peak readout while testing", async ({ page }) => {

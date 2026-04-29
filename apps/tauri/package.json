@@ -21,6 +21,7 @@
     "pw:close": "playwright-cli -s=ow close"
   },
   "dependencies": {
+    "@base-ui/react": "^1.4.1",
     "@fontsource-variable/geist": "5.2.8",
     "@radix-ui/react-slot": "1.2.4",
     "@tauri-apps/api": "^2",

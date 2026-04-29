@@ -10,6 +10,14 @@ import {
   type HotkeyTarget,
 } from "./lib/use-global-hotkey";
 import { LevelMeter } from "./components/level-meter";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./components/ui/select";
 import { useDictation } from "./lib/use-dictation";
 import "./Settings.css";
 
@@ -115,7 +123,15 @@ function PaneStub({ title }: { title: string }) {
 }
 
 interface AudioDevice {
-  name: string;
+  // Stable cpal device id ("host:device_id"). Persisted by the picker; the
+  // <option value="..."> uses this so two devices with the same friendly
+  // label (Windows, where every capture endpoint is "Microphone (...)")
+  // round-trip distinctly.
+  id: string;
+  // Discord/Windows-Sound-style label — Windows FriendlyName
+  // ("Microphone (SteelSeries Arctis 5 Chat)") on Windows, cpal description
+  // name elsewhere.
+  label: string;
   is_default: boolean;
 }
 
@@ -123,13 +139,30 @@ interface AudioDevice {
 // `AudioDeviceState` in apps/tauri/src-tauri/src/lib.rs. `selected_present`
 // flips false when the persisted device is no longer enumerable (unplugged,
 // renamed) — capture transparently uses the host default in that case, but
-// the picker keeps the saved name selected so a re-plug auto-rebinds.
+// the picker keeps the saved id selected so a re-plug auto-rebinds.
+// `default_label` is the FriendlyName of whatever device the host default
+// currently resolves to, used to render Discord's "System default
+// (<device label>)" UX without forcing the UI to scan the device list.
 interface AudioDeviceState {
   devices: AudioDevice[];
-  selected_name: string | null;
+  selected_id: string | null;
   selected_present: boolean;
-  default_name: string | null;
+  default_label: string | null;
 }
+
+// Discord-style label for the host-default option. We mirror Discord's
+// platform-specific phrasing so the dropdown reads like the OS audio
+// settings the user already knows: "Windows Default" on Windows,
+// "macOS Default" on Mac, plain "Default" elsewhere. Resolves at module
+// load via `navigator.platform`, matching the platform-detection pattern
+// in `lib/use-global-hotkey.ts` rather than introducing a Tauri OS plugin
+// just for one string.
+const DEFAULT_DEVICE_PREFIX = (() => {
+  if (typeof navigator === "undefined") return "Default";
+  if (/win/i.test(navigator.platform)) return "Windows Default";
+  if (/mac/i.test(navigator.platform)) return "macOS Default";
+  return "Default";
+})();
 
 // Audio pane — device picker + opt-in test meter (TASK-53).
 //
@@ -150,12 +183,16 @@ function AudioPane() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   // Empty string maps to the "System default" option in the <select> AND to
   // `None` in core's selector (host default at begin_capture time).
+  // Otherwise this is the cpal device id of the active selection.
   const [selected, setSelected] = useState<string>("");
   // Tracks whether the currently selected device is still enumerable. False
-  // means the saved name doesn't match any present input device — capture
-  // transparently falls back to the host default. We keep the saved name
+  // means the saved id doesn't match any present input device — capture
+  // transparently falls back to the host default. We keep the saved id
   // in `selected` so a re-plug rebinds the user's choice without re-pick.
   const [selectedPresent, setSelectedPresent] = useState<boolean>(true);
+  // Friendly name of whatever device the host default currently resolves
+  // to. Powers the Discord-style "System default (<label>)" row.
+  const [defaultLabel, setDefaultLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -182,18 +219,10 @@ function AudioPane() {
     let alive = true;
     let unlisten: UnlistenFn | null = null;
     const apply = (state: AudioDeviceState) => {
-      setDevices(
-        state.devices.map((d) => ({
-          name: d.name,
-          // Keep the "(default)" tag live: the host default can change
-          // mid-session (Bluetooth route, AirPods auto-connect), so we
-          // prefer the snapshot's `default_name` over each device's
-          // boot-time `is_default`.
-          is_default: state.default_name === d.name,
-        })),
-      );
-      setSelected(state.selected_name ?? "");
+      setDevices(state.devices);
+      setSelected(state.selected_id ?? "");
       setSelectedPresent(state.selected_present);
+      setDefaultLabel(state.default_label);
     };
     void (async () => {
       try {
@@ -300,9 +329,8 @@ function AudioPane() {
   // Resetting the buffer + peak window synchronously on click gives
   // immediate "I heard you, retuning…" feedback instead.
   const onChange = useCallback(
-    async (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const name = e.target.value;
-      setSelected(name);
+    async (id: string) => {
+      setSelected(id);
       setError(null);
       setBusy(true);
       setLevels(new Array(PREVIEW_BAR_COUNT).fill(0));
@@ -314,7 +342,7 @@ function AudioPane() {
           await invoke("audio_preview_stop");
           setTesting(false);
         }
-        await invoke("audio_set_device", { name: name === "" ? null : name });
+        await invoke("audio_set_device", { id: id === "" ? null : id });
         if (wasTesting) {
           await invoke("audio_preview_start");
           setTesting(true);
@@ -356,30 +384,94 @@ function AudioPane() {
           </div>
         </div>
         <div className="ow-audio__row-control">
-          <select
-            className="ow-audio__select"
-            // Effective value: when the saved device isn't currently
-            // enumerable, render the picker as "System default" rather
-            // than a Frankenstein "device (disconnected)" entry. The
-            // saved preference (`selected`) is kept untouched in core, so
-            // a re-plug auto-rebinds the picker to that device on the
-            // next snapshot. If the user actively picks "System default"
-            // while disconnected, onChange writes null → clearing the
-            // saved preference (intent override, not just a display
-            // flip).
+          {/*
+            Custom Select (shadcn / BaseUI) instead of a native <select>:
+            - The trigger collapses long labels with ellipsis (so the row
+              stays compact), but the dropdown popup is allowed to grow
+              wider than the trigger via `alignItemWithTrigger={false}` so
+              "Windows Default (Microphone (Steam Streaming Microphone))"
+              and friends render in full.
+            - The default option uses Discord's two-line layout: a
+              "Windows Default" / "macOS Default" / "Default" heading with
+              the resolved device label underneath in the muted token. Per-
+              device options stay one-line.
+
+            BaseUI requires an `items` prop on the root for trigger-side
+            value lookup (Selects without it can render an empty trigger
+            on hydrate, see rules/base-vs-radix.md). Each entry is a flat
+            { value, label } pair — the dropdown rendering is independent
+            and stays inside <SelectItem>.
+
+            Effective value: when the saved device isn't enumerable,
+            render the picker as the platform default rather than a
+            Frankenstein "device (disconnected)" entry. The saved
+            preference (`selected`) is kept in core, so a re-plug auto-
+            rebinds the picker on the next snapshot. If the user actively
+            picks the default option while disconnected, onChange writes
+            null → clearing the saved preference (intent override, not a
+            display flip).
+          */}
+          <Select
+            items={[
+              {
+                value: "",
+                label: defaultLabel
+                  ? `${DEFAULT_DEVICE_PREFIX} (${defaultLabel})`
+                  : DEFAULT_DEVICE_PREFIX,
+              },
+              ...devices.map((d) => ({ value: d.id, label: d.label })),
+            ]}
             value={selectedPresent ? selected : ""}
-            onChange={onChange}
+            onValueChange={(v) => void onChange(typeof v === "string" ? v : "")}
             disabled={busy || dictation.isRecording}
-            aria-label="Microphone device"
           >
-            <option value="">System default</option>
-            {devices.map((d) => (
-              <option key={d.name} value={d.name}>
-                {d.name}
-                {d.is_default ? " (default)" : ""}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              className="w-[264px]"
+              aria-label="Microphone device"
+            >
+              {/*
+                `truncate` overrides shadcn's default `line-clamp-1` on the
+                value so long FriendlyNames ellipsize cleanly inside the
+                fixed-width trigger. line-clamp-1 silently fails here
+                because the trigger also sets `whitespace-nowrap`, which
+                stops -webkit-box from breaking the line line-clamp wants
+                to clamp on.
+              */}
+              <SelectValue className="truncate" />
+            </SelectTrigger>
+            <SelectContent
+              className="min-w-[264px] max-w-[480px]"
+              alignItemWithTrigger={false}
+              align="start"
+            >
+              <SelectGroup>
+                <SelectItem value="">
+                  {/*
+                    Tailwind utilities (not custom CSS classes) so the
+                    shadcn item's `focus:**:text-accent-foreground`
+                    cascade reaches both lines. With `color:
+                    var(--foreground)` we fought the highlight color and
+                    lost — the title sat invisible on the focused row.
+                  */}
+                  <div className="flex flex-col gap-0.5 leading-tight">
+                    <span className="font-medium">
+                      {DEFAULT_DEVICE_PREFIX}
+                    </span>
+                    {defaultLabel && (
+                      <span className="text-xs text-muted-foreground">
+                        {defaultLabel}
+                      </span>
+                    )}
+                  </div>
+                </SelectItem>
+                {devices.map((d) => (
+                  <SelectItem key={d.id} value={d.id}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </div>
       </section>
 

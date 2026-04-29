@@ -124,60 +124,54 @@ async function installTauriShim(page: Page, label: "main" = "main") {
             ((window as unknown as { __owCaptureCancelCount?: number }).__owCaptureCancelCount ?? 0) + 1;
           return null;
         }
-        if (cmd === "audio_list_devices") {
-          const w = window as unknown as { __owAudioDevices?: unknown };
-          return (
-            w.__owAudioDevices ?? [
-              { name: "MacBook Pro Microphone", is_default: true },
-              { name: "AirPods Pro", is_default: false },
-            ]
-          );
-        }
-        if (cmd === "audio_get_device") {
-          const w = window as unknown as { __owAudioDevice?: string | null };
-          return w.__owAudioDevice ?? null;
-        }
         if (cmd === "audio_get_device_state") {
-          // Source state from the same window stash the legacy commands
-          // use so existing fixtures (e.g. setting __owAudioDevice before
-          // opening the pane) keep working without bespoke setup.
+          // Mirror the Rust shell's snapshot shape. Tests stash device
+          // fixtures on `__owAudioDevices` and the saved selection on
+          // `__owAudioDevice` (the cpal id). Defaults match the seed
+          // pair below so a test that just opens the pane gets a sane
+          // pre-populated picker.
           const w = window as unknown as {
-            __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
+            __owAudioDevices?: Array<{
+              id: string;
+              label: string;
+              is_default: boolean;
+            }>;
             __owAudioDevice?: string | null;
-            __owAudioDefaultName?: string | null;
+            __owAudioDefaultLabel?: string | null;
             __owAudioSelectedPresent?: boolean;
           };
           const devices = w.__owAudioDevices ?? [
-            { name: "MacBook Pro Microphone", is_default: true },
-            { name: "AirPods Pro", is_default: false },
+            {
+              id: "default-mic",
+              label: "MacBook Pro Microphone",
+              is_default: true,
+            },
+            { id: "airpods-pro", label: "AirPods Pro", is_default: false },
           ];
-          const selectedName = w.__owAudioDevice ?? null;
-          const defaultName =
-            w.__owAudioDefaultName ??
-            devices.find((d) => d.is_default)?.name ??
+          const selectedId = w.__owAudioDevice ?? null;
+          const defaultLabel =
+            w.__owAudioDefaultLabel ??
+            devices.find((d) => d.is_default)?.label ??
             null;
-          // Honour an explicit override (used by disconnect tests). Otherwise
-          // derive presence from whether the saved name is enumerable.
           const selectedPresent =
             w.__owAudioSelectedPresent ??
-            (selectedName === null ||
-              devices.some((d) => d.name === selectedName));
+            (selectedId === null || devices.some((d) => d.id === selectedId));
           return {
             devices,
-            selected_name: selectedName,
+            selected_id: selectedId,
             selected_present: selectedPresent,
-            default_name: defaultName,
+            default_label: defaultLabel,
           };
         }
         if (cmd === "audio_set_device") {
-          const { name } = (args ?? {}) as { name: string | null };
+          const { id } = (args ?? {}) as { id: string | null };
           const w = window as unknown as {
             __owAudioDevice?: string | null;
             __owAudioSetCount?: number;
             __owAudioLastSet?: string | null;
           };
-          w.__owAudioDevice = name;
-          w.__owAudioLastSet = name;
+          w.__owAudioDevice = id;
+          w.__owAudioLastSet = id;
           w.__owAudioSetCount = (w.__owAudioSetCount ?? 0) + 1;
           return null;
         }
@@ -305,43 +299,56 @@ export async function waitForTickListener(page: Page) {
 // Mirrors `AudioDeviceState` in apps/tauri/src-tauri/src/lib.rs. Defaults
 // follow the shim's seeded device fixture so the helper composes cleanly
 // with `__owAudioDevice` overrides set earlier in a test.
-export interface MockAudioDeviceState {
-  devices?: Array<{ name: string; is_default: boolean }>;
-  selected_name?: string | null;
-  selected_present?: boolean;
-  default_name?: string | null;
+export interface MockAudioDevice {
+  id: string;
+  label: string;
+  is_default: boolean;
 }
+
+export interface MockAudioDeviceState {
+  devices?: MockAudioDevice[];
+  selected_id?: string | null;
+  selected_present?: boolean;
+  default_label?: string | null;
+}
+
+const DEFAULT_DEVICE_FIXTURE: MockAudioDevice[] = [
+  { id: "default-mic", label: "MacBook Pro Microphone", is_default: true },
+  { id: "airpods-pro", label: "AirPods Pro", is_default: false },
+];
 
 export async function emitDeviceState(
   page: Page,
   state: MockAudioDeviceState = {},
 ): Promise<number> {
-  return page.evaluate((partial) => {
-    const w = window as unknown as {
-      __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
-      __owAudioDevice?: string | null;
-    };
-    const devices = partial.devices ??
-      w.__owAudioDevices ?? [
-        { name: "MacBook Pro Microphone", is_default: true },
-        { name: "AirPods Pro", is_default: false },
-      ];
-    const selectedName = partial.selected_name ?? w.__owAudioDevice ?? null;
-    const defaultName =
-      partial.default_name ??
-      devices.find((d) => d.is_default)?.name ??
-      null;
-    const selectedPresent =
-      partial.selected_present ??
-      (selectedName === null ||
-        devices.some((d) => d.name === selectedName));
-    return window.__owEmit("audio_device_state", {
-      devices,
-      selected_name: selectedName,
-      selected_present: selectedPresent,
-      default_name: defaultName,
-    });
-  }, state);
+  return page.evaluate(
+    ({ partial, fallback }) => {
+      const w = window as unknown as {
+        __owAudioDevices?: Array<{
+          id: string;
+          label: string;
+          is_default: boolean;
+        }>;
+        __owAudioDevice?: string | null;
+      };
+      const devices = partial.devices ?? w.__owAudioDevices ?? fallback;
+      const selectedId = partial.selected_id ?? w.__owAudioDevice ?? null;
+      const defaultLabel =
+        partial.default_label ??
+        devices.find((d) => d.is_default)?.label ??
+        null;
+      const selectedPresent =
+        partial.selected_present ??
+        (selectedId === null || devices.some((d) => d.id === selectedId));
+      return window.__owEmit("audio_device_state", {
+        devices,
+        selected_id: selectedId,
+        selected_present: selectedPresent,
+        default_label: defaultLabel,
+      });
+    },
+    { partial: state, fallback: DEFAULT_DEVICE_FIXTURE },
+  );
 }
 
 // Wait for AudioPane's `audio_device_state` listener to attach. Probe by
@@ -349,29 +356,30 @@ export async function emitDeviceState(
 // trick as `waitForTickListener`.
 export async function waitForDeviceStateListener(page: Page) {
   await page.waitForFunction(
-    () => {
+    (fallback) => {
       const w = window as unknown as {
-        __owAudioDevices?: Array<{ name: string; is_default: boolean }>;
+        __owAudioDevices?: Array<{
+          id: string;
+          label: string;
+          is_default: boolean;
+        }>;
         __owAudioDevice?: string | null;
       };
-      const devices = w.__owAudioDevices ?? [
-        { name: "MacBook Pro Microphone", is_default: true },
-        { name: "AirPods Pro", is_default: false },
-      ];
-      const selectedName = w.__owAudioDevice ?? null;
-      const defaultName = devices.find((d) => d.is_default)?.name ?? null;
+      const devices = w.__owAudioDevices ?? fallback;
+      const selectedId = w.__owAudioDevice ?? null;
+      const defaultLabel = devices.find((d) => d.is_default)?.label ?? null;
       const selectedPresent =
-        selectedName === null ||
-        devices.some((d) => d.name === selectedName);
+        selectedId === null || devices.some((d) => d.id === selectedId);
       return (
         window.__owEmit("audio_device_state", {
           devices,
-          selected_name: selectedName,
+          selected_id: selectedId,
           selected_present: selectedPresent,
-          default_name: defaultName,
+          default_label: defaultLabel,
         }) > 0
       );
     },
+    DEFAULT_DEVICE_FIXTURE,
     { timeout: 3000 },
   );
 }

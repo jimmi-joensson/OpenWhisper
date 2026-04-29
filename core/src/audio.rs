@@ -36,22 +36,50 @@ fn level_epoch() -> Instant {
     *EPOCH.get_or_init(Instant::now)
 }
 
-// Selected input device by name. `None` = default. Looked up at begin_capture
-// time, falling back to the host default if the saved name no longer matches
-// any present device (mic unplugged, renamed, etc.).
+// Selected input device by cpal ID. `None` = default. The ID is the stable
+// identifier cpal exposes via `Device::id()` (Display-serialized) — survives
+// reboots and reconnections, unlike the device name which changes when a
+// driver is reinstalled. Looked up at begin_capture time; if no matching
+// device is present we transparently fall back to the host default.
 static SELECTED_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Clone, Debug)]
 pub struct AudioDeviceInfo {
-    pub name: String,
+    /// Stable cpal device id (Display form: "host:device_id"). Used for
+    /// persistence and lookup.
+    pub id: String,
+    /// Human-readable label shown in the picker. Mirrors what Discord and
+    /// the Windows Sound control panel show — see `device_label`.
+    pub label: String,
     pub is_default: bool,
 }
 
-fn device_name(device: &cpal::Device) -> Option<String> {
-    device
-        .description()
-        .ok()
-        .map(|d| d.name().to_string())
+/// Human-readable display label for a cpal device.
+///
+/// On Windows, cpal 0.17's WASAPI backend prefers the (often generic)
+/// `PKEY_Device_DeviceDesc` for `DeviceDescription::name()` — both
+/// "Microphone (SteelSeries Arctis 5 Chat)" and "Microphone (Steam
+/// Streaming Microphone)" collapse to "Microphone", which makes the picker
+/// useless when more than one capture endpoint is plugged in. The full
+/// `PKEY_Device_FriendlyName` is preserved as the first extended line when
+/// it differs, and that's what every other Windows audio app surfaces, so
+/// we prefer it for the displayed label. On macOS / Linux the description
+/// name is already unique and the extended-line check no-ops.
+fn device_label(device: &cpal::Device) -> Option<String> {
+    let desc = device.description().ok()?;
+    let short = desc.name();
+    if let Some(friendly) = desc.extended().first() {
+        if friendly.len() > short.len() && friendly.contains(short) {
+            return Some(friendly.clone());
+        }
+    }
+    Some(short.to_string())
+}
+
+/// Stable cpal device id, serialized via `DeviceId::Display`. Round-trips
+/// through `DeviceId::FromStr` (used by `find_input_device`).
+fn device_id_string(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.to_string())
 }
 
 pub struct AudioEngine {
@@ -187,15 +215,15 @@ fn begin_capture(preview: bool) -> Result<Capture, String> {
     let host = cpal::default_host();
     let selected = SELECTED_DEVICE.lock().ok().and_then(|g| g.clone());
     let device = match selected.as_deref() {
-        Some(name) => find_input_device(&host, name)
+        Some(id) => find_input_device(&host, id)
             .or_else(|| host.default_input_device())
-            .ok_or_else(|| format!("no input device matched {name:?} and no default available"))?,
+            .ok_or_else(|| format!("no input device matched {id:?} and no default available"))?,
         None => host
             .default_input_device()
             .ok_or_else(|| "no default input device".to_string())?,
     };
 
-    let device_label = device_name(&device).unwrap_or_else(|| "unknown".to_string());
+    let device_label = device_label(&device).unwrap_or_else(|| "unknown".to_string());
     let supported = device
         .default_input_config()
         .map_err(|e| format!("default input config: {e}"))?;
@@ -230,10 +258,11 @@ fn begin_capture(preview: bool) -> Result<Capture, String> {
     })
 }
 
-fn find_input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
-    let devs = host.input_devices().ok()?;
-    devs.into_iter()
-        .find(|d| device_name(d).as_deref() == Some(name))
+fn find_input_device(host: &cpal::Host, id_str: &str) -> Option<cpal::Device> {
+    let target: cpal::DeviceId = id_str.parse().ok()?;
+    host.input_devices()
+        .ok()?
+        .find(|d| d.id().ok().as_ref() == Some(&target))
 }
 
 fn build_input_stream<T>(
@@ -443,15 +472,16 @@ pub fn audio_list_input_devices() -> Vec<AudioDeviceInfo> {
     mac_virtual::refresh();
 
     let host = cpal::default_host();
-    let default_name = host
+    let default_id = host
         .default_input_device()
-        .and_then(|d| device_name(&d));
+        .and_then(|d| device_id_string(&d));
     let Ok(devices) = host.input_devices() else {
         return Vec::new();
     };
     devices
         .filter_map(|d| {
-            let name = device_name(&d)?;
+            let id = device_id_string(&d)?;
+            let label = device_label(&d)?;
             if is_virtual_device(&d) {
                 return None;
             }
@@ -461,8 +491,8 @@ pub fn audio_list_input_devices() -> Vec<AudioDeviceInfo> {
             if d.default_input_config().is_err() {
                 return None;
             }
-            let is_default = default_name.as_deref() == Some(name.as_str());
-            Some(AudioDeviceInfo { name, is_default })
+            let is_default = default_id.as_deref() == Some(id.as_str());
+            Some(AudioDeviceInfo { id, label, is_default })
         })
         .collect()
 }
@@ -477,7 +507,10 @@ fn is_virtual_device(device: &cpal::Device) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        if let Some(name) = device_name(device) {
+        // The CoreAudio name lookup keys mac_virtual's cache, so use the
+        // raw description name (matches `get_device_name(id)` from
+        // coreaudio-rs) rather than our display label.
+        if let Some(name) = device.description().ok().map(|d| d.name().to_string()) {
             return mac_virtual::is_virtual_named(&name);
         }
     }
@@ -547,37 +580,39 @@ mod mac_virtual {
 }
 
 /// Persisted device picker — `None` means "use the host default at
-/// begin_capture time". Effective on the next stream open; the live stream
-/// (if any) is unaffected. Callers that want the change to take effect
-/// immediately should stop+start preview themselves.
-pub fn audio_set_selected_device(name: Option<String>) {
+/// begin_capture time". The argument is the cpal device id string (Display
+/// form). Effective on the next stream open; the live stream (if any) is
+/// unaffected. Callers that want the change to take effect immediately
+/// should stop+start preview themselves.
+pub fn audio_set_selected_device_id(id: Option<String>) {
     if let Ok(mut g) = SELECTED_DEVICE.lock() {
-        *g = name;
+        *g = id;
     }
 }
 
-pub fn audio_get_selected_device() -> Option<String> {
+pub fn audio_get_selected_device_id() -> Option<String> {
     SELECTED_DEVICE.lock().ok().and_then(|g| g.clone())
 }
 
-/// Name of the host's current default input device, or `None` if no
-/// default is reported. The default can change while the app is running
-/// (user toggles a Bluetooth headset, AirPods auto-route on connect),
-/// so callers that surface "(default)" in the UI should poll this and
-/// refresh on change rather than caching the boot-time value.
-pub fn audio_default_input_name() -> Option<String> {
+/// Display label of the host's current default input device, or `None` if
+/// no default is reported. Used by the Settings UI to render the
+/// "System default (<device label>)" option à la Discord. The default can
+/// change while the app is running (user toggles a Bluetooth headset,
+/// AirPods auto-route on connect), so callers that surface this in the UI
+/// should poll and refresh rather than caching the boot-time value.
+pub fn audio_default_input_label() -> Option<String> {
     let host = cpal::default_host();
-    host.default_input_device().and_then(|d| device_name(&d))
+    host.default_input_device().and_then(|d| device_label(&d))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectedDeviceStatus {
-    /// User has picked a device by name and it's currently enumerable.
+    /// Saved id matches a device in the current input list.
     Present,
-    /// User has picked a device by name but it's not in the current
-    /// input-device list (unplugged, renamed, virtual mic gone). The
-    /// next `begin_capture` will silently fall back to host default;
-    /// the saved name is preserved so a re-plug auto-resumes intent.
+    /// Saved id doesn't match any present input device (unplugged,
+    /// virtual mic gone). The next `begin_capture` will silently fall
+    /// back to host default; the saved id is preserved so a re-plug
+    /// auto-resumes intent.
     MissingFallbackToDefault,
     /// No persisted selection — capture uses host default by design.
     NoneSelectedUsingDefault,
@@ -589,15 +624,18 @@ pub enum SelectedDeviceStatus {
 /// on a miss — preserving the saved name lets a re-plugged mic
 /// auto-rebind without the user re-picking.
 pub fn audio_selected_device_status() -> SelectedDeviceStatus {
-    let Some(name) = audio_get_selected_device() else {
+    let Some(id_str) = audio_get_selected_device_id() else {
         return SelectedDeviceStatus::NoneSelectedUsingDefault;
+    };
+    let Ok(target) = id_str.parse::<cpal::DeviceId>() else {
+        return SelectedDeviceStatus::MissingFallbackToDefault;
     };
     let host = cpal::default_host();
     let Ok(devices) = host.input_devices() else {
         return SelectedDeviceStatus::MissingFallbackToDefault;
     };
     for d in devices {
-        if device_name(&d).as_deref() == Some(name.as_str()) {
+        if d.id().ok().as_ref() == Some(&target) {
             return SelectedDeviceStatus::Present;
         }
     }

@@ -138,6 +138,7 @@ pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
     let scale = monitor.scale_factor();
     let mon_x_log = monitor.position().x as f64 / scale;
     let mon_y_log = monitor.position().y as f64 / scale;
+    let mon_w_log = monitor.size().width as f64 / scale;
     let mon_h_log = monitor.size().height as f64 / scale;
     // Fallback used in every "can't determine work area" branch — the
     // bottom edge of the monitor itself, which is what `place_pill`
@@ -156,19 +157,27 @@ pub fn work_area_bottom_y(monitor: &Monitor) -> f64 {
     // screen's frame; we use that height to convert between Cocoa
     // (Y-up) and Quartz (Y-down).
     let primary_height_cocoa = primary.frame().size.height;
-    let mon_bottom_cocoa_y = primary_height_cocoa - (mon_y_log + mon_h_log);
+
+    // Match NSScreen by point-in-frame (using the monitor's centre in
+    // Quartz coords converted to Cocoa). This is more robust than
+    // matching by frame.origin equality across vertical multi-monitor
+    // arrangements where Cocoa and Quartz Y axes flip.
+    let cx_quartz = mon_x_log + mon_w_log / 2.0;
+    let cy_quartz = mon_y_log + mon_h_log / 2.0;
+    let cx_cocoa = cx_quartz;
+    let cy_cocoa = primary_height_cocoa - cy_quartz;
 
     for screen in screens.iter() {
         let frame = screen.frame();
-        if (frame.origin.x - mon_x_log).abs() < 1.0
-            && (frame.origin.y - mon_bottom_cocoa_y).abs() < 1.0
+        if cx_cocoa >= frame.origin.x
+            && cx_cocoa < frame.origin.x + frame.size.width
+            && cy_cocoa >= frame.origin.y
+            && cy_cocoa < frame.origin.y + frame.size.height
         {
-            // visibleFrame.origin.y in Cocoa is the Y of the *bottom*
-            // edge of the work area (Cocoa is Y-up; the work area's
-            // origin is at its bottom-left). Converting that to Quartz
-            // gives the Y of where the Dock starts (or the screen
-            // bottom when no Dock is on this screen).
             let vf = screen.visibleFrame();
+            // visibleFrame.origin.y in Cocoa is the Y of the bottom
+            // edge of the work area (Cocoa is Y-up; origin is at the
+            // bottom-left). Convert to Quartz Y-down.
             return primary_height_cocoa - vf.origin.y;
         }
     }

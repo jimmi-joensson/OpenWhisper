@@ -34,9 +34,6 @@ extern "C" {
         attribute: core_foundation::string::CFStringRef,
         value: *mut CFTypeRef,
     ) -> i32;
-    // Caller in TASK-55.4 (mod.rs poll tick) — silence the unused
-    // warning for the in-between commit.
-    #[allow(dead_code)]
     fn AXValueGetValue(
         value: CFTypeRef,
         the_type: u32,
@@ -47,15 +44,11 @@ extern "C" {
 const KAX_FOCUSED_APPLICATION: &str = "AXFocusedApplication";
 const KAX_FOCUSED_WINDOW: &str = "AXFocusedWindow";
 const KAX_FULL_SCREEN: &str = "AXFullScreen";
-#[allow(dead_code)]
 const KAX_POSITION: &str = "AXPosition";
-#[allow(dead_code)]
 const KAX_SIZE: &str = "AXSize";
 
 // AXValueType constants from <ApplicationServices/AXValue.h>.
-#[allow(dead_code)]
 const KAX_VALUE_CG_POINT_TYPE: u32 = 1;
-#[allow(dead_code)]
 const KAX_VALUE_CG_SIZE_TYPE: u32 = 2;
 
 pub fn is_fullscreen_now() -> bool {
@@ -109,7 +102,6 @@ unsafe fn copy_attr(element: CFTypeRef, attr: &str) -> Option<CFTypeRef> {
 /// position/size attributes can't be unpacked. Stable across ticks on a
 /// fixed display arrangement; the watcher in `mod.rs` only fires when
 /// the tuple changes.
-#[allow(dead_code)]
 pub fn focused_window_monitor() -> Option<(i32, i32)> {
     unsafe {
         let sys = AXUIElementCreateSystemWide();

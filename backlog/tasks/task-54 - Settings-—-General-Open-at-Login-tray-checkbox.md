@@ -4,13 +4,16 @@ title: 'Settings — General: Open at Login + tray checkbox'
 status: To Do
 assignee: []
 created_date: '2026-04-27 15:29'
-updated_date: '2026-04-29 16:29'
+updated_date: '2026-04-29 17:44'
 labels:
   - ui
   - tauri
   - settings
 dependencies:
   - TASK-56
+documentation:
+  - docs/superpowers/specs/2026-04-29-launch-at-login.md
+  - docs/superpowers/plans/2026-04-29-launch-at-login.md
 priority: medium
 ---
 

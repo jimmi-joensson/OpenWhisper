@@ -1,10 +1,11 @@
 ---
 id: TASK-55.6
 title: 'Plan Task 6: Settings UI toggle in General pane'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-04-29 08:01'
-updated_date: '2026-04-29 08:27'
+updated_date: '2026-04-29 19:04'
 labels:
   - 55-impl
 dependencies:
@@ -20,8 +21,20 @@ Surface 'Follow active screen' in Settings → General, default ON, persisting v
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 General pane renders the toggle and reflects persisted state on open
-- [ ] #2 Flipping the toggle updates settings.json AND the in-process atomic on the same interaction (no restart needed)
-- [ ] #3 New users see toggle in the ON position by default
-- [ ] #4 Uses shadcn Switch + Field primitives consistent with the rest of GeneralPane (TASK-56)
+- [x] #1 General pane renders the toggle and reflects persisted state on open
+- [x] #2 Flipping the toggle updates settings.json AND the in-process atomic on the same interaction (no restart needed)
+- [x] #3 New users see toggle in the ON position by default
+- [x] #4 Uses shadcn Switch + Field primitives consistent with the rest of GeneralPane (TASK-56)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+8694f8b General pane Pill section: Switch + invoke wiring + optimistic update with revert.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added Pill section in GeneralPane between Appearance and Updates. Switch hydrated from settings_get_pill (defaults ON on rejection, matching Rust-side default). Toggle flip = optimistic UI update + invoke settings_set_pill_follow, with state revert + console.warn on rejection. Uses the same Field/Switch primitives as launch-at-login. tsc clean.
+<!-- SECTION:FINAL_SUMMARY:END -->

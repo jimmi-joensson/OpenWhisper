@@ -34,7 +34,44 @@ test.describe("settings view", () => {
       "aria-selected",
       "true",
     );
-    await expect(page.getByRole("heading", { name: "General" })).toBeVisible();
+    // GeneralPane renders Launch at login as its first row — this fails
+    // fast if the pane didn't mount.
+    await expect(page.getByText("Launch at login")).toBeVisible();
+  });
+
+  test("General pane renders Startup, Appearance, and Updates sections", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await expect(page.getByRole("heading", { name: "Startup" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Appearance" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Updates" })).toBeVisible();
+    await expect(page.getByText("Launch at login")).toBeVisible();
+    await expect(page.getByText("Theme")).toBeVisible();
+    await expect(page.getByText("Current version")).toBeVisible();
+  });
+
+  test("Theme ToggleGroup defaults to System", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await expect(
+      page.getByRole("button", { name: "System" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      page.getByRole("button", { name: "Light" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      page.getByRole("button", { name: "Dark" }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("Launch at login Switch starts checked", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Launch at login" }),
+    ).toBeChecked();
   });
 
   test("clicking a sidebar item activates the pane", async ({ page }) => {

@@ -90,6 +90,7 @@ pub fn reset_if_version_changed(app: &AppHandle) {
         eprintln!("[version_reset] could not read own cdhash, skipping reset cycle");
         return;
     };
+    eprintln!("[version_reset] current cdhash = {current}");
 
     let bundle_id = app.config().identifier.clone();
     if bundle_id.is_empty() {

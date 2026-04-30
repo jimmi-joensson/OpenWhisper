@@ -35,7 +35,11 @@ Scope:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Landed in 0.4.0 release prep. New module `apps/tauri/src-tauri/src/permissions/version_reset.rs`; wired in `lib.rs::setup()` before `hotkey::install`. Resets Accessibility, Microphone, ListenEvent (the keyboard-monitor TCC service CGEventTap relies on). Gated on `cfg!(not(debug_assertions))` so dev-run.sh keeps owning the dev path. Marker file: `~/Library/Application Support/com.openwhisper.app/tcc-last-version`.
+Landed in 0.4.0 release prep. New module `apps/tauri/src-tauri/src/permissions/version_reset.rs`; wired in `lib.rs::setup()` before `hotkey::install`. Resets Accessibility, Microphone, ListenEvent (the keyboard-monitor TCC service CGEventTap relies on). Gated on `cfg!(not(debug_assertions))` so dev-run.sh keeps owning the dev path.
+
+Cachebuster: **cdhash**, not version. The first iteration keyed off `CFBundleShortVersionString` and missed the within-version-rebuild case (two 0.4.0 release builds both wrote "0.4.0" to the marker, so the second install's reset never fired). Switched to reading own cdhash via `codesign -dvv` parsing `CDHash=` from stderr — this is exactly what TCC itself keys on, so any rebuild TCC would treat as a new identity also flips the marker. If `codesign` fails the whole cycle is skipped silently rather than firing reset on a partial identity read.
+
+Marker file: `~/Library/Application Support/com.openwhisper.app/tcc-last-cdhash` (legacy `tcc-last-version` files from the earlier iteration are orphaned but harmless).
 <!-- SECTION:NOTES:END -->
 
 ## Acceptance Criteria

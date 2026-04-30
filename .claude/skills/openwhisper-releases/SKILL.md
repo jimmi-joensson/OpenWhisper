@@ -137,3 +137,4 @@ User publishes the draft (or instructs the Win agent to). At that point:
 - **Don't run `lsregister -kill -r`** as TCC cleanup — it wipes System Settings. (See `openwhisper-platform-gotchas`.)
 - **Backlog tasks**, not GitHub Issues. Update task statuses + ACs as part of the release.
 - **Cross-compile doesn't work** in either direction. Two physical machines, period.
+- **Ship BOTH `.msi` and `.exe` (NSIS) on Windows.** Tauri's Windows builder produces both by default; we keep both attached deliberately. NSIS is friendlier for consumer per-user installs (smaller, no admin prompt); MSI is what enterprise / group-policy deploys want. Don't constrain `bundle.targets` in `tauri.conf.json` to drop one — the choice is intentional.

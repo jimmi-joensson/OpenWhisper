@@ -17,13 +17,18 @@
 //! TCC itself keys on, so it captures any case TCC would treat as a
 //! "new" identity.
 //!
-//! Behavior on boot: read own cdhash via `codesign -dvv`, compare to the
-//! `tcc-last-cdhash` marker file. If absent or different, shell out to
-//! `tccutil reset <Service> <bundle-id>` for Accessibility, Microphone,
-//! and ListenEvent (the 11.0+ keyboard-monitor service CGEventTap relies
-//! on), then persist the current cdhash. tccutil exit code is
-//! intentionally ignored — "no entries to reset" is exit 1 on a clean
-//! install and is the desired no-op.
+//! Behavior on boot: read own cdhash via `codesign -d --verbose=4`,
+//! compare to the `tcc-last-cdhash` marker file. If absent or different,
+//! shell out to `tccutil reset <Service> <bundle-id>` for Accessibility,
+//! Microphone, and ListenEvent (the 11.0+ keyboard-monitor service
+//! CGEventTap relies on), then persist the current cdhash. tccutil exit
+//! code is intentionally ignored — "no entries to reset" is exit 1 on a
+//! clean install and is the desired no-op.
+//!
+//! Verbosity matters: `CDHash=` is only emitted at `-dvvvv` (verbosity 4)
+//! and above. `-dvv` shows `CodeDirectory` but not `CDHash`, so a too-low
+//! verbose flag would make `current_cdhash()` silently return None and
+//! skip the reset cycle on every boot.
 //!
 //! Marker-file-absent is treated as a reset trigger, not a quiet first
 //! run: on a brand-new install no TCC entries exist so the reset is a
@@ -56,7 +61,7 @@ fn current_cdhash() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let exe_str = exe.to_str()?;
     let output = Command::new("codesign")
-        .args(["-dvv", exe_str])
+        .args(["-d", "--verbose=4", exe_str])
         .output()
         .ok()?;
     if !output.status.success() {

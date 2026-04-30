@@ -70,6 +70,22 @@ Open Tauri issues for the symptom (note: most discussions land on `acceptFirstMo
 
 ---
 
+### Ad-hoc-signed apps drift their TCC identity on every rebuild — and `codesign -dvv` won't tell you the cdhash
+
+**Symptom:** User updates from one release to the next (e.g. 0.3.0 → 0.4.0, or even one 0.4.0 build to a re-signed 0.4.0 build). System Settings → Privacy & Security → Accessibility (and Microphone, and Input Monitoring) still shows the previous "OpenWhisper" entry toggled on, but the global hotkey + mic prompts re-fire as if the grant had never been given. Toggling the existing entry off/on doesn't help. Manually deleting the entry then re-granting works — but having to walk the user through that on every release is the actual UX bug.
+
+**Root cause:** TCC identifies ad-hoc-signed apps (no Apple Developer ID → no Team Identifier) by their **cdhash**. Bundle id stays stable across rebuilds; cdhash does not. Re-signing a freshly compiled binary produces a fresh cdhash even when source is unchanged (the build is deterministic, so a clean `cargo build` of identical sources gives an identical cdhash — but any real source byte change flips it). System Settings reads the row by bundle id and shows it as "still granted", but TCC's `kTCCAccessAuth` lookup keys on cdhash + bundle id, sees a mismatch, and treats the new binary as a fresh identity. The only path that anchors TCC across rebuilds is a paid Apple Developer ID (Team Identifier overrides cdhash); without it, every release looks new to TCC.
+
+A subtle secondary trap when reading own cdhash from Rust: `codesign -dvv` shows `CodeDirectory` but **not** the `CDHash=` line. `CDHash=` only appears at `-dvvvv` (`--verbose=4`) and above. A naive parser using `-dvv` returns None on every boot and silently skips the reset cycle. Verified: `CandidateCDHash sha256=…` is also present at v=4 but uses a different separator and won't match a `strip_prefix("CDHash=")`.
+
+**Fix in tree:** `apps/tauri/src-tauri/src/permissions/version_reset.rs` — TASK-48. On boot (release builds only), shell out to `codesign -d --verbose=4 $current_exe`, parse `CDHash=<hex>` from stderr, compare to the marker file at `~/Library/Application Support/com.openwhisper.app/tcc-last-cdhash`. On mismatch (or marker absent — first install), shell out to `tccutil reset Accessibility|Microphone|ListenEvent com.openwhisper.app` and write the new cdhash. Wired in `lib.rs::setup()` before `hotkey::install` so the AX prompt that follows lands on a fresh row. tccutil exit code is intentionally ignored — exit 1 "no entries to reset" is the desired no-op on a clean install.
+
+**Windows impact:** None. Windows has no equivalent TCC service for keyboard input or mic; the OS handles consent at first device open without an explicit per-bundle grant table.
+
+**Do NOT** key the marker on `CFBundleShortVersionString`. The first iteration of TASK-48 did exactly that and missed the within-version-rebuild case (two 0.4.0 release builds during release prep both wrote "0.4.0" to the marker → second install's reset never fired). cdhash is the only key that matches what TCC itself uses. Also do NOT add a `tccutil reset Microphone` (no bundle id — wipes every app's mic grant) as a "stronger" reset; bundle-id form is correct, the entry truly does clear, and System Settings sometimes shows a stale UI row for a few seconds after the underlying TCC.db row is gone (close + reopen the pane to refresh). Also do NOT bother with self-signed certificates as a "stable identity" workaround — TCC keys grants on Team Identifier when present, and self-signed certs without Apple-issued Team IDs still fall back to cdhash, which still drifts. The only forward path is the paid Developer ID (TASK-46).
+
+---
+
 ## Cross-platform interface contracts
 
 When adding to this file, prefer the format:

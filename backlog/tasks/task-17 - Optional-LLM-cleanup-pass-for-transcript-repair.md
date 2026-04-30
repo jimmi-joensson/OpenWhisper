@@ -1,10 +1,10 @@
 ---
 id: TASK-17
 title: Optional LLM cleanup pass for transcript repair
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-23 09:52'
-updated_date: '2026-04-26 20:58'
+updated_date: '2026-04-30 16:35'
 labels:
   - macos
   - post-processing
@@ -52,3 +52,9 @@ Out of scope (future tasks):
 - Local model auto-download/manage (separate task)
 - Per-domain custom prompts (coding vs. emailing vs. chatting)
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; BYO-cloud LLM repair will be re-planned alongside its TASK-45 (Ollama bridge) prerequisite from current state if/when revisited.
+<!-- SECTION:FINAL_SUMMARY:END -->

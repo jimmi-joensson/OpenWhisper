@@ -1,9 +1,10 @@
 ---
 id: TASK-21
 title: 'Windows port spike: sherpa-onnx + Parakeet ONNX on Win11 VM'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 06:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - windows
   - stt
@@ -36,3 +37,9 @@ First cross-vendor Windows spike. Goal: validate Parakeet-TDT v3 transcribes on 
 <!-- SECTION:PLAN:BEGIN -->
 1. Finish UTM Win11 setup (in progress). 2. Install Python 3.11 + venv + pip install onnxruntime sherpa-onnx. 3. Pull istupakov v3 ONNX weights. 4. Run sherpa-onnx CLI on samples/ WAV, record output + time. 5. Try DirectML EP via onnxruntime-directml. 6. Document numbers in final summary — input for TASK-22 trait design.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. Spike served — sherpa-onnx + Parakeet ONNX shipped on Windows in v0.4.0 via TASK-33 (recognizer spike) and TASK-40 (ort engine swap). Decisions captured in backlog/decisions/recognizer-{cuda,ort}-*.md.
+<!-- SECTION:FINAL_SUMMARY:END -->

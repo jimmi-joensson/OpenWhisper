@@ -1,9 +1,10 @@
 ---
 id: TASK-14
 title: Voice activity detection in Rust core
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-23 05:57'
+updated_date: '2026-04-30 16:35'
 labels:
   - core
   - audio
@@ -24,3 +25,9 @@ Follow-up to TASK-4: stream-based VAD that emits speech segment boundaries. Enab
 - [ ] #2 VAD segments emitted with start/end timestamps through FFI
 - [ ] #3 Sensitivity configurable from Swift settings
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; VAD remains a future continuous-listening enabler and will be re-planned from current state if/when revisited.
+<!-- SECTION:FINAL_SUMMARY:END -->

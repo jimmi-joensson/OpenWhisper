@@ -1,10 +1,10 @@
 ---
 id: TASK-58
 title: Setting — Show in fullscreen apps (override fullscreen deactivation)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-29 18:02'
-updated_date: '2026-04-29 20:49'
+updated_date: '2026-04-30 16:31'
 labels:
   - ui
   - tauri
@@ -41,3 +41,9 @@ da26ad0+a982b42 fullscreen overlay verified via tauri-nspanel; learning captured
 
 fad1364 AC#2 + AC#3 verified manually after deferred-hide fix landed. All parent ACs now satisfied.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. All five plan-tasks (58.1-58.5) shipped in v0.4.0. Show-in-fullscreen Switch in General → Behavior persists, drives detector callback short-circuit, and toggles macOS pill collection-behavior live (tauri-nspanel).
+<!-- SECTION:FINAL_SUMMARY:END -->

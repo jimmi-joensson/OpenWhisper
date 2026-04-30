@@ -1,9 +1,10 @@
 ---
 id: TASK-45
 title: Settings — Models board + Ollama LLM bridge infra
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-26 20:58'
+updated_date: '2026-04-30 16:35'
 labels:
   - tauri
   - settings
@@ -99,3 +100,9 @@ Prepare BYO-LLM infrastructure (Ollama bridge) and ship the Settings → Models 
 - [ ] #8 cargo check clean from apps/tauri/src-tauri and core
 - [ ] #9 pnpm test:ui green from apps/tauri; new Playwright spec covers (a) Models board renders Parakeet + Ollama bridge rows, (b) Connect… sheet probes endpoint and populates model dropdown
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; Models board + Ollama bridge will be re-planned from current state if/when revisited.
+<!-- SECTION:FINAL_SUMMARY:END -->

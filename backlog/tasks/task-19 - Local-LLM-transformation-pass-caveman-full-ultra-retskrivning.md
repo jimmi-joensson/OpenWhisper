@@ -1,9 +1,10 @@
 ---
 id: TASK-19
 title: Local LLM transformation pass (caveman full/ultra + retskrivning)
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-23 10:09'
+updated_date: '2026-04-30 16:35'
 labels:
   - macos
   - post-processing
@@ -78,3 +79,9 @@ Dependencies:
 - Related to TASK-17 (supersedes the cloud retskrivning idea once this ships — consider deprecating TASK-17 then)
 - Related to TASK-11 (Settings window needs a Compression tab)
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; local-LLM transformation pass will be re-planned from current state if/when revisited (depends on a Models board landing first — see retired TASK-45).
+<!-- SECTION:FINAL_SUMMARY:END -->

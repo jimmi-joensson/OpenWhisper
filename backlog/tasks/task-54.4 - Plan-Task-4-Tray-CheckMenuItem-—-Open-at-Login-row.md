@@ -1,9 +1,10 @@
 ---
 id: TASK-54.4
 title: 'Plan Task 4: Tray CheckMenuItem — Open at Login row'
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-29 17:44'
+updated_date: '2026-04-30 16:32'
 labels:
   - 54-impl
 dependencies: []
@@ -18,3 +19,9 @@ parent_task_id: TASK-54
 - [ ] #4 In dev builds the item renders disabled
 - [ ] #5 cargo check clean
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Parent TASK-54 closed in favor of TASK-60.
+<!-- SECTION:FINAL_SUMMARY:END -->

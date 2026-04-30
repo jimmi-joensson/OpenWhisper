@@ -1,9 +1,10 @@
 ---
 id: TASK-37
 title: Tauri Phase 6 — Close-to-tray + single-instance + health banner + auto-update
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 22:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - tauri
   - phase-6
@@ -33,3 +34,9 @@ Shipping hygiene.
 - [ ] #3 Health banner appears in main window when hotkey registration fails; Retry button re-registers
 - [ ] #4 tauri-plugin-updater wired; mock update from placeholder endpoint installs successfully on Mac + Windows
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review with reduced scope. Close-to-tray, single-instance (tauri-plugin-single-instance), and HealthBanner all ship in v0.4.0. tauri-plugin-updater NOT wired — auto-update will be revisited as a fresh task once we have a signed/notarized release pipeline; manual GitHub Releases is the v0.4.x distribution path.
+<!-- SECTION:FINAL_SUMMARY:END -->

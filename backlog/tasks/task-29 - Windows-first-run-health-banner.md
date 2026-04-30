@@ -1,10 +1,10 @@
 ---
 id: TASK-29
 title: Windows first-run health banner
-status: In Review
-updated_date: '2026-04-24 21:45'
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - ui
@@ -35,3 +35,9 @@ Windows analog of Mac's post-permissions restart banner (`ContentView.swift` acc
 <!-- SECTION:PLAN:BEGIN -->
 1. New `HealthBanner.xaml` UserControl styled to match Mac's `ContentView.swift:restartBanner` visual: colored background, leading icon, title + body, trailing action button. 2. `HealthMonitor` service polling hook/mic/core at 2 s intervals while main window is open. 3. Mic check via `Windows.Media.Capture.MediaCapture` probe or Privacy API. 4. Wire deep-link buttons via `Launcher.LaunchUriAsync("ms-settings:privacy-microphone")`. 5. Hide banner when all three probes pass.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 health banner superseded by Tauri health-banner.tsx (shipped in v0.4.0 via TASK-37). apps/windows shell retired.
+<!-- SECTION:FINAL_SUMMARY:END -->

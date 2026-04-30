@@ -1,9 +1,10 @@
 ---
 id: TASK-34
 title: Tauri Phase 3 — Main window parity with Mac ContentView
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 22:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - tauri
   - phase-3
@@ -34,3 +35,9 @@ Build a build-time script that generates apps/tauri/src/lib/tokens.ts + Tailwind
 - [ ] #6 Hardcoded color/dimension values in source tree = 0 (all flow from generated tokens)
 - [ ] #7 Phase transitions from DictationService.swift surface correctly in UI
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. Tauri main window (App.tsx + LevelMeter + 20 Hz state stream) ships in v0.4.0. Token-gen-from-identity-tokens.md script (AC#5) was not built — current tokens are hand-rolled in Tailwind config. Acceptable trade; revisit if token drift becomes a real problem.
+<!-- SECTION:FINAL_SUMMARY:END -->

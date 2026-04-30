@@ -1,9 +1,10 @@
 ---
 id: TASK-59
-title: 'Bench-sherpa target isolation so MSI bundler stops sweeping CUDA DLLs'
-status: To Do
+title: Bench-sherpa target isolation so MSI bundler stops sweeping CUDA DLLs
+status: Won't Do
 assignee: []
 created_date: '2026-04-30 09:30'
+updated_date: '2026-04-30 16:35'
 labels:
   - windows
   - build
@@ -25,7 +26,6 @@ This task is the proper fix: keep bench-sherpa's outputs out of the Tauri app's 
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
 <!-- AC:BEGIN -->
 - [ ] #1 Bench-sherpa builds (whether triggered by a developer running `cargo build -p bench-sherpa` or by a script) deposit their CUDA/cuDNN DLLs OUTSIDE `target/release/`. Options: a dedicated `CARGO_TARGET_DIR=target-bench` shim wrapper, a Cargo workspace `[profile.release-bench]` redirect, or moving bench-sherpa into a sub-crate with its own `target/`. Pick whichever the maintainer prefers.
 - [ ] #2 `pnpm tauri build` on a clean checkout that has previously built bench-sherpa succeeds without manual cleanup. Reproduce by: `cargo build --release -p bench-sherpa && cd apps/tauri && pnpm tauri build` — must produce both MSI + NSIS setup without LGHT0306.
@@ -48,3 +48,9 @@ Likely lowest-friction implementation: a `scripts/build-bench.cmd` (and `.sh`) w
 
 Avoid the temptation to fix this at WiX level (Media element split, multi-CAB) — that just lets the broken state ship a bigger MSI. The fix is keeping unrelated artifacts out of the bundler's source dir.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; bench-sherpa target-isolation work will be re-planned from current state if/when revisited. Workaround captured in the openwhisper-dev-workflow skill (DLL-sweep gotcha) — current build flow tolerates the failure mode by avoiding bench-sherpa builds in the same workspace before MSI packaging.
+<!-- SECTION:FINAL_SUMMARY:END -->

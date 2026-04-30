@@ -1,10 +1,10 @@
 ---
 id: TASK-55
 title: Pill follows active screen
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-29 07:57'
-updated_date: '2026-04-29 18:08'
+updated_date: '2026-04-30 16:31'
 labels: []
 dependencies:
   - TASK-58
@@ -30,3 +30,9 @@ Pill HUD jumps to bottom-center of whichever monitor the focused app lives on. D
 - [ ] #6 Single-monitor setups incur zero repositioning churn
 - [ ] #7 AX-permission revoked or no focused window: pill stays put (no fallback to primary)
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. All seven plan-tasks (55.1-55.7) shipped in v0.4.0. Pill follows active screen by cursor tracking, with Settings → General opt-out toggle and Playwright coverage.
+<!-- SECTION:FINAL_SUMMARY:END -->

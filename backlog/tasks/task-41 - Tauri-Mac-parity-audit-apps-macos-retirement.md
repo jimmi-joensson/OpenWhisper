@@ -1,9 +1,10 @@
 ---
 id: TASK-41
 title: Tauri Mac parity audit + apps/macos retirement
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-26 18:49'
+updated_date: '2026-04-30 16:31'
 labels:
   - tauri
   - phase-7
@@ -29,3 +30,9 @@ Known gaps (pill not fully ported per user, possibly other macOS-only behaviors)
 - [ ] #4 apps/macos/ removed from repo
 - [ ] #5 README.md + INSTALL.md updated for single-Tauri-app repo
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. apps/macos retired to archive/macos/; apps/ now contains only tauri/. Tauri ships as the Mac release in v0.4.0. README/INSTALL refreshed during the v0.4.0 release prep.
+<!-- SECTION:FINAL_SUMMARY:END -->

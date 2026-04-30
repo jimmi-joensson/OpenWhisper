@@ -1,10 +1,10 @@
 ---
 id: TASK-24
 title: Windows floating pill overlay
-status: In Review
-updated_date: '2026-04-24 20:00'
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - ui
@@ -36,6 +36,12 @@ Windows equivalent of the macOS pill HUD (TASK-6). Borderless, topmost, click-th
 <!-- SECTION:PLAN:BEGIN -->
 1. New `PillWindow.xaml` + code-behind in `apps/windows/App`. Use `AppWindow` with `OverlappedPresenter` set to borderless + topmost + no-maximize/minimize. 2. Set `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` via P/Invoke `SetWindowLongPtrW` to hide from Alt-Tab and prevent focus steal. 3. Enable click-through via `WS_EX_TRANSPARENT | WS_EX_LAYERED` toggled on phase change. 4. Mica/Acrylic backdrop via `SystemBackdrop`. 5. Custom `LevelMeter` UserControl: `Microsoft.UI.Composition` visuals or `Canvas` with 12 `Rectangle` children. 6. Subscribe to DictationService phase changes; drive states identically to `PillOverlay.swift`. 7. Verify click-through doesn't break with focused fullscreen apps — may need fallback to non-click-through with pointer-events flag.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 pill superseded by Tauri pill (TASK-32 spike + TASK-36 Phase 5). apps/windows shell retired; Tauri ships the Windows pill in v0.4.0.
+<!-- SECTION:FINAL_SUMMARY:END -->
 
 ## Known pitfalls
 

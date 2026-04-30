@@ -1,9 +1,10 @@
 ---
 id: TASK-42
 title: Pill HUD rework — particle morph + sphere transitions
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-26 19:44'
+updated_date: '2026-04-30 16:35'
 labels:
   - tauri
   - ui
@@ -55,3 +56,9 @@ Reference impl: components.jsx PillOverlay() in design bundle (extracted to /tmp
 - [ ] #10 60fps on macOS M-series and Windows 11 with backdrop blur active
 - [ ] #11 Playwright UI smoke (pnpm test:ui) passes
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; particle-morph pill rework will be re-planned from current state if/when revisited. Current pill ships and works on both platforms.
+<!-- SECTION:FINAL_SUMMARY:END -->

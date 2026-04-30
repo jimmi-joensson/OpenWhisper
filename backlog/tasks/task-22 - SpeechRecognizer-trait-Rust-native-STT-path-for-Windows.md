@@ -1,9 +1,10 @@
 ---
 id: TASK-22
 title: SpeechRecognizer trait + Rust-native STT path for Windows
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 06:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - rust-core
   - stt
@@ -34,3 +35,9 @@ Abstract STT behind a Rust trait so the Windows shell can call transcribe withou
 <!-- SECTION:NOTES:BEGIN -->
 Context: after migrating DictationService phase machine into Rust (early April 2026), the Mac shell works end-to-end in host-push mode. Windows port is the forcing function for the trait. See feedback_rust_core_orchestration memory for why orchestration lives in Rust.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. SpeechRecognizer trait abstraction landed via TASK-33 (sherpa-rs spike) and TASK-40 (ort engine swap); Windows path ships in v0.4.0 alongside the Mac FluidAudio host-push path. Both converge on core::dictation as planned.
+<!-- SECTION:FINAL_SUMMARY:END -->

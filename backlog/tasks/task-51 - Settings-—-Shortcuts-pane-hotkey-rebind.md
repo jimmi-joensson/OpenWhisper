@@ -1,10 +1,10 @@
 ---
 id: TASK-51
 title: Settings — Shortcuts pane + hotkey rebind
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-27 15:29'
-updated_date: '2026-04-27 15:29'
+updated_date: '2026-04-30 16:35'
 labels:
   - ui
   - tauri
@@ -33,3 +33,9 @@ Implement Settings → Shortcuts pane per design (screens.jsx SettingsShortcutsB
 - [x] #6 Captured chord descriptor is cross-platform JSON: { kind: 'modifier-tap'|'chord', code: string, mods: string[] }
 - [x] #7 HotkeyChip + 'press keys…' UI matches design components
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; hotkey rebind UI will be re-planned from current state if/when revisited. GitHub issue #5 still tracks user-facing demand.
+<!-- SECTION:FINAL_SUMMARY:END -->

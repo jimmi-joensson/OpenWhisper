@@ -1,10 +1,10 @@
 ---
 id: TASK-54
 title: 'Settings — General: Open at Login + tray checkbox'
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-27 15:29'
-updated_date: '2026-04-29 17:44'
+updated_date: '2026-04-30 16:32'
 labels:
   - ui
   - tauri
@@ -36,3 +36,9 @@ Add tauri-plugin-autostart and surface the toggle in two places: Settings → Ge
 <!-- SECTION:NOTES:BEGIN -->
 518f673 TASK-54 AC#4: ThemeProvider + GeneralPane wiring (overshot stub — actually applies)
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Superseded by TASK-60 (Wire Launch-at-login backend), which is the post-v0.4.0 hotfix framing for the same autostart-plugin work. Plan-tasks 54.1-54.5 closed alongside; TASK-60 will rebuild the implementation tree from current state.
+<!-- SECTION:FINAL_SUMMARY:END -->

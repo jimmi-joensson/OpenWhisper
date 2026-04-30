@@ -1,10 +1,10 @@
 ---
 id: TASK-25
 title: Windows tray icon with phase state
-status: In Review
-updated_date: '2026-04-24 20:30'
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - ui
@@ -35,3 +35,9 @@ Windows equivalent of the macOS menubar status icon. Tray icon flips between idl
 <!-- SECTION:PLAN:BEGIN -->
 1. Evaluate `H.NotifyIcon.WinUI` vs direct `Shell_NotifyIcon` P/Invoke. Prefer library unless it pulls heavy deps. 2. Ship two ICO assets: idle (template-style for system-theme tinting) and recording (pre-rendered orange). 3. Hook tray icon creation to `App.OnLaunched`. 4. Subscribe to DictationService phase polling; swap icon + tooltip on change. 5. Wire double-click → existing `MainWindow` activation path. 6. Leave right-click menu as a stub until TASK-30.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 tray icon superseded by Tauri tray (TASK-35 Phase 4). apps/windows shell retired.
+<!-- SECTION:FINAL_SUMMARY:END -->

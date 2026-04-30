@@ -1,9 +1,10 @@
 ---
 id: TASK-18
 title: Caveman-lite rule-based compression filter
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-04-23 10:09'
+updated_date: '2026-04-30 16:35'
 labels:
   - macos
   - post-processing
@@ -55,3 +56,9 @@ Acceptance criteria:
 - [ ] Setting persists across launches
 - [ ] Off by default; zero behavior change unless user opts in
 <!-- SECTION:DESCRIPTION:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. Post-v0.4.0 priorities reset; rule-based caveman compression will be re-planned from current state if/when revisited.
+<!-- SECTION:FINAL_SUMMARY:END -->

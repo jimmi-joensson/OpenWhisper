@@ -1,9 +1,10 @@
 ---
 id: TASK-36
 title: Tauri Phase 5 — Dictation flow + text injection
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 22:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - tauri
   - phase-5
@@ -33,3 +34,9 @@ Fullscreen-aware: pill hides when fullscreen app is foreground; hotkey unregiste
 - [ ] #5 Verified across Chromium fullscreen, video apps, and at least one fullscreen game
 - [ ] #6 Injection path uses arboard + platform key-event synthesis; no shell-out to osascript/powershell
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. End-to-end dictation flow (hotkey → record → recognize → post-process → paste) ships on both Mac and Windows in v0.4.0. Fullscreen-aware behavior tracked separately under TASK-58 (Done) and TASK-57 (Done).
+<!-- SECTION:FINAL_SUMMARY:END -->

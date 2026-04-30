@@ -1,9 +1,10 @@
 ---
 id: TASK-35
 title: Tauri Phase 4 — Tray + global hotkey + Escape hook
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-24 22:07'
+updated_date: '2026-04-30 16:31'
 labels:
   - tauri
   - phase-4
@@ -37,3 +38,9 @@ TCC entitlements (mic, Accessibility, Input Monitoring) need to be wired into th
 - [ ] #6 Mac Tauri bundle declares Microphone + Accessibility + Input Monitoring entitlements
 - [ ] #7 Dev-cycle script exists for Mac resetting TCC grants on rebuild (equivalent of scripts/reset-tcc.sh)
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review. Tauri tray, Windows global-shortcut chord, Mac CGEventTap Right-Cmd hook, and Escape-to-cancel all ship in v0.4.0. TCC dev-loop pain handled via scripts/dev-run.sh + TASK-48 auto-reset.
+<!-- SECTION:FINAL_SUMMARY:END -->

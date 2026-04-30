@@ -1,10 +1,10 @@
 ---
 id: TASK-30
 title: Windows tray menu with phase-aware labels
-status: In Review
-updated_date: '2026-04-24 21:00'
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - ui
@@ -35,3 +35,9 @@ Windows equivalent of Mac's menubar dropdown menu (`OpenWhisperApp.swift` status
 <!-- SECTION:PLAN:BEGIN -->
 1. Attach a `MenuFlyout` to the tray icon from TASK-25. 2. Bind the top item's `Text` and `IsEnabled` to the polled Rust-core phase. 3. Wire click handlers to `DictationService.Toggle()` / `CancelIfRecording()` / `MainWindow.Activate()` / `App.Exit()`. 4. Cross-check label text against `OpenWhisperApp.swift` menu item titles to keep wording identical.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 tray menu superseded by Tauri tray menu (TASK-35 Phase 4). Tray menu refresh per design handoff is tracked separately under TASK-50.
+<!-- SECTION:FINAL_SUMMARY:END -->

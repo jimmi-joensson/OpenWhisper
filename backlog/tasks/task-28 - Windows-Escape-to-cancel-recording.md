@@ -1,10 +1,10 @@
 ---
 id: TASK-28
 title: Windows Escape-to-cancel recording
-status: In Review
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
-updated_date: '2026-04-24 21:30'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - input
@@ -44,3 +44,9 @@ stays in the Rust core (Cancel is a no-op outside of Recording).
 3. MainWindow subscribes, marshals to dispatcher, calls `_service.Cancel()` which forwards to Rust `Core.RequestCancel()` (phase-gated on the Rust side).
 4. Dispose: PostThreadMessage WM_QUIT, join thread (500 ms timeout), UnhookWindowsHookEx inside the thread as it exits.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 EscapeHook.cs superseded by Tauri Rust Escape hook (TASK-35 Phase 4). ACs were checked against the WinUI 3 implementation; that codebase now lives in archive/.
+<!-- SECTION:FINAL_SUMMARY:END -->

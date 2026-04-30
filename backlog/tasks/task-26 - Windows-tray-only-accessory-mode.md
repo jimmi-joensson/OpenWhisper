@@ -1,10 +1,10 @@
 ---
 id: TASK-26
 title: Windows tray-only / accessory mode
-status: In Review
-updated_date: '2026-04-24 20:45'
+status: Won't Do
 assignee: []
 created_date: '2026-04-24 18:45'
+updated_date: '2026-04-30 16:32'
 labels:
   - windows
   - ui
@@ -34,3 +34,9 @@ Windows analog of macOS `.accessory` activation policy — the app lives in the 
 <!-- SECTION:PLAN:BEGIN -->
 1. Intercept `MainWindow.Closed` or `AppWindowClosingEventArgs` → `args.Cancel = true; window.Hide()`. 2. Set `WS_EX_TOOLWINDOW` on the main HWND when "Show in taskbar" is off so it drops out of the taskbar and Alt-Tab. 3. Settings store: a simple JSON at `%LOCALAPPDATA%\OpenWhisper\settings.json` (no full settings UI yet — single boolean, read on startup). 4. Single-instance guard via named mutex; second launch sends a message to activate the existing instance.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed during 2026-04-30 backlog review as Won't Do. WinUI 3 tray-only mode superseded by Tauri close-to-tray (TASK-37 Phase 6). apps/windows shell retired.
+<!-- SECTION:FINAL_SUMMARY:END -->

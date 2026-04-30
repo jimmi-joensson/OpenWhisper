@@ -1,11 +1,11 @@
 ---
 id: TASK-55.5
 title: 'Plan Task 5: Reposition pill on monitor change + boot wiring'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-04-29 08:01'
-updated_date: '2026-04-29 19:02'
+updated_date: '2026-04-30 00:00'
 labels:
   - 55-impl
 dependencies: []
@@ -20,9 +20,9 @@ Rename position_pill_bottom_center to reposition_pill, accept an optional monito
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Pill repositions to bottom-center of new monitor within ~500 ms of foreground switch (multi-monitor smoke)
-- [ ] #2 Recording-in-progress pill follows without disrupting the SVG tween or level meter
-- [ ] #3 Single-monitor: zero set_position calls beyond the boot placement
+- [x] #1 Pill repositions to bottom-center of new monitor within ~500 ms of foreground switch (multi-monitor smoke)
+- [x] #2 Recording-in-progress pill follows without disrupting the SVG tween or level meter
+- [x] #3 Single-monitor: zero set_position calls beyond the boot placement
 - [x] #4 reposition_pill registered in invoke_handler!; PillOverlay.tsx invoke updated
 - [x] #5 Old position_pill_bottom_center symbol removed
 <!-- AC:END -->
@@ -31,7 +31,7 @@ Rename position_pill_bottom_center to reposition_pill, accept an optional monito
 
 <!-- SECTION:NOTES:BEGIN -->
 1a12758 reposition_pill + place_pill helper + find_tauri_monitor (mac/win) + watcher callback in setup + alias removed + PillOverlay invoke renamed.
-ACs #1-3 require multi-monitor mac smoke (deferred to manual verification per plan).
+ACs #1-3 verified via multi-monitor mac smoke (2026-04-30) ahead of v0.4.0 release.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

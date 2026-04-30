@@ -35,6 +35,22 @@ For Windows release builds (`pnpm tauri build`), the bundle is **non-functional*
 
 **How to apply:** Don't propose simplifying away the vendor step or the object-form resource map. If the WebView2Loader source path or the ort version changes, update the script — don't reach for `download-binaries` (which doesn't ship for `x86_64-pc-windows-gnu`) or manual DLL copying (works on one machine, breaks for end users).
 
+## Tauri MSI bundler auto-sweeps stray DLLs from `target/release/`
+
+The Tauri 2 WiX bundler auto-sweeps every `.dll` sitting next to the main binary in `target/release/` and adds it to `main.wxs` as a separate `<Component>`/`<File>`, on top of whatever is in the explicit `bundle.resources` map. EXEs are NOT swept — only DLLs. The bundler dedupes a swept DLL against `bundle.resources` (so the vendor copies of `onnxruntime.dll` and `WebView2Loader.dll` don't double up), but it does NOT distinguish between DLLs that belong to the Tauri app and stale DLLs left over from sibling targets in the same workspace.
+
+**Why this bites OpenWhisper:** The repo has a `bench-sherpa` binary that links a CUDA-enabled ONNX runtime. Building it deposits ~2 GB of CUDA + cuDNN DLLs (`cublas64_*`, `cublasLt64_*`, `cudnn_engines_precompiled64_*`, `cufft64_*`, etc.) into `target/release/`. On the next `pnpm tauri build`, the WiX bundler sweeps all of them into the MSI. Linking then fails at WiX `light.exe` with:
+
+> `light.exe : error LGHT0306 : An error (E_FAIL) was returned while finalizing a CAB file. This most commonly happens when creating a CAB file with more than 65535 files in it.`
+
+The error text is misleading — the actual cause is the **2 GB hard size limit of a single MSI CAB**, not the file count. Confirm by running `pnpm tauri build --verbose` (the bare `pnpm tauri build` swallows light's stderr) and grepping `target/release/wix/x64/main.wxs` for `Source=` to see exactly which paths got pulled in.
+
+**How to apply:**
+- Before a release build, ensure `target/release/` contains only the openwhisper-tauri build outputs (`openwhisper-tauri.exe`, `onnxruntime.dll`, `WebView2Loader.dll`) plus standard Cargo metadata. Specifically: no `cargs.dll`, no `cu*64_*.dll`, no `cudnn_*.dll`, no `nvrtc*.dll`, no `nvJitLink_*.dll`.
+- If you need bench-sherpa for development, build it in a separate target dir (`CARGO_TARGET_DIR=target-bench cargo build -p bench-sherpa`) so its CUDA siblings never land next to the Tauri exe.
+- Don't try to fix this at WiX level (Media element split, multi-cab) — the right fix is keeping the source dir clean. Track follow-up under TASK-59 (Bench-sherpa target isolation so MSI bundler stops sweeping CUDA DLLs).
+- Don't be fooled by the LGHT0306 "65535 files" wording. With our `bundle.resources` map, a healthy `main.wxs` has fewer than 50 components.
+
 ## Task tracking — Backlog.md CLI
 
 Tasks live in `backlog/` at the repo root, managed by the **Backlog.md** CLI (npm global, but install with `pnpm add -g backlog.md`).

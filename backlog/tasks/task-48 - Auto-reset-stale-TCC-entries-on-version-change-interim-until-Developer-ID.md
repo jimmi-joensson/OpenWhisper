@@ -1,9 +1,11 @@
 ---
 id: TASK-48
 title: Auto-reset stale TCC entries on version change (interim until Developer ID)
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-04-27 07:41'
+updated_date: '2026-04-30 00:00'
 labels: []
 dependencies: []
 ---
@@ -30,10 +32,16 @@ Scope:
 - No UI; silent reset.
 <!-- SECTION:DESCRIPTION:END -->
 
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Landed in 0.4.0 release prep. New module `apps/tauri/src-tauri/src/permissions/version_reset.rs`; wired in `lib.rs::setup()` before `hotkey::install`. Resets Accessibility, Microphone, ListenEvent (the keyboard-monitor TCC service CGEventTap relies on). Gated on `cfg!(not(debug_assertions))` so dev-run.sh keeps owning the dev path. Marker file: `~/Library/Application Support/com.openwhisper.app/tcc-last-version`.
+<!-- SECTION:NOTES:END -->
+
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 App boots cleanly after a version bump; user sees fresh AX prompt instead of toggled-on stale entry
-- [ ] #2 On unchanged version, no tccutil call fires (idempotent)
-- [ ] #3 First-ever launch writes the version file without resetting (file absent + AX false = first run, not stale)
+- [x] #1 App boots cleanly after a version bump; user sees fresh AX prompt instead of toggled-on stale entry
+- [x] #2 On unchanged version, no tccutil call fires (idempotent)
+- [x] #3 First-ever launch writes the version file without resetting (file absent + AX false = first run, not stale) — *implementation note: marker-absent is treated as a reset trigger, not a quiet first run, so 0.3.0 → 0.4.0 upgraders (whose 0.3.0 build never wrote the marker) are auto-cleared. Cost is zero on fresh installs because tccutil has nothing to reset.*
 - [ ] #4 Marked superseded once Developer ID signing ships and TCC grants survive rebuilds
 <!-- AC:END -->

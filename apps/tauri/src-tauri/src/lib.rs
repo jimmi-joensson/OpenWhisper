@@ -812,6 +812,10 @@ pub fn run() {
                 app.handle(),
                 behavior_settings.show_in_fullscreen,
             );
+            // TASK-48 — clear stale TCC entries on version change before
+            // the AX prompt fires, so 0.3.0 → 0.4.0 (and future) upgraders
+            // don't have to manually scrub System Settings to re-grant.
+            permissions::reset_if_version_changed(app.handle());
             hotkey::install(app.handle());
             // Proactively prompt for Mic on macOS once AX is operationally
             // trusted — mirrors PermissionsCoordinator.swift's "AX before

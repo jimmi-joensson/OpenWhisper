@@ -27,6 +27,9 @@ use tauri::{AppHandle, Emitter};
 #[cfg(target_os = "macos")]
 mod mac;
 
+mod version_reset;
+pub use version_reset::reset_if_version_changed;
+
 pub const PERMISSIONS_STATUS_EVENT: &str = "permissions_status";
 
 /// Coarse-grained UI-facing mic state. Auth-pending (`NotDetermined`) is

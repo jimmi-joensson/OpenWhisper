@@ -9,6 +9,12 @@
 //!   4. Normalize whitespace (collapse runs, strip before punctuation,
 //!      merge comma runs left by filler removal).
 //!
+//! After the four passes, append a single trailing space when the result
+//! is non-empty so consecutive injections into the same input don't run
+//! together (e.g. "hello world" + "how are you" → "hello world how are
+//! you", not "hello worldhow are you"). Empty results stay empty so a
+//! pure-filler dictation doesn't write a lone space.
+//!
 //! The EN/DA asymmetry around "er" is deliberate: "er" is English
 //! hesitation but also the Danish copula ("det er fedt"). Stripping
 //! it blindly ate Danish verbs.
@@ -93,7 +99,12 @@ pub fn process(text: &str) -> String {
     let out = strip_fillers(text, &lang);
     let out = apply_subs(&out);
     let out = dedupe_repeats(&out);
-    normalize_whitespace(&out)
+    let out = normalize_whitespace(&out);
+    if out.is_empty() {
+        out
+    } else {
+        format!("{out} ")
+    }
 }
 
 fn strip_fillers(text: &str, lang: &FillerLang) -> String {
@@ -143,37 +154,37 @@ mod tests {
 
     #[test]
     fn strips_english_fillers() {
-        assert_eq!(process("um, this is a test"), "this is a test");
-        assert_eq!(process("uh well uhm I think"), "well I think");
+        assert_eq!(process("um, this is a test"), "this is a test ");
+        assert_eq!(process("uh well uhm I think"), "well I think ");
     }
 
     #[test]
     fn strips_danish_oh_filler() {
         // "øh" triggers DA detection AND is a DA filler.
-        assert_eq!(process("det er fedt øh"), "det er fedt");
+        assert_eq!(process("det er fedt øh"), "det er fedt ");
     }
 
     #[test]
     fn danish_preserves_er_copula() {
         // "æ" forces DA detection; "er" is not in DA_FILLERS.
-        assert_eq!(process("jeg er træt"), "jeg er træt");
+        assert_eq!(process("jeg er træt"), "jeg er træt ");
     }
 
     #[test]
     fn substitutes_open_whisper() {
-        assert_eq!(process("open whisper rocks"), "OpenWhisper rocks");
-        assert_eq!(process("Open Whisper rocks"), "OpenWhisper rocks");
+        assert_eq!(process("open whisper rocks"), "OpenWhisper rocks ");
+        assert_eq!(process("Open Whisper rocks"), "OpenWhisper rocks ");
     }
 
     #[test]
     fn normalizes_whitespace() {
-        assert_eq!(process("hello   world"), "hello world");
-        assert_eq!(process("hello ,world"), "hello,world");
+        assert_eq!(process("hello   world"), "hello world ");
+        assert_eq!(process("hello ,world"), "hello,world ");
     }
 
     #[test]
     fn collapses_repeated_commas_from_filler_strip() {
-        assert_eq!(process("um, uh, hello"), "hello");
+        assert_eq!(process("um, uh, hello"), "hello ");
     }
 
     #[test]
@@ -188,38 +199,46 @@ mod tests {
 
     #[test]
     fn preserves_oh_interjection() {
-        assert_eq!(process("Oh, I didn't know that"), "Oh, I didn't know that");
+        assert_eq!(process("Oh, I didn't know that"), "Oh, I didn't know that ");
     }
 
     #[test]
     fn dedupes_adjacent_word_repeats() {
-        assert_eq!(process("let's let's check this"), "let's check this");
-        assert_eq!(process("boat boat fish fish"), "boat fish");
-        assert_eq!(process("ha ha ha"), "ha");
+        assert_eq!(process("let's let's check this"), "let's check this ");
+        assert_eq!(process("boat boat fish fish"), "boat fish ");
+        assert_eq!(process("ha ha ha"), "ha ");
     }
 
     #[test]
     fn dedupe_preserves_first_casing() {
-        assert_eq!(process("Let's let's go"), "Let's go");
-        assert_eq!(process("BOAT boat"), "BOAT");
+        assert_eq!(process("Let's let's go"), "Let's go ");
+        assert_eq!(process("BOAT boat"), "BOAT ");
     }
 
     #[test]
     fn dedupe_case_insensitive_match() {
-        assert_eq!(process("OpenWhisper openwhisper"), "OpenWhisper");
+        assert_eq!(process("OpenWhisper openwhisper"), "OpenWhisper ");
     }
 
     #[test]
     fn dedupe_punctuation_protects_repetition() {
         // Comma between words = intentional (rhetorical emphasis).
-        assert_eq!(process("really, really nice"), "really, really nice");
+        assert_eq!(process("really, really nice"), "really, really nice ");
         // Period between words = sentence boundary.
-        assert_eq!(process("no. No problem"), "no. No problem");
+        assert_eq!(process("no. No problem"), "no. No problem ");
     }
 
     #[test]
     fn dedupe_after_substitution() {
         // "open whisper open whisper" -> subs run first, then dedupe collapses.
-        assert_eq!(process("open whisper open whisper"), "OpenWhisper");
+        assert_eq!(process("open whisper open whisper"), "OpenWhisper ");
+    }
+
+    #[test]
+    fn appends_trailing_space_for_continuation() {
+        // Non-empty results end in a space so a follow-up injection into
+        // the same field doesn't fuse against the prior word.
+        assert_eq!(process("hello"), "hello ");
+        assert_eq!(process("end."), "end. ");
     }
 }

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getName } from "@tauri-apps/api/app";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
+import { HomePane } from "./components/home-pane";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { SettingsShell } from "./Settings";
@@ -31,10 +31,6 @@ function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route>("home");
-  // App productName from Tauri runtime — "OpenWhisper" (release) or
-  // "OpenWhisper Dev" (per tauri.dev.conf.json overlay). Single source of
-  // truth: the running bundle's CFBundleName.
-  const [appName, setAppName] = useState<string>("OpenWhisper");
   const platform = detectPlatform();
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
@@ -71,11 +67,6 @@ function App() {
     invoke<string>("core_version")
       .then(setCoreVersion)
       .catch((e) => setCoreError(String(e)));
-    getName()
-      .then(setAppName)
-      .catch(() => {
-        // Keep default "OpenWhisper" if the API isn't available.
-      });
   }, []);
 
   // ⌘, switches the in-window route to Settings. Settings is no longer a
@@ -208,28 +199,20 @@ function App() {
               onToggle={() => void dictation.toggle()}
               coreVersion={coreVersion}
               coreError={coreError}
-              hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-              onHotkeyRetry={() => void hotkey.retry()}
-              micError={
-                permissions.status && !permissions.status.mic_ok
-                  ? permissions.status.error
-                  : null
-              }
-              recognizerError={recognizerError}
             />
           )}
           {route === "home" && (
             <>
-              <div
-                data-testid="home-placeholder"
-                style={{
-                  padding: 40,
-                  color: "var(--muted-foreground)",
-                  textAlign: "center",
-                }}
-              >
-                {appName} — Home pane coming in Task 4.
-              </div>
+              <HomePane
+                hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+                onHotkeyRetry={() => void hotkey.retry()}
+                micError={
+                  permissions.status && !permissions.status.mic_ok
+                    ? permissions.status.error
+                    : null
+                }
+                recognizerError={recognizerError}
+              />
               {import.meta.env.DEV && (
                 <DevPillControls
                   enabled={pillOverride.enabled}

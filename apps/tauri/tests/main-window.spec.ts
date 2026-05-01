@@ -129,7 +129,6 @@ test.describe("hotkey banner", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForHotkeyStatusListener(page);
 
     // Default state: ok=true was last emit (from the wait probe). No banner.
@@ -167,7 +166,6 @@ test.describe("mic permission banner", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForPermissionsStatusListener(page);
 
     // Default state: probe emitted ok=true. No banner.
@@ -206,7 +204,6 @@ test.describe("recognizer-load banner", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForTickListener(page);
 
     // Boot baseline: no banner.

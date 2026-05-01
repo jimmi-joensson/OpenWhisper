@@ -13,7 +13,7 @@ import {
 // `ow_navigate` event (the same surface tray Preferences… uses in prod).
 
 async function openSettings(page: import("@playwright/test").Page) {
-  await page.waitForSelector("text=OpenWhisper Dev");
+  await page.waitForSelector('[data-testid="sidebar-item-home"]');
   await page.evaluate(() => window.__owEmit("ow_navigate", "settings"));
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
 }
@@ -245,7 +245,9 @@ test.describe("settings view", () => {
     await expect(
       page.getByRole("heading", { name: "Settings" }),
     ).toBeHidden();
-    await expect(page.getByText("OpenWhisper Dev")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Ready when you are" }),
+    ).toBeVisible();
   });
 });
 
@@ -823,14 +825,14 @@ test.describe("settings — audio pane", () => {
 test.describe("main window — settings entry point", () => {
   test("⌘, switches to settings view", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
     await page.keyboard.press("Meta+,");
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   });
 
   test("ow_navigate event swaps the view", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
     await page.evaluate(() => window.__owEmit("ow_navigate", "settings"));
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
     await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
@@ -841,7 +843,7 @@ test.describe("main window — settings entry point", () => {
 
   test("sidebar Settings item opens settings", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
     await expect(
       page.getByRole("heading", { name: "Settings" }),
     ).toBeHidden();

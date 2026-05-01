@@ -9,7 +9,6 @@ import {
   PHASE_TRANSCRIBING,
 } from "../lib/dictation";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
-import { HealthBanner } from "./health-banner";
 import { LevelMeter } from "./level-meter";
 import { RecordButton } from "./record-button";
 
@@ -35,11 +34,6 @@ export interface DiagnosticsPaneProps {
   onToggle?: () => void;
   coreVersion?: string | null;
   coreError?: string | null;
-  hotkeyError?: string | null;
-  onHotkeyRetry?: () => void;
-  micError?: string | null;
-  recognizerError?: string | null;
-  onRecognizerRetry?: () => void;
 }
 
 const PHASE_NAMES: Record<number, string> = {
@@ -70,11 +64,6 @@ export function DiagnosticsPane({
   onToggle,
   coreVersion,
   coreError,
-  hotkeyError,
-  onHotkeyRetry,
-  micError,
-  recognizerError,
-  onRecognizerRetry,
 }: DiagnosticsPaneProps) {
   const statusText =
     statusMessage ||
@@ -95,32 +84,6 @@ export function DiagnosticsPane({
         fontFamily: "var(--font-sys)",
       }}
     >
-      {hotkeyError ? (
-        <div data-testid="hotkey-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner
-            message={hotkeyError}
-            onRetry={onHotkeyRetry}
-            retryLabel="Restart"
-          />
-        </div>
-      ) : null}
-
-      {micError ? (
-        <div data-testid="mic-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner message={micError} />
-        </div>
-      ) : null}
-
-      {recognizerError ? (
-        <div data-testid="recognizer-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner
-            message={recognizerError}
-            onRetry={onRecognizerRetry}
-            retryLabel="Retry"
-          />
-        </div>
-      ) : null}
-
       <Section title="Rust ↔ React FFI">
         <KV
           k="message"

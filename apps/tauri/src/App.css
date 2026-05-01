@@ -354,6 +354,55 @@ body {
   overflow-y: auto;
 }
 
+.ow-home {
+  padding: 24px 28px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 580px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.ow-home__banner {
+  width: 100%;
+}
+
+.ow-home__hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 16px 24px;
+  gap: 12px;
+}
+
+.ow-home__icon {
+  image-rendering: -webkit-optimize-contrast;
+}
+
+.ow-home__headline {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.ow-home__hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.ow-home__hint kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid var(--border);
+}
+
 /* Webview scrollbar — Tauri's default is invisible on Mac. Slim, theme-aware. */
 ::-webkit-scrollbar {
   width: 10px;

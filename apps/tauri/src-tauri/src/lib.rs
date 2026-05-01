@@ -595,8 +595,8 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
     // Capsule is centered inside the window via flex so the shadow has room
     // on all four sides — capsule visible bottom is `CAPSULE_BELOW_PAD`
     // from the window's bottom edge.
-    const PILL_WIN_W: f64 = 130.0;
-    const PILL_WIN_H: f64 = 82.0;
+    const PILL_WIN_W: f64 = 180.0;
+    const PILL_WIN_H: f64 = 110.0;
     const CAPSULE_H: f64 = 22.0;
     const CAPSULE_BELOW_PAD: f64 = (PILL_WIN_H - CAPSULE_H) / 2.0;
     /// Logical-pt gap between the capsule's bottom edge and the Dock /

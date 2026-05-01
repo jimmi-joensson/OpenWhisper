@@ -1,10 +1,11 @@
 ---
 id: TASK-70.1
 title: 'Plan Task 1: Bump pill OS window dimensions + reposition math'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 19:18'
+updated_date: '2026-05-01 20:01'
 labels:
   - 70-impl
 dependencies: []

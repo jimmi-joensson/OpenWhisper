@@ -10,7 +10,7 @@ import {
 test.describe("main window", () => {
   test("renders header + all four cards", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.getByTestId("sidebar-item-diagnostics").click();
 
     await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
     await expect(page.getByText("Dictation debug")).toBeVisible();
@@ -20,11 +20,13 @@ test.describe("main window", () => {
 
   test("FFI section shows mocked core_version", async ({ page }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByText("0.1.0-test")).toBeVisible();
   });
 
   test("debug Card reflects tick payload", async ({ page }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForTickListener(page);
     await emitTick(page, {
       phase: 2,
@@ -46,7 +48,7 @@ test.describe("scroll", () => {
   test(".ow-app__body scrolls when content overflows the viewport", async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 500 });
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.getByTestId("sidebar-item-diagnostics").click();
 
     // Window titlebar strip stays fixed; scroll happens inside
     // `.ow-app__body` so the strip never scrolls out of view.
@@ -75,7 +77,7 @@ test.describe("scroll", () => {
   test("transcript Card visible without scroll at default 720x820", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 820 });
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
   });
 });
@@ -83,6 +85,7 @@ test.describe("scroll", () => {
 test.describe("phase transitions drive RecordButton", () => {
   test("idle → loading → recording → transcribing → idle", async ({ page }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForTickListener(page);
 
     // idle: "Record"
@@ -126,6 +129,7 @@ test.describe("hotkey banner", () => {
     page,
   }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForHotkeyStatusListener(page);
 
     // Default state: ok=true was last emit (from the wait probe). No banner.
@@ -163,6 +167,7 @@ test.describe("mic permission banner", () => {
     page,
   }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForPermissionsStatusListener(page);
 
     // Default state: probe emitted ok=true. No banner.
@@ -201,6 +206,7 @@ test.describe("recognizer-load banner", () => {
     page,
   }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForTickListener(page);
 
     // Boot baseline: no banner.
@@ -264,6 +270,7 @@ test.describe("sidebar nav", () => {
 test.describe("text selection", () => {
   test("chrome non-selectable, transcript + KV values selectable", async ({ page }) => {
     await page.goto("/");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForTickListener(page);
     await emitTick(page, {
       phase: 0,
@@ -271,10 +278,10 @@ test.describe("text selection", () => {
       transcript: "selectable transcript text",
     });
 
-    const headerSelect = await page
-      .locator("h1", { hasText: "OpenWhisper Dev" })
+    const sidebarSelect = await page
+      .getByTestId("sidebar-item-home")
       .evaluate((el) => getComputedStyle(el).userSelect);
-    expect(headerSelect).toBe("none");
+    expect(sidebarSelect).toBe("none");
 
     const transcriptSelect = await page
       .getByText("selectable transcript text")

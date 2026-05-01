@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getName } from "@tauri-apps/api/app";
-import { MainWindowShell, type Platform } from "./components/main-window-shell";
+import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { SettingsShell } from "./Settings";
@@ -188,38 +188,49 @@ function App() {
         <SidebarNav active={route} onSelect={setRoute} />
         <main className="ow-app__body">
           {route === "settings" && <SettingsShell />}
-          {(route === "home" || route === "diagnostics") && (
+          {route === "diagnostics" && (
+            <DiagnosticsPane
+              phase={dictation.phase}
+              status={dictation.status}
+              levels={dictation.levels}
+              level={dictation.level}
+              elapsed={dictation.elapsed}
+              samples={dictation.samples}
+              transcript={dictation.transcript}
+              confidence={dictation.confidence}
+              statusMessage={dictation.statusMessage}
+              errorMessage={dictation.errorMessage}
+              canToggle={dictation.canToggle}
+              isRecording={dictation.isRecording}
+              downloadBytesDone={dictation.downloadBytesDone}
+              downloadBytesTotal={dictation.downloadBytesTotal}
+              platform={platform}
+              onToggle={() => void dictation.toggle()}
+              coreVersion={coreVersion}
+              coreError={coreError}
+              hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+              onHotkeyRetry={() => void hotkey.retry()}
+              micError={
+                permissions.status && !permissions.status.mic_ok
+                  ? permissions.status.error
+                  : null
+              }
+              recognizerError={recognizerError}
+            />
+          )}
+          {route === "home" && (
             <>
-              <MainWindowShell
-                title={appName}
-                phase={dictation.phase}
-                status={dictation.status}
-                levels={dictation.levels}
-                level={dictation.level}
-                elapsed={dictation.elapsed}
-                samples={dictation.samples}
-                transcript={dictation.transcript}
-                confidence={dictation.confidence}
-                statusMessage={dictation.statusMessage}
-                errorMessage={dictation.errorMessage}
-                canToggle={dictation.canToggle}
-                isRecording={dictation.isRecording}
-                downloadBytesDone={dictation.downloadBytesDone}
-                downloadBytesTotal={dictation.downloadBytesTotal}
-                platform={platform}
-                onToggle={() => void dictation.toggle()}
-                coreVersion={coreVersion}
-                coreError={coreError}
-                hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-                onHotkeyRetry={() => void hotkey.retry()}
-                micError={
-                  permissions.status && !permissions.status.mic_ok
-                    ? permissions.status.error
-                    : null
-                }
-                recognizerError={recognizerError}
-              />
-              {import.meta.env.DEV && route === "home" && (
+              <div
+                data-testid="home-placeholder"
+                style={{
+                  padding: 40,
+                  color: "var(--muted-foreground)",
+                  textAlign: "center",
+                }}
+              >
+                {appName} — Home pane coming in Task 4.
+              </div>
+              {import.meta.env.DEV && (
                 <DevPillControls
                   enabled={pillOverride.enabled}
                   status={pillOverride.status}

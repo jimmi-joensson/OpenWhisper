@@ -1,9 +1,10 @@
 ---
 id: TASK-60
-title: 'Wire Launch-at-login backend (Windows + Mac) — autostart plugin'
-status: To Do
+title: Wire Launch-at-login backend (Windows + Mac) — autostart plugin
+status: In Progress
 assignee: []
 created_date: '2026-04-30 09:35'
+updated_date: '2026-05-01 13:14'
 labels:
   - windows
   - macos
@@ -26,14 +27,13 @@ Cross-platform parity is part of the AC: even though the regression was only con
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
 <!-- AC:BEGIN -->
-- [ ] #1 Add `tauri-plugin-autostart` (or equivalent) to `apps/tauri/src-tauri/Cargo.toml` and register it in the Tauri builder in `apps/tauri/src-tauri/src/main.rs` (or wherever plugins are registered).
-- [ ] #2 The Switch in `apps/tauri/src/settings/General/Startup.tsx` (or wherever the existing UI stub lives) calls a Tauri command that enables/disables autostart on flip. Toggling the Switch off removes the autostart entry; toggling it on creates the entry.
-- [ ] #3 The Switch state is read from the actual platform autostart registration on mount, not just from local React state — so a user who enabled autostart in a previous run sees the Switch reflect reality after a restart.
+- [x] #1 Add `tauri-plugin-autostart` (or equivalent) to `apps/tauri/src-tauri/Cargo.toml` and register it in the Tauri builder in `apps/tauri/src-tauri/src/main.rs` (or wherever plugins are registered).
+- [x] #2 The Switch in `apps/tauri/src/settings/General/Startup.tsx` (or wherever the existing UI stub lives) calls a Tauri command that enables/disables autostart on flip. Toggling the Switch off removes the autostart entry; toggling it on creates the entry.
+- [x] #3 The Switch state is read from the actual platform autostart registration on mount, not just from local React state — so a user who enabled autostart in a previous run sees the Switch reflect reality after a restart.
 - [ ] #4 Manual smoke on Windows 11: enable Switch → close OpenWhisper → sign out of Windows → sign back in → OpenWhisper launches automatically (tray icon visible). Then disable Switch → sign out → sign back in → OpenWhisper does NOT launch.
 - [ ] #5 Manual smoke on macOS (Sequoia 15+, arm64): enable Switch → quit OpenWhisper → log out → log in → OpenWhisper launches and the menu-bar mic icon appears (no Dock icon, since LSUIElement = true). Then disable Switch → log out → log in → OpenWhisper does NOT launch.
-- [ ] #6 Behaviour with the autostart plugin is documented in a code-comment at the registration site (or a short module doc-comment) covering: which platform-level mechanism is used on each OS, the bundle-identifier the registration is keyed on, and how to manually inspect the registration (Windows: `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; macOS: `ls ~/Library/LaunchAgents/`).
+- [x] #6 Behaviour with the autostart plugin is documented in a code-comment at the registration site (or a short module doc-comment) covering: which platform-level mechanism is used on each OS, the bundle-identifier the registration is keyed on, and how to manually inspect the registration (Windows: `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; macOS: `ls ~/Library/LaunchAgents/`).
 - [ ] #7 v0.4.1 release notes mention "Launch-at-login Switch is now functional on both Windows and macOS" and the v0.4.1 release ships with both platforms verified.
 <!-- AC:END -->
 

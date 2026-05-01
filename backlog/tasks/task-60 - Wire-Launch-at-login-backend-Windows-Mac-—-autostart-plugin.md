@@ -4,7 +4,7 @@ title: Wire Launch-at-login backend (Windows + Mac) — autostart plugin
 status: In Progress
 assignee: []
 created_date: '2026-04-30 09:35'
-updated_date: '2026-05-01 13:14'
+updated_date: '2026-05-01 13:15'
 labels:
   - windows
   - macos
@@ -47,4 +47,6 @@ Background pointers:
 - Watch out for the macOS bundle-identifier conflict noted in `tauri.conf.json` (`com.openwhisper.app` ends with `.app` — the warning Tauri logs at build time). LaunchAgent plists key off the bundle ID; if anyone changes it later, autostart entries will silently break for users who upgrade.
 - Do NOT roll a custom registry-write / plist-write — `tauri-plugin-autostart` already handles the cross-platform differences (Windows HKCU Run key vs LaunchAgent plist vs macOS Service Management framework on newer OS versions). Custom code here would re-invent the bugs the plugin already solved.
 - LSUIElement = true on Mac means OpenWhisper has no Dock icon. Some autostart plumbing assumes a Dock-icon app; verify the plugin's macOS path uses a LaunchAgent plist (works for menu-bar apps) and not the Service Management framework's "login item" API (which expects a normal app and may fail silently or show a system-managed login-items entry the user doesn't expect).
+
+Implementation commit: dbdd2a7 (branch task-60-launch-at-login). tauri-plugin-autostart 2.5.1 wired in apps/tauri/src-tauri (MacosLauncher::LaunchAgent on macOS). General pane Switch reads via @tauri-apps/plugin-autostart isEnabled() on mount; enable()/disable() on flip with revert-on-rejection. Capability autostart:default added. Playwright tests/settings-window.spec.ts covers hydration + invoke + revert; existing 51-test suite green locally. ACs 1/2/3/6 covered by code + tests; ACs 4/5/7 left for the user — manual sign-out cycle on Win11 + macOS Sequoia and v0.4.1 release-notes line.
 <!-- SECTION:NOTES:END -->

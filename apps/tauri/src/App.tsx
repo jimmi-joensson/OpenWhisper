@@ -5,6 +5,7 @@ import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
 import { HomePane } from "./components/home-pane";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
+import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
@@ -202,6 +203,7 @@ function App() {
                 </h1>
               </>
             )}
+            <WindowControls platform={platform} />
           </header>
           <main className="ow-app__body">
             {route === "settings" && <SettingsShell active={settingsPane} />}

@@ -300,6 +300,43 @@ body {
   letter-spacing: -0.005em;
 }
 
+/* Windows-only chrome: min/max/close cluster, right-aligned in the
+   inset titlebar. Mac collapses to nothing (component returns null). */
+.ow-window-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.ow-window-controls__btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 80ms ease, color 80ms ease;
+}
+
+.ow-window-controls__btn:hover {
+  background: color-mix(in oklch, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+.ow-window-controls__btn--close:hover {
+  background: #e81123;
+  color: white;
+}
+
+.ow-window-controls__btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--info-border);
+}
+
 .ow-app__shell {
   display: grid;
   grid-template-columns: 180px 1fr;

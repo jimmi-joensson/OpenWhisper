@@ -34,6 +34,16 @@ function App() {
   const [route, setRoute] = useState<Route>("home");
   const [settingsPane, setSettingsPane] = useState<SettingsPaneId>("general");
   const platform = detectPlatform();
+
+  // Leaving Settings resets the pane to General so re-entering always lands
+  // on the canonical first pane. Keeps in-Settings nav lossless (clicking
+  // around between panes preserves your spot) without making the route exit
+  // feel like a partial back.
+  useEffect(() => {
+    if (route !== "settings" && settingsPane !== "general") {
+      setSettingsPane("general");
+    }
+  }, [route, settingsPane]);
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
   const permissions = usePermissionsStatus();

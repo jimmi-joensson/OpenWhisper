@@ -45,6 +45,33 @@ test.describe("sidebar nav", () => {
     );
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
+
+  test("re-entering Settings resets to General regardless of last pane", async ({ page }) => {
+    await page.goto("/");
+
+    // First visit: navigate Settings → Shortcuts.
+    await page.getByTestId("sidebar-item-settings").click();
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    // Leave Settings via the back arrow.
+    await page.getByRole("button", { name: "Back to main" }).click();
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
+
+    // Re-enter Settings — General is active again, not Shortcuts.
+    await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
 });
 
 test.describe("scroll", () => {

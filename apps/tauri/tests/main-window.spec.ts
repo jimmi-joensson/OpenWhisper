@@ -1,44 +1,91 @@
-import {
-  emitTick,
-  expect,
-  test,
-  waitForHotkeyStatusListener,
-  waitForPermissionsStatusListener,
-  waitForTickListener,
-} from "./fixtures/tauri-shim";
+import { expect, test } from "./fixtures/tauri-shim";
 
-test.describe("main window", () => {
-  test("renders header + all four cards", async ({ page }) => {
+test.describe("sidebar nav", () => {
+  test("route sidebar (Home/Settings/Diagnostics) on home + diagnostics", async ({ page }) => {
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    // Default route is Home.
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
 
+    // Click Diagnostics — debug content visible, sidebar still shows the three routes.
+    await page.getByTestId("sidebar-item-diagnostics").click();
+    await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
-    await expect(page.getByText("Dictation debug")).toBeVisible();
-    await expect(page.getByText("Dictation (mic → Rust core → Parakeet)")).toBeVisible();
-    await expect(page.getByText("transcript", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-home")).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-settings")).toBeVisible();
+
+    // Click Home — sidebar marks Home active and hero is back.
+    await page.getByTestId("sidebar-item-home").click();
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
 
-  test("FFI section shows mocked core_version", async ({ page }) => {
+  test("entering Settings replaces the sidebar with the pane chooser; back restores it", async ({
+    page,
+  }) => {
     await page.goto("/");
-    await expect(page.getByText("0.1.0-test")).toBeVisible();
+
+    // Enter Settings — sidebar swaps to General/Audio/Models/Shortcuts;
+    // route-level items disappear.
+    await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-home")).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveCount(0);
+
+    // Back arrow restores the outer route sidebar.
+    await page.getByRole("button", { name: "Back to main" }).click();
+    await expect(page.getByRole("tab", { name: "General" })).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
 
-  test("debug Card reflects tick payload", async ({ page }) => {
+  test("sidebar starts at window top; titlebar inset over content column", async ({ page }) => {
     await page.goto("/");
-    await waitForTickListener(page);
-    await emitTick(page, {
-      phase: 2,
-      status: "recording",
-      is_recording: true,
-      level: 0.4321,
-      can_toggle: true,
-    });
+    const sidebarBox = await page.getByTestId("sidebar-item-home").boundingBox();
+    // Sidebar's first item is within the top 60 px of the window — i.e. the
+    // sidebar column starts at or near y=0.
+    expect(sidebarBox && sidebarBox.y).toBeLessThan(60);
 
-    const debugCard = page
-      .locator("div", { has: page.getByText("Dictation debug", { exact: true }) })
-      .first();
-    await expect(debugCard.getByText("2 (recording)")).toBeVisible();
-    await expect(debugCard.getByText("0.4321")).toBeVisible();
+    // Settings titlebar back-arrow lives inside the content column (x>150),
+    // not full-width above the sidebar.
+    await page.getByTestId("sidebar-item-settings").click();
+    const back = page.getByRole("button", { name: "Back to main" });
+    const backBox = await back.boundingBox();
+    expect(backBox && backBox.x).toBeGreaterThan(150);
+  });
+
+  test("re-entering Settings resets to General regardless of last pane", async ({ page }) => {
+    await page.goto("/");
+
+    // First visit: navigate Settings → Shortcuts.
+    await page.getByTestId("sidebar-item-settings").click();
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    // Leave Settings via the back arrow.
+    await page.getByRole("button", { name: "Back to main" }).click();
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
+
+    // Re-enter Settings — General is active again, not Shortcuts.
+    await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
   });
 });
 
@@ -46,7 +93,8 @@ test.describe("scroll", () => {
   test(".ow-app__body scrolls when content overflows the viewport", async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 500 });
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    // Diagnostics has the densest content; force overflow there.
+    await page.getByTestId("sidebar-item-diagnostics").click();
 
     // Window titlebar strip stays fixed; scroll happens inside
     // `.ow-app__body` so the strip never scrolls out of view.
@@ -75,180 +123,18 @@ test.describe("scroll", () => {
   test("transcript Card visible without scroll at default 720x820", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 820 });
     await page.goto("/");
-    await page.waitForSelector("text=OpenWhisper Dev");
+    await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
   });
 });
 
-test.describe("phase transitions drive RecordButton", () => {
-  test("idle → loading → recording → transcribing → idle", async ({ page }) => {
-    await page.goto("/");
-    await waitForTickListener(page);
-
-    // idle: "Record"
-    await emitTick(page, { phase: 0, status: "idle" });
-    await expect(page.getByRole("button", { name: /^Record$/ })).toBeEnabled();
-
-    // loading: "Loading…", disabled
-    await emitTick(page, {
-      phase: 1,
-      status: "idle",
-      can_toggle: false,
-      status_message: "Loading model…",
-    });
-    await expect(page.getByRole("button", { name: /Loading/ })).toBeDisabled();
-
-    // recording: "Stop & transcribe", enabled
-    await emitTick(page, {
-      phase: 2,
-      status: "recording",
-      is_recording: true,
-      can_toggle: true,
-    });
-    await expect(page.getByRole("button", { name: /Stop & transcribe/ })).toBeEnabled();
-
-    // transcribing: "Transcribing…", disabled
-    await emitTick(page, {
-      phase: 3,
-      status: "transcribing",
-      can_toggle: false,
-    });
-    await expect(page.getByRole("button", { name: /Transcribing/ })).toBeDisabled();
-
-    // back to idle: "Record"
-    await emitTick(page, { phase: 0, status: "idle", can_toggle: true });
-    await expect(page.getByRole("button", { name: /^Record$/ })).toBeEnabled();
-  });
-});
-
-test.describe("hotkey banner", () => {
-  test("hidden when status ok, visible with error when not, retry invokes hotkey_retry", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await waitForHotkeyStatusListener(page);
-
-    // Default state: ok=true was last emit (from the wait probe). No banner.
-    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
-
-    // Failure surfaces the banner with the exact error text.
-    await page.evaluate(() =>
-      window.__owEmit("hotkey_status", {
-        ok: false,
-        error: "AX denied — grant Accessibility, then click Restart.",
-      }),
-    );
-    const banner = page.getByTestId("hotkey-banner");
-    await expect(banner).toBeVisible();
-    await expect(banner).toContainText("AX denied");
-    await expect(banner.getByRole("button", { name: "Restart" })).toBeVisible();
-
-    // Retry click invokes hotkey_retry exactly once.
-    await banner.getByRole("button", { name: "Restart" }).click();
-    const retryCount = await page.evaluate(
-      () => (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0,
-    );
-    expect(retryCount).toBe(1);
-
-    // Recovery clears the banner.
-    await page.evaluate(() =>
-      window.__owEmit("hotkey_status", { ok: true, error: "" }),
-    );
-    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
-  });
-});
-
-test.describe("mic permission banner", () => {
-  test("hidden when authorized, visible when denied, recovers when authorized again", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await waitForPermissionsStatusListener(page);
-
-    // Default state: probe emitted ok=true. No banner.
-    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
-
-    // Denial surfaces the banner with the System Settings copy.
-    await page.evaluate(() =>
-      window.__owEmit("permissions_status", {
-        mic_ok: false,
-        mic_state: "denied",
-        error:
-          "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
-      }),
-    );
-    const banner = page.getByTestId("mic-banner");
-    await expect(banner).toBeVisible();
-    await expect(banner).toContainText("Microphone access denied");
-    // Mic banner is informational — no Retry button (recovery is via
-    // System Settings, not an in-app button).
-    await expect(banner.getByRole("button")).toHaveCount(0);
-
-    // Recovery clears the banner (e.g., user grants access then reopens).
-    await page.evaluate(() =>
-      window.__owEmit("permissions_status", {
-        mic_ok: true,
-        mic_state: "authorized",
-        error: "",
-      }),
-    );
-    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
-  });
-});
-
-test.describe("recognizer-load banner", () => {
-  test("appears on PHASE_ERROR with recognizer load prefix; transcribe-prefix errors stay in debug only", async ({
-    page,
-  }) => {
-    await page.goto("/");
-    await waitForTickListener(page);
-
-    // Boot baseline: no banner.
-    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
-
-    // PHASE_ERROR with "recognizer load" prefix → banner.
-    await emitTick(page, {
-      phase: 5,
-      status: "idle",
-      can_toggle: true,
-      error_message:
-        "recognizer load failed: failed to read model file model.int8.onnx",
-    });
-    const banner = page.getByTestId("recognizer-banner");
-    await expect(banner).toBeVisible();
-    await expect(banner).toContainText("recognizer load failed");
-
-    // Per-utterance transcribe failure (different prefix) → debug KV only,
-    // no banner. Confirms the prefix-based gating discriminates the two
-    // error sources correctly.
-    await emitTick(page, {
-      phase: 5,
-      status: "idle",
-      can_toggle: true,
-      error_message: "transcribe: empty audio buffer",
-    });
-    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
-  });
-});
-
 test.describe("text selection", () => {
-  test("chrome non-selectable, transcript + KV values selectable", async ({ page }) => {
+  test("chrome (sidebar) is non-selectable", async ({ page }) => {
     await page.goto("/");
-    await waitForTickListener(page);
-    await emitTick(page, {
-      phase: 0,
-      status: "idle",
-      transcript: "selectable transcript text",
-    });
 
-    const headerSelect = await page
-      .locator("h1", { hasText: "OpenWhisper Dev" })
+    const sidebarSelect = await page
+      .getByTestId("sidebar-item-home")
       .evaluate((el) => getComputedStyle(el).userSelect);
-    expect(headerSelect).toBe("none");
-
-    const transcriptSelect = await page
-      .getByText("selectable transcript text")
-      .evaluate((el) => getComputedStyle(el).userSelect);
-    expect(transcriptSelect).toBe("text");
+    expect(sidebarSelect).toBe("none");
   });
 });

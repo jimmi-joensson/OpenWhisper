@@ -170,7 +170,30 @@ pub fn install(app: &AppHandle) {
 pub fn hotkey_retry(app: AppHandle) {
     #[cfg(target_os = "macos")]
     {
-        let _ = &app;
+        // Tauri 2's app.restart() re-execs current_exe() directly. On Mac
+        // that skips LaunchServices/launchctl registration, so the process
+        // exits but the new instance silently fails to start — especially
+        // in dev builds where ad-hoc signing + TCC handoff is fragile.
+        // Canonical Mac relaunch is `open -n -a <bundle>`, which goes
+        // through LaunchServices and registers with launchctl cleanly.
+        // Walk current_exe ancestors to find the enclosing .app bundle.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(bundle) = exe.ancestors().find(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s == "app")
+                    .unwrap_or(false)
+            }) {
+                let _ = std::process::Command::new("open")
+                    .args(["-n", "-a"])
+                    .arg(bundle)
+                    .spawn();
+                app.exit(0);
+                return;
+            }
+        }
+        // Fallback for the bare-binary case (running target/debug/openwhisper-tauri
+        // without a .app wrapper). Tauri's restart() is correct there.
         app.restart();
     }
     #[cfg(target_os = "windows")]

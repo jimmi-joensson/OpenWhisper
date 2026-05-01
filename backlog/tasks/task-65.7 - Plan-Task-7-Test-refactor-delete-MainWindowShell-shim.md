@@ -1,9 +1,10 @@
 ---
 id: TASK-65.7
 title: 'Plan Task 7: Test refactor + delete MainWindowShell shim'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:46'
+updated_date: '2026-05-01 14:22'
 labels:
   - 65-impl
 dependencies: []
@@ -19,3 +20,9 @@ parent_task_id: TASK-65
 - [ ] #5 Dev-shell smoke (pnpm dev) verifies all three routes render; Cmd/Ctrl+, jumps to Settings; tray Preferences… still opens Settings.
 - [ ] #6 pnpm test:ui green; pnpm tsc --noEmit clean.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: f4bcec5 — split tests by route; delete MainWindowShell shim. 56/56 Playwright; tsc clean. Live-shell smoke (Step 5) deferred to pre-review.
+<!-- SECTION:NOTES:END -->

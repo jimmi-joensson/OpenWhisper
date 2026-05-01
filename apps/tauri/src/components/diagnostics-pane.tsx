@@ -9,13 +9,12 @@ import {
   PHASE_TRANSCRIBING,
 } from "../lib/dictation";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
-import { HealthBanner } from "./health-banner";
 import { LevelMeter } from "./level-meter";
 import { RecordButton } from "./record-button";
 
 export type Platform = "macos" | "windows";
 
-interface MainWindowShellProps {
+export interface DiagnosticsPaneProps {
   title?: string;
   phase?: number;
   status?: PillStatus;
@@ -35,11 +34,6 @@ interface MainWindowShellProps {
   onToggle?: () => void;
   coreVersion?: string | null;
   coreError?: string | null;
-  hotkeyError?: string | null;
-  onHotkeyRetry?: () => void;
-  micError?: string | null;
-  recognizerError?: string | null;
-  onRecognizerRetry?: () => void;
 }
 
 const PHASE_NAMES: Record<number, string> = {
@@ -51,8 +45,7 @@ const PHASE_NAMES: Record<number, string> = {
   [PHASE_ERROR]: "error",
 };
 
-export function MainWindowShell({
-  title = "OpenWhisper",
+export function DiagnosticsPane({
   phase = 0,
   status = "idle",
   levels = [],
@@ -71,12 +64,7 @@ export function MainWindowShell({
   onToggle,
   coreVersion,
   coreError,
-  hotkeyError,
-  onHotkeyRetry,
-  micError,
-  recognizerError,
-  onRecognizerRetry,
-}: MainWindowShellProps) {
+}: DiagnosticsPaneProps) {
   const statusText =
     statusMessage ||
     (status === "recording"
@@ -96,44 +84,6 @@ export function MainWindowShell({
         fontFamily: "var(--font-sys)",
       }}
     >
-      <h1
-        style={{
-          textAlign: "center",
-          fontSize: 22,
-          fontWeight: 600,
-          letterSpacing: "-0.01em",
-          margin: "4px 0 18px",
-        }}
-      >
-        {title}
-      </h1>
-
-      {hotkeyError ? (
-        <div data-testid="hotkey-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner
-            message={hotkeyError}
-            onRetry={onHotkeyRetry}
-            retryLabel="Restart"
-          />
-        </div>
-      ) : null}
-
-      {micError ? (
-        <div data-testid="mic-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner message={micError} />
-        </div>
-      ) : null}
-
-      {recognizerError ? (
-        <div data-testid="recognizer-banner" style={{ marginBottom: 12 }}>
-          <HealthBanner
-            message={recognizerError}
-            onRetry={onRecognizerRetry}
-            retryLabel="Retry"
-          />
-        </div>
-      ) : null}
-
       <Section title="Rust ↔ React FFI">
         <KV
           k="message"

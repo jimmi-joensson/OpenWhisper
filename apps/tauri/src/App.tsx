@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getName } from "@tauri-apps/api/app";
-import { Settings as SettingsIcon } from "lucide-react";
-import { MainWindowShell, type Platform } from "./components/main-window-shell";
+import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
+import { HomePane } from "./components/home-pane";
 import { DevPillControls } from "./components/dev-pill-controls";
+import { SidebarNav, type Route } from "./components/sidebar-nav";
+import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
+import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
@@ -20,8 +23,6 @@ import {
 import { PHASE_ERROR } from "./lib/dictation";
 import "./App.css";
 
-type View = "main" | "settings";
-
 const PILL_BAR_COUNT = 12;
 
 function detectPlatform(): Platform {
@@ -32,12 +33,26 @@ function detectPlatform(): Platform {
 function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
-  const [view, setView] = useState<View>("main");
-  // App productName from Tauri runtime — "OpenWhisper" (release) or
-  // "OpenWhisper Dev" (per tauri.dev.conf.json overlay). Single source of
-  // truth: the running bundle's CFBundleName.
-  const [appName, setAppName] = useState<string>("OpenWhisper");
+  const [route, setRoute] = useState<Route>("home");
+  const [settingsPane, setSettingsPane] = useState<SettingsPaneId>("general");
   const platform = detectPlatform();
+
+  // Leaving Settings resets the pane to General so re-entering always lands
+  // on the canonical first pane. Keeps in-Settings nav lossless (clicking
+  // around between panes preserves your spot) without making the route exit
+  // feel like a partial back.
+  useEffect(() => {
+    if (route !== "settings" && settingsPane !== "general") {
+      setSettingsPane("general");
+    }
+  }, [route, settingsPane]);
+
+  // Mac sidebar reserves 38 px padding-top for traffic-light overlay; CSS
+  // selector keys on body[data-platform="macos"]. Set once on mount.
+  useEffect(() => {
+    document.body.setAttribute("data-platform", platform);
+  }, [platform]);
+
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
   const permissions = usePermissionsStatus();
@@ -73,11 +88,6 @@ function App() {
     invoke<string>("core_version")
       .then(setCoreVersion)
       .catch((e) => setCoreError(String(e)));
-    getName()
-      .then(setAppName)
-      .catch(() => {
-        // Keep default "OpenWhisper" if the API isn't available.
-      });
   }, []);
 
   // ⌘, switches the in-window route to Settings. Settings is no longer a
@@ -88,7 +98,7 @@ function App() {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (cmdOrCtrl && e.key === ",") {
         e.preventDefault();
-        setView("settings");
+        setRoute("settings");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -96,12 +106,15 @@ function App() {
   }, []);
 
   // Tray Preferences… (and any other Rust-side trigger) emits `ow_navigate`
-  // with a target view. Listen here and swap routes.
+  // with a target view. Listen here and swap routes. The "main" payload maps
+  // to "home" so existing tray-menu wiring keeps working without a Rust change.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     void listen<string>("ow_navigate", (evt) => {
-      if (evt.payload === "settings" || evt.payload === "main") {
-        setView(evt.payload);
+      if (evt.payload === "settings") {
+        setRoute("settings");
+      } else if (evt.payload === "main") {
+        setRoute("home");
       }
     }).then((fn) => {
       unlisten = fn;
@@ -109,8 +122,7 @@ function App() {
     return () => unlisten?.();
   }, []);
 
-  const goBack = useCallback(() => setView("main"), []);
-  const openSettings = useCallback(() => setView("settings"), []);
+  const goBack = useCallback(() => setRoute("home"), []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
   // override is active so manual selections aren't immediately overwritten
@@ -154,96 +166,99 @@ function App() {
   return (
     <ThemeProvider>
     <div className="ow-app">
-      {/* Drag region — `data-tauri-drag-region` on the strip + on the
-          h1 (Tauri 2.10's drag.js only checks `e.target.getAttribute`,
-          not ancestors, so descendants must opt in individually). The
-          back button explicitly opts OUT via `="false"` so its onClick
-          still fires (per tauri#9901). The whole drag flow only works
-          because the main window has `acceptFirstMouse: true` set in
-          tauri.conf.json — without it, WKWebView swallows the first
-          NSLeftMouseDown and AppKit never sees a chance to start the
-          window drag (tauri#9503). */}
-      <header
-        className={`ow-titlebar ow-titlebar--${view}`}
-        data-tauri-drag-region
-      >
-        {view === "settings" ? (
-          <>
-            <button
-              type="button"
-              className="ow-titlebar__back"
-              onClick={goBack}
-              aria-label="Back to main"
-              data-tauri-drag-region="false"
-            >
-              <span aria-hidden="true">←</span>
-            </button>
-            <h1 className="ow-titlebar__title" data-tauri-drag-region>
-              Settings
-            </h1>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="ow-titlebar__icon ow-titlebar__icon--end"
-            onClick={openSettings}
-            aria-label="Open settings"
-            data-testid="open-settings-button"
-            data-tauri-drag-region="false"
+      {/* Layout: sidebar column from y=0; titlebar is INSET inside the
+          content column only (TASK-68). Drag region — `data-tauri-drag-region`
+          on the inset titlebar + on the h1 (Tauri 2.10's drag.js only checks
+          `e.target.getAttribute`, not ancestors, so descendants must opt in
+          individually). The back button explicitly opts OUT via `="false"`
+          so its onClick still fires (per tauri#9901). The whole drag flow
+          only works because the main window has `acceptFirstMouse: true` set
+          in tauri.conf.json — without it, WKWebView swallows the first
+          NSLeftMouseDown and AppKit never sees a chance to start the window
+          drag (tauri#9503). */}
+      <div className="ow-app__shell">
+        <SidebarNav
+          route={route}
+          onRouteSelect={setRoute}
+          settingsPane={settingsPane}
+          onSettingsPaneSelect={setSettingsPane}
+        />
+        <div className="ow-app__column">
+          <header
+            className={`ow-titlebar ow-titlebar--${route}`}
+            data-tauri-drag-region
           >
-            <SettingsIcon size={15} aria-hidden="true" />
-          </button>
-        )}
-      </header>
-      <main className="ow-app__body">
-        {view === "settings" ? (
-          <SettingsShell />
-        ) : (
-          <>
-            <MainWindowShell
-              title={appName}
-              phase={dictation.phase}
-              status={dictation.status}
-              levels={dictation.levels}
-              level={dictation.level}
-              elapsed={dictation.elapsed}
-              samples={dictation.samples}
-              transcript={dictation.transcript}
-              confidence={dictation.confidence}
-              statusMessage={dictation.statusMessage}
-              errorMessage={dictation.errorMessage}
-              canToggle={dictation.canToggle}
-              isRecording={dictation.isRecording}
-              downloadBytesDone={dictation.downloadBytesDone}
-              downloadBytesTotal={dictation.downloadBytesTotal}
-              platform={platform}
-              onToggle={() => void dictation.toggle()}
-              coreVersion={coreVersion}
-              coreError={coreError}
-              hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-              onHotkeyRetry={() => void hotkey.retry()}
-              micError={
-                permissions.status && !permissions.status.mic_ok
-                  ? permissions.status.error
-                  : null
-              }
-              recognizerError={recognizerError}
-            />
-            {import.meta.env.DEV && (
-              <DevPillControls
-                enabled={pillOverride.enabled}
-                status={pillOverride.status}
-                onToggle={(enabled) =>
-                  setPillOverride((prev) => ({ ...prev, enabled }))
-                }
-                onStatus={(status) =>
-                  setPillOverride((prev) => ({ ...prev, status }))
-                }
+            {route === "settings" && (
+              <>
+                <button
+                  type="button"
+                  className="ow-titlebar__back"
+                  onClick={goBack}
+                  aria-label="Back to main"
+                  data-tauri-drag-region="false"
+                >
+                  <ArrowLeft size={16} aria-hidden="true" />
+                </button>
+                <h1 className="ow-titlebar__title" data-tauri-drag-region>
+                  Settings
+                </h1>
+              </>
+            )}
+            <WindowControls platform={platform} />
+          </header>
+          <main className="ow-app__body">
+            {route === "settings" && <SettingsShell active={settingsPane} />}
+            {route === "diagnostics" && (
+              <DiagnosticsPane
+                phase={dictation.phase}
+                status={dictation.status}
+                levels={dictation.levels}
+                level={dictation.level}
+                elapsed={dictation.elapsed}
+                samples={dictation.samples}
+                transcript={dictation.transcript}
+                confidence={dictation.confidence}
+                statusMessage={dictation.statusMessage}
+                errorMessage={dictation.errorMessage}
+                canToggle={dictation.canToggle}
+                isRecording={dictation.isRecording}
+                downloadBytesDone={dictation.downloadBytesDone}
+                downloadBytesTotal={dictation.downloadBytesTotal}
+                platform={platform}
+                onToggle={() => void dictation.toggle()}
+                coreVersion={coreVersion}
+                coreError={coreError}
               />
             )}
-          </>
-        )}
-      </main>
+            {route === "home" && (
+              <>
+                <HomePane
+                  hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+                  onHotkeyRetry={() => void hotkey.retry()}
+                  micError={
+                    permissions.status && !permissions.status.mic_ok
+                      ? permissions.status.error
+                      : null
+                  }
+                  recognizerError={recognizerError}
+                />
+                {import.meta.env.DEV && (
+                  <DevPillControls
+                    enabled={pillOverride.enabled}
+                    status={pillOverride.status}
+                    onToggle={(enabled) =>
+                      setPillOverride((prev) => ({ ...prev, enabled }))
+                    }
+                    onStatus={(status) =>
+                      setPillOverride((prev) => ({ ...prev, status }))
+                    }
+                  />
+                )}
+              </>
+            )}
+          </main>
+        </div>
+      </div>
     </div>
     </ThemeProvider>
   );

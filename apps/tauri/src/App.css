@@ -226,15 +226,25 @@ body {
   gap: 10px;
   flex: 0 0 auto;
   height: 36px;
-  padding: 0 14px 0 80px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--background);
+  /* Match sidebar's tinted background so the seam between the inset
+     titlebar and the (left) sidebar reads as one continuous panel. */
+  background: rgb(0 0 0 / 0.15);
   user-select: none;
   -webkit-user-select: none;
 }
 
-.ow-titlebar--main {
-  /* No content in the strip on the main view — just drag space. */
+/* Windows: close button must sit flush against the window edge per OS
+   convention. WindowControls renders null on Mac, so :has() naturally
+   scopes this to Windows. */
+.ow-titlebar:has(.ow-window-controls) {
+  padding-right: 0;
+}
+
+.ow-titlebar--home,
+.ow-titlebar--diagnostics {
+  /* No content in the strip on these routes — just drag space. */
   border-bottom-color: transparent;
 }
 
@@ -299,10 +309,218 @@ body {
   letter-spacing: -0.005em;
 }
 
-.ow-app__body {
+/* Windows-only chrome: min/max/close cluster, right-aligned in the
+   inset titlebar. Mac collapses to nothing (component returns null). */
+.ow-window-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.ow-window-controls__btn {
+  width: 46px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 80ms ease, color 80ms ease;
+}
+
+.ow-window-controls__btn:hover {
+  background: color-mix(in oklch, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+.ow-window-controls__btn--close:hover {
+  background: #e81123;
+  color: white;
+}
+
+.ow-window-controls__btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--info-border);
+}
+
+.ow-app__shell {
+  display: grid;
+  grid-template-columns: 180px 1fr;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* Right column inside the shell — hosts the inset titlebar above the
+   route body. Sidebar (left column) is full-height and starts at y=0
+   per TASK-68 D5. */
+.ow-app__column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ow-sidebar {
+  background: rgb(0 0 0 / 0.15);
+  border-right: 1px solid var(--border);
+  padding: 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   overflow-y: auto;
+}
+
+/* Mac: traffic-light buttons render at the top-left over the sidebar.
+   Reserve 38 px so the sidebar's first item clears the overlay zone. */
+body[data-platform="macos"] .ow-sidebar {
+  padding-top: 38px;
+}
+
+.ow-sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ow-sidebar__item:hover {
+  background: color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+
+.ow-sidebar__item:focus-visible {
+  outline: none;
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 2px var(--info-bg);
+}
+
+.ow-sidebar__item--active,
+.ow-sidebar__item--active:hover {
+  background: color-mix(in oklch, var(--info) 30%, transparent);
+  font-weight: 500;
+}
+
+.ow-app__body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.ow-home {
+  padding: 24px 28px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 580px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.ow-home__banner {
+  width: 100%;
+}
+
+.ow-home__hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 16px 24px;
+  gap: 12px;
+}
+
+.ow-home__icon {
+  image-rendering: -webkit-optimize-contrast;
+}
+
+.ow-home__headline {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.ow-home__hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.ow-home__hint kbd {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.08);
+  border: 1px solid var(--border);
+}
+
+.ow-transcript-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.ow-transcript-row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ow-transcript-row__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--foreground);
+  word-break: break-word;
+}
+
+.ow-transcript-row__time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-transcript-row__copy {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.ow-transcript-row:hover .ow-transcript-row__copy,
+.ow-transcript-row__copy:focus-visible {
+  opacity: 1;
+}
+
+.ow-transcript-row__copy:hover {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  color: var(--foreground);
 }
 
 /* Webview scrollbar — Tauri's default is invisible on Mac. Slim, theme-aware. */

@@ -29,6 +29,31 @@ Open Tauri issues with the same root cause:
 
 ---
 
+### Custom titlebar requires `set_decorations(false)` AND four window IPCs in capabilities
+
+**Symptom:** OS title bar still drawn above the app's drawn header strip on Windows even after `decorations: false`. Or: WindowControls (min/max/close) clicks silently no-op — the buttons render, the JS click handler fires, but nothing happens to the window. Identical to the macOS drag-region capability bug above (silent IPC rejection).
+
+**Root cause:** `set_decorations(false)` only removes the OS chrome. The custom min/max/close buttons invoke Tauri 2's `plugin:window|minimize` / `toggle_maximize` / `close` / `is_maximized` IPCs from React. Without `core:window:allow-minimize`, `allow-toggle-maximize`, `allow-close`, and `allow-is-maximized` in `apps/tauri/src-tauri/capabilities/default.json`, the IPC calls reject silently at the capability layer. There is no UI feedback for a denied IPC call — the `invoke` Promise just rejects, and the WindowControls component's `onClick={() => void win.minimize()}` swallows it. Same trap as the macOS `allow-start-dragging` omission documented above.
+
+There's a secondary trap on the maximize/restore icon swap: Tauri 2.10's global `listen("tauri://resize", …)` does NOT fire reliably for synthetic resize events triggered by `toggleMaximize()`. The reliable subscription is `getCurrentWindow().onResized(cb)` — window-scoped, returns the unlisten fn directly.
+
+**Fix in tree:**
+1. `apps/tauri/src-tauri/capabilities/default.json` lists all four `core:window:allow-{minimize,toggle-maximize,close,is-maximized}` permissions explicitly.
+2. `apps/tauri/src-tauri/src/lib.rs::setup()` calls `main.set_decorations(false)` behind `#[cfg(target_os = "windows")]`. Tauri 2 keeps `WS_THICKFRAME` on the window style after this, so Aero-snap (Win+arrows, edge snap, snap-assist) keeps working — we do not strip it ourselves.
+3. `apps/tauri/src/components/window-controls.tsx` subscribes via `getCurrentWindow().onResized(cb)` to keep the maximize/restore icon in sync, NOT global `listen("tauri://resize", …)`.
+
+**macOS is unaffected:** the `cfg(target_os = "windows")` gate compiles to nothing on Mac. `titleBarStyle: "Overlay"` keeps drawing AppKit traffic-lights over the sidebar; the WindowControls component returns `null` on Mac (`platform !== "windows"` early-return). The unified inset titlebar layout (sidebar from y=0, titlebar inset over content column) lands on both platforms identically.
+
+**Do NOT** move `decorations: false` into `tauri.conf.json` — `app.windows[]` in `tauri.dev.conf.json` replaces (not merges) the base array, so platform-conditional decorations would have to be duplicated four times across two configs. The Rust `cfg` gate in `setup()` is cleaner.
+
+**Do NOT** strip `WS_THICKFRAME` manually thinking "decorations: false should kill it" — Tauri keeps it intentionally for Aero-snap. Stripping breaks `Win+←/→/↑/↓` and edge snap-assist, which are baseline Windows expectations.
+
+**Do NOT** switch macOS's `titleBarStyle` to `"Transparent"` to dodge the cfg gate — see the existing macOS drag entry above (loses the focus-loss blur on traffic-lights, which the identity tokens depend on).
+
+**Do NOT** use lucide-react's `Copy` icon as a "restore-down" glyph — `Copy` is a clipboard icon (one rectangle behind another, with a bend), not the Win 11 chrome restore convention (two squares overlapping at the corner). Hand-roll the SVGs in `window-controls.tsx`; lucide doesn't ship a Win 11 chrome glyph set.
+
+---
+
 ## macOS
 
 ### Window drag silently no-ops without `core:window:allow-start-dragging`

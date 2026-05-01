@@ -1,10 +1,10 @@
 ---
 id: TASK-65
 title: Main window — Home pane + sidebar nav (v1)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:40'
-updated_date: '2026-05-01 08:13'
+updated_date: '2026-05-01 14:50'
 labels: []
 dependencies: []
 documentation:
@@ -29,3 +29,9 @@ Replace the current debug-style MainWindowShell with a clean Home pane + outer s
 - [ ] #6 Playwright tests pass (pnpm test:ui): home spec covers hero + banners + latest-row + copy; diagnostics spec covers debug dashboard; main-window spec covers shell / sidebar routing / scroll.
 - [ ] #7 After a dictation finalizes with a non-empty transcript, a single transcript row appears below the hero with the text and a relative timestamp ('just now' / '2m ago'); the row is replaced (not appended) on each subsequent dictation. Hover reveals a copy-to-clipboard button. State is in-memory only.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+All 7 subtasks landed on worktree-task-65-home-pane (commits abed3d9..f4bcec5). 56/56 Playwright; tsc clean. AC #1–#5, #7 covered by tests; AC #6 verified locally. Pending pre-PR: live-shell smoke on Mac (per plan Task 7 Step 5).
+<!-- SECTION:NOTES:END -->

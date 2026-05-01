@@ -54,6 +54,24 @@ async function installTauriShim(page: Page, label: "main" = "main") {
         currentWebview: { label: windowLabel, windowLabel },
       },
       invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        // plugin:window|<verb> — record + return sane defaults so the
+        // WindowControls component can call minimize/toggleMaximize/close
+        // without a real Tauri runtime. Verb is the suffix after the pipe.
+        if (cmd.startsWith("plugin:window|")) {
+          const verb = cmd.slice("plugin:window|".length);
+          const w = window as unknown as {
+            __owWindowCalls?: string[];
+            __owMaximized?: boolean;
+          };
+          w.__owWindowCalls = w.__owWindowCalls ?? [];
+          w.__owWindowCalls.push(verb);
+          if (verb === "is_maximized") return w.__owMaximized ?? false;
+          if (verb === "toggle_maximize") {
+            w.__owMaximized = !(w.__owMaximized ?? false);
+            return null;
+          }
+          return null;
+        }
         if (cmd === "core_version") return "0.1.0-test";
         if (cmd === "plugin:app|name") return "OpenWhisper Dev";
         if (cmd === "dictation_toggle") return null;

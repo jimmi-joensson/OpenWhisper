@@ -46,6 +46,21 @@ test.describe("sidebar nav", () => {
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
 
+  test("sidebar starts at window top; titlebar inset over content column", async ({ page }) => {
+    await page.goto("/");
+    const sidebarBox = await page.getByTestId("sidebar-item-home").boundingBox();
+    // Sidebar's first item is within the top 60 px of the window — i.e. the
+    // sidebar column starts at or near y=0.
+    expect(sidebarBox && sidebarBox.y).toBeLessThan(60);
+
+    // Settings titlebar back-arrow lives inside the content column (x>150),
+    // not full-width above the sidebar.
+    await page.getByTestId("sidebar-item-settings").click();
+    const back = page.getByRole("button", { name: "Back to main" });
+    const backBox = await back.boundingBox();
+    expect(backBox && backBox.x).toBeGreaterThan(150);
+  });
+
   test("re-entering Settings resets to General regardless of last pane", async ({ page }) => {
     await page.goto("/");
 

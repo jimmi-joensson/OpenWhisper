@@ -226,7 +226,7 @@ body {
   gap: 10px;
   flex: 0 0 auto;
   height: 36px;
-  padding: 0 14px 0 80px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--background);
   user-select: none;
@@ -307,6 +307,16 @@ body {
   min-height: 0;
 }
 
+/* Right column inside the shell — hosts the inset titlebar above the
+   route body. Sidebar (left column) is full-height and starts at y=0
+   per TASK-68 D5. */
+.ow-app__column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
 .ow-sidebar {
   background: rgb(0 0 0 / 0.15);
   border-right: 1px solid var(--border);
@@ -315,6 +325,12 @@ body {
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
+}
+
+/* Mac: traffic-light buttons render at the top-left over the sidebar.
+   Reserve 38 px so the sidebar's first item clears the overlay zone. */
+body[data-platform="macos"] .ow-sidebar {
+  padding-top: 38px;
 }
 
 .ow-sidebar__item {

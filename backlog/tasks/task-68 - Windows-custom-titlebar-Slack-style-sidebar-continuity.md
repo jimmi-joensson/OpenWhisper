@@ -1,10 +1,10 @@
 ---
 id: TASK-68
 title: Windows custom titlebar (Slack-style) + sidebar continuity
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-05-01 16:54'
-updated_date: '2026-05-01 16:57'
+updated_date: '2026-05-01 17:24'
 labels: []
 dependencies: []
 documentation:

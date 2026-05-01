@@ -65,6 +65,27 @@ When updating a GitHub issue or PR comment thread on the **same topic** in close
 - Exception: when the user explicitly asks for a new comment ("post a follow-up saying X"), respect that.
 - This applies symmetrically to PR review comments — don't post "actually, ignore that" right after a review comment; edit or delete the original.
 
+## Issue close-out comments — short, addressed, linked
+
+When closing a user-reported GitHub issue, the comment shape is: **@mention the reporter, link to the shipped artifact, one line of relevant change, thank them.** Don't include implementation forensics (SHA256, codesign output, verification commands) — those belong in release notes / `INSTALL.md` / a security advisory, not in a close-out comment.
+
+**Why:** The reporter is a human who wants to know "is this fixed for me, and where do I get it?" — not "how do I forensically prove it." Close-out comments without an `@<reporter>` don't trigger an inbox notification on their side, so silently closing the issue lets the fix sit there unnoticed. Concrete case: closing #2 today my draft was 9 lines of hash + `spctl` block; the published version was 5 lines, `@mkrautz`-mentioned, with `[Release 0.4.0](https://…/releases/tag/v0.4.0)` as a clickable link. The shorter shape is what the reporter wanted.
+
+**Template:**
+
+> Done @<reporter> — <one-line summary of what shipped> in [<release name>](<link to release / PR / docs>).
+>
+> <one optional sentence on user-visible behavior change>
+>
+> Thanks again for the issue!
+
+**How to apply:**
+- Always `@<reporter>` on close-out, even when the reporter is a regular collaborator. The notification matters more than the etiquette.
+- Always include a markdown link to the concrete artifact (release tag, asset URL, merged PR, updated doc) — not a bare reference like "v0.4.0".
+- Cut SHA256s, `spctl`/`codesign -dv` output, environment dumps, and any "here's how to verify" code block. If verification matters, link to the place where verification *lives* (e.g. `INSTALL.md`'s troubleshooting section).
+- Aim for ≤ 6 lines including blank lines. Longer means you're explaining the implementation; shorten it.
+- This applies to **close-out** comments specifically. Mid-thread debugging comments and PR review comments have different shapes.
+
 ## Task tracking — Backlog.md CLI
 
 Tasks live in `backlog/` at the repo root, managed by the **Backlog.md** CLI (npm global, but install with `pnpm add -g backlog.md`).

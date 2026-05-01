@@ -228,7 +228,9 @@ body {
   height: 36px;
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--background);
+  /* Match sidebar's tinted background so the seam between the inset
+     titlebar and the (left) sidebar reads as one continuous panel. */
+  background: rgb(0 0 0 / 0.15);
   user-select: none;
   -webkit-user-select: none;
 }

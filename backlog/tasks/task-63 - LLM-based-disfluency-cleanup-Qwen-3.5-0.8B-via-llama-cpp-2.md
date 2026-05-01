@@ -4,11 +4,12 @@ title: LLM-based disfluency cleanup (Qwen 3.5 0.8B via llama-cpp-2)
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:17'
-updated_date: '2026-04-30 22:27'
+updated_date: '2026-05-01 08:13'
 labels: []
 dependencies: []
 documentation:
-  - docs/superpowers/plans/2026-05-01-llm-disfluency-cleanup.md
+  - backlog/docs/specs/2026-05-01-llm-disfluency-cleanup.md
+  - backlog/docs/plans/2026-05-01-llm-disfluency-cleanup.md
 priority: high
 ---
 

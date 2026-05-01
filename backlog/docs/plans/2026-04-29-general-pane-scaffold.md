@@ -1,7 +1,7 @@
 # Settings → General pane scaffold — implementation plan
 
 **Backlog parent:** TASK-56
-**Spec:** `docs/superpowers/specs/2026-04-29-general-pane-scaffold.md`
+**Spec:** `backlog/docs/specs/2026-04-29-general-pane-scaffold.md`
 **Date:** 2026-04-29
 
 Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-56.N`. Sequential — Task 1 installs the primitives the rest depend on.

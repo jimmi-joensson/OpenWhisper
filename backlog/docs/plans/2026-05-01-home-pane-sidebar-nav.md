@@ -1,9 +1,9 @@
 # Home pane + sidebar nav (v1) — implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement this plan task-by-task. Pick up the matching `TASK-65.N` subtask, mark it In Progress, work through the steps, append commit refs to the subtask notes, and check ACs as you go. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Backlog parent:** TASK-65
-**Spec:** `docs/superpowers/specs/2026-05-01-home-pane-sidebar-nav.md`
+**Spec:** `backlog/docs/specs/2026-05-01-home-pane-sidebar-nav.md`
 **Date:** 2026-05-01
 
 **Goal.** Replace the debug-style `MainWindowShell` with a clean Home pane + outer sidebar nav (Home / Settings / Diagnostics). Existing debug dashboard relocates to a Diagnostics pane; Settings is unchanged internally and only loses its titlebar gear entry point.

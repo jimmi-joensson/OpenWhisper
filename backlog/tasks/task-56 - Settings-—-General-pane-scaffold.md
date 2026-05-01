@@ -4,12 +4,12 @@ title: Settings — General pane scaffold
 status: Done
 assignee: []
 created_date: '2026-04-29 08:24'
-updated_date: '2026-04-29 13:34'
+updated_date: '2026-05-01 08:13'
 labels: []
 dependencies: []
 documentation:
-  - docs/superpowers/specs/2026-04-29-general-pane-scaffold.md
-  - docs/superpowers/plans/2026-04-29-general-pane-scaffold.md
+  - backlog/docs/specs/2026-04-29-general-pane-scaffold.md
+  - backlog/docs/plans/2026-04-29-general-pane-scaffold.md
 priority: high
 ---
 

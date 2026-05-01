@@ -104,8 +104,8 @@ Prefer `--append-notes` during execution so the log builds incrementally with co
 ## Attaching specs & plans
 
 ```bash
-backlog task edit 58 --doc docs/superpowers/specs/2026-04-13-skill-split.md
-backlog task edit 58 --doc docs/superpowers/plans/2026-04-13-skill-split.md
+backlog task edit 58 --doc backlog/docs/specs/2026-04-13-skill-split.md
+backlog task edit 58 --doc backlog/docs/plans/2026-04-13-skill-split.md
 backlog task edit 58 --ref src/parser.ts --ref https://github.com/org/repo/issues/42
 ```
 

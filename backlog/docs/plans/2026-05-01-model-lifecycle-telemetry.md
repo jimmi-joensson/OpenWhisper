@@ -1,7 +1,7 @@
 # Model memory telemetry + lifecycle foundation — implementation plan
 
 **Backlog parent:** TASK-62
-**Spec:** `docs/superpowers/specs/2026-05-01-model-lifecycle-telemetry.md`
+**Spec:** `backlog/docs/specs/2026-05-01-model-lifecycle-telemetry.md`
 **Date:** 2026-05-01
 
 Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-62.N`. Ordering: Tasks 1–3 are pure-core foundations and can run sequentially. Task 4 needs Task 3 (settings hot-reload integrates with the timer). Tasks 5 and 6 (Mac and Win wrapping) can run in parallel after 1–4 land. Tasks 7–9 are surfacing layers — 7 depends on 4–6; 8 and 9 depend on 7; 10 depends on 8 and 9.

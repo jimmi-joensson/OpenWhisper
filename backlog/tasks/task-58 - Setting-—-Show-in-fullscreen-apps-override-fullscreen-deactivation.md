@@ -4,15 +4,15 @@ title: Setting — Show in fullscreen apps (override fullscreen deactivation)
 status: Done
 assignee: []
 created_date: '2026-04-29 18:02'
-updated_date: '2026-04-30 16:31'
+updated_date: '2026-05-01 08:13'
 labels:
   - ui
   - tauri
   - settings
 dependencies: []
 documentation:
-  - docs/superpowers/specs/2026-04-29-fullscreen-behavior-toggle.md
-  - docs/superpowers/plans/2026-04-29-fullscreen-behavior-toggle.md
+  - backlog/docs/specs/2026-04-29-fullscreen-behavior-toggle.md
+  - backlog/docs/plans/2026-04-29-fullscreen-behavior-toggle.md
 priority: medium
 ---
 

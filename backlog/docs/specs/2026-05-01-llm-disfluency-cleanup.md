@@ -166,6 +166,6 @@ UI surface lives in **Settings → Dictation** (new section "Cleanup" — distin
 - Existing transcript pipeline: `core/src/transcript.rs` (called from both shells via `transcript::process`).
 - Existing recognizer model-download pattern: `core/src/recognizer/download.rs` — mirror this for the GGUF.
 - Dictation state machine + download progress fields: `core/src/dictation.rs:26–53`.
-- Lifecycle abstraction (this spec depends on it): TASK-62 spec at `docs/superpowers/specs/2026-05-01-model-lifecycle-telemetry.md`.
+- Lifecycle abstraction (this spec depends on it): TASK-62 spec at `backlog/docs/specs/2026-05-01-model-lifecycle-telemetry.md`.
 - Project principles applied: local-first-for-cost-saving (LLM is local), zero-config-over-toggles (sane defaults, minimal user choices), Mac-as-source-of-truth (settings UI mirrors Mac SwiftUI patterns).
 - Engine choice rationale: discussed in conversation context — `llama-cpp-2` over MLX for portability + Vulkan for Windows GPU coverage.

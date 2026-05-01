@@ -4,11 +4,11 @@ title: Pill loading-state animation (replace cleanup-load placeholder)
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:17'
-updated_date: '2026-04-30 22:27'
+updated_date: '2026-05-01 08:13'
 labels: []
 dependencies: []
 documentation:
-  - docs/superpowers/plans/2026-05-01-pill-loading-animation.md
+  - backlog/docs/plans/2026-05-01-pill-loading-animation.md
 priority: medium
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: writing-backlog-plans
-description: Use when writing an implementation plan for a project that uses Backlog.md (detect via `backlog/` dir or `backlog.config.yml` at repo root, or project CLAUDE.md references the `backlog` CLI). Produces both a design-doc markdown in docs/superpowers/plans/ AND a Backlog.md subtask tree under the parent task. Composes superpowers:writing-plans for the markdown half; adds Backlog enforcement: subtask-per-plan-task, status tracking, commit-ref appending, ID-mapping reviewer check.
+description: Use when writing an implementation plan for a project that uses Backlog.md (detect via `backlog/` dir or `backlog.config.yml` at repo root, or project CLAUDE.md references the `backlog` CLI). Produces both a design-doc markdown in backlog/docs/plans/ AND a Backlog.md subtask tree under the parent task. Backlog is the single source of truth: tasks own status/ACs/notes, attached docs (specs + plans) live in `backlog/docs/`. Adds Backlog enforcement: subtask-per-plan-task, status tracking, commit-ref appending, ID-mapping reviewer check.
 ---
 
 # Writing Backlog Plans
@@ -15,9 +15,9 @@ Use when ALL of:
 
 - Repo has `backlog/` directory OR `backlog.config.yml` / `backlog/config.yml` / `.backlog/config.yml` at root
 - Project CLAUDE.md references the `backlog` CLI, or the user invokes `backlog task …` verbs
-- You are writing a plan for a multi-step task (same trigger as writing-plans)
+- You are writing a plan for a multi-step task
 
-Otherwise use plain `superpowers:writing-plans`.
+For projects without Backlog.md, hand-roll the plan markdown using the same shape (bite-sized tasks, verifiable outcome ACs, per-task verification steps) — there is no other planning skill installed.
 
 ## Prereqs
 
@@ -25,18 +25,28 @@ Verify before planning:
 
 - `backlog --version` returns a version. If not, stop and ask the user to install Backlog.md.
 - Parent task exists: `backlog task <id> --plain` returns the task body. If the parent doesn't exist, create it first with `backlog task create "<title>" -d "<why>" --ac "..."` — the plan attaches under that parent.
-- The spec lives somewhere linkable (usually `docs/superpowers/specs/…`). Record the spec path to pass to `--doc` when creating subtasks.
+- The spec lives somewhere linkable (usually `backlog/docs/specs/…`). Record the spec path to pass to `--doc` when creating subtasks.
 
 ## Process
 
-**REQUIRED SUB-SKILL:** Use `superpowers:writing-plans` for the plan markdown itself — file structure, bite-sized tasks, TDD step shape, reviewer loop, execution handoff. Do not duplicate that here.
+The plan markdown is owned by this skill — there is no separate plan-writing skill installed. Embedded rules below.
 
-After the markdown plan is drafted (before the reviewer loop), run the Backlog enforcement steps:
+### Plan markdown rules
+
+- **One markdown file per parent task** at `backlog/docs/plans/YYYY-MM-DD-<topic>.md`. Top header includes `**Backlog parent:** TASK-<N>` and (if exists) `**Spec:** backlog/docs/specs/YYYY-MM-DD-<topic>.md`.
+- **Tasks** are `### Task N:` headings, each ~one commit's worth of work. 2–6 verifiable outcomes per task. If a task has more, split it.
+- **Steps** are concrete: name files (verify they exist or mark `(new)`), give code-shape snippets when ambiguous, but don't write the full implementation in the plan.
+- **Outcome ACs** at the end of each task: observable end-states ("test X committed and red", "command Y emits Z"), NOT step commands ("run pytest").
+- **Ordering + dependencies** stated explicitly. If tasks can run in parallel, say so. Cross-plan deps named to subtask granularity (e.g. "depends on TASK-62.2", not just "depends on TASK-62").
+- **Verification per task** — every task names how it'll be verified (cargo test, manual smoke with concrete steps, Playwright spec).
+- **No deferred design decisions** — anything load-bearing decided in the plan, not at execution time. Acceptable to defer minor knobs.
+
+### Backlog enforcement
 
 1. Confirm parent task ID. Add a "Backlog parent: TASK-<parent>" line near the plan's top header so the linkage is explicit.
 2. For each plan task `Task N`, create the matching Backlog subtask (see next section).
-3. Attach the spec to the parent: `backlog task edit <parent> --doc docs/superpowers/specs/<spec>.md`.
-4. Attach the plan markdown to the parent: `backlog task edit <parent> --doc docs/superpowers/plans/<plan>.md`.
+3. Attach the spec to the parent: `backlog task edit <parent> --doc backlog/docs/specs/<spec>.md`.
+4. Attach the plan markdown to the parent: `backlog task edit <parent> --doc backlog/docs/plans/<plan>.md`.
 5. Run the plan reviewer loop. Pass the reviewer the addendum in `references/plan-reviewer-addendum.md` so it also checks ID mapping.
 
 For concrete command syntax, see `references/backlog-cli-cheatsheet.md`.
@@ -66,7 +76,7 @@ Do not create subtasks speculatively for follow-ups discovered later; those beco
 
 ## Status flow during execution
 
-Agents executing the plan (via `subagent-driven-development` or `executing-plans`) update Backlog as they go. The execution skills already own this, but the contract is:
+Agents executing the plan update Backlog as they go. The contract is:
 
 - Start: `backlog task edit <subtask-id> -s "In Progress" -a @claude`
 - Per commit: `backlog task edit <subtask-id> --append-notes $'<sha> <one-line summary>'`
@@ -81,16 +91,16 @@ Canonical reference for what goes where:
 
 | Source | Lives in | Updated by |
 |---|---|---|
-| Design rationale (rubrics, topology, content allocation) | `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` | brainstorming / spec-review |
-| Implementation plan (ordered tasks + steps + commands) | `docs/superpowers/plans/YYYY-MM-DD-<topic>.md` | writing-plans |
-| Per-task work-in-flight (status, owner, ACs, notes, commit refs) | Backlog subtasks `TASK-<parent>.<N>` | writing-backlog-plans (this skill) |
+| Design rationale (problem, goal, non-goals, behavior model, trade-offs) | `backlog/docs/specs/YYYY-MM-DD-<topic>.md` | spec author (often the user via brainstorming) |
+| Implementation plan (ordered tasks + steps + verification) | `backlog/docs/plans/YYYY-MM-DD-<topic>.md` | this skill |
+| Per-task work-in-flight (status, owner, ACs, notes, commit refs) | Backlog subtasks `TASK-<parent>.<N>` | this skill (creates), executor (updates) |
 | Cross-cutting follow-ups discovered mid-task | New top-level Backlog tasks (`TASK-<next>`) | this skill (escalate from executor) |
 
 If a piece of information doesn't fit one of these rows, stop and ask — don't invent a fifth location.
 
 ## Plan reviewer addendum
 
-When dispatching the plan-document-reviewer subagent (see writing-plans' review loop), append the Backlog checks from `references/plan-reviewer-addendum.md` to the reviewer prompt. Minimum the reviewer verifies:
+After the plan + subtask tree are written, dispatch a reviewer agent (the project's general-purpose agent — there is no dedicated reviewer subagent installed). Pass it the standard plan-quality criteria PLUS the verbatim Backlog checks from `references/plan-reviewer-addendum.md`. Minimum the reviewer verifies:
 
 - Backlog parent task exists and is referenced in the plan markdown
 - One Backlog subtask per plan task, ID `TASK-<parent>.<N>` matches plan `### Task N`
@@ -104,7 +114,7 @@ Paste the verbatim fragment from the addendum file into the reviewer's context.
 
 Parent TASK-41 (skill layer split) had 10 plan tasks → 10 subtasks `TASK-41.1` through `TASK-41.10`, each with status, ACs, and commit refs in notes. Inspect the live pattern:
 
-- Plan markdown: `docs/superpowers/plans/2026-04-13-skill-layer-split.md`
+- Plan markdown: `backlog/docs/plans/2026-04-13-skill-layer-split.md`
 - Subtask tree: `backlog task 41 --plain` (parent) and `backlog task list -l 41-impl --plain` (all children)
 
 When uncertain about shape, read TASK-41's subtasks. The `--append-notes` log with commit SHAs is the canonical example of the status flow.
@@ -113,19 +123,12 @@ When uncertain about shape, read TASK-41's subtasks. The `--append-notes` log wi
 
 | Skill | Purpose |
 |---|---|
-| `superpowers:writing-plans` | Universal plan-writing (markdown half); REQUIRED SUB-SKILL |
-| `superpowers:brainstorming` | Upstream — produces the spec this skill plans against |
-| `superpowers:subagent-driven-development` | Downstream — executes the plan; updates Backlog subtasks per task |
-| `superpowers:executing-plans` | Downstream alternative — inline execution with checkpoints |
+| `writing-skills` | Authoring agent skill files themselves (different concern from authoring plans) |
 
-## Classification rubric
+Spec authoring is upstream of this skill — usually the user supplies the design context via brainstorming in chat, and this skill captures it as a `backlog/docs/specs/` doc before drafting the plan.
 
-When something belongs in writing-plans vs here:
+Plan execution is downstream — the executor (or the user) picks up subtasks one at a time and updates Backlog status as commits land.
 
-| Rule about… | Layer |
-|---|---|
-| Plan markdown structure, bite-sized tasks, TDD shape, file paths | writing-plans (universal) |
-| Backlog CLI invocation, subtask creation, status flow, AC management | writing-backlog-plans |
-| Spans both | writing-plans owns the universal; this skill adds Backlog enforcement on top |
+## Single source of truth
 
-If tempted to add harness-specific guidance (Backlog, Jira, Linear) to writing-plans, stop — write a sibling wrapper instead.
+Backlog is the source of truth. Tasks own status, ACs, notes, and commit refs. Specs and plans live as `--doc` attachments under `backlog/docs/{specs,plans}/`. **Do not create a sibling docs tree elsewhere in the repo for plan/spec content** — if a piece of design or implementation context isn't reachable from `backlog task <id> --plain`, it's effectively lost. This skill enforces that contract.

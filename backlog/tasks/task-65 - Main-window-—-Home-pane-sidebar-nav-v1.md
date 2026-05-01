@@ -4,12 +4,12 @@ title: Main window — Home pane + sidebar nav (v1)
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:40'
-updated_date: '2026-04-30 22:48'
+updated_date: '2026-05-01 08:13'
 labels: []
 dependencies: []
 documentation:
-  - docs/superpowers/specs/2026-05-01-home-pane-sidebar-nav.md
-  - docs/superpowers/plans/2026-05-01-home-pane-sidebar-nav.md
+  - backlog/docs/specs/2026-05-01-home-pane-sidebar-nav.md
+  - backlog/docs/plans/2026-05-01-home-pane-sidebar-nav.md
 priority: high
 ---
 

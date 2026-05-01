@@ -1,10 +1,10 @@
 # Plan Reviewer Addendum — Backlog Checks
 
-Addendum to the plan-document-reviewer prompt used by `superpowers:writing-plans`. Paste the fragment below into the reviewer's context alongside the standard plan-review criteria.
+Addendum to the plan-review prompt the writing-backlog-plans skill dispatches. Paste the fragment below into the reviewer's context alongside the standard plan-review criteria. The reviewer is typically a general-purpose agent (no dedicated reviewer subagent ships with this skill).
 
 ## When to use
 
-The plan-writer (writing-backlog-plans) appends this addendum to the reviewer dispatch. The reviewer runs the standard writing-plans review PLUS the Backlog-specific checks below.
+The plan-writer (writing-backlog-plans) appends this addendum to the reviewer dispatch. The reviewer runs the standard plan-quality review PLUS the Backlog-specific checks below.
 
 ## What the reviewer checks
 

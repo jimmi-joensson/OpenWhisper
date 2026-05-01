@@ -1,7 +1,7 @@
 # LLM-based disfluency cleanup — implementation plan
 
 **Backlog parent:** TASK-63
-**Spec:** `docs/superpowers/specs/2026-05-01-llm-disfluency-cleanup.md`
+**Spec:** `backlog/docs/specs/2026-05-01-llm-disfluency-cleanup.md`
 **Date:** 2026-05-01
 **Depends on:** TASK-62 (model lifecycle foundation)
 
@@ -365,7 +365,7 @@ Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-63.N`. Ordering: 
 
 **Goal.** Manual verification on both platforms. Document results in the spec or this plan as a comment block. Latency expectations come from the conversation's research (≤500 ms target on Mac high / Win GPU; ≤1 s upper bound on Mac low / Win CPU).
 
-**Files.** Document results in `docs/superpowers/specs/2026-05-01-llm-disfluency-cleanup.md` (append a "Verified" section at the bottom).
+**Files.** Document results in `backlog/docs/specs/2026-05-01-llm-disfluency-cleanup.md` (append a "Verified" section at the bottom).
 
 **Steps.**
 

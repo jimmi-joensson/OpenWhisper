@@ -4,7 +4,7 @@ title: 'Settings — General: Open at Login + tray checkbox'
 status: Won't Do
 assignee: []
 created_date: '2026-04-27 15:29'
-updated_date: '2026-04-30 16:32'
+updated_date: '2026-05-01 08:13'
 labels:
   - ui
   - tauri
@@ -12,8 +12,8 @@ labels:
 dependencies:
   - TASK-56
 documentation:
-  - docs/superpowers/specs/2026-04-29-launch-at-login.md
-  - docs/superpowers/plans/2026-04-29-launch-at-login.md
+  - backlog/docs/specs/2026-04-29-launch-at-login.md
+  - backlog/docs/plans/2026-04-29-launch-at-login.md
 priority: medium
 ---
 

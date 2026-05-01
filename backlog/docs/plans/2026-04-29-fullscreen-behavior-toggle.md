@@ -1,7 +1,7 @@
 # Setting: Show in fullscreen apps — implementation plan
 
 **Backlog parent:** TASK-58
-**Spec:** `docs/superpowers/specs/2026-04-29-fullscreen-behavior-toggle.md`
+**Spec:** `backlog/docs/specs/2026-04-29-fullscreen-behavior-toggle.md`
 **Date:** 2026-04-29
 
 Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-58.N`. Sequential — Task 1 lands the schema + commands the rest depend on; Task 5 lands tests against the wired-up Switch.

@@ -1,7 +1,7 @@
 # Pill follows active screen — implementation plan
 
 **Backlog parent:** TASK-55
-**Spec:** `docs/superpowers/specs/2026-04-29-pill-follows-active-screen.md`
+**Spec:** `backlog/docs/specs/2026-04-29-pill-follows-active-screen.md`
 **Date:** 2026-04-29
 
 Each `### Task N:` heading maps 1:1 to a Backlog subtask `TASK-55.N`. Task ordering matters: 1 first (settings + atomic flag is a dependency for the watcher gate), 2 and 3 can run in parallel, 4 depends on 2+3, 5 depends on 4, 6 depends on 1, 7 last.

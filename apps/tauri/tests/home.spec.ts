@@ -2,6 +2,7 @@ import {
   emitTick,
   expect,
   test,
+  waitForHotkeyStatusListener,
   waitForPermissionsStatusListener,
   waitForTickListener,
 } from "./fixtures/tauri-shim";
@@ -121,5 +122,102 @@ test.describe("home pane", () => {
     const bannerBox = await banner.boundingBox();
     const heroBox = await hero.boundingBox();
     expect(bannerBox && heroBox && bannerBox.y < heroBox.y).toBeTruthy();
+  });
+});
+
+test.describe("hotkey banner", () => {
+  test("hidden when status ok, visible with error when not, retry invokes hotkey_retry", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForHotkeyStatusListener(page);
+
+    // Default state: ok=true was last emit (from the wait probe). No banner.
+    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
+
+    // Failure surfaces the banner with the exact error text.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_status", {
+        ok: false,
+        error: "AX denied — grant Accessibility, then click Restart.",
+      }),
+    );
+    const banner = page.getByTestId("hotkey-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("AX denied");
+    await expect(banner.getByRole("button", { name: "Restart" })).toBeVisible();
+
+    // Retry click invokes hotkey_retry exactly once.
+    await banner.getByRole("button", { name: "Restart" }).click();
+    const retryCount = await page.evaluate(
+      () => (window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0,
+    );
+    expect(retryCount).toBe(1);
+
+    // Recovery clears the banner.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_status", { ok: true, error: "" }),
+    );
+    await expect(page.getByTestId("hotkey-banner")).toHaveCount(0);
+  });
+});
+
+test.describe("mic permission banner", () => {
+  test("hidden when authorized, visible when denied, recovers when authorized again", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPermissionsStatusListener(page);
+
+    // Default state: probe emitted ok=true. No banner.
+    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
+
+    // Denial surfaces the banner with the System Settings copy.
+    await page.evaluate(() =>
+      window.__owEmit("permissions_status", {
+        mic_ok: false,
+        mic_state: "denied",
+        error:
+          "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
+      }),
+    );
+    const banner = page.getByTestId("mic-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("Microphone access denied");
+    // Mic banner is informational — no Retry button (recovery is via
+    // System Settings, not an in-app button).
+    await expect(banner.getByRole("button")).toHaveCount(0);
+
+    // Recovery clears the banner (e.g., user grants access then reopens).
+    await page.evaluate(() =>
+      window.__owEmit("permissions_status", {
+        mic_ok: true,
+        mic_state: "authorized",
+        error: "",
+      }),
+    );
+    await expect(page.getByTestId("mic-banner")).toHaveCount(0);
+  });
+});
+
+test.describe("recognizer-load banner", () => {
+  test("recognizer load error renders banner on Home", async ({ page }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+
+    // Boot baseline: no banner.
+    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
+
+    // PHASE_ERROR with "recognizer load" prefix → banner.
+    await emitTick(page, {
+      phase: 5,
+      status: "idle",
+      can_toggle: true,
+      error_message:
+        "recognizer load failed: failed to read model file model.int8.onnx",
+    });
+    const banner = page.getByTestId("recognizer-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText("recognizer load failed");
   });
 });

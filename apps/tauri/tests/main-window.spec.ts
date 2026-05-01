@@ -231,6 +231,36 @@ test.describe("recognizer-load banner", () => {
   });
 });
 
+test.describe("sidebar nav", () => {
+  test("clicking sidebar items switches the visible pane", async ({ page }) => {
+    await page.goto("/");
+    // Default route is Home.
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
+
+    // Click Diagnostics — old debug content should still be visible
+    // (Task 1 leaves the Diagnostics body wired to MainWindowShell).
+    await page.getByTestId("sidebar-item-diagnostics").click();
+    await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
+
+    // Click Settings — existing settings shell renders.
+    await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.getByTestId("sidebar-item-settings")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
+
+    // Click Home — sidebar marks Home active. (Hero content lands in Task 4;
+    // assert sidebar state only.)
+    await page.getByTestId("sidebar-item-home").click();
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
+  });
+});
+
 test.describe("text selection", () => {
   test("chrome non-selectable, transcript + KV values selectable", async ({ page }) => {
     await page.goto("/");

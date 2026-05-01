@@ -233,8 +233,9 @@ body {
   -webkit-user-select: none;
 }
 
-.ow-titlebar--main {
-  /* No content in the strip on the main view — just drag space. */
+.ow-titlebar--home,
+.ow-titlebar--diagnostics {
+  /* No content in the strip on these routes — just drag space. */
   border-bottom-color: transparent;
 }
 
@@ -299,8 +300,56 @@ body {
   letter-spacing: -0.005em;
 }
 
-.ow-app__body {
+.ow-app__shell {
+  display: grid;
+  grid-template-columns: 180px 1fr;
   flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ow-sidebar {
+  background: rgb(0 0 0 / 0.15);
+  border-right: 1px solid var(--border);
+  padding: 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.ow-sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ow-sidebar__item:hover {
+  background: color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+
+.ow-sidebar__item:focus-visible {
+  outline: none;
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 2px var(--info-bg);
+}
+
+.ow-sidebar__item--active,
+.ow-sidebar__item--active:hover {
+  background: color-mix(in oklch, var(--info) 30%, transparent);
+  font-weight: 500;
+}
+
+.ow-app__body {
   min-height: 0;
   overflow-y: auto;
 }

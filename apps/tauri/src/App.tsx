@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getName } from "@tauri-apps/api/app";
-import { Settings as SettingsIcon } from "lucide-react";
 import { MainWindowShell, type Platform } from "./components/main-window-shell";
 import { DevPillControls } from "./components/dev-pill-controls";
+import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { SettingsShell } from "./Settings";
 import { useDictation } from "./lib/use-dictation";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
@@ -20,8 +20,6 @@ import {
 import { PHASE_ERROR } from "./lib/dictation";
 import "./App.css";
 
-type View = "main" | "settings";
-
 const PILL_BAR_COUNT = 12;
 
 function detectPlatform(): Platform {
@@ -32,7 +30,7 @@ function detectPlatform(): Platform {
 function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
-  const [view, setView] = useState<View>("main");
+  const [route, setRoute] = useState<Route>("home");
   // App productName from Tauri runtime — "OpenWhisper" (release) or
   // "OpenWhisper Dev" (per tauri.dev.conf.json overlay). Single source of
   // truth: the running bundle's CFBundleName.
@@ -88,7 +86,7 @@ function App() {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (cmdOrCtrl && e.key === ",") {
         e.preventDefault();
-        setView("settings");
+        setRoute("settings");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -96,12 +94,15 @@ function App() {
   }, []);
 
   // Tray Preferences… (and any other Rust-side trigger) emits `ow_navigate`
-  // with a target view. Listen here and swap routes.
+  // with a target view. Listen here and swap routes. The "main" payload maps
+  // to "home" so existing tray-menu wiring keeps working without a Rust change.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     void listen<string>("ow_navigate", (evt) => {
-      if (evt.payload === "settings" || evt.payload === "main") {
-        setView(evt.payload);
+      if (evt.payload === "settings") {
+        setRoute("settings");
+      } else if (evt.payload === "main") {
+        setRoute("home");
       }
     }).then((fn) => {
       unlisten = fn;
@@ -109,8 +110,7 @@ function App() {
     return () => unlisten?.();
   }, []);
 
-  const goBack = useCallback(() => setView("main"), []);
-  const openSettings = useCallback(() => setView("settings"), []);
+  const goBack = useCallback(() => setRoute("home"), []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
   // override is active so manual selections aren't immediately overwritten
@@ -164,10 +164,10 @@ function App() {
           NSLeftMouseDown and AppKit never sees a chance to start the
           window drag (tauri#9503). */}
       <header
-        className={`ow-titlebar ow-titlebar--${view}`}
+        className={`ow-titlebar ow-titlebar--${route}`}
         data-tauri-drag-region
       >
-        {view === "settings" ? (
+        {route === "settings" && (
           <>
             <button
               type="button"
@@ -182,68 +182,59 @@ function App() {
               Settings
             </h1>
           </>
-        ) : (
-          <button
-            type="button"
-            className="ow-titlebar__icon ow-titlebar__icon--end"
-            onClick={openSettings}
-            aria-label="Open settings"
-            data-testid="open-settings-button"
-            data-tauri-drag-region="false"
-          >
-            <SettingsIcon size={15} aria-hidden="true" />
-          </button>
         )}
       </header>
-      <main className="ow-app__body">
-        {view === "settings" ? (
-          <SettingsShell />
-        ) : (
-          <>
-            <MainWindowShell
-              title={appName}
-              phase={dictation.phase}
-              status={dictation.status}
-              levels={dictation.levels}
-              level={dictation.level}
-              elapsed={dictation.elapsed}
-              samples={dictation.samples}
-              transcript={dictation.transcript}
-              confidence={dictation.confidence}
-              statusMessage={dictation.statusMessage}
-              errorMessage={dictation.errorMessage}
-              canToggle={dictation.canToggle}
-              isRecording={dictation.isRecording}
-              downloadBytesDone={dictation.downloadBytesDone}
-              downloadBytesTotal={dictation.downloadBytesTotal}
-              platform={platform}
-              onToggle={() => void dictation.toggle()}
-              coreVersion={coreVersion}
-              coreError={coreError}
-              hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-              onHotkeyRetry={() => void hotkey.retry()}
-              micError={
-                permissions.status && !permissions.status.mic_ok
-                  ? permissions.status.error
-                  : null
-              }
-              recognizerError={recognizerError}
-            />
-            {import.meta.env.DEV && (
-              <DevPillControls
-                enabled={pillOverride.enabled}
-                status={pillOverride.status}
-                onToggle={(enabled) =>
-                  setPillOverride((prev) => ({ ...prev, enabled }))
+      <div className="ow-app__shell">
+        <SidebarNav active={route} onSelect={setRoute} />
+        <main className="ow-app__body">
+          {route === "settings" && <SettingsShell />}
+          {(route === "home" || route === "diagnostics") && (
+            <>
+              <MainWindowShell
+                title={appName}
+                phase={dictation.phase}
+                status={dictation.status}
+                levels={dictation.levels}
+                level={dictation.level}
+                elapsed={dictation.elapsed}
+                samples={dictation.samples}
+                transcript={dictation.transcript}
+                confidence={dictation.confidence}
+                statusMessage={dictation.statusMessage}
+                errorMessage={dictation.errorMessage}
+                canToggle={dictation.canToggle}
+                isRecording={dictation.isRecording}
+                downloadBytesDone={dictation.downloadBytesDone}
+                downloadBytesTotal={dictation.downloadBytesTotal}
+                platform={platform}
+                onToggle={() => void dictation.toggle()}
+                coreVersion={coreVersion}
+                coreError={coreError}
+                hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+                onHotkeyRetry={() => void hotkey.retry()}
+                micError={
+                  permissions.status && !permissions.status.mic_ok
+                    ? permissions.status.error
+                    : null
                 }
-                onStatus={(status) =>
-                  setPillOverride((prev) => ({ ...prev, status }))
-                }
+                recognizerError={recognizerError}
               />
-            )}
-          </>
-        )}
-      </main>
+              {import.meta.env.DEV && route === "home" && (
+                <DevPillControls
+                  enabled={pillOverride.enabled}
+                  status={pillOverride.status}
+                  onToggle={(enabled) =>
+                    setPillOverride((prev) => ({ ...prev, enabled }))
+                  }
+                  onStatus={(status) =>
+                    setPillOverride((prev) => ({ ...prev, status }))
+                  }
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
     </div>
     </ThemeProvider>
   );

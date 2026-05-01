@@ -839,13 +839,13 @@ test.describe("main window — settings entry point", () => {
     ).toBeHidden();
   });
 
-  test("titlebar gear button opens settings", async ({ page }) => {
+  test("sidebar Settings item opens settings", async ({ page }) => {
     await page.goto("/");
     await page.waitForSelector("text=OpenWhisper Dev");
     await expect(
       page.getByRole("heading", { name: "Settings" }),
     ).toBeHidden();
-    await page.getByRole("button", { name: "Open settings" }).click();
+    await page.getByTestId("sidebar-item-settings").click();
     await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
   });
 });

@@ -1,10 +1,10 @@
 ---
 id: TASK-65.3
 title: 'Plan Task 3: useCurrentHotkey hook + hotkey-format module'
-status: Done
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:45'
-updated_date: '2026-05-01 13:18'
+updated_date: '2026-05-01 13:52'
 labels:
   - 65-impl
 dependencies: []

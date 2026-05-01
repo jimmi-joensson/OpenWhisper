@@ -1,10 +1,10 @@
 ---
 id: TASK-65.1
 title: 'Plan Task 1: Outer sidebar nav + view-enum widening'
-status: Done
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:45'
-updated_date: '2026-05-01 13:13'
+updated_date: '2026-05-01 13:52'
 labels:
   - 65-impl
 dependencies: []

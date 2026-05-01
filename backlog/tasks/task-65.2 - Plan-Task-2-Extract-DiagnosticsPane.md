@@ -1,10 +1,10 @@
 ---
 id: TASK-65.2
 title: 'Plan Task 2: Extract DiagnosticsPane'
-status: Done
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:45'
-updated_date: '2026-05-01 13:17'
+updated_date: '2026-05-01 13:52'
 labels:
   - 65-impl
 dependencies: []

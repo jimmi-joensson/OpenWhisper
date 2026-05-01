@@ -1,10 +1,10 @@
 ---
 id: TASK-65.6
 title: 'Plan Task 6: TranscriptRow + wire into HomePane'
-status: Done
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:45'
-updated_date: '2026-05-01 13:32'
+updated_date: '2026-05-01 13:52'
 labels:
   - 65-impl
 dependencies: []

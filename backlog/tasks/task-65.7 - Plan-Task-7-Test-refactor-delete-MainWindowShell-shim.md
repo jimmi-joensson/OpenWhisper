@@ -1,10 +1,10 @@
 ---
 id: TASK-65.7
 title: 'Plan Task 7: Test refactor + delete MainWindowShell shim'
-status: Done
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:46'
-updated_date: '2026-05-01 13:34'
+updated_date: '2026-05-01 13:52'
 labels:
   - 65-impl
 dependencies: []

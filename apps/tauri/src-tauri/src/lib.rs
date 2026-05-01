@@ -710,7 +710,40 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        // Launch at login. Cross-platform autostart registration with no
+        // platform-specific code on our side — the plugin handles the
+        // divergence:
+        //   - Windows: writes the user-scope Run key
+        //     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Inspect
+        //     with `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+        //   - macOS: writes a LaunchAgent plist at
+        //     `~/Library/LaunchAgents/<productName>.plist`. Inspect with
+        //     `ls ~/Library/LaunchAgents/`.
+        // We deliberately pin macos_launcher to LaunchAgent (also the
+        // plugin default) rather than AppleScript or SMAppService.
+        // OpenWhisper sets activation policy = Accessory (menu-bar-only,
+        // LSUIElement-equivalent at runtime) and SMAppService's
+        // login-items API is geared at normal Dock-icon apps — using it
+        // here would either fail silently or surface a system-managed
+        // login-items entry the user doesn't expect.
+        // Bundle identifier `com.openwhisper.app` (note the `.app`
+        // suffix Tauri logs a warning about at build time): if anyone
+        // ever changes the productName in tauri.conf.json the
+        // LaunchAgent plist filename changes with it and existing
+        // autostart entries silently break for upgraders.
+        // app_name is left at its default (`package_info().name`, which
+        // resolves to productName) so the dev overlay registers as
+        // "OpenWhisper Dev" and the release registers as "OpenWhisper" —
+        // dev runs don't fight release autostart entries.
+        .plugin({
+            let mut b = tauri_plugin_autostart::Builder::new();
+            #[cfg(target_os = "macos")]
+            {
+                b = b.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            }
+            b.build()
+        });
 
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());

@@ -67,12 +67,100 @@ test.describe("settings view", () => {
     ).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("Launch at login Switch starts checked", async ({ page }) => {
+  test("Launch at login Switch starts unchecked when not registered", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Launch at login" }),
+    ).not.toBeChecked();
+  });
+
+  test("Launch at login Switch hydrates from autostart isEnabled", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owAutostart?: boolean }).__owAutostart = true;
+    });
     await page.goto("/");
     await openSettings(page);
     await expect(
       page.getByRole("switch", { name: "Launch at login" }),
     ).toBeChecked();
+  });
+
+  test("Toggling Launch at login on invokes autostart enable", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Launch at login" });
+    await expect(sw).not.toBeChecked();
+    await sw.click();
+    await expect(sw).toBeChecked();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAutostartLastSet?: boolean })
+              .__owAutostartLastSet,
+        ),
+      )
+      .toBe(true);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __owAutostartEnableCount?: number })
+            .__owAutostartEnableCount ?? 0,
+      ),
+    ).toBe(1);
+  });
+
+  test("Toggling Launch at login off invokes autostart disable", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owAutostart?: boolean }).__owAutostart = true;
+    });
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Launch at login" });
+    await expect(sw).toBeChecked();
+    await sw.click();
+    await expect(sw).not.toBeChecked();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owAutostartLastSet?: boolean })
+              .__owAutostartLastSet,
+        ),
+      )
+      .toBe(false);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __owAutostartDisableCount?: number })
+            .__owAutostartDisableCount ?? 0,
+      ),
+    ).toBe(1);
+  });
+
+  test("Failed autostart enable reverts the Switch", async ({ page }) => {
+    await page.addInitScript(() => {
+      (
+        window as unknown as { __owAutostartEnableShouldThrow?: boolean }
+      ).__owAutostartEnableShouldThrow = true;
+    });
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Launch at login" });
+    await expect(sw).not.toBeChecked();
+    await sw.click();
+    // The optimistic flip lands first; the rejected promise then reverts
+    // the state back to unchecked.
+    await expect(sw).not.toBeChecked();
   });
 
   test("Show in fullscreen Switch reflects behavior_get on mount", async ({

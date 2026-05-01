@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  disable as autostartDisable,
+  enable as autostartEnable,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
 
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -17,7 +22,12 @@ import { useTheme } from "@/lib/use-theme";
 type PillSettings = { follow_active_screen: boolean };
 
 export function GeneralPane() {
-  const [launchAtLogin, setLaunchAtLogin] = useState(true);
+  // Hydrated from the platform autostart registration on mount, NOT from
+  // local state — a user who enabled autostart in a previous run sees the
+  // Switch reflect reality after a fresh boot. False is the safe default
+  // before isEnabled() resolves: we'd rather render a momentary unchecked
+  // Switch and flip it on than render checked and silently flip it off.
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const { theme, setTheme } = useTheme();
   const { enabled: showInFullscreen, setEnabled: setShowInFullscreen } =
     useShowInFullscreen();
@@ -31,10 +41,30 @@ export function GeneralPane() {
   }, []);
 
   useEffect(() => {
+    autostartIsEnabled()
+      .then(setLaunchAtLogin)
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.warn("autostart isEnabled failed", e);
+        setLaunchAtLogin(false);
+      });
+  }, []);
+
+  useEffect(() => {
     invoke<PillSettings>("settings_get_pill")
       .then((s) => setFollowActiveScreen(s.follow_active_screen))
       .catch(() => setFollowActiveScreen(true));
   }, []);
+
+  const onLaunchAtLoginChange = (next: boolean) => {
+    setLaunchAtLogin(next);
+    const apply = next ? autostartEnable() : autostartDisable();
+    apply.catch((e) => {
+      // eslint-disable-next-line no-console
+      console.warn(`autostart ${next ? "enable" : "disable"} failed`, e);
+      setLaunchAtLogin(!next);
+    });
+  };
 
   const onFollowChange = (next: boolean) => {
     setFollowActiveScreen(next);
@@ -58,7 +88,7 @@ export function GeneralPane() {
         <Switch
           id="launch-at-login"
           checked={launchAtLogin}
-          onCheckedChange={setLaunchAtLogin}
+          onCheckedChange={onLaunchAtLoginChange}
         />
       </Field>
 

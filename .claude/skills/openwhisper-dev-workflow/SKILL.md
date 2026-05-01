@@ -51,6 +51,20 @@ The error text is misleading — the actual cause is the **2 GB hard size limit 
 - Don't try to fix this at WiX level (Media element split, multi-cab) — the right fix is keeping the source dir clean. Track follow-up under TASK-59 (Bench-sherpa target isolation so MSI bundler stops sweeping CUDA DLLs).
 - Don't be fooled by the LGHT0306 "65535 files" wording. With our `bundle.resources` map, a healthy `main.wxs` has fewer than 50 components.
 
+## GitHub comments — edit or replace, don't stack
+
+When updating a GitHub issue or PR comment thread on the **same topic** in close succession (same session, or within ~24 h), prefer editing the prior comment, or deleting it and posting a single replacement, over leaving a chain of consecutive comments by the same author.
+
+**Why:** Stacked back-to-back comments from one author dilute signal and look like noise on the timeline. If the only thing that changed is "I learned more / shipped the fix," the reader wants the *current* state, not a diff log of intermediate updates. Concrete case: posting "Update — infra landed, will close after first user-facing release" and then 6 minutes later closing the issue with "Done — re-uploaded the DMG" produced two consecutive notifications and a redundant intermediate comment. The right shape was a single closing comment with the final state.
+
+**How to apply:**
+- Before composing a new comment, check whether you have a recent prior comment on the same thread (`gh api /repos/<owner>/<repo>/issues/<num>/comments`).
+- If a prior comment is now **superseded** (a status changed, the answer evolved), edit it via `gh api -X PATCH /repos/<owner>/<repo>/issues/comments/<id> -f body=…` or delete it (`gh api -X DELETE …`) and post a single replacement.
+- If the prior comment is **still valid context** and the new comment adds genuinely new information (new question answered, distinct phase of work), a new comment is fine.
+- "Same topic" means the same conversational point — a reply to a follow-up question is a new topic; an "actually, here's the final state" follow-up to your own update is the same topic.
+- Exception: when the user explicitly asks for a new comment ("post a follow-up saying X"), respect that.
+- This applies symmetrically to PR review comments — don't post "actually, ignore that" right after a review comment; edit or delete the original.
+
 ## Task tracking — Backlog.md CLI
 
 Tasks live in `backlog/` at the repo root, managed by the **Backlog.md** CLI (npm global, but install with `pnpm add -g backlog.md`).

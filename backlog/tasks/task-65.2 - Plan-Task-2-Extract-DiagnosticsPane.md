@@ -1,9 +1,10 @@
 ---
 id: TASK-65.2
 title: 'Plan Task 2: Extract DiagnosticsPane'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:45'
+updated_date: '2026-05-01 13:17'
 labels:
   - 65-impl
 dependencies: []
@@ -18,3 +19,9 @@ parent_task_id: TASK-65
 - [ ] #4 Existing main-window.spec.ts assertions navigate via Diagnostics sidebar click; suite green.
 - [ ] #5 pnpm tsc --noEmit clean.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: 0d26154 — extract DiagnosticsPane; Home placeholder. 48/48 Playwright; tsc clean.
+<!-- SECTION:NOTES:END -->

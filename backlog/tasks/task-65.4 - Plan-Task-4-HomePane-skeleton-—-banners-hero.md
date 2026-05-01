@@ -1,9 +1,10 @@
 ---
 id: TASK-65.4
 title: 'Plan Task 4: HomePane skeleton — banners + hero'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:45'
+updated_date: '2026-05-01 13:29'
 labels:
   - 65-impl
 dependencies: []
@@ -19,3 +20,9 @@ parent_task_id: TASK-65
 - [ ] #5 home.spec.ts (3 tests: hero + live hint update + banner-above-hero ordering) green.
 - [ ] #6 pnpm tsc --noEmit clean.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: f52a35f — HomePane skeleton (banners + hero with live hotkey hint). 51/51 Playwright; tsc clean.
+<!-- SECTION:NOTES:END -->

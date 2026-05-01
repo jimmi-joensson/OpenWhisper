@@ -1,9 +1,10 @@
 ---
 id: TASK-65.1
 title: 'Plan Task 1: Outer sidebar nav + view-enum widening'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:45'
+updated_date: '2026-05-01 13:13'
 labels:
   - 65-impl
 dependencies: []
@@ -18,3 +19,9 @@ parent_task_id: TASK-65
 - [ ] #4 New 'sidebar nav' Playwright test passes; existing main-window + settings-window specs stay green.
 - [ ] #5 pnpm tsc --noEmit clean.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: abed3d9 — Tauri: outer sidebar nav + Route enum (Home/Settings/Diagnostics). All steps complete; Playwright suite 48/48 green; tsc clean.
+<!-- SECTION:NOTES:END -->

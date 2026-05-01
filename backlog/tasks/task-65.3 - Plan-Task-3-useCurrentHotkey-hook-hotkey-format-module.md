@@ -1,9 +1,10 @@
 ---
 id: TASK-65.3
 title: 'Plan Task 3: useCurrentHotkey hook + hotkey-format module'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:45'
+updated_date: '2026-05-01 13:18'
 labels:
   - 65-impl
 dependencies: []
@@ -18,3 +19,9 @@ parent_task_id: TASK-65
 - [ ] #4 settings-window.spec.ts stays green.
 - [ ] #5 pnpm tsc --noEmit clean.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: ba7eefb — lift hotkey-format helpers; add useCurrentHotkey. 48/48 Playwright; tsc clean.
+<!-- SECTION:NOTES:END -->

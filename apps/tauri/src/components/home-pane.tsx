@@ -1,6 +1,8 @@
 import iconSrc from "../assets/icon-128.png";
 import { HealthBanner } from "./health-banner";
+import { TranscriptRow } from "./transcript-row";
 import { useCurrentHotkey } from "../lib/use-current-hotkey";
+import { useLastTranscription } from "../lib/use-last-transcription";
 import { formatHotkeyLabel } from "../lib/hotkey-format";
 
 interface HomePaneProps {
@@ -20,6 +22,7 @@ export function HomePane({
 }: HomePaneProps) {
   const toggleConfig = useCurrentHotkey("toggle");
   const chord = formatHotkeyLabel(toggleConfig);
+  const latest = useLastTranscription();
 
   return (
     <div className="ow-home">
@@ -61,6 +64,8 @@ export function HomePane({
           Press <kbd>{chord}</kbd> anywhere — speak — press again to stop.
         </p>
       </section>
+
+      {latest && <TranscriptRow text={latest.text} timestamp={latest.timestamp} />}
     </div>
   );
 }

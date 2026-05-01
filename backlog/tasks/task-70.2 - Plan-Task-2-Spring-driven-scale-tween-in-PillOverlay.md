@@ -1,10 +1,11 @@
 ---
 id: TASK-70.2
 title: 'Plan Task 2: Spring-driven scale tween in PillOverlay'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 19:38'
+updated_date: '2026-05-01 20:03'
 labels:
   - 70-impl
 dependencies: []

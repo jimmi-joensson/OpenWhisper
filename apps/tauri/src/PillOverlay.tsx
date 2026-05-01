@@ -17,6 +17,17 @@ const PILL_OUTER_W: Record<PillStatus, number> = {
   recording: 70,
   transcribing: 38,
 };
+// Outer scale per state. 1 at idle, 2 during recording/transcribing. Driven
+// by a hand-rolled 2nd-order spring (asymmetric: subtle overshoot on grow,
+// critically damped on shrink) so the morph reads as a Dynamic-Island-style
+// alive badge rather than a timed tween.
+const PILL_SCALE: Record<PillStatus, number> = {
+  idle: 1,
+  recording: 2,
+  transcribing: 2,
+};
+const SPRING_GROW = { stiffness: 220, damping: 24 }; // ~18% overshoot
+const SPRING_SHRINK = { stiffness: 280, damping: 34 }; // critically damped
 const PILL_INNER_W = 54;
 const PILL_INNER_H = 12;
 const PARTICLE_COUNT = 12;
@@ -140,6 +151,9 @@ export function PillOverlay() {
     Array.from({ length: PARTICLE_COUNT }, (_, i) => idleTarget(i)),
   );
   const widthRef = useRef<number>(PILL_OUTER_W.idle);
+  const scaleStateRef = useRef<{ x: number; v: number }>({ x: 1, v: 0 });
+  const prevScaleWriteRef = useRef<number>(1);
+  const prevTickRef = useRef<number>(0);
   const tweenRef = useRef<Tween>({
     from: null,
     fromWidth: PILL_OUTER_W.idle,
@@ -399,6 +413,33 @@ export function PillOverlay() {
         widthRef.current = nextWidth;
         if (capsuleRef.current) {
           capsuleRef.current.style.width = `${nextWidth}px`;
+        }
+      }
+
+      // Spring-driven scale tween (1× ↔ 2×). Runs on its own clock — does not
+      // share tweenRef.duration; the spring settles on physics, not a timer.
+      // Asymmetric: SPRING_GROW has subtle overshoot for the "alive" feel,
+      // SPRING_SHRINK is critically damped for a decisive return-to-rest.
+      // Velocity is preserved across direction reversal (cancel mid-grow ⇒
+      // shrink inherits current v ⇒ no jolt).
+      const targetScale = PILL_SCALE[status];
+      const s = scaleStateRef.current;
+      const dt = Math.min(1 / 30, Math.max(0, (now - prevTickRef.current) / 1000));
+      prevTickRef.current = now;
+      if (s.x !== targetScale || s.v !== 0) {
+        const cfg = targetScale > s.x ? SPRING_GROW : SPRING_SHRINK;
+        const accel = (targetScale - s.x) * cfg.stiffness - s.v * cfg.damping;
+        s.v += accel * dt;
+        s.x += s.v * dt;
+        if (Math.abs(targetScale - s.x) < 5e-4 && Math.abs(s.v) < 5e-3) {
+          s.x = targetScale;
+          s.v = 0;
+        }
+      }
+      if (s.x !== prevScaleWriteRef.current) {
+        prevScaleWriteRef.current = s.x;
+        if (capsuleRef.current) {
+          capsuleRef.current.style.transform = `scale(${s.x.toFixed(4)})`;
         }
       }
 

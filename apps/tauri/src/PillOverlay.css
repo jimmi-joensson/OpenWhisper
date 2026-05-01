@@ -53,8 +53,13 @@ body,
   user-select: none;
   -webkit-user-select: none;
   overflow: hidden;
-  /* Width animated by RAF — keep on the compositor. */
-  will-change: width;
+  /* Width and scale-transform are both animated by RAF (width: layout
+   * tween between idle/recording/transcribing; transform: spring-driven
+   * 1×↔2× scale on enter/leave active states). Keep both on the
+   * compositor; transform-origin pins the bottom edge so growth extends
+   * upward and the dock-anchor in place_pill stays valid. */
+  will-change: width, transform;
+  transform-origin: 50% 100%;
   -webkit-tap-highlight-color: transparent;
   outline: none;
   /* Pointer cursor only visible while click-through is OFF (idle state) —

@@ -1,6 +1,22 @@
 import { useCallback, useRef } from "react";
-import { Activity, Home, Settings as SettingsIcon } from "lucide-react";
+import {
+  Activity,
+  Boxes,
+  Home,
+  Keyboard,
+  Mic,
+  Settings as SettingsIcon,
+  SlidersHorizontal,
+  type LucideIcon,
+} from "lucide-react";
 import { SETTINGS_PANES, type SettingsPaneId } from "../lib/settings-panes";
+
+const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
+  general: SlidersHorizontal,
+  audio: Mic,
+  models: Boxes,
+  shortcuts: Keyboard,
+};
 
 export type Route = "home" | "settings" | "diagnostics";
 
@@ -97,27 +113,28 @@ function SettingsPaneSidebar({
       aria-orientation="vertical"
       onKeyDown={onKey}
     >
-      {SETTINGS_PANES.map((p) => (
-        <button
-          key={p.id}
-          type="button"
-          data-pane={p.id}
-          data-testid={`settings-pane-${p.id}`}
-          role="tab"
-          aria-selected={active === p.id}
-          tabIndex={active === p.id ? 0 : -1}
-          className={
-            "ow-sidebar__item" +
-            (active === p.id ? " ow-sidebar__item--active" : "")
-          }
-          onClick={() => onSelect(p.id)}
-        >
-          <span className="ow-sidebar__icon-text" aria-hidden="true">
-            {p.icon}
-          </span>
-          <span>{p.label}</span>
-        </button>
-      ))}
+      {SETTINGS_PANES.map((p) => {
+        const Icon = SETTINGS_PANE_ICONS[p.id];
+        return (
+          <button
+            key={p.id}
+            type="button"
+            data-pane={p.id}
+            data-testid={`settings-pane-${p.id}`}
+            role="tab"
+            aria-selected={active === p.id}
+            tabIndex={active === p.id ? 0 : -1}
+            className={
+              "ow-sidebar__item" +
+              (active === p.id ? " ow-sidebar__item--active" : "")
+            }
+            onClick={() => onSelect(p.id)}
+          >
+            <Icon size={16} aria-hidden="true" />
+            <span>{p.label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

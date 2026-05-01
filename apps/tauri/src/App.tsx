@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
@@ -196,7 +197,7 @@ function App() {
                   aria-label="Back to main"
                   data-tauri-drag-region="false"
                 >
-                  <span aria-hidden="true">←</span>
+                  <ArrowLeft size={16} aria-hidden="true" />
                 </button>
                 <h1 className="ow-titlebar__title" data-tauri-drag-region>
                   Settings

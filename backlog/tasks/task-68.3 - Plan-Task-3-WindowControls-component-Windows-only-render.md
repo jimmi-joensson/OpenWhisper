@@ -1,10 +1,10 @@
 ---
 id: TASK-68.3
 title: 'Plan Task 3: WindowControls component (Windows-only render)'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:54'
-updated_date: '2026-05-01 17:29'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

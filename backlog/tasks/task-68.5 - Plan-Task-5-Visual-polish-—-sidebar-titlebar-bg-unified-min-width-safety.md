@@ -1,10 +1,10 @@
 ---
 id: TASK-68.5
 title: 'Plan Task 5: Visual polish — sidebar/titlebar bg unified, min-width safety'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:55'
-updated_date: '2026-05-01 17:30'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

@@ -1,10 +1,10 @@
 ---
 id: TASK-68.1
 title: 'Plan Task 1: Sidebar from y=0; titlebar inset over content column'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:54'
-updated_date: '2026-05-01 17:26'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

@@ -3,10 +3,10 @@ id: TASK-68.6
 title: >-
   Plan Task 6: Update openwhisper-platform-gotchas with Windows decorations
   finding
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:55'
-updated_date: '2026-05-01 17:31'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

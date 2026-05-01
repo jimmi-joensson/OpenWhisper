@@ -1,10 +1,10 @@
 ---
 id: TASK-68.2
 title: 'Plan Task 2: Capabilities for window control IPCs'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:54'
-updated_date: '2026-05-01 17:27'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

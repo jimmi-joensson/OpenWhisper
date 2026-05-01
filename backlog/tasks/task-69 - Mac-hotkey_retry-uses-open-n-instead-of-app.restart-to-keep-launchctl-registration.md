@@ -3,10 +3,10 @@ id: TASK-69
 title: >-
   Mac: hotkey_retry uses 'open -n' instead of app.restart() to keep launchctl
   registration
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-05-01 18:33'
-updated_date: '2026-05-01 18:33'
+updated_date: '2026-05-01 18:46'
 labels: []
 dependencies: []
 priority: high

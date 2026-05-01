@@ -1,10 +1,10 @@
 ---
 id: TASK-68.4
 title: 'Plan Task 4: Drop Windows OS chrome via Rust setup()'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 16:54'
-updated_date: '2026-05-01 17:30'
+updated_date: '2026-05-01 18:46'
 labels:
   - 68-impl
 dependencies: []

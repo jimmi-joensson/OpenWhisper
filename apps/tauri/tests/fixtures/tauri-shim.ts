@@ -202,6 +202,46 @@ async function installTauriShim(page: Page, label: "main" = "main") {
           w.__owAudioPreviewStops = (w.__owAudioPreviewStops ?? 0) + 1;
           return null;
         }
+        if (cmd === "plugin:autostart|is_enabled") {
+          const w = window as unknown as {
+            __owAutostart?: boolean;
+            __owAutostartIsEnabledShouldThrow?: boolean;
+          };
+          if (w.__owAutostartIsEnabledShouldThrow) {
+            throw new Error("autostart isEnabled failed");
+          }
+          return w.__owAutostart ?? false;
+        }
+        if (cmd === "plugin:autostart|enable") {
+          const w = window as unknown as {
+            __owAutostart?: boolean;
+            __owAutostartEnableShouldThrow?: boolean;
+            __owAutostartEnableCount?: number;
+            __owAutostartLastSet?: boolean;
+          };
+          w.__owAutostartEnableCount = (w.__owAutostartEnableCount ?? 0) + 1;
+          if (w.__owAutostartEnableShouldThrow) {
+            throw new Error("autostart enable failed");
+          }
+          w.__owAutostart = true;
+          w.__owAutostartLastSet = true;
+          return null;
+        }
+        if (cmd === "plugin:autostart|disable") {
+          const w = window as unknown as {
+            __owAutostart?: boolean;
+            __owAutostartDisableShouldThrow?: boolean;
+            __owAutostartDisableCount?: number;
+            __owAutostartLastSet?: boolean;
+          };
+          w.__owAutostartDisableCount = (w.__owAutostartDisableCount ?? 0) + 1;
+          if (w.__owAutostartDisableShouldThrow) {
+            throw new Error("autostart disable failed");
+          }
+          w.__owAutostart = false;
+          w.__owAutostartLastSet = false;
+          return null;
+        }
         if (cmd === "settings_get_pill") {
           const stored = (window as unknown as { __owPillFollow?: boolean })
             .__owPillFollow;

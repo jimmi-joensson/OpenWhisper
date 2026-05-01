@@ -1,10 +1,10 @@
 ---
 id: TASK-65
 title: Main window — Home pane + sidebar nav (v1)
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:40'
-updated_date: '2026-05-01 14:26'
+updated_date: '2026-05-01 14:50'
 labels: []
 dependencies: []
 documentation:

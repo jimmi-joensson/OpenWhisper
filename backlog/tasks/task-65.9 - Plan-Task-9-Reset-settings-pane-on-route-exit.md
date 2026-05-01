@@ -1,9 +1,10 @@
 ---
 id: TASK-65.9
 title: 'Plan Task 9: Reset settings pane on route exit'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 14:26'
+updated_date: '2026-05-01 14:50'
 labels: []
 dependencies: []
 parent_task_id: TASK-65

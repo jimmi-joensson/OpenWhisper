@@ -1,10 +1,10 @@
 ---
 id: TASK-65.4
 title: 'Plan Task 4: HomePane skeleton — banners + hero'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:45'
-updated_date: '2026-05-01 13:52'
+updated_date: '2026-05-01 14:22'
 labels:
   - 65-impl
 dependencies: []

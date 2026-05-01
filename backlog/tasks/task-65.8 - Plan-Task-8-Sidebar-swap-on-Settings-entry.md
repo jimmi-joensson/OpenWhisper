@@ -1,10 +1,10 @@
 ---
 id: TASK-65.8
 title: 'Plan Task 8: Sidebar swap on Settings entry'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-01 13:57'
-updated_date: '2026-05-01 14:00'
+updated_date: '2026-05-01 14:22'
 labels: []
 dependencies: []
 parent_task_id: TASK-65

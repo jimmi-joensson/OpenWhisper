@@ -153,7 +153,15 @@ export function PillOverlay() {
   const widthRef = useRef<number>(PILL_OUTER_W.idle);
   const scaleStateRef = useRef<{ x: number; v: number }>({ x: 1, v: 0 });
   const prevScaleWriteRef = useRef<number>(1);
+  const prevBlurWriteRef = useRef<number>(20);
   const prevTickRef = useRef<number>(0);
+  // Vestibular accessibility: reduced-motion snaps width + scale to target
+  // instead of tweening. Particle pose tweens still run — they encode
+  // information (state shape), not motion-for-motion's-sake.
+  const prefersReducedMotionRef = useRef<boolean>(
+    typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
   const tweenRef = useRef<Tween>({
     from: null,
     fromWidth: PILL_OUTER_W.idle,
@@ -216,6 +224,17 @@ export function PillOverlay() {
       // eslint-disable-next-line no-console
       (e) => console.warn("reposition_pill failed", e),
     );
+  }, []);
+
+  // Subscribe to prefers-reduced-motion changes so the pill responds the
+  // moment a user toggles the OS-level setting (no app restart required).
+  useEffect(() => {
+    const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = (e: MediaQueryListEvent) => {
+      prefersReducedMotionRef.current = e.matches;
+    };
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
   }, []);
 
   // RAF loop — mutates DOM only; no React state writes per frame.
@@ -392,9 +411,12 @@ export function PillOverlay() {
       // Outer width: for sphere transitions, hold at fromWidth through
       // implode (0–0.45), then ease to target across hold + explode
       // (0.45–1) so dots never clip outside in either direction.
+      const reducedMotion = prefersReducedMotionRef.current;
       const targetWidth = PILL_OUTER_W[status];
       let nextWidth = widthRef.current;
-      if (tweening && tw.from) {
+      if (reducedMotion) {
+        nextWidth = targetWidth;
+      } else if (tweening && tw.from) {
         const sphere = tw.status === "transcribing" || tw.fromStatus === "transcribing";
         if (sphere) {
           if (baseT < 0.45) {
@@ -426,7 +448,10 @@ export function PillOverlay() {
       const s = scaleStateRef.current;
       const dt = Math.min(1 / 30, Math.max(0, (now - prevTickRef.current) / 1000));
       prevTickRef.current = now;
-      if (s.x !== targetScale || s.v !== 0) {
+      if (reducedMotion) {
+        s.x = targetScale;
+        s.v = 0;
+      } else if (s.x !== targetScale || s.v !== 0) {
         const cfg = targetScale > s.x ? SPRING_GROW : SPRING_SHRINK;
         const accel = (targetScale - s.x) * cfg.stiffness - s.v * cfg.damping;
         s.v += accel * dt;
@@ -440,6 +465,19 @@ export function PillOverlay() {
         prevScaleWriteRef.current = s.x;
         if (capsuleRef.current) {
           capsuleRef.current.style.transform = `scale(${s.x.toFixed(4)})`;
+          // Counter-scale the backdrop-filter blur so the pill's *material*
+          // looks identical at 1× and 2× (visible blur in screen pixels =
+          // 20 / scale × scale = 20 constant). Denominator clamped at 0.001
+          // to defend against arithmetic edge cases — the spring should
+          // never go below ~1.0 in practice.
+          const nextBlur = 20 / Math.max(s.x, 0.001);
+          if (Math.abs(nextBlur - prevBlurWriteRef.current) > 0.05) {
+            prevBlurWriteRef.current = nextBlur;
+            capsuleRef.current.style.setProperty(
+              "--pill-blur",
+              `${nextBlur.toFixed(2)}px`,
+            );
+          }
         }
       }
 

@@ -1,10 +1,11 @@
 ---
 id: TASK-70.3
 title: 'Plan Task 3: Reduced-motion fallback + backdrop-filter counter-scale'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 19:38'
+updated_date: '2026-05-01 20:05'
 labels:
   - 70-impl
 dependencies: []

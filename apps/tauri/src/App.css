@@ -235,6 +235,13 @@ body {
   -webkit-user-select: none;
 }
 
+/* Windows: close button must sit flush against the window edge per OS
+   convention. WindowControls renders null on Mac, so :has() naturally
+   scopes this to Windows. */
+.ow-titlebar:has(.ow-window-controls) {
+  padding-right: 0;
+}
+
 .ow-titlebar--home,
 .ow-titlebar--diagnostics {
   /* No content in the strip on these routes — just drag space. */

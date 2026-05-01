@@ -5,7 +5,7 @@ description: Cut a versioned OpenWhisper release (Mac DMG + Windows MSI) split a
 
 # Cutting an OpenWhisper release
 
-Releases are **split across two machines**: Mac DMG built on macOS arm64, Windows MSI built on a separate Windows x64 box. Cross-compile does NOT work — wry needs MSVC + WebView2 SDK on Win, hardened-runtime+adhoc breaks CGEventTapCreate on Mac. The two halves meet in a single **draft** GitHub Release, which is published only after both artifacts are attached.
+Releases are **split across two machines**: Mac DMG built on macOS arm64, Windows MSI built on a separate Windows x64 box. Cross-compile does NOT work — wry needs MSVC + WebView2 SDK on Win, codesigning + notarization on Mac requires the local keychain. The two halves meet in a single **draft** GitHub Release, which is published only after both artifacts are attached.
 
 There is no GitHub Actions release workflow yet. The whole pipeline runs locally per machine.
 
@@ -15,7 +15,7 @@ Every release follows the same shape. Don't skip; don't reorder.
 
 1. **Discover scope** — `git log vPREV..HEAD` and group commits into user-visible buckets.
 2. **Bump versions** in four manifests (one commit, before tagging).
-3. **Build + smoke Mac side** locally, sign without hardened runtime.
+3. **Build + sign + notarize Mac side** locally, smoke the resulting `.app`.
 4. **Tag, push, create DRAFT GH Release** with DMG attached.
 5. **Hand off to Windows** via `docs/release-N.M.0-handover.md`. Win box pulls tag, builds MSI, uploads to the same draft, then publishes.
 
@@ -45,7 +45,7 @@ Bump `vPREV` → `vNEW` in all four:
 
 Commit subject: `Repo: bump version to N.M.0`. Body: one line pointing at the release-notes doc.
 
-## Step 3 — Build + smoke Mac
+## Step 3 — Build + sign + notarize Mac
 
 Pre-reqs (one-time per host, usually already done):
 
@@ -54,21 +54,46 @@ cd apps/tauri && pnpm install
 pnpm setup:ort                    # → ~/.cache/openwhisper/onnxruntime/
 ```
 
-Build:
+Pre-reqs (one-time per signing host):
+
+- Developer ID Application cert in login keychain (`security find-identity -v -p codesigning` shows `1 valid identities found` for `Developer ID Application: Jimmi Joensson (898R9M89GU)`).
+- Apple Developer ID intermediates installed (DeveloperIDG2CA + DeveloperIDCA from https://www.apple.com/certificateauthority/).
+- Notarytool keychain profile `openwhisper-notarytool` created via `xcrun notarytool store-credentials`.
+
+Build + notarize:
 
 ```sh
 cd apps/tauri
 PATH="$HOME/.cargo/bin:$PATH" pnpm release:mac
-# → target/release/bundle/dmg/OpenWhisper_N.M.0_aarch64.dmg
-# → target/release/bundle/macos/OpenWhisper.app
+# → target/release/bundle/dmg/OpenWhisper_N.M.0_aarch64.dmg (signed + notarized + stapled)
+# → target/release/bundle/macos/OpenWhisper.app (signed)
 ```
 
-**Use `pnpm release:mac`, not raw `pnpm tauri build`.** `release:mac` runs `tauri build` then re-signs without hardened runtime via `scripts/sign-mac.cjs`. Hardened runtime + ad-hoc signing breaks `CGEventTapCreate` on Sequoia 15 (the global hotkey hook stops firing). Verify after build:
+`release:mac` runs `pnpm tauri build` (which signs with the Developer ID identity from `tauri.conf.json` + `Entitlements.plist`) then `pnpm notarize:mac` (which submits the DMG, waits for Apple, staples the ticket, and runs a final Gatekeeper assessment). Notarization typically takes 2–15 min server-side; first submission from a fresh Developer ID can run 30+ min.
+
+Verify after build:
 
 ```sh
-codesign -d --entitlements - --xml target/release/bundle/macos/OpenWhisper.app 2>&1 | grep -i flags
-# expect: flags=0x2 (or no hardened-runtime flag at all). NOT 0x10000 (runtime)
+codesign -dv --verbose=4 target/release/bundle/macos/OpenWhisper.app 2>&1 | grep -E "Authority|flags|TeamIdentifier"
+# expect:
+#   Authority=Developer ID Application: Jimmi Joensson (898R9M89GU)
+#   Authority=Developer ID Certification Authority
+#   Authority=Apple Root CA
+#   flags=0x10000(runtime)             ← hardened runtime present
+#   TeamIdentifier=898R9M89GU
+
+xcrun stapler validate target/release/bundle/dmg/OpenWhisper_N.M.0_aarch64.dmg
+# expect: "The validate action worked!"
+
+spctl -a -t open --context context:primary-signature -vv \
+  target/release/bundle/dmg/OpenWhisper_N.M.0_aarch64.dmg
+# expect:
+#   accepted
+#   source=Notarized Developer ID
+#   origin=Developer ID Application: Jimmi Joensson (898R9M89GU)
 ```
+
+If any of these fail, do NOT publish — debug first. `spctl rejected: source=Unnotarized Developer ID` means the staple didn't land.
 
 Sanity:
 
@@ -79,7 +104,7 @@ pnpm test:ui                      # all Playwright cases must pass
 
 Manual smoke — install the DMG locally, verify against this checklist:
 
-1. First-launch Gatekeeper bypass works (right-click → Open).
+1. Double-click DMG → drag-to-Applications layout opens. Drag in `OpenWhisper`. Double-click `/Applications/OpenWhisper.app` → app launches with no Gatekeeper warning (no "can't be opened", no "verify with Apple" dialog).
 2. Menu-bar mic icon appears (no Dock icon — LSUIElement = true).
 3. Mic + Accessibility prompts fire on first hotkey/record. AX prompt does NOT keep firing after grant (silent-first AX check is the regression flag).
 4. Hotkey starts recording, releases pill, transcribes, injects to focused field.
@@ -102,7 +127,7 @@ gh release create vN.M.0 \
 
 **Always `--draft`.** The Win box hasn't attached its MSI yet; a non-draft release is publicly visible the instant you create it. Draft is the safety net — equivalent to "release as PR" since drafts are invisible until explicitly published.
 
-In the notes, include a short **Install** section pointing at `INSTALL.md` for the Gatekeeper bypass walkthrough — DMGs are ad-hoc signed, not notarized.
+In the notes, include a short **Install** section pointing at `INSTALL.md`. Mac DMGs are signed with the Developer ID and Apple-notarized, so first-launch is double-click-and-go (no Gatekeeper bypass).
 
 ## Step 5 — Hand off to Windows
 

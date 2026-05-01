@@ -2,7 +2,7 @@
 
 macOS **15 Sequoia or later**, Apple Silicon (M-series) only. Intel Macs and macOS 14 (Sonoma) not supported.
 
-Builds on the [Releases page](https://github.com/jimmi-joensson/OpenWhisper/releases) are **ad-hoc signed, not notarized** — free distribution, zero Apple Developer Program cost. macOS Gatekeeper will warn on first launch. The bypass takes ~30 seconds, once per install.
+Builds on the [Releases page](https://github.com/jimmi-joensson/OpenWhisper/releases) are **signed with a Developer ID and notarized by Apple** — Gatekeeper recognizes them as trusted on first launch, no warnings, no manual bypass.
 
 ---
 
@@ -13,34 +13,11 @@ Builds on the [Releases page](https://github.com/jimmi-joensson/OpenWhisper/rele
 3. Drag **OpenWhisper** into the `Applications` folder.
 4. Eject the DMG.
 
-## 2. First launch — Gatekeeper bypass
+## 2. First launch
 
-macOS Sequoia (15) and later blocks unsigned apps from opening via double-click. You need one of the flows below.
+Double-click **OpenWhisper** in `/Applications`. macOS verifies Apple's notarization ticket (offline; no network call needed) and launches the app.
 
-### Recommended: System Settings flow
-
-1. Double-click **OpenWhisper** in `/Applications`. macOS shows a dialog:
-   > `"OpenWhisper" can't be opened because Apple cannot check it for malicious software.`
-
-   Click **Done**.
-2. Open **System Settings → Privacy & Security**.
-3. Scroll to the bottom. Under the *Security* section you'll see:
-   > `"OpenWhisper" was blocked to protect your Mac.`
-
-   Click **Open Anyway**.
-4. Authenticate with Touch ID or password.
-5. A final confirmation dialog appears — click **Open**.
-
-The app now launches as a **menu-bar agent** (no Dock icon). Look for the OpenWhisper icon in the top-right menu bar.
-
-### Alternative: command line
-
-For the impatient, strip the quarantine flag before first launch:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/OpenWhisper.app
-open /Applications/OpenWhisper.app
-```
+The app starts as a **menu-bar agent** — no Dock icon. Look for the OpenWhisper icon in the top-right menu bar.
 
 ## 3. Grant permissions
 
@@ -50,7 +27,7 @@ OpenWhisper needs two permissions. Both are prompted automatically — grant Acc
 
 Needed for the Right Command hotkey and to paste transcribed text into the focused app.
 
-1. On first launch, OpenWhisper shows the macOS *"OpenWhisper would like to control this computer"* dialog. Click **Open System Settings**.
+1. On first hotkey press, OpenWhisper shows the macOS *"OpenWhisper would like to control this computer"* dialog. Click **Open System Settings**.
 2. In **Privacy & Security → Accessibility**, toggle **OpenWhisper** on.
 3. Click **Restart** in the OpenWhisper banner (or quit + relaunch from `/Applications`). macOS only sees the new grant on a fresh process.
 
@@ -82,10 +59,6 @@ log stream --predicate 'subsystem == "com.openwhisper.OpenWhisper"' --level debu
 **Hotkey doesn't do anything, or text doesn't paste.** Accessibility not granted, or OpenWhisper wasn't relaunched after the grant. Check System Settings → Privacy & Security → Accessibility, toggle OpenWhisper on, then quit + relaunch.
 
 **No mic prompt fires after granting Accessibility.** The mic prompt is gated on hotkey-install success — if Accessibility shows toggled on but the hotkey still doesn't work, quit OpenWhisper, then `tccutil reset Accessibility com.openwhisper.app` in Terminal and relaunch to start the prompt cycle fresh.
-
-**"App is damaged and can't be opened".** The DMG lost its signature metadata in transit (e.g. re-zipped by email/Slack). Re-download from Releases, or run `xattr -dr com.apple.quarantine /Applications/OpenWhisper.app`.
-
-**Permissions keep getting revoked on updates.** Known pain point for ad-hoc signed builds — every new build has a different signature hash, so macOS TCC treats it as a "different app" and wipes grants. Re-grant after each update. Going away when the project moves to Developer ID signing.
 
 **Where are logs?** Console.app → search for `com.openwhisper.OpenWhisper` subsystem. Transcript text is redacted by default.
 

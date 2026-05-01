@@ -1,31 +1,48 @@
 import { expect, test } from "./fixtures/tauri-shim";
 
 test.describe("sidebar nav", () => {
-  test("clicking sidebar items switches the visible pane", async ({ page }) => {
+  test("route sidebar (Home/Settings/Diagnostics) on home + diagnostics", async ({ page }) => {
     await page.goto("/");
     // Default route is Home.
     await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
 
-    // Click Diagnostics — debug content visible.
+    // Click Diagnostics — debug content visible, sidebar still shows the three routes.
     await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveAttribute(
       "aria-current",
       "page",
     );
     await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
-
-    // Click Settings — existing settings shell renders.
-    await page.getByTestId("sidebar-item-settings").click();
-    await expect(page.getByTestId("sidebar-item-settings")).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-home")).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-settings")).toBeVisible();
 
     // Click Home — sidebar marks Home active and hero is back.
     await page.getByTestId("sidebar-item-home").click();
     await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
+  });
+
+  test("entering Settings replaces the sidebar with the pane chooser; back restores it", async ({
+    page,
+  }) => {
+    await page.goto("/");
+
+    // Enter Settings — sidebar swaps to General/Audio/Models/Shortcuts;
+    // route-level items disappear.
+    await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Shortcuts" })).toBeVisible();
+    await expect(page.getByTestId("sidebar-item-home")).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveCount(0);
+
+    // Back arrow restores the outer route sidebar.
+    await page.getByRole("button", { name: "Back to main" }).click();
+    await expect(page.getByRole("tab", { name: "General" })).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
 });

@@ -10,6 +10,7 @@ import {
   type HotkeyTarget,
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
+import type { SettingsPaneId } from "./lib/settings-panes";
 import { LevelMeter } from "./components/level-meter";
 import {
   Select,
@@ -33,74 +34,17 @@ const PEAK_WINDOW_TICKS = 20;
 const PREVIEW_FLOOR_DB = -55;
 const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 
-// Sidebar items mirror the design (project_recognizer_tauri / screens.jsx
-// SettingsSidebarLayout). Order matters — General is the landing pane.
-const PANES = [
-  { id: "general", label: "General", icon: "⚙" },
-  { id: "audio", label: "Audio", icon: "🎙" },
-  { id: "models", label: "Models", icon: "◆" },
-  { id: "shortcuts", label: "Shortcuts", icon: "⌘" },
-] as const;
+// SettingsShell renders pane content only. The pane chooser lives in the
+// outer SidebarNav (route=settings mode), which owns active-pane state via
+// App.tsx — the back arrow on the titlebar then restores the route-level
+// sidebar (Home/Settings/Diagnostics) by flipping route back to "home".
+interface SettingsShellProps {
+  active: SettingsPaneId;
+}
 
-type PaneId = (typeof PANES)[number]["id"];
-
-// SettingsShell renders the body only — sidebar + pane. The titlebar
-// (back-arrow + "Settings" title) lives at the window level in App.tsx
-// so it shares the strip with the macOS traffic-light buttons.
-export function SettingsShell() {
-  const [active, setActive] = useState<PaneId>("general");
-  const sidebarRef = useRef<HTMLDivElement>(null);
-
-  // ↑/↓ on a focused sidebar item moves selection. Keeps focus on the
-  // newly-active item so the keyboard cycle stays continuous.
-  const onSidebarKey = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-      e.preventDefault();
-      const idx = PANES.findIndex((p) => p.id === active);
-      const next =
-        e.key === "ArrowDown"
-          ? PANES[(idx + 1) % PANES.length]
-          : PANES[(idx - 1 + PANES.length) % PANES.length];
-      setActive(next.id);
-      requestAnimationFrame(() => {
-        const node = sidebarRef.current?.querySelector<HTMLButtonElement>(
-          `[data-pane="${next.id}"]`,
-        );
-        node?.focus();
-      });
-    },
-    [active],
-  );
-
+export function SettingsShell({ active }: SettingsShellProps) {
   return (
     <div className="ow-settings">
-      <div
-        ref={sidebarRef}
-        className="ow-settings__sidebar"
-        role="tablist"
-        aria-orientation="vertical"
-        onKeyDown={onSidebarKey}
-      >
-        {PANES.map((p) => (
-          <button
-            key={p.id}
-            data-pane={p.id}
-            role="tab"
-            aria-selected={active === p.id}
-            tabIndex={active === p.id ? 0 : -1}
-            className={
-              "ow-settings__sidebar-item" +
-              (active === p.id ? " ow-settings__sidebar-item--active" : "")
-            }
-            onClick={() => setActive(p.id)}
-          >
-            <span className="ow-settings__sidebar-icon">{p.icon}</span>
-            <span>{p.label}</span>
-          </button>
-        ))}
-      </div>
-
       <div
         className="ow-settings__pane"
         role="tabpanel"

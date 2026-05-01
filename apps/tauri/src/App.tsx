@@ -6,6 +6,7 @@ import { HomePane } from "./components/home-pane";
 import { DevPillControls } from "./components/dev-pill-controls";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { SettingsShell } from "./Settings";
+import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
@@ -31,6 +32,7 @@ function App() {
   const [coreVersion, setCoreVersion] = useState<string | null>(null);
   const [coreError, setCoreError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route>("home");
+  const [settingsPane, setSettingsPane] = useState<SettingsPaneId>("general");
   const platform = detectPlatform();
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
@@ -176,9 +178,14 @@ function App() {
         )}
       </header>
       <div className="ow-app__shell">
-        <SidebarNav active={route} onSelect={setRoute} />
+        <SidebarNav
+          route={route}
+          onRouteSelect={setRoute}
+          settingsPane={settingsPane}
+          onSettingsPaneSelect={setSettingsPane}
+        />
         <main className="ow-app__body">
-          {route === "settings" && <SettingsShell />}
+          {route === "settings" && <SettingsShell active={settingsPane} />}
           {route === "diagnostics" && (
             <DiagnosticsPane
               phase={dictation.phase}

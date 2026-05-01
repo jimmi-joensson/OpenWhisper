@@ -782,6 +782,18 @@ pub fn run() {
                 // both the bundle name AND the visible chrome.
                 let _ = main.set_title(&product_name(app.handle()));
 
+                // Windows: drop OS chrome entirely so OW draws its own
+                // dark titlebar (Slack-style). WS_THICKFRAME stays set by
+                // Tauri 2 — Aero-snap (Win+arrows) keeps working. Mac is
+                // unaffected (cfg-gate compiles to nothing); titleBarStyle
+                // Overlay still draws traffic-lights over the sidebar.
+                // See openwhisper-platform-gotchas (TASK-68 entry) for why
+                // this lives here instead of tauri.conf.json.
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = main.set_decorations(false);
+                }
+
                 let main_clone = main.clone();
                 main.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {

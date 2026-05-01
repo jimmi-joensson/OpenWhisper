@@ -1,5 +1,6 @@
 import {
   emitDeviceState,
+  emitPauseAudioChanged,
   emitShowInFullscreenChanged,
   emitTick,
   expect,
@@ -205,6 +206,48 @@ test.describe("settings view", () => {
     await expect(sw).not.toBeChecked();
     await emitShowInFullscreenChanged(page, true);
     await expect(sw).toBeChecked();
+  });
+
+  test("Pause audio Switch reflects behavior_get on mount", async ({ page }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owPauseAudio?: boolean }).__owPauseAudio = false;
+    });
+    await openSettings(page);
+    await expect(
+      page.getByRole("switch", { name: "Pause audio during dictation" }),
+    ).not.toBeChecked();
+  });
+
+  test("Toggling the Pause audio Switch invokes behavior_set with the new value", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Pause audio during dictation" });
+    // Default-on per the Rust-side default; the Switch starts checked.
+    await expect(sw).toBeChecked();
+    await sw.click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owPauseAudioLastSet?: boolean })
+              .__owPauseAudioLastSet,
+        ),
+      )
+      .toBe(false);
+  });
+
+  test("behavior_pause_audio_changed event updates the Pause audio Switch", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    const sw = page.getByRole("switch", { name: "Pause audio during dictation" });
+    await expect(sw).toBeChecked();
+    await emitPauseAudioChanged(page, false);
+    await expect(sw).not.toBeChecked();
   });
 
   // Manual multi-monitor smoke (NOT covered here — these tests cover the

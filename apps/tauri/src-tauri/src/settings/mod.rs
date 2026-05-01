@@ -147,7 +147,7 @@ pub struct AudioSettings {
     pub device_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BehaviorSettings {
     /// When true, OpenWhisper stays active over fullscreen apps — pill
     /// remains visible (best-effort), hotkey stays armed. Default false
@@ -156,6 +156,27 @@ pub struct BehaviorSettings {
     /// `behavior::SHOW_IN_FULLSCREEN` AtomicBool cache.
     #[serde(default)]
     pub show_in_fullscreen: bool,
+    /// When true, OpenWhisper pauses other apps' audio playback on
+    /// PHASE_RECORDING entry and resumes on exit. Default true: most
+    /// users want auto-pause; the rare user dictating intentionally
+    /// over background audio toggles off once. Read by the phase
+    /// observer in `spawn_dictation_emitter` via the
+    /// `behavior::PAUSE_AUDIO` AtomicBool cache.
+    #[serde(default = "default_pause_audio_during_dictation")]
+    pub pause_audio_during_dictation: bool,
+}
+
+fn default_pause_audio_during_dictation() -> bool {
+    true
+}
+
+impl Default for BehaviorSettings {
+    fn default() -> Self {
+        Self {
+            show_in_fullscreen: false,
+            pause_audio_during_dictation: default_pause_audio_during_dictation(),
+        }
+    }
 }
 
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
@@ -433,4 +454,43 @@ pub fn settings_get_pill(_app: AppHandle) -> PillSettings {
 #[tauri::command]
 pub fn settings_set_pill_follow(app: AppHandle, follow: bool) -> Result<(), String> {
     save_pill_settings(&app, PillSettings { follow_active_screen: follow })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn behavior_default_pause_audio_is_true() {
+        let s = BehaviorSettings::default();
+        assert!(s.pause_audio_during_dictation);
+        assert!(!s.show_in_fullscreen);
+    }
+
+    #[test]
+    fn behavior_serde_round_trip() {
+        let original = BehaviorSettings {
+            show_in_fullscreen: true,
+            pause_audio_during_dictation: false,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: BehaviorSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn behavior_legacy_json_without_pause_audio_defaults_true() {
+        // settings.json from a build that predates pause_audio_during_dictation
+        // must round-trip through serde with the new field defaulting to true.
+        let legacy = r#"{"show_in_fullscreen":true}"#;
+        let parsed: BehaviorSettings = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.show_in_fullscreen);
+        assert!(parsed.pause_audio_during_dictation);
+    }
+
+    #[test]
+    fn behavior_empty_json_uses_full_defaults() {
+        let parsed: BehaviorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, BehaviorSettings::default());
+    }
 }

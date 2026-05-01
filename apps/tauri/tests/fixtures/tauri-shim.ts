@@ -210,6 +210,22 @@ async function installTauriShim(page: Page, label: "main" = "main") {
             (w.__owShowInFullscreenSetCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "behavior_get_pause_audio_during_dictation") {
+          const w = window as unknown as { __owPauseAudio?: boolean };
+          return w.__owPauseAudio ?? true;
+        }
+        if (cmd === "behavior_set_pause_audio_during_dictation") {
+          const { enabled } = (args ?? {}) as { enabled: boolean };
+          const w = window as unknown as {
+            __owPauseAudio?: boolean;
+            __owPauseAudioLastSet?: boolean;
+            __owPauseAudioSetCount?: number;
+          };
+          w.__owPauseAudio = enabled;
+          w.__owPauseAudioLastSet = enabled;
+          w.__owPauseAudioSetCount = (w.__owPauseAudioSetCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "audio_preview_start") {
           const w = window as unknown as { __owAudioPreviewStarts?: number };
           w.__owAudioPreviewStarts = (w.__owAudioPreviewStarts ?? 0) + 1;
@@ -343,6 +359,18 @@ export async function emitShowInFullscreenChanged(
 ): Promise<number> {
   return page.evaluate(
     (value) => window.__owEmit("behavior_show_in_fullscreen_changed", value),
+    enabled,
+  );
+}
+
+// Push a `behavior_pause_audio_changed` event at the usePauseAudio
+// subscriber. Mirrors the Rust setter's emit.
+export async function emitPauseAudioChanged(
+  page: Page,
+  enabled: boolean,
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("behavior_pause_audio_changed", value),
     enabled,
   );
 }

@@ -16,6 +16,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
+import { usePauseAudio } from "@/lib/use-pause-audio";
 import { useShowInFullscreen } from "@/lib/use-show-in-fullscreen";
 import { useTheme } from "@/lib/use-theme";
 
@@ -31,6 +32,7 @@ export function GeneralPane() {
   const { theme, setTheme } = useTheme();
   const { enabled: showInFullscreen, setEnabled: setShowInFullscreen } =
     useShowInFullscreen();
+  const { enabled: pauseAudio, setEnabled: setPauseAudio } = usePauseAudio();
   const [version, setVersion] = useState<string | null>(null);
   const [followActiveScreen, setFollowActiveScreen] = useState(true);
 
@@ -132,6 +134,30 @@ export function GeneralPane() {
           checked={showInFullscreen}
           onCheckedChange={(next) => {
             void setShowInFullscreen(next);
+          }}
+        />
+      </Field>
+
+      <Separator />
+
+      <SectionHeader>Audio</SectionHeader>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor="pause-audio">
+            Pause audio during dictation
+          </FieldLabel>
+          <FieldDescription>
+            Pauses Spotify, browser playback, and other media when you
+            start recording, then resumes when recording ends. Falls back
+            to muting system output for apps that don't support media
+            controls.
+          </FieldDescription>
+        </FieldContent>
+        <Switch
+          id="pause-audio"
+          checked={pauseAudio}
+          onCheckedChange={(next) => {
+            void setPauseAudio(next);
           }}
         />
       </Field>

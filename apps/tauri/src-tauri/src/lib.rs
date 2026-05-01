@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -23,9 +24,56 @@ mod focus;
 mod fullscreen;
 mod hotkey;
 mod injection;
+mod media_control;
 mod permissions;
 mod settings;
 mod tray;
+
+use media_control::{MediaController, PlatformMediaController};
+
+static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new();
+
+/// True between `pause_audio_for_recording` returning true and the
+/// matching `resume_audio_after_recording` having fired. Process-wide
+/// because cancel and stop both flow through the resume path; we never
+/// want to call resume twice or to call it without a prior pause.
+static PAUSED_BY_US: AtomicBool = AtomicBool::new(false);
+
+/// Pause other apps' audio BEFORE opening the mic. Synchronous and
+/// blocking — that is the point: we want fade-out + pause-send to
+/// finish before the mic opens, so Bluetooth headphones don't switch
+/// from A2DP/stereo to HFP/mono with music still mid-playback (audible
+/// quality blip otherwise).
+fn pause_audio_for_recording() {
+    if !behavior::pause_audio_during_dictation() {
+        return;
+    }
+    let Some(controller) = MEDIA_CONTROLLER.get() else {
+        return;
+    };
+    if controller.pause_now() {
+        PAUSED_BY_US.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Resume previously-paused audio AFTER the mic has closed. Spawned on
+/// a worker thread because `resume_now` itself blocks: the platform
+/// impl polls for the audio device to return to its pre-recording
+/// state (BT profile switchback) before sending the play command, so
+/// we must NOT block the hotkey path on that wait.
+fn resume_audio_after_recording() {
+    if !PAUSED_BY_US.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    thread::Builder::new()
+        .name("openwhisper-audio-resume".into())
+        .spawn(|| {
+            if let Some(controller) = MEDIA_CONTROLLER.get() {
+                controller.resume_now();
+            }
+        })
+        .ok();
+}
 
 // The pill needs to be a real NSPanel (not NSWindow) so it can render
 // over other apps' fullscreen Spaces on macOS Sonoma+. tauri-nspanel
@@ -111,6 +159,9 @@ pub(crate) fn do_toggle() -> Result<(), String> {
                     }
                 })
                 .expect("spawn recognizer loader");
+            // Fade out + pause other apps' audio BEFORE opening the
+            // mic. See `pause_audio_for_recording` doc.
+            pause_audio_for_recording();
             audio::audio_start_capture()?;
             dictation::dictation_mark_capture_started();
         }
@@ -124,6 +175,7 @@ pub(crate) fn do_toggle() -> Result<(), String> {
             audio::audio_stop_capture();
             dictation::dictation_mark_transcribing_pending();
             spawn_stop_pipeline();
+            resume_audio_after_recording();
         }
         _ => {}
     }
@@ -134,7 +186,9 @@ pub(crate) fn do_toggle() -> Result<(), String> {
 pub(crate) fn do_cancel() -> bool {
     audio::audio_stop_capture();
     let _ = audio::audio_drain_samples();
-    dictation::dictation_request_cancel()
+    let cancelled = dictation::dictation_request_cancel();
+    resume_audio_after_recording();
+    cancelled
 }
 
 #[tauri::command]
@@ -853,6 +907,10 @@ pub fn run() {
             // flip the Switch again.
             let behavior_settings = settings::load_behavior_settings(app.handle());
             behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
+            behavior::set_pause_audio_cache(behavior_settings.pause_audio_during_dictation);
+            // Single process-wide MediaController; phase observer in
+            // spawn_dictation_emitter reads it on every tick.
+            let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
             behavior::apply_collection_behavior(
                 app.handle(),
                 behavior_settings.show_in_fullscreen,
@@ -981,6 +1039,8 @@ pub fn run() {
             audio_preview_stop,
             behavior::behavior_get_show_in_fullscreen,
             behavior::behavior_set_show_in_fullscreen,
+            behavior::behavior_get_pause_audio_during_dictation,
+            behavior::behavior_set_pause_audio_during_dictation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

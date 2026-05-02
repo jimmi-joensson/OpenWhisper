@@ -20,9 +20,28 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./components/ui/select";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "./components/ui/field";
+import { Separator } from "./components/ui/separator";
+import { Slider } from "./components/ui/slider";
+import { Switch } from "./components/ui/switch";
+import { useBtResumeDelay } from "./lib/use-bt-resume-delay";
 import { useDictation } from "./lib/use-dictation";
+import { usePauseAudio } from "./lib/use-pause-audio";
 import { GeneralPane } from "./components/general-pane";
 import "./Settings.css";
+
+// Step granularity (ms) for the BT resume delay slider. 500 ms gives
+// 21 stops over 0–10 s — fine enough to land on user-perceptible
+// differences without overwhelming the slider with sub-perceptual
+// detents.
+const BT_RESUME_DELAY_STEP_MS = 500;
+const BT_RESUME_DELAY_MAX_MS = 10_000;
 
 // Live preview meter geometry — same 32-bar count and bar height as the
 // main-window meter card so the visual reads identically across surfaces.
@@ -143,6 +162,14 @@ function AudioPane() {
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
   const dictation = useDictation();
+  // Audio behavior settings — moved out of GeneralPane to keep
+  // related concerns together. The pause toggle gates the slider:
+  // when off, the entire ducking path short-circuits in Rust and
+  // the slider value has no effect, so disabling matches the
+  // user-visible behavior.
+  const { enabled: pauseAudio, setEnabled: setPauseAudio } = usePauseAudio();
+  const { delayMs: btResumeDelayMs, setDelayMs: setBtResumeDelayMs } =
+    useBtResumeDelay();
 
   // Rolling 32-bar buffer, fed from `dictation.level` at the 20 Hz tick
   // emit cadence. Matching the main-window meter geometry so users build a
@@ -464,9 +491,105 @@ function AudioPane() {
         </div>
       </section>
 
+      {/*
+        Audio behavior settings — pause-during-dictation toggle and
+        the BT resume delay slider. Lives here (not in GeneralPane)
+        because both rules act on audio output specifically; keeping
+        them next to the device picker and mic test gives the user
+        one mental "Audio" surface to find them on.
+
+        Uses shadcn FieldGroup/Field while the rest of AudioPane is
+        still BEM-styled (`ow-audio__*`). Visual mismatch is a known
+        scoped cost — modernizing the rest of AudioPane is its own
+        follow-up. The Separator above gives a clean visual break.
+      */}
+      <Separator className="my-4" />
+
+      <FieldGroup className="px-1 pb-2">
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="pause-audio">
+              Pause audio during dictation
+            </FieldLabel>
+            <FieldDescription>
+              Pauses Spotify, browser playback, and other media when
+              you start recording, then resumes when recording ends.
+              Falls back to muting system output for apps that don't
+              support media controls.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="pause-audio"
+            checked={pauseAudio}
+            onCheckedChange={(next) => {
+              void setPauseAudio(next);
+            }}
+          />
+        </Field>
+        <Field>
+          {/*
+            Label + current value share a baseline so the right-
+            aligned value floats opposite the label, not embedded
+            in the description text — the description block stays
+            stable as the slider drags. The value label mirrors the
+            "Current version" row's `font-mono text-sm` for cross-
+            pane consistency. Always one decimal so the readout
+            never reflows between e.g. "5s" and "5.5s" widths.
+          */}
+          <div className="flex items-baseline justify-between gap-2">
+            <FieldLabel htmlFor="bt-resume-delay">
+              Bluetooth resume delay
+            </FieldLabel>
+            <span
+              data-testid="bt-resume-delay-value"
+              className="font-mono text-sm"
+            >
+              {formatDelayShort(btResumeDelayMs)}
+            </span>
+          </div>
+          <FieldDescription>
+            Pauses Bluetooth headphones long enough for them to
+            switch back to stereo before music resumes. Wired or USB
+            outputs ignore this setting.
+          </FieldDescription>
+          <div className="flex items-center gap-3">
+            <span className="text-xs tabular-nums text-muted-foreground">
+              0s
+            </span>
+            <Slider
+              id="bt-resume-delay"
+              className="flex-1"
+              value={btResumeDelayMs}
+              onValueChange={(next) => {
+                void setBtResumeDelayMs(next);
+              }}
+              min={0}
+              max={BT_RESUME_DELAY_MAX_MS}
+              step={BT_RESUME_DELAY_STEP_MS}
+              disabled={!pauseAudio}
+              aria-label="Bluetooth resume delay"
+            />
+            <span className="text-xs tabular-nums text-muted-foreground">
+              10s
+            </span>
+          </div>
+        </Field>
+      </FieldGroup>
+
       {error && <div className="ow-audio__error">{error}</div>}
     </div>
   );
+}
+
+// Compact value-label form for the BT delay slider's right-aligned
+// readout: "Off" at 0, otherwise always one decimal place ("5.0s",
+// "5.5s", "10.0s") so the label width is stable across drags. With
+// font-mono each character is also fixed-width, so the readout never
+// reflows the row layout.
+function formatDelayShort(ms: number): string {
+  if (ms === 0) return "Off";
+  const seconds = ms / 1000;
+  return `${seconds.toFixed(1)}s`;
 }
 
 // Shortcuts pane — capture-on-click rebind for both toggle and cancel

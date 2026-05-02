@@ -54,6 +54,38 @@ There's a secondary trap on the maximize/restore icon swap: Tauri 2.10's global 
 
 ---
 
+### BT A2DP↔HFP profile flip has no user-mode "live state" signal — blind sleep is the only fix
+
+**Symptom:** Bluetooth output device (AirPods, BT headphones). Recording opens the mic; the OS forces the BT link from A2DP/stereo into HFP/mono. After the mic closes, sending `TryPlayAsync` to resume the SMTC source (Spotify, browser, etc.) immediately makes the user hear 1–3 s of music in mono before BT actually switches back to stereo. The mic-open / HFP-engage half is unavoidable (BT spec); the user-visible bug is the **resume-too-early** half — we want to delay `TryPlayAsync` until BT is back on A2DP, but there's no user-mode way to know when that is.
+
+**Root cause:** The signal we'd want — "is the BT codec currently in A2DP-active or HFP-active state at this exact moment?" — lives in `BTHHFP.sys`'s IRP queue, surfaced only via `IOCTL_BTHHFP_DEVICE_GET_CONNECTION_STATUS_UPDATE` and `KSEVENT_PINCAPS_JACKINFOCHANGE` ([HFP Device Connection — MS Learn](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/hfp-device-connection)). Both are kernel-mode-driver-only. There is no user-mode equivalent. Confirmed via three failed code attempts and two research passes:
+
+1. Polling **plain `IAudioClient::GetMixFormat` sample rate** — that's the engine's shared-mode mix format, decoupled from the BT codec layer. Stuck at 48 kHz across the profile flip.
+2. Polling **`IAudioClient2 + AudioCategory_Communications + GetMixFormat` channel count** — Microsoft Learn's [Communications Audio Format Capabilities](https://learn.microsoft.com/en-us/windows/win32/coreaudio/communications-audio-format-capabilities) doc claims this reflects live BT codec state on Win11 unified endpoints. **Doc is wrong in practice on Win11 26200 + AirPods Pro.** Verbose-log evidence: value stuck at 1 (HFP-1ch capability) for the entire 3 s timeout window, both at pause-time and resume-time, regardless of whether music was actively playing in A2DP/stereo through the same endpoint. It is a capability query, not a state reflection.
+3. **`IMMNotificationClient::OnDefaultDeviceChanged` / `OnDeviceStateChanged` / `OnPropertyValueChanged`** — Win11 unifies A2DP/HFP into one IMMDevice with a stable ID ([Bluetooth Classic Audio — Windows drivers](https://learn.microsoft.com/en-us/windows-hardware/drivers/bluetooth/bluetooth-classic-audio)), so none fire on profile flips. (Win10 had separate endpoints; not relevant for this codebase's targets.)
+4. **`Windows.Devices.Bluetooth.HandsFreeProfile.ConnectionStatus`** — service-connected state, not transport-active state. Both A2DP and HFP services stay connected across the flip.
+5. **`IPolicyConfig` / `IPolicyConfigVista`** (the undocumented MS interfaces used by EarTrumpet, SoundSwitch) — reads the same property store available to public user-mode APIs ([EarTrumpet IPolicyConfig.cs](https://github.com/File-New-Project/EarTrumpet/blob/dev/EarTrumpet/Interop/MMDeviceAPI/IPolicyConfig.cs)). The property doesn't exist there.
+6. **SMTC `PlaybackInfoChanged` / `MediaPropertiesChanged`** — Spotify et al. are upstream of WASAPI, no idea what BT codec is downstream. Their event surface is title/artist/playback-status, nothing transport-related ([GlobalSystemMediaTransportControlsSessionPlaybackInfo](https://learn.microsoft.com/en-us/uwp/api/windows.media.control.globalsystemmediatransportcontrolssessionplaybackinfo)).
+7. **ETW `Microsoft.Windows.Bluetooth.BthA2DP`** ({DDB6DA39-08A7-4579-8D0C-68011146E205}) DOES carry profile-flip events — but real-time consumption requires `SeSystemProfilePrivilege` (admin), disqualified for a shipped end-user app.
+
+Industry consensus: **nobody solves this deterministically.** Discord/Teams/Zoom Windows clients all suffer the same mono-tail; the standing user-side workaround is to disable Hands-free Telephony on the BT device ([shkspr.mobi blog](https://shkspr.mobi/blog/2023/09/better-bluetooth-sound-quality-on-microsoft-teams-in-windows-11/)). Wispr Flow's audio docs explicitly tell users to manually pause music ([Wispr Flow audio docs](https://docs.wisprflow.ai/articles/8533503284-knwon-audio-playback-airpod-issues-ios-macos)). Microsoft's Windows team is walking away from the A2DP/HFP split entirely by pushing LE Audio ([MS Windows Platform blog](https://techcommunity.microsoft.com/blog/windowsosplatform/cutting-the-wire-without-cutting-the-audio-quality/4447942)) — i.e., they're not solving the user-mode signal in the legacy stack, just replacing the legacy stack.
+
+**Fix in tree:** `apps/tauri/src-tauri/src/media_control/windows.rs`. `is_default_render_bluetooth()` checks `PKEY_Device_EnumeratorName` for `"BTHENUM"` (Classic) / `"BTHLEDEVICE"` (LE Audio) — that part is deterministic and reliable. On match, `resume_now` does a fixed `thread::sleep(BT_RESUME_DELAY_MS)` (default 5000) before `TryPlayAsync`. Wired/USB endpoints (`USB`/`HDAUDIO`/etc.) skip the sleep entirely — zero added latency. The 5 s value was tuned empirically on AirPods Pro on Win11 26200 — 3 s and 4 s both left audible mono tail-end on consecutive recordings (BT codec stays warmer in HFP after repeated mic cycles and takes longer to drop back). Configurability tracked under TASK-61.8.
+
+**macOS is unaffected:** CoreAudio's `kAudioDevicePropertyNominalSampleRate` IS a live state signal that reflects the actual BT codec, so `apps/tauri/src-tauri/src/media_control/mac.rs::resume_now` polls it deterministically and exits as soon as the rate climbs back to the captured A2DP value. The Windows audio stack is structurally different — no equivalent user-mode property exists. Don't try to "unify" the two implementations; the platform asymmetry is intrinsic, not accidental.
+
+**Do NOT** burn another iteration trying to find a user-mode "live BT codec state" signal. Three approaches and two research passes confirmed there is none. The next attempt will also fail.
+
+**Do NOT** poll `IAudioClient2 + AudioCategory_Communications + GetMixFormat` thinking the MS Learn doc is right — field tests on AirPods Pro/Win11 show the value stuck at HFP-capability regardless of codec state. The doc claim ("supported audio formats... change... when the device is used in Communications mode") is true for capability discovery; it does NOT track live profile transitions.
+
+**Do NOT** rely on `IMMNotificationClient::OnDefaultDeviceChanged` / `OnDeviceStateChanged` callbacks for profile flip detection on Win11 — the unified endpoint model means they don't fire.
+
+**Do NOT** add an ETW listener for `Microsoft.Windows.Bluetooth.BthA2DP` thinking it's "just user-mode tracing" — it requires `SeSystemProfilePrivilege` (admin elevation), which OpenWhisper does not and should not have.
+
+**Do NOT** assume a faster delay value works just because Windows boot was clean. The mono tail gets longer on consecutive recordings — second-recording-in-a-row keeps BT warmer in HFP. Always tune to the worst-case observed, not the first-recording case.
+
+---
+
 ## macOS
 
 ### Window drag silently no-ops without `core:window:allow-start-dragging`

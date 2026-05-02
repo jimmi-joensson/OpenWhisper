@@ -44,8 +44,20 @@ static PAUSED_BY_US: AtomicBool = AtomicBool::new(false);
 /// finish before the mic opens, so Bluetooth headphones don't switch
 /// from A2DP/stereo to HFP/mono with music still mid-playback (audible
 /// quality blip otherwise).
+///
+/// Idempotent across the preview→recording transition: if the Audio
+/// settings preview had already paused music (PAUSED_BY_US true) and
+/// the user then triggers a recording (which internally stops the
+/// preview without firing our resume hook), this function no-ops and
+/// `resume_audio_after_recording` on stop will fire the single resume
+/// for both. Without this guard, the second `pause_now` call would
+/// reset the controller's `paused_sessions` state and the eventual
+/// resume would have nothing to play back.
 fn pause_audio_for_recording() {
     if !behavior::pause_audio_during_dictation() {
+        return;
+    }
+    if PAUSED_BY_US.load(Ordering::Relaxed) {
         return;
     }
     let Some(controller) = MEDIA_CONTROLLER.get() else {
@@ -305,12 +317,18 @@ fn audio_preview_start() -> Result<(), String> {
     if dictation::is_recording() {
         return Err("recording in progress".into());
     }
+    // Same audio-ducking semantics as a real recording: pause other
+    // apps' audio BEFORE opening the mic so BT headphones don't sit
+    // in HFP/mono with music still mid-playback. Gated on the
+    // existing `pause_audio_during_dictation` master toggle.
+    pause_audio_for_recording();
     audio::audio_preview_start()
 }
 
 #[tauri::command]
 fn audio_preview_stop() {
     audio::audio_preview_stop();
+    resume_audio_after_recording();
 }
 
 // Drain the captured buffer (downmix + sinc resample to 16 kHz) and run
@@ -791,11 +809,11 @@ pub fn run() {
         // "OpenWhisper Dev" and the release registers as "OpenWhisper" —
         // dev runs don't fight release autostart entries.
         .plugin({
-            let mut b = tauri_plugin_autostart::Builder::new();
+            // Shadow on Mac so `b` stays immutable on Windows (no
+            // unused-mut warning) without an `#[allow]` escape hatch.
+            let b = tauri_plugin_autostart::Builder::new();
             #[cfg(target_os = "macos")]
-            {
-                b = b.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
-            }
+            let b = b.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
             b.build()
         });
 
@@ -908,6 +926,7 @@ pub fn run() {
             let behavior_settings = settings::load_behavior_settings(app.handle());
             behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
             behavior::set_pause_audio_cache(behavior_settings.pause_audio_during_dictation);
+            behavior::set_bt_resume_delay_ms_cache(behavior_settings.bt_resume_delay_ms);
             // Single process-wide MediaController; phase observer in
             // spawn_dictation_emitter reads it on every tick.
             let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
@@ -1041,6 +1060,8 @@ pub fn run() {
             behavior::behavior_set_show_in_fullscreen,
             behavior::behavior_get_pause_audio_during_dictation,
             behavior::behavior_set_pause_audio_during_dictation,
+            behavior::behavior_get_bt_resume_delay_ms,
+            behavior::behavior_set_bt_resume_delay_ms,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

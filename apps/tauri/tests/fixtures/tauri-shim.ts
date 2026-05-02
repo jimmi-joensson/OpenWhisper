@@ -41,7 +41,7 @@ declare global {
 
 // Install the Tauri 2 internals stub before the SPA boots. Records emitted
 // `dictation_tick` events into a queue the test can replay.
-async function installTauriShim(page: Page, label: "main" = "main") {
+async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
   await page.addInitScript((windowLabel) => {
     const handlers = new Map<string, Set<number>>();
     const callbacks = new Map<number, (payload: unknown) => void>();
@@ -282,6 +282,21 @@ async function installTauriShim(page: Page, label: "main" = "main") {
           // catch path doesn't surface in unrelated specs.
           return null;
         }
+        if (cmd === "set_pill_click_through") {
+          const { passthrough } = (args ?? {}) as { passthrough: boolean };
+          const w = window as unknown as {
+            __owPillPassthrough?: boolean;
+            __owPillPassthroughCalls?: number;
+          };
+          w.__owPillPassthrough = passthrough;
+          w.__owPillPassthroughCalls = (w.__owPillPassthroughCalls ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "show_main_window") {
+          const w = window as unknown as { __owShowMainCount?: number };
+          w.__owShowMainCount = (w.__owShowMainCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;
@@ -496,6 +511,15 @@ export async function waitForDeviceStateListener(page: Page) {
 export const test = base.extend({
   page: async ({ page }, use) => {
     await installTauriShim(page);
+    await use(page);
+  },
+});
+
+// Same shim, but boots the SPA as the "pill" window — main.tsx's
+// React.lazy switch then loads PillOverlay instead of App.
+export const pillTest = base.extend({
+  page: async ({ page }, use) => {
+    await installTauriShim(page, "pill");
     await use(page);
   },
 });

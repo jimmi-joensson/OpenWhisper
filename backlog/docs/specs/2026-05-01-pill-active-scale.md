@@ -1,8 +1,8 @@
-# Pill scales 2x during recording / transcribing — spec
+# Pill scales 1.5x during recording / transcribing — spec
 
 **Backlog parent:** TASK-70
 **Date:** 2026-05-01
-**Revision:** 2 (folded in Emil-design-eng review + Dynamic Island reference, 2026-05-01)
+**Revision:** 3 (scale 2× → 1.5× per Mac smoke feedback, 2026-05-02)
 
 ---
 
@@ -12,11 +12,11 @@ The pill HUD is small (38–70 px wide × 22 px tall logical) so users can lose 
 
 ## Goal
 
-Increase visual presence during the two active phases by scaling the **whole capsule and its content** to 2× while idle stays at 1×. The motion must read as **alive, not timed** — the pill is the same UX archetype as Apple's Dynamic Island (status badge that grows when the device is doing something, anchored at a screen edge, lives across all app states), so the size change uses a **spring, not a bezier**: it settles into place with a subtle bounce on grow, snaps decisively on shrink, and carries velocity across interruptions.
+Increase visual presence during the two active phases by scaling the **whole capsule and its content** to 1.5× while idle stays at 1×. The motion must read as **alive, not timed** — the pill is the same UX archetype as Apple's Dynamic Island (status badge that grows when the device is doing something, anchored at a screen edge, lives across all app states), so the size change uses a **spring, not a bezier**: it settles into place with a subtle bounce on grow, snaps decisively on shrink, and carries velocity across interruptions.
 
 ## Non-goals
 
-- Not changing the existing inner width tween between recording (70) ↔ transcribing (38) — those values stay; the 2× factor multiplies whatever they resolve to.
+- Not changing the existing inner width tween between recording (70) ↔ transcribing (38) — those values stay; the 1.5× factor multiplies whatever they resolve to.
 - Not redesigning particle / sphere geometry — content scales because the capsule is scaled, not because we double every per-particle coordinate.
 - Not changing click-through behavior, anchor position, or the dock-gap math (capsule's *bottom edge* must stay where it is today; only the top extends upward).
 - Not refactoring the width animation off layout (`style.width`) onto `transform: scaleX()`. That is hygiene, not feel — captured as a finding in TASK-71's audit.
@@ -28,7 +28,7 @@ Increase visual presence during the two active phases by scaling the **whole cap
 | --- | --- | --- | --- |
 | idle → recording | 1 → 2 | grow spring (slight overshoot) | 38 → 70 (existing, RAF) |
 | idle → transcribing | 1 → 2 | grow spring | 38 → 38, sphere implode/explode (existing) |
-| recording ↔ transcribing | stays at 2 | (no scale spring fires) | existing |
+| recording ↔ transcribing | stays at 1.5 | (no scale spring fires) | existing |
 | recording → idle | 2 → 1 | shrink spring (critically damped, no bounce) | 70 → 38 (existing) |
 | transcribing → idle | 2 → 1 | shrink spring | 38 → 38, sphere implode/explode (existing) |
 
@@ -54,11 +54,11 @@ The spring runs on its own clock — it does **not** share `tweenRef.start / dur
 
 5. **`transform-origin: 50% 100%`** (center bottom). Bottom edge anchored; growth extends upward. Preserves `place_pill` math — no Rust position changes per state.
 
-6. **Backdrop-filter counter-scale.** At 2× the visual blur radius would double (20 px → 40 px screen pixels) and the pill's *material* would feel different across states. Counter-scale via CSS custom property: `backdrop-filter: blur(var(--pill-blur))`, RAF writes `--pill-blur = ${20 / currentScale}px`. Net visible blur in screen pixels stays at 20 px constant across the entire scale tween. The capsule's **form** changes; the **material** does not.
+6. **Backdrop-filter counter-scale.** At 1.5× the visual blur radius scales with the capsule (20 px → 30 px screen pixels) and the pill's *material* would feel different across states. Counter-scale via CSS custom property: `backdrop-filter: blur(var(--pill-blur))`, RAF writes `--pill-blur = ${20 / currentScale}px`. Net visible blur in screen pixels stays at 20 px constant across the entire scale tween. The capsule's **form** changes; the **material** does not.
 
 7. **`prefers-reduced-motion` honored.** When the media query matches, the spring solver is bypassed: `x` snaps to `target` on every status change (still through the same code path so the rest of the pill — particles, pose, click-through — keeps working). This *also* upgrades the existing pill animation to honor reduced-motion, which it currently does not — we explicitly take that on now because doubling the visual displacement amplifies any vestibular impact.
 
-8. **OS window dimension bump.** `130×82 → 180×110` logical pt. The capsule at 2× recording is 140×44; window must contain that plus shadow blur (~14 px) without clipping. Window is transparent so the bump is invisible to the user — it is just a larger paint region. Reposition math constants follow.
+8. **OS window dimension bump.** `130×82 → 180×110` logical pt. The capsule at 1.5× recording is 105×33; window must contain that plus shadow blur (~14 px) without clipping. Window is transparent so the bump is invisible to the user — it is just a larger paint region. Reposition math constants follow.
 
 ## Trade-offs considered
 

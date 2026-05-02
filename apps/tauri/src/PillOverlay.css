@@ -44,8 +44,12 @@ body,
   padding: 0 8px;
   border-radius: 11px;
   background: rgba(0, 0, 0, 0.55);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  backdrop-filter: blur(20px) saturate(140%);
+  /* Blur radius is counter-scaled by the RAF loop (--pill-blur =
+   * 20px / current-scale) so the visible blur in screen pixels stays
+   * constant across the 1×↔2× scale tween. The capsule's *form*
+   * changes; the *material* should not. */
+  -webkit-backdrop-filter: blur(var(--pill-blur, 20px)) saturate(140%);
+  backdrop-filter: blur(var(--pill-blur, 20px)) saturate(140%);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.08),
     0 4px 14px rgba(0, 0, 0, 0.35);
@@ -53,8 +57,13 @@ body,
   user-select: none;
   -webkit-user-select: none;
   overflow: hidden;
-  /* Width animated by RAF — keep on the compositor. */
-  will-change: width;
+  /* Width and scale-transform are both animated by RAF (width: layout
+   * tween between idle/recording/transcribing; transform: spring-driven
+   * 1×↔2× scale on enter/leave active states). Keep both on the
+   * compositor; transform-origin pins the bottom edge so growth extends
+   * upward and the dock-anchor in place_pill stays valid. */
+  will-change: width, transform;
+  transform-origin: 50% 100%;
   -webkit-tap-highlight-color: transparent;
   outline: none;
   /* Pointer cursor only visible while click-through is OFF (idle state) —

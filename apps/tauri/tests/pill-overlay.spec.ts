@@ -59,20 +59,20 @@ test.describe("pill overlay — visual dimensions", () => {
     await expectCapsuleRect(page, 38, 22);
   });
 
-  test("recording capsule renders at 140x44 (2x scale)", async ({ page }) => {
+  test("recording capsule renders at 105x33 (1.5x scale)", async ({ page }) => {
     await page.goto("/");
     await waitForPillMount(page);
     await emitPillState(page, { status: "recording", levels: RECORDING_LEVELS });
-    // Layout width 70 × scale 2 = 140; layout height 22 × scale 2 = 44.
-    await expectCapsuleRect(page, 140, 44);
+    // Layout width 70 × scale 1.5 = 105; layout height 22 × scale 1.5 = 33.
+    await expectCapsuleRect(page, 105, 33);
   });
 
-  test("transcribing capsule renders at 76x44 (2x scale)", async ({ page }) => {
+  test("transcribing capsule renders at 57x33 (1.5x scale)", async ({ page }) => {
     await page.goto("/");
     await waitForPillMount(page);
     await emitPillState(page, { status: "transcribing", levels: ZERO_LEVELS });
-    // Layout width 38 × scale 2 = 76; layout height 22 × scale 2 = 44.
-    await expectCapsuleRect(page, 76, 44);
+    // Layout width 38 × scale 1.5 = 57; layout height 22 × scale 1.5 = 33.
+    await expectCapsuleRect(page, 57, 33);
   });
 });
 
@@ -85,7 +85,7 @@ test.describe("pill overlay — reduced motion", () => {
     // Reduced-motion branches snap width + scale on the next RAF tick.
     // 500ms timeout is conservative under parallel load; the snap itself
     // resolves in a few frames.
-    await expectCapsuleRect(page, 140, 44, 500);
+    await expectCapsuleRect(page, 105, 33, 500);
   });
 
   test("transcribing->idle snaps without sphere implode tween", async ({
@@ -95,7 +95,7 @@ test.describe("pill overlay — reduced motion", () => {
     await page.goto("/");
     await waitForPillMount(page);
     await emitPillState(page, { status: "transcribing", levels: ZERO_LEVELS });
-    await expectCapsuleRect(page, 76, 44, 500);
+    await expectCapsuleRect(page, 57, 33, 500);
     await emitPillState(page, { status: "idle", levels: ZERO_LEVELS });
     await expectCapsuleRect(page, 38, 22, 500);
   });
@@ -139,7 +139,7 @@ test.describe("pill overlay — click-through gating", () => {
     await emitPillState(page, { status: "recording", levels: RECORDING_LEVELS });
     // Wait for the recording target rect to land before flipping back so
     // the click-through invoke ordering is stable.
-    await expectCapsuleRect(page, 140, 44);
+    await expectCapsuleRect(page, 105, 33);
     await emitPillState(page, { status: "idle", levels: ZERO_LEVELS });
     await expect
       .poll(() =>

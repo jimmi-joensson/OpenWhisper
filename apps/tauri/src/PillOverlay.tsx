@@ -17,14 +17,16 @@ const PILL_OUTER_W: Record<PillStatus, number> = {
   recording: 70,
   transcribing: 38,
 };
-// Outer scale per state. 1 at idle, 2 during recording/transcribing. Driven
-// by a hand-rolled 2nd-order spring (asymmetric: subtle overshoot on grow,
-// critically damped on shrink) so the morph reads as a Dynamic-Island-style
-// alive badge rather than a timed tween.
+// Outer scale per state. 1 at idle, 1.5 during recording/transcribing.
+// Driven by a hand-rolled 2nd-order spring (asymmetric: subtle overshoot on
+// grow, critically damped on shrink) so the morph reads as a Dynamic-Island-
+// style alive badge rather than a timed tween. 1.5× is the user-tested
+// value — 2× felt too aggressive against the dock; 1.5× gives clear
+// presence without dominating the screen edge.
 const PILL_SCALE: Record<PillStatus, number> = {
   idle: 1,
-  recording: 2,
-  transcribing: 2,
+  recording: 1.5,
+  transcribing: 1.5,
 };
 const SPRING_GROW = { stiffness: 220, damping: 24 }; // ~18% overshoot
 const SPRING_SHRINK = { stiffness: 280, damping: 34 }; // critically damped

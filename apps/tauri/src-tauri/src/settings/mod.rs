@@ -147,7 +147,7 @@ pub struct AudioSettings {
     pub device_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BehaviorSettings {
     /// When true, OpenWhisper stays active over fullscreen apps — pill
     /// remains visible (best-effort), hotkey stays armed. Default false
@@ -156,6 +156,46 @@ pub struct BehaviorSettings {
     /// `behavior::SHOW_IN_FULLSCREEN` AtomicBool cache.
     #[serde(default)]
     pub show_in_fullscreen: bool,
+    /// When true, OpenWhisper pauses other apps' audio playback on
+    /// PHASE_RECORDING entry and resumes on exit. Default true: most
+    /// users want auto-pause; the rare user dictating intentionally
+    /// over background audio toggles off once. Read by the phase
+    /// observer in `spawn_dictation_emitter` via the
+    /// `behavior::PAUSE_AUDIO` AtomicBool cache.
+    #[serde(default = "default_pause_audio_during_dictation")]
+    pub pause_audio_during_dictation: bool,
+    /// Bluetooth resume delay in milliseconds. After a recording (or
+    /// mic-test preview) ends, OpenWhisper waits this long before
+    /// sending the SMTC `TryPlayAsync` to resume music — masks the
+    /// HFP→A2DP profile-switchback window during which BT would
+    /// otherwise replay music in mono. Only applies when the default
+    /// render endpoint is a Bluetooth device (gated via
+    /// `PKEY_Device_EnumeratorName`); wired/USB endpoints skip the
+    /// wait entirely regardless of this value. See the BT mono blip
+    /// gotcha in the `openwhisper-platform-gotchas` skill for the full
+    /// "why blind sleep, not deterministic detection" trail. Default
+    /// 5000 — empirically tuned for AirPods Pro on Win11 26200; users
+    /// on faster radios can dial down.
+    #[serde(default = "default_bt_resume_delay_ms")]
+    pub bt_resume_delay_ms: u64,
+}
+
+fn default_pause_audio_during_dictation() -> bool {
+    true
+}
+
+pub fn default_bt_resume_delay_ms() -> u64 {
+    5000
+}
+
+impl Default for BehaviorSettings {
+    fn default() -> Self {
+        Self {
+            show_in_fullscreen: false,
+            pause_audio_during_dictation: default_pause_audio_during_dictation(),
+            bt_resume_delay_ms: default_bt_resume_delay_ms(),
+        }
+    }
 }
 
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
@@ -433,4 +473,56 @@ pub fn settings_get_pill(_app: AppHandle) -> PillSettings {
 #[tauri::command]
 pub fn settings_set_pill_follow(app: AppHandle, follow: bool) -> Result<(), String> {
     save_pill_settings(&app, PillSettings { follow_active_screen: follow })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn behavior_default_pause_audio_is_true() {
+        let s = BehaviorSettings::default();
+        assert!(s.pause_audio_during_dictation);
+        assert!(!s.show_in_fullscreen);
+        assert_eq!(s.bt_resume_delay_ms, 5000);
+    }
+
+    #[test]
+    fn behavior_serde_round_trip() {
+        let original = BehaviorSettings {
+            show_in_fullscreen: true,
+            pause_audio_during_dictation: false,
+            bt_resume_delay_ms: 2500,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: BehaviorSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn behavior_legacy_json_without_pause_audio_defaults_true() {
+        // settings.json from a build that predates pause_audio_during_dictation
+        // must round-trip through serde with the new field defaulting to true.
+        let legacy = r#"{"show_in_fullscreen":true}"#;
+        let parsed: BehaviorSettings = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.show_in_fullscreen);
+        assert!(parsed.pause_audio_during_dictation);
+        assert_eq!(parsed.bt_resume_delay_ms, 5000);
+    }
+
+    #[test]
+    fn behavior_legacy_json_without_bt_resume_delay_defaults_5000() {
+        // settings.json from a build that has pause_audio_during_dictation
+        // but predates bt_resume_delay_ms must round-trip with the new
+        // field at its default.
+        let legacy = r#"{"show_in_fullscreen":false,"pause_audio_during_dictation":true}"#;
+        let parsed: BehaviorSettings = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.bt_resume_delay_ms, 5000);
+    }
+
+    #[test]
+    fn behavior_empty_json_uses_full_defaults() {
+        let parsed: BehaviorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, BehaviorSettings::default());
+    }
 }

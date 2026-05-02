@@ -210,6 +210,40 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             (w.__owShowInFullscreenSetCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "behavior_get_pause_audio_during_dictation") {
+          const w = window as unknown as { __owPauseAudio?: boolean };
+          return w.__owPauseAudio ?? true;
+        }
+        if (cmd === "behavior_set_pause_audio_during_dictation") {
+          const { enabled } = (args ?? {}) as { enabled: boolean };
+          const w = window as unknown as {
+            __owPauseAudio?: boolean;
+            __owPauseAudioLastSet?: boolean;
+            __owPauseAudioSetCount?: number;
+          };
+          w.__owPauseAudio = enabled;
+          w.__owPauseAudioLastSet = enabled;
+          w.__owPauseAudioSetCount = (w.__owPauseAudioSetCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "behavior_get_bt_resume_delay_ms") {
+          const w = window as unknown as { __owBtResumeDelayMs?: number };
+          return w.__owBtResumeDelayMs ?? 5000;
+        }
+        if (cmd === "behavior_set_bt_resume_delay_ms") {
+          const { delayMs } = (args ?? {}) as { delayMs: number };
+          const clamped = Math.min(Math.max(delayMs, 0), 10000);
+          const w = window as unknown as {
+            __owBtResumeDelayMs?: number;
+            __owBtResumeDelayLastSet?: number;
+            __owBtResumeDelaySetCount?: number;
+          };
+          w.__owBtResumeDelayMs = clamped;
+          w.__owBtResumeDelayLastSet = clamped;
+          w.__owBtResumeDelaySetCount =
+            (w.__owBtResumeDelaySetCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "audio_preview_start") {
           const w = window as unknown as { __owAudioPreviewStarts?: number };
           w.__owAudioPreviewStarts = (w.__owAudioPreviewStarts ?? 0) + 1;
@@ -359,6 +393,30 @@ export async function emitShowInFullscreenChanged(
   return page.evaluate(
     (value) => window.__owEmit("behavior_show_in_fullscreen_changed", value),
     enabled,
+  );
+}
+
+// Push a `behavior_pause_audio_changed` event at the usePauseAudio
+// subscriber. Mirrors the Rust setter's emit.
+export async function emitPauseAudioChanged(
+  page: Page,
+  enabled: boolean,
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("behavior_pause_audio_changed", value),
+    enabled,
+  );
+}
+
+// Push a `behavior_bt_resume_delay_changed` event at the
+// useBtResumeDelay subscriber. Mirrors the Rust setter's emit.
+export async function emitBtResumeDelayChanged(
+  page: Page,
+  delayMs: number,
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("behavior_bt_resume_delay_changed", value),
+    delayMs,
   );
 }
 

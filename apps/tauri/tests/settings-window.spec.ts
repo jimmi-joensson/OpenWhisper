@@ -1,5 +1,7 @@
 import {
+  emitBtResumeDelayChanged,
   emitDeviceState,
+  emitPauseAudioChanged,
   emitShowInFullscreenChanged,
   emitTick,
   expect,
@@ -205,6 +207,142 @@ test.describe("settings view", () => {
     await expect(sw).not.toBeChecked();
     await emitShowInFullscreenChanged(page, true);
     await expect(sw).toBeChecked();
+  });
+
+  test("Pause audio Switch reflects behavior_get on mount", async ({ page }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owPauseAudio?: boolean }).__owPauseAudio = false;
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await expect(
+      page.getByRole("switch", { name: "Pause audio during dictation" }),
+    ).not.toBeChecked();
+  });
+
+  test("Toggling the Pause audio Switch invokes behavior_set with the new value", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const sw = page.getByRole("switch", { name: "Pause audio during dictation" });
+    // Default-on per the Rust-side default; the Switch starts checked.
+    await expect(sw).toBeChecked();
+    await sw.click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owPauseAudioLastSet?: boolean })
+              .__owPauseAudioLastSet,
+        ),
+      )
+      .toBe(false);
+  });
+
+  test("behavior_pause_audio_changed event updates the Pause audio Switch", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    const sw = page.getByRole("switch", { name: "Pause audio during dictation" });
+    await expect(sw).toBeChecked();
+    await emitPauseAudioChanged(page, false);
+    await expect(sw).not.toBeChecked();
+  });
+
+  // BT resume delay slider is Windows-only — Mac uses adaptive
+  // sample-rate polling for BT switchback. The four tests below all
+  // fake `navigator.platform = "Win32"` via init script so they run
+  // the Windows render path on a Mac CI box. The fifth test confirms
+  // the slider is hidden on the default Mac platform.
+
+  test("BT resume delay value label reflects behavior_get on mount", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { value: "Win32" });
+    });
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owBtResumeDelayMs?: number }).__owBtResumeDelayMs =
+        2000;
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await expect(page.getByTestId("bt-resume-delay-value")).toHaveText("2.0s");
+  });
+
+  test("BT resume delay value label shows 'Off' when value is 0", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { value: "Win32" });
+    });
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owBtResumeDelayMs?: number }).__owBtResumeDelayMs = 0;
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await expect(page.getByTestId("bt-resume-delay-value")).toHaveText("Off");
+  });
+
+  test("behavior_bt_resume_delay_changed event updates the value label", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { value: "Win32" });
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    // Default is 5000 ms → always-decimal "5.0s" in the value label.
+    await expect(page.getByTestId("bt-resume-delay-value")).toHaveText("5.0s");
+    await emitBtResumeDelayChanged(page, 3000);
+    await expect(page.getByTestId("bt-resume-delay-value")).toHaveText("3.0s");
+  });
+
+  test("BT resume delay slider is disabled when Pause audio is off", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { value: "Win32" });
+    });
+    await page.goto("/");
+    await page.evaluate(() => {
+      (window as unknown as { __owPauseAudio?: boolean }).__owPauseAudio = false;
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    // base-ui renders a hidden `<input type="range">` inside the
+    // Thumb that carries the actual disabled state. `getByRole`
+    // skips disabled inputs from the accessibility tree under
+    // Playwright's default rules, so we target the input via its
+    // attribute selectors directly.
+    await expect(
+      page.locator(
+        'input[type="range"][aria-label="Bluetooth resume delay"]',
+      ),
+    ).toBeDisabled();
+  });
+
+  test("BT resume delay slider is hidden on Mac", async ({ page }) => {
+    // Playwright's Desktop Chrome preset reports navigator.platform =
+    // "Win32" by default regardless of host OS, so we have to fake the
+    // Mac platform explicitly here. On a real Mac runtime
+    // navigator.platform = "MacIntel" (or similar), the SHOW_BT_RESUME_DELAY
+    // module-level check evaluates false, and the Field never mounts.
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { value: "MacIntel" });
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Audio" }).click();
+    await expect(page.getByTestId("bt-resume-delay-value")).toHaveCount(0);
   });
 
   // Manual multi-monitor smoke (NOT covered here — these tests cover the

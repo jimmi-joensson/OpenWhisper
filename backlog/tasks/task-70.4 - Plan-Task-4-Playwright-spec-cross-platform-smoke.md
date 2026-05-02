@@ -1,9 +1,11 @@
 ---
 id: TASK-70.4
 title: 'Plan Task 4: Playwright spec + cross-platform smoke'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-01 19:37'
+updated_date: '2026-05-01 20:06'
 labels:
   - 70-impl
 dependencies: []

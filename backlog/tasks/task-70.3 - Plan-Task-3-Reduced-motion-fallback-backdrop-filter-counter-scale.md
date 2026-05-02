@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 20:05'
+updated_date: '2026-05-01 20:06'
 labels:
   - 70-impl
 dependencies: []
@@ -20,9 +20,15 @@ Honor prefers-reduced-motion (snap to target, skip spring + width tween). Counte
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 prefersReducedMotionRef subscribes to media-query changes and unsubscribes on unmount
-- [ ] #2 Reduced-motion branch snaps scaleStateRef.x and widthRef.current to target instantly (no spring, no width tween) but particle pose tweens still run
-- [ ] #3 .pill-capsule uses var(--pill-blur, 20px) for backdrop-filter and -webkit-backdrop-filter
-- [ ] #4 RAF writes --pill-blur per frame as 20/scale, denominator clamped at 0.001
+- [x] #1 prefersReducedMotionRef subscribes to media-query changes and unsubscribes on unmount
+- [x] #2 Reduced-motion branch snaps scaleStateRef.x and widthRef.current to target instantly (no spring, no width tween) but particle pose tweens still run
+- [x] #3 .pill-capsule uses var(--pill-blur, 20px) for backdrop-filter and -webkit-backdrop-filter
+- [x] #4 RAF writes --pill-blur per frame as 20/scale, denominator clamped at 0.001
 - [ ] #5 Manual smoke: with reduced-motion enabled, status changes are instant; with reduced-motion off, blur disk is visually constant across scale 1<->2
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+8eca2a3 prefersReducedMotionRef + media-query subscription; reduced-motion branches on width tween + spring step; --pill-blur CSS var driven by RAF as 20/scale, denominator clamped at 0.001.
+<!-- SECTION:NOTES:END -->

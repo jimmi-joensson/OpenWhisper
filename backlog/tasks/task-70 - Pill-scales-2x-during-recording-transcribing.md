@@ -1,10 +1,10 @@
 ---
 id: TASK-70
 title: Pill scales 2x during recording/transcribing
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-05-01 19:14'
-updated_date: '2026-05-02 07:30'
+updated_date: '2026-05-02 08:54'
 labels: []
 dependencies: []
 documentation:

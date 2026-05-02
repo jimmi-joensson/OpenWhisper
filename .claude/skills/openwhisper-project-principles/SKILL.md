@@ -77,3 +77,20 @@ OpenWhisper must be visually and behaviorally recognizable as the *same product*
 - When in doubt about behavior or visuals, read `apps/macos/App/` and mirror — `PillOverlay.swift`, `DictationService.swift`, `ContentView.swift`, `LevelMeter.swift`, `TextInjector.swift` are the load-bearing files.
 - Don't propose porting to yet another shell (WinUI, GTK, Qt). The cross-platform shell is Tauri.
 - Platform-specific affordances that genuinely matter (hotkey semantics, OS-level text injection, tray vs menubar) are the only places the code branches by platform.
+
+---
+
+## Platform-relevant copy and settings — hide what doesn't apply
+
+UI text, settings, and controls must speak only to the platform the user is on. A Mac user should never see a setting, label, or description that mentions Windows behavior, and vice versa. When a feature is meaningful on only one platform, **hide it** on the other — don't show-and-disable, don't show-with-cross-platform-explainer.
+
+**Why:** Mentioning the other OS's behavior in copy makes the app feel like it's been bolted together rather than designed for the platform you're using. Settings that don't do anything on your platform are noise that erodes trust in the rest of the UI ("if this slider does nothing, what else doesn't work?"). The cross-platform shell is an implementation detail; the user-visible product should look platform-native.
+
+**How to apply:**
+- Settings whose backend has no effect on a platform → don't render the control on that platform. Use a module-level `navigator.platform` guard (see `Settings.tsx::SHOW_BT_RESUME_DELAY` for the canonical pattern). Module-level (not runtime-conditional) so the setting genuinely isn't part of the UI on the wrong platform.
+- Field descriptions and labels must NOT contain "On macOS, … On Windows, …" branching. Each platform sees only the copy that applies to it. If the same control is meaningful on both with different semantics, write platform-specific copy and pick at render time.
+- Hide (don't disable) the control on the wrong platform. A disabled control still claims screen real estate and tells the user "this is something you could care about" — they ignore it once and lose trust the next time they see it.
+- The one exception: the same setting that has identical semantics on both platforms (e.g. `pause_audio_during_dictation`) renders identically. Symmetry is fine; cross-OS explainers are not.
+- Concrete example: TASK-61's "Bluetooth resume delay" slider is Windows-only. macOS uses adaptive sample-rate polling and the setting has no effect there, so the entire `<Field>` is gated on a `SHOW_BT_RESUME_DELAY` platform check and never mounts on Mac.
+- Mirror this for Mac-only settings if any are added later (none today). Don't show "Allow JavaScript from Apple Events" guidance on Windows.
+- Tests for platform-gated UI need to fake `navigator.platform` explicitly: Playwright's "Desktop Chrome" preset reports `Win32` regardless of host OS, so a test that wants to assert Mac-render must `addInitScript` to set `MacIntel` (or similar). The default-passes-on-Mac fallback is a test-flakiness trap.

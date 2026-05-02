@@ -122,6 +122,15 @@ interface AudioDeviceState {
 // load via `navigator.platform`, matching the platform-detection pattern
 // in `lib/use-global-hotkey.ts` rather than introducing a Tauri OS plugin
 // just for one string.
+// Mac uses adaptive sample-rate polling for BT switchback (see
+// `media_control/mac.rs`), so the user-configurable BT resume delay
+// has no effect there. Hide the slider on Mac entirely; it's a
+// Windows-only fallback for the Windows lack of a switchback event.
+const SHOW_BT_RESUME_DELAY = (() => {
+  if (typeof navigator === "undefined") return true;
+  return !/mac/i.test(navigator.platform);
+})();
+
 const DEFAULT_DEVICE_PREFIX = (() => {
   if (typeof navigator === "undefined") return "Default";
   if (/win/i.test(navigator.platform)) return "Windows Default";
@@ -526,54 +535,56 @@ function AudioPane() {
             }}
           />
         </Field>
-        <Field>
-          {/*
-            Label + current value share a baseline so the right-
-            aligned value floats opposite the label, not embedded
-            in the description text — the description block stays
-            stable as the slider drags. The value label mirrors the
-            "Current version" row's `font-mono text-sm` for cross-
-            pane consistency. Always one decimal so the readout
-            never reflows between e.g. "5s" and "5.5s" widths.
-          */}
-          <div className="flex items-baseline justify-between gap-2">
-            <FieldLabel htmlFor="bt-resume-delay">
-              Bluetooth resume delay
-            </FieldLabel>
-            <span
-              data-testid="bt-resume-delay-value"
-              className="font-mono text-sm"
-            >
-              {formatDelayShort(btResumeDelayMs)}
-            </span>
-          </div>
-          <FieldDescription>
-            Pauses Bluetooth headphones long enough for them to
-            switch back to stereo before music resumes. Wired or USB
-            outputs ignore this setting.
-          </FieldDescription>
-          <div className="flex items-center gap-3">
-            <span className="text-xs tabular-nums text-muted-foreground">
-              0s
-            </span>
-            <Slider
-              id="bt-resume-delay"
-              className="flex-1"
-              value={btResumeDelayMs}
-              onValueChange={(next) => {
-                void setBtResumeDelayMs(next);
-              }}
-              min={0}
-              max={BT_RESUME_DELAY_MAX_MS}
-              step={BT_RESUME_DELAY_STEP_MS}
-              disabled={!pauseAudio}
-              aria-label="Bluetooth resume delay"
-            />
-            <span className="text-xs tabular-nums text-muted-foreground">
-              10s
-            </span>
-          </div>
-        </Field>
+        {SHOW_BT_RESUME_DELAY && (
+          <Field>
+            {/*
+              Label + current value share a baseline so the right-
+              aligned value floats opposite the label, not embedded
+              in the description text — the description block stays
+              stable as the slider drags. The value label mirrors the
+              "Current version" row's `font-mono text-sm` for cross-
+              pane consistency. Always one decimal so the readout
+              never reflows between e.g. "5s" and "5.5s" widths.
+            */}
+            <div className="flex items-baseline justify-between gap-2">
+              <FieldLabel htmlFor="bt-resume-delay">
+                Bluetooth resume delay
+              </FieldLabel>
+              <span
+                data-testid="bt-resume-delay-value"
+                className="font-mono text-sm"
+              >
+                {formatDelayShort(btResumeDelayMs)}
+              </span>
+            </div>
+            <FieldDescription>
+              Pauses Bluetooth headphones long enough for them to
+              switch back to stereo before music resumes. Wired or USB
+              outputs ignore this setting.
+            </FieldDescription>
+            <div className="flex items-center gap-3">
+              <span className="text-xs tabular-nums text-muted-foreground">
+                0s
+              </span>
+              <Slider
+                id="bt-resume-delay"
+                className="flex-1"
+                value={btResumeDelayMs}
+                onValueChange={(next) => {
+                  void setBtResumeDelayMs(next);
+                }}
+                min={0}
+                max={BT_RESUME_DELAY_MAX_MS}
+                step={BT_RESUME_DELAY_STEP_MS}
+                disabled={!pauseAudio}
+                aria-label="Bluetooth resume delay"
+              />
+              <span className="text-xs tabular-nums text-muted-foreground">
+                10s
+              </span>
+            </div>
+          </Field>
+        )}
       </FieldGroup>
 
       {error && <div className="ow-audio__error">{error}</div>}

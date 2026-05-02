@@ -319,8 +319,14 @@ impl MediaController for MacMediaController {
         // Wait for BT to switch back to its pre-recording profile
         // (HFP→A2DP on AirPods, ~500–1000 ms) before sending play.
         // Signal: device's nominal sample rate climbs back to the
-        // pre-pause value. Wired headsets / BT-stayed-A2DP exit on
-        // the first poll.
+        // pre-pause value — adaptive detection, exits as soon as the
+        // OS reports the switch is complete. Wired headsets and
+        // BT-stayed-A2DP devices exit on the first poll. Hardcoded
+        // 2 s timeout is a generous fallback for unusual BT devices
+        // that never report rate change; the
+        // `behavior::bt_resume_delay_ms` setting is Windows-only
+        // (Windows can't observe the switch event, see
+        // `media_control/windows.rs`).
         if let (Some(d), Some(target)) = (default_output_device(), original_rate) {
             let deadline = Instant::now() + Duration::from_millis(RESUME_RATE_WAIT_TIMEOUT_MS);
             let mut waited_ms = 0u64;

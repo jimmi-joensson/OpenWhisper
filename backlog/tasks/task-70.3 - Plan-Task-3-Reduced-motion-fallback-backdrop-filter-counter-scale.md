@@ -1,11 +1,11 @@
 ---
 id: TASK-70.3
 title: 'Plan Task 3: Reduced-motion fallback + backdrop-filter counter-scale'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 20:06'
+updated_date: '2026-05-02 08:55'
 labels:
   - 70-impl
 dependencies: []
@@ -32,3 +32,9 @@ Honor prefers-reduced-motion (snap to target, skip spring + width tween). Counte
 <!-- SECTION:NOTES:BEGIN -->
 8eca2a3 prefersReducedMotionRef + media-query subscription; reduced-motion branches on width tween + spring step; --pill-blur CSS var driven by RAF as 20/scale, denominator clamped at 0.001.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+prefersReducedMotionRef + media-query subscription. Reduced-motion snaps width + scale (also upgrades existing width tween). Backdrop-filter blur counter-scaled via --pill-blur = 20/scale. Material visually invariant across morph.
+<!-- SECTION:FINAL_SUMMARY:END -->

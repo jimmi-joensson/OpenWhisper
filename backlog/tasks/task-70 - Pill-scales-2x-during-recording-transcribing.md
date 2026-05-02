@@ -1,10 +1,10 @@
 ---
 id: TASK-70
 title: Pill scales 2x during recording/transcribing
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-01 19:14'
-updated_date: '2026-05-02 07:30'
+updated_date: '2026-05-02 08:55'
 labels: []
 dependencies: []
 documentation:
@@ -29,3 +29,9 @@ Capsule + content scale 1x->2x via spring (subtle bounce on grow, critically dam
 - [ ] #7 Transcribing pill renders at 1.5x scale (57x33) with content scaled
 - [ ] #8 Pill OS window has clearance for 1.5x capsule + shadow on Mac and Windows
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Pill capsule scales 1x<->1.5x via hand-rolled spring during recording/transcribing. Asymmetric (subtle overshoot grow, critically damped shrink), velocity-preserving across reversal. prefers-reduced-motion honored (also fixes existing width tween). Backdrop-filter counter-scaled so material stays invariant. Window 130x82 -> 180x110 for paint headroom. Merged in PR #13. Original 2x target dialed to 1.5x after Mac smoke felt too aggressive against the dock.
+<!-- SECTION:FINAL_SUMMARY:END -->

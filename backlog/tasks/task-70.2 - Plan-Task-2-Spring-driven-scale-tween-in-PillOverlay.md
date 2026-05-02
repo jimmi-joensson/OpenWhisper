@@ -1,11 +1,11 @@
 ---
 id: TASK-70.2
 title: 'Plan Task 2: Spring-driven scale tween in PillOverlay'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 20:04'
+updated_date: '2026-05-02 08:55'
 labels:
   - 70-impl
 dependencies: []
@@ -27,3 +27,9 @@ parent_task_id: TASK-70
 <!-- SECTION:NOTES:BEGIN -->
 9295233 PILL_SCALE map + SPRING_GROW (k=220,c=24) + SPRING_SHRINK (k=280,c=34) + scaleStateRef ({x,v}) + prevTickRef + prevScaleWriteRef added to PillOverlay.tsx.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Hand-rolled 2nd-order spring (k=220 c=24 grow, k=280 c=34 shrink) in existing RAF. Asymmetric overshoot/critical-damp, velocity preserved across reversal. transform-origin: 50% 100% pins bottom edge so place_pill math unchanged. Mac + Windows smoke green.
+<!-- SECTION:FINAL_SUMMARY:END -->

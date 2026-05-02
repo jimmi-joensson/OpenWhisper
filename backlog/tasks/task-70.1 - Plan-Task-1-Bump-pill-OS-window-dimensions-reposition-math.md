@@ -1,11 +1,11 @@
 ---
 id: TASK-70.1
 title: 'Plan Task 1: Bump pill OS window dimensions + reposition math'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-01 19:16'
-updated_date: '2026-05-01 20:02'
+updated_date: '2026-05-02 08:55'
 labels:
   - 70-impl
 dependencies: []
@@ -25,3 +25,9 @@ parent_task_id: TASK-70
 <!-- SECTION:NOTES:BEGIN -->
 0d2ea0e Window 130x82->180x110 in tauri.conf.json + tauri.dev.conf.json; PILL_WIN_W/H constants in src-tauri/src/lib.rs match; cargo check clean.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Pill window 130x82 -> 180x110 (tauri.conf.json + tauri.dev.conf.json + lib.rs PILL_WIN_W/H). Idle on-screen Y unchanged on Mac and Windows (verified).
+<!-- SECTION:FINAL_SUMMARY:END -->

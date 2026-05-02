@@ -1,11 +1,11 @@
 ---
 id: TASK-70.4
 title: 'Plan Task 4: Playwright spec + cross-platform smoke'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-01 19:37'
-updated_date: '2026-05-02 07:30'
+updated_date: '2026-05-02 08:55'
 labels:
   - 70-impl
 dependencies: []
@@ -27,3 +27,9 @@ parent_task_id: TASK-70
 <!-- SECTION:NOTES:BEGIN -->
 2ef0520 pill-overlay.spec.ts (8 tests) + pillTest fixture + shim handlers for set_pill_click_through and show_main_window. Local 8/8 pass.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+pill-overlay.spec.ts (8 tests) + pillTest fixture + shim handlers for set_pill_click_through and show_main_window. Local 8/8 pass. Mac + Windows manual smoke verified.
+<!-- SECTION:FINAL_SUMMARY:END -->

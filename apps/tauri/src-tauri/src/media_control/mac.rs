@@ -3,58 +3,74 @@
 //! output) while OpenWhisper is recording, then resumes after the mic
 //! closes and Bluetooth has switched back to A2DP/stereo.
 //!
-//! Implementation: synthesize the system play/pause media key
-//! (`NX_KEYTYPE_PLAY`) via `+[NSEvent otherEventWithType:…]` →
-//! `CGEventPost(kCGHIDEventTap, …)`. The OS treats the event
-//! identically to a hardware F8 press, so every well-behaved audio
-//! source — Spotify, Apple Music, Safari/Chrome/Firefox tab media,
-//! podcast apps — toggles its play state. Same path
-//! BetterTouchTool / Hammerspoon / Caffeine use. No new TCC prompts:
-//! posting at the HID layer reuses our existing Accessibility grant
-//! (the hotkey CGEventTap establishes it at boot).
+//! ## Hybrid implementation: AppleScript for Spotify + Music, media
+//! keys for everything else
 //!
-//! Why NOT the previous AppleScript per-app pause: each
-//! `tell application "X"` invocation triggers a per-app Automation
-//! TCC prompt the first time the user runs it. For a v0.5 headline
-//! feature ("the open alternative to Superwhisper"), stacking 2+
-//! permission prompts per music app is exactly the friction we want
-//! to avoid. AppleScript also can't reach browser-tab media at all.
+//! At pause-time we enumerate active output producers via
+//! `kAudioHardwarePropertyProcessObjectList`, query each process's
+//! `kAudioProcessPropertyBundleID`, and bucket:
 //!
-//! Why NOT MediaRemote (`MRMediaRemoteSendCommand` kMRPause/kMRPlay):
-//! macOS 15.4+ enforces a `com.apple.*` entitlement check on
-//! `MRMediaRemoteSendCommand` for non-Apple-signed processes, making
-//! SET commands unreliable. A media-key synthesis path side-steps
-//! the entitlement entirely and works the same on every macOS
-//! version we support.
+//! - **AppleScript track** (`com.spotify.client`, `com.apple.Music`):
+//!   per-app `tell application "X" to pause` — deterministic, returns
+//!   only the apps that actually transitioned, costs a one-time
+//!   Automation TCC prompt per app (Spotify and Music, max two prompts
+//!   ever per install) the first time we touch them while they're
+//!   playing. Resume replays per-app `tell ... to play`.
+//! - **Media-key track** (browser tabs, VLC, Plex, podcast apps,
+//!   anything else): synthesize `NX_KEYTYPE_PLAY` via
+//!   `+[NSEvent otherEventWithType:…]` → `CGEventPost(kCGHIDEventTap,
+//!   …)`. Same pattern BetterTouchTool / Hammerspoon / Caffeine use.
+//!   Reuses the existing Accessibility grant — no extra TCC prompt.
 //!
-//! Toggle gating (avoids the "stop with nothing playing → music
-//! starts" regression and the "user-started-something-else-during-
-//! recording → we pause it" regression): media keys toggle, so we
-//! probe `kAudioDevicePropertyDeviceIsRunningSomewhere` on the
-//! default-output device before each post.
-//! - `pause_now`: enumerate active output processes via
-//!   `kAudioHardwarePropertyProcessObjectList` +
-//!   `kAudioProcessPropertyIsRunningOutput` to size the loop, then
-//!   send up to that many media-key toggles with
-//!   `INTER_TOGGLE_SLEEP_MS` between (gives `mediaremoted` time to
-//!   re-elect the NowPlaying client). `is_audio_playing` is the
-//!   actual termination signal, the count is the upper bound.
-//!   Records `toggles_sent` so resume can replay the same number.
-//! - `resume_now`: replay up to `toggles_sent` toggles, with the same
-//!   `is_audio_playing` re-probe before each as an early-exit guard.
+//! Pause order: AppleScript first, settle, then media-key burst. AS
+//! pause is synchronous so we know which apps it touched; the brief
+//! `POST_APPLESCRIPT_SETTLE_MS` lets HAL + `mediaremoted`'s NowPlaying
+//! election re-settle before we start posting media keys (otherwise
+//! the first toggle can route to a not-yet-de-elected Spotify and
+//! waste itself as a no-op).
 //!
-//! Known multi-app resume limitation: the OS routes media keys to a
-//! single NowPlaying client at a time. With one app paused, resume
-//! is straightforward — the toggle goes to that app. With N>1 apps
-//! paused, only one (the most recently NowPlaying) resumes; the
-//! others stay paused. Continuing the loop after the first app
-//! resumes would pause it again rather than resume the next paused
-//! client, because NowPlaying election follows whatever is currently
-//! producing audio. The early-exit re-probe is the safe choice; the
-//! user resumes leftover apps manually. Tracked for follow-up;
-//! deterministic multi-app resume requires a per-client SET path
-//! (private `MRMediaRemoteSendCommandToApp` or a return to
-//! AppleScript), both of which trade other regressions back in.
+//! Resume order: media-key replay first, then AppleScript. Reverse
+//! of pause for the same election reason — if we resumed Spotify
+//! first, the next media-key toggle would route to the now-playing
+//! Spotify and pause it again. Doing media-key first targets the
+//! browser/VLC/etc. while Spotify is still paused, then AS resumes
+//! Spotify cleanly afterwards.
+//!
+//! ## Why this hybrid (and not pure media-key)
+//!
+//! macOS routes the play/pause media key to a single elected
+//! NowPlaying client at a time. With multiple apps producing output,
+//! one media-key toggle hits one app. A burst loop with
+//! re-election gaps *should* hit each subsequent app — but in
+//! practice `mediaremoted`'s re-election latency exceeds the gap we
+//! can afford with imperceptible UX (verified empirically: 40 ms
+//! gap → second toggle still routes to the just-paused first app).
+//!
+//! The deterministic alternatives are gone in macOS 15.4: Apple
+//! gated the entire `MediaRemote.framework` (both
+//! `MRMediaRemoteSendCommand` SET and `MRMediaRemoteGetNowPlaying*`
+//! READ) behind a `com.apple.*` entitlement that no third-party app
+//! holds. The only way to use it post-15.4 is the
+//! [ungive/mediaremote-adapter](https://github.com/ungive/mediaremote-adapter)
+//! Perl-bridge hack — bundling that into a Tauri app is well past
+//! "non-hacky" for a v0.5 nicety. BetterTouchTool — the most-shipped
+//! app in this niche — landed on exactly the AppleScript-per-app
+//! hybrid after the same 15.4 break
+//! ([thread](https://community.folivora.ai/t/now-playing-is-no-longer-working-on-macos-15-4/42802)).
+//!
+//! Trade accepted: two TCC prompts max per install (Spotify, Music),
+//! lazy (only fires when those apps are actually playing during a
+//! record), in exchange for deterministic multi-app pause + resume
+//! covering the realistic case (Spotify + browser tab YouTube etc.).
+//!
+//! ## Known limitation that remains
+//!
+//! Multi-app resume is still limited *within the media-key bucket*
+//! (3+ media-key targets, e.g. browser tab + VLC + Plex playing
+//! simultaneously): only the most-recently-NowPlaying media-key app
+//! resumes, others stay paused. Spotify and Music are exempt because
+//! they get explicit AppleScript resume. Realistic users hit this
+//! near-never; documented for honesty.
 //!
 //! Resume timing: Bluetooth headphones (AirPods etc.) switch from
 //! A2DP/stereo to HFP/mono the moment the mic opens. Posting the
@@ -67,10 +83,13 @@
 //! and the BT entry in `openwhisper-platform-gotchas`).
 
 use std::ffi::c_void;
+use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use core_foundation::base::TCFType;
+use core_foundation::string::{CFString, CFStringRef};
 use objc2::encode::{Encode, Encoding};
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -99,6 +118,11 @@ const KAUDIO_HARDWARE_PROPERTY_PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#");
 /// AudioObject when that process is currently rendering output. Set
 /// per-process; we only count processes where this is true.
 const KAUDIO_PROCESS_PROPERTY_IS_RUNNING_OUTPUT: u32 = fourcc(b"piro");
+/// `kAudioProcessPropertyBundleID` — `CFStringRef` bundle identifier
+/// for a process AudioObject. We use this to bucket each active
+/// producer into the AppleScript track (Spotify, Music) vs. the
+/// media-key track (everything else).
+const KAUDIO_PROCESS_PROPERTY_BUNDLE_ID: u32 = fourcc(b"pbid");
 const KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = fourcc(b"glob");
 const KAUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
 const KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN: u32 = 0;
@@ -119,6 +143,22 @@ const INTER_TOGGLE_SLEEP_MS: u64 = 40;
 /// (pre-14.0 host, selector-code drift, hostile audio source). Keeps
 /// us from spinning forever if `is_audio_playing` mis-reports.
 const MAX_TOGGLE_ITERATIONS: usize = 4;
+/// Wait between the AppleScript pause/resume call and the media-key
+/// burst. AppleScript's `pause`/`play` is synchronous from osascript's
+/// view (returns when the target ACKs) but the target's CoreAudio I/O
+/// proc + `mediaremoted`'s NowPlaying election still take a beat to
+/// settle. Skipping this lets the next media-key toggle route to the
+/// not-yet-de-elected AppleScript-paused app and waste itself as a
+/// no-op. 150 ms is well below user perception (one fewer than half a
+/// frame past 1/8 s) and reliably covers Spotify/Music spin-down on
+/// every host we've smoke-tested.
+const POST_APPLESCRIPT_SETTLE_MS: u64 = 150;
+
+/// Bundle ID of the Spotify desktop client. Stable for years.
+const SPOTIFY_BUNDLE_ID: &str = "com.spotify.client";
+/// Bundle ID of the Apple Music app on macOS Catalina+. (Pre-Catalina
+/// iTunes used `com.apple.iTunes` but our floor is macOS 14.)
+const MUSIC_BUNDLE_ID: &str = "com.apple.Music";
 
 /// `IOKit/hidsystem/ev_keymap.h` — `NX_KEYTYPE_PLAY` is the
 /// system-defined "play/pause" multimedia key code. The OS routes it
@@ -270,17 +310,53 @@ fn is_audio_playing() -> bool {
     value != 0
 }
 
-/// Returns the number of processes currently producing audio output
-/// via the system HAL. Used to size the multi-app pause loop: each
-/// media-key toggle hits only the elected NowPlaying client, so N
-/// active producers need N successive toggles (with re-election gaps)
-/// to silence everything.
-///
-/// Returns `None` when the host doesn't expose
-/// `kAudioHardwarePropertyProcessObjectList` (pre-macOS 14, or some
-/// future API drift) — caller falls back to `MAX_TOGGLE_ITERATIONS`
-/// guarded by `is_audio_playing`.
-fn count_active_output_processes() -> Option<usize> {
+/// Per-process bundle-id read. Returns `None` when the property
+/// isn't set on the AudioObject (background daemons, processes that
+/// haven't published a CFBundleIdentifier).
+fn process_bundle_id(pid_obj: u32) -> Option<String> {
+    let prop = AudioObjectPropertyAddress {
+        selector: KAUDIO_PROCESS_PROPERTY_BUNDLE_ID,
+        scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+        element: KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+    };
+    let mut value: *const c_void = std::ptr::null();
+    let mut sz: u32 = std::mem::size_of::<*const c_void>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            pid_obj,
+            &prop,
+            0,
+            std::ptr::null(),
+            &mut sz,
+            &mut value as *mut *const c_void as *mut c_void,
+        )
+    };
+    if status != 0 || value.is_null() {
+        return None;
+    }
+    // The property follows the Create rule — wrap into a CFString
+    // that auto-releases on drop.
+    let cf_str = unsafe { CFString::wrap_under_create_rule(value as CFStringRef) };
+    Some(cf_str.to_string())
+}
+
+/// Maps a bundle-id to the AppleScript app name we drive it with,
+/// or `None` if the producer should go through the media-key path.
+fn applescript_name_for(bundle_id: &str) -> Option<&'static str> {
+    match bundle_id {
+        SPOTIFY_BUNDLE_ID => Some("Spotify"),
+        MUSIC_BUNDLE_ID => Some("Music"),
+        _ => None,
+    }
+}
+
+/// Active output producers, bucketed by which control mechanism we
+/// can use against them. Returns `None` only when the
+/// `kAudioHardwarePropertyProcessObjectList` enumeration fails
+/// (pre-macOS 14 or future API drift) — caller falls back to
+/// "media-key burst with `MAX_TOGGLE_ITERATIONS` cap, no AppleScript
+/// targets".
+fn enumerate_active_producers() -> Option<(Vec<&'static str>, usize)> {
     let addr = AudioObjectPropertyAddress {
         selector: KAUDIO_HARDWARE_PROPERTY_PROCESS_OBJECT_LIST,
         scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
@@ -301,7 +377,7 @@ fn count_active_output_processes() -> Option<usize> {
         return None;
     }
     if bytes == 0 {
-        return Some(0);
+        return Some((Vec::new(), 0));
     }
     let stride = std::mem::size_of::<u32>() as u32;
     let mut ids = vec![0u32; (bytes / stride) as usize];
@@ -322,14 +398,15 @@ fn count_active_output_processes() -> Option<usize> {
     }
     ids.truncate((io_size / stride) as usize);
 
-    let mut active = 0usize;
+    let mut applescript_apps: Vec<&'static str> = Vec::new();
+    let mut media_key_count = 0usize;
     for &pid_obj in &ids {
         let prop = AudioObjectPropertyAddress {
             selector: KAUDIO_PROCESS_PROPERTY_IS_RUNNING_OUTPUT,
             scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
             element: KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
         };
-        let mut value: u32 = 0;
+        let mut running: u32 = 0;
         let mut sz: u32 = std::mem::size_of::<u32>() as u32;
         let s = unsafe {
             AudioObjectGetPropertyData(
@@ -338,14 +415,82 @@ fn count_active_output_processes() -> Option<usize> {
                 0,
                 std::ptr::null(),
                 &mut sz,
-                &mut value as *mut u32 as *mut c_void,
+                &mut running as *mut u32 as *mut c_void,
             )
         };
-        if s == 0 && value != 0 {
-            active += 1;
+        if s != 0 || running == 0 {
+            continue;
+        }
+        match process_bundle_id(pid_obj).as_deref().and_then(applescript_name_for) {
+            Some(name) => {
+                if !applescript_apps.contains(&name) {
+                    applescript_apps.push(name);
+                }
+            }
+            None => media_key_count += 1,
         }
     }
-    Some(active)
+    Some((applescript_apps, media_key_count))
+}
+
+/// Run an AppleScript via `osascript`, return trimmed stdout.
+/// `None` on any failure — TCC denial, syntax error, missing app.
+/// Caller treats `None` as "nothing happened" and recovers by
+/// leaving the corresponding state empty.
+fn run_osascript(script: &str) -> Option<String> {
+    let output = Command::new("osascript").arg("-e").arg(script).output().ok()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        verbose_log!(
+            "[media_control.mac] osascript failed (status={:?}): {}",
+            output.status,
+            stderr.trim()
+        );
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Build a script that pauses each AppleScript-track app currently
+/// playing and emits a comma-separated list of the apps it actually
+/// touched. Each `tell` is wrapped in `try` so a missing-app or
+/// per-app TCC denial doesn't break the rest. Both `Spotify` and
+/// `Music` expose `player state` on macOS 14+ — Podcasts/TV don't,
+/// which is why they're not in the AppleScript track at all (a
+/// reference to one inside a `tell` would fail compile, not runtime,
+/// and `try` doesn't catch compile errors).
+fn build_pause_script(apps: &[&str]) -> String {
+    let mut s = String::from("set output to \"\"\n");
+    for app in apps {
+        s.push_str(&format!(
+            "try
+    tell application \"{app}\"
+        if it is running then
+            if player state is playing then
+                pause
+                set output to output & \"{app},\"
+            end if
+        end if
+    end tell
+end try
+"
+        ));
+    }
+    s.push_str("return output");
+    s
+}
+
+fn build_play_script(apps: &[String]) -> String {
+    let mut s = String::new();
+    for app in apps {
+        s.push_str(&format!(
+            "try
+    tell application \"{app}\" to if it is running then play
+end try
+"
+        ));
+    }
+    s
 }
 
 /// Synthesize one half (down or up) of a play/pause media-key press
@@ -394,14 +539,21 @@ fn toggle_play_pause() {
 
 #[derive(Default)]
 struct State {
+    /// AppleScript-track apps that `pause_now` actually transitioned
+    /// (their `player state` was `playing` and the script reported
+    /// back). `resume_now` plays back exactly these via per-app
+    /// AppleScript — never a generic media-key on these, since that
+    /// would race the same NowPlaying election we're trying to avoid.
+    paused_via_applescript: Vec<String>,
     /// Number of media-key toggles `pause_now` posted to silence the
-    /// active producers. `resume_now` replays up to this many toggles
-    /// (with re-probe between, so an externally-resumed app stops the
-    /// loop early). Zero iff `pause_now` saw nothing playing.
+    /// non-AppleScript producers. `resume_now` replays up to this
+    /// many with the same `is_audio_playing` re-probe early-exit.
+    /// Subject to the documented "only the most-recently-NowPlaying
+    /// media-key app actually resumes" limitation.
     toggles_sent: usize,
     /// Default-output device's nominal sample rate at pause-time.
     /// `resume_now` polls until the rate climbs back to this value
-    /// (BT profile switchback signal) before posting the play key.
+    /// (BT profile switchback signal) before any play key / script.
     original_sample_rate: Option<f64>,
 }
 
@@ -424,45 +576,79 @@ impl MediaController for MacMediaController {
         };
         *state = State::default();
 
-        // Cap the loop at the count of currently-active output
-        // producers (one toggle per app — media keys hit only the
-        // elected NowPlaying client). Fall back to MAX_TOGGLE_ITERATIONS
-        // when enumeration is unavailable; `is_audio_playing` is the
-        // actual termination signal either way.
-        let target_n = match count_active_output_processes() {
-            Some(n) => n.min(MAX_TOGGLE_ITERATIONS),
-            None => MAX_TOGGLE_ITERATIONS,
+        let (ascript_targets, media_count) = match enumerate_active_producers() {
+            Some(buckets) => buckets,
+            None => {
+                verbose_log!(
+                    "[media_control.mac] pause_now: enumeration unavailable, falling back to media-key burst with cap"
+                );
+                (Vec::new(), if is_audio_playing() { MAX_TOGGLE_ITERATIONS } else { 0 })
+            }
         };
 
-        if target_n == 0 || !is_audio_playing() {
-            verbose_log!(
-                "[media_control.mac] pause_now: nothing playing (target_n={target_n}), skip"
-            );
+        if ascript_targets.is_empty() && media_count == 0 {
+            verbose_log!("[media_control.mac] pause_now: nothing playing, skip");
             return false;
         }
 
-        let mut sent = 0usize;
-        while sent < target_n {
-            if !is_audio_playing() {
-                break;
-            }
-            toggle_play_pause();
-            sent += 1;
-            if sent < target_n {
-                thread::sleep(Duration::from_millis(INTER_TOGGLE_SLEEP_MS));
+        // AppleScript track first: deterministic, returns exactly which
+        // apps actually transitioned (player state was `playing` and
+        // the `tell ... pause` ACK'd).
+        if !ascript_targets.is_empty() {
+            let script = build_pause_script(&ascript_targets);
+            let actually_paused: Vec<String> = run_osascript(&script)
+                .map(|out| {
+                    out.split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            state.paused_via_applescript = actually_paused;
+
+            // Settle: AppleScript pause ACKs as soon as the app
+            // received the command, but the app's CoreAudio I/O proc
+            // takes a beat to actually stop and `mediaremoted` takes
+            // another beat to re-elect the next NowPlaying claimant.
+            // Skipping this lets the first media-key toggle below
+            // route to the not-yet-de-elected Spotify/Music and
+            // waste itself.
+            if !state.paused_via_applescript.is_empty() && media_count > 0 {
+                thread::sleep(Duration::from_millis(POST_APPLESCRIPT_SETTLE_MS));
             }
         }
 
-        if sent == 0 {
+        // Media-key track: burst loop sized to the count of
+        // non-AppleScript producers. `is_audio_playing` is the safety
+        // gate (skip the burst if nothing's left to silence after the
+        // AppleScript pass) but is NOT used for early-exit inside the
+        // loop — we trust the count, since the loop is bounded.
+        if media_count > 0 && is_audio_playing() {
+            let target = media_count.min(MAX_TOGGLE_ITERATIONS);
+            let mut sent = 0usize;
+            while sent < target {
+                toggle_play_pause();
+                sent += 1;
+                if sent < target {
+                    thread::sleep(Duration::from_millis(INTER_TOGGLE_SLEEP_MS));
+                }
+            }
+            state.toggles_sent = sent;
+        }
+
+        if state.paused_via_applescript.is_empty() && state.toggles_sent == 0 {
             return false;
         }
 
-        state.toggles_sent = sent;
         if let Some(d) = default_output_device() {
             state.original_sample_rate = nominal_sample_rate(d);
         }
         verbose_log!(
-            "[media_control.mac] pause_now: sent {sent}/{target_n} toggles, original_sample_rate={:?}",
+            "[media_control.mac] pause_now: applescript={:?} media_key={}/{} (targets {:?}), original_sample_rate={:?}",
+            state.paused_via_applescript,
+            state.toggles_sent,
+            media_count,
+            ascript_targets,
             state.original_sample_rate
         );
         true
@@ -472,20 +658,21 @@ impl MediaController for MacMediaController {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if state.toggles_sent == 0 {
-            return;
-        }
-        let target = state.toggles_sent;
-        let original_rate = state.original_sample_rate.take();
+        let ascript_apps = std::mem::take(&mut state.paused_via_applescript);
+        let toggles = state.toggles_sent;
         state.toggles_sent = 0;
+        let original_rate = state.original_sample_rate.take();
         drop(state);
 
+        if ascript_apps.is_empty() && toggles == 0 {
+            return;
+        }
+
         // Wait for BT to switch back to its pre-recording profile
-        // (HFP→A2DP on AirPods, ~500–1000 ms) before posting the
-        // play key. Signal: device's nominal sample rate climbs back
-        // to the pre-pause value — adaptive detection, exits as soon
-        // as the OS reports the switch is complete. Wired headsets
-        // and BT-stayed-A2DP devices exit on the first poll.
+        // (HFP→A2DP on AirPods, ~500–1000 ms). Signal: device's
+        // nominal sample rate climbs back to the pre-pause value —
+        // adaptive, exits as soon as the OS reports the switch.
+        // Wired headsets / BT-stayed-A2DP devices exit on first poll.
         if let (Some(d), Some(rate)) = (default_output_device(), original_rate) {
             let deadline = Instant::now() + Duration::from_millis(RESUME_RATE_WAIT_TIMEOUT_MS);
             let mut waited_ms = 0u64;
@@ -503,33 +690,40 @@ impl MediaController for MacMediaController {
             );
         }
 
-        // Replay up to `target` toggles. The re-probe before each
-        // toggle is the early-exit guard: once any audio source is
-        // producing again (a paused app resumed, OR the user started
-        // something else mid-record, OR we caught the AirPod button),
-        // stop — the next toggle would otherwise pause the running
-        // app instead of resuming the next paused one. NowPlaying
-        // election doesn't cleanly route media keys across multiple
-        // *paused* clients, so multi-app resume is best-effort here:
-        // the most-recently-NowPlaying client resumes, others stay
-        // paused (user resumes them manually). Tracked as a known
-        // limitation in the file header.
+        // Media-key replay FIRST. If we resumed AppleScript apps
+        // first, they'd take NowPlaying immediately — and the next
+        // media-key toggle would route to them and pause them again.
+        // Doing media-key first targets the still-paused browser/VLC/
+        // etc. cleanly. Re-probe is the early-exit guard against the
+        // user starting something else mid-record.
         let mut replayed = 0usize;
-        while replayed < target {
+        while replayed < toggles {
             if is_audio_playing() {
                 verbose_log!(
-                    "[media_control.mac] resume_now: device running after {replayed}/{target} toggles, stop"
+                    "[media_control.mac] resume_now: device running, stop media-key replay at {replayed}/{toggles}"
                 );
                 break;
             }
             toggle_play_pause();
             replayed += 1;
-            if replayed < target {
+            if replayed < toggles {
                 thread::sleep(Duration::from_millis(INTER_TOGGLE_SLEEP_MS));
             }
         }
+
+        // AppleScript replay. Per-app `tell ... to play` is
+        // deterministic — runs against exactly the apps `pause_now`
+        // recorded as actually-paused, never resumes a Spotify the
+        // user paused externally before recording.
+        if !ascript_apps.is_empty() {
+            let script = build_play_script(&ascript_apps);
+            let _ = run_osascript(&script);
+            verbose_log!(
+                "[media_control.mac] resume_now: applescript played {ascript_apps:?}"
+            );
+        }
         verbose_log!(
-            "[media_control.mac] resume_now: replayed {replayed}/{target} toggles"
+            "[media_control.mac] resume_now: replayed {replayed}/{toggles} media-key toggles"
         );
     }
 }

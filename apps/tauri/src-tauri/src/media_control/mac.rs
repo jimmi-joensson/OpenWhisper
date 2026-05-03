@@ -32,11 +32,29 @@
 //! recording → we pause it" regression): media keys toggle, so we
 //! probe `kAudioDevicePropertyDeviceIsRunningSomewhere` on the
 //! default-output device before each post.
-//! - `pause_now`: only post (and record `did_pause = true`) if the
-//!   device is currently running. Otherwise leave everything alone.
-//! - `resume_now`: only post if `did_pause` is true AND the device
-//!   is currently NOT running (so we don't pause audio the user
-//!   started in the meantime).
+//! - `pause_now`: enumerate active output processes via
+//!   `kAudioHardwarePropertyProcessObjectList` +
+//!   `kAudioProcessPropertyIsRunningOutput` to size the loop, then
+//!   send up to that many media-key toggles with
+//!   `INTER_TOGGLE_SLEEP_MS` between (gives `mediaremoted` time to
+//!   re-elect the NowPlaying client). `is_audio_playing` is the
+//!   actual termination signal, the count is the upper bound.
+//!   Records `toggles_sent` so resume can replay the same number.
+//! - `resume_now`: replay up to `toggles_sent` toggles, with the same
+//!   `is_audio_playing` re-probe before each as an early-exit guard.
+//!
+//! Known multi-app resume limitation: the OS routes media keys to a
+//! single NowPlaying client at a time. With one app paused, resume
+//! is straightforward — the toggle goes to that app. With N>1 apps
+//! paused, only one (the most recently NowPlaying) resumes; the
+//! others stay paused. Continuing the loop after the first app
+//! resumes would pause it again rather than resume the next paused
+//! client, because NowPlaying election follows whatever is currently
+//! producing audio. The early-exit re-probe is the safe choice; the
+//! user resumes leftover apps manually. Tracked for follow-up;
+//! deterministic multi-app resume requires a per-client SET path
+//! (private `MRMediaRemoteSendCommandToApp` or a return to
+//! AppleScript), both of which trade other regressions back in.
 //!
 //! Resume timing: Bluetooth headphones (AirPods etc.) switch from
 //! A2DP/stereo to HFP/mono the moment the mic opens. Posting the
@@ -70,11 +88,37 @@ const KAUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
 /// gate the play/pause toggle so it never starts music that wasn't
 /// already playing.
 const KAUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
+/// `kAudioHardwarePropertyProcessObjectList` (macOS 14+) — variable-size
+/// array of `AudioObjectID`s, one per process that has registered
+/// audio I/O with HAL. We enumerate this to count *how many* clients
+/// the play/pause key needs to silence in the multi-app case
+/// (Spotify + browser-tab YouTube + Music + …) — each toggle hits
+/// only the elected NowPlaying client, so N producers need N toggles.
+const KAUDIO_HARDWARE_PROPERTY_PROCESS_OBJECT_LIST: u32 = fourcc(b"prs#");
+/// `kAudioProcessPropertyIsRunningOutput` — non-zero on a process
+/// AudioObject when that process is currently rendering output. Set
+/// per-process; we only count processes where this is true.
+const KAUDIO_PROCESS_PROPERTY_IS_RUNNING_OUTPUT: u32 = fourcc(b"piro");
 const KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = fourcc(b"glob");
 const KAUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
 const KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN: u32 = 0;
 const RESUME_RATE_WAIT_TIMEOUT_MS: u64 = 2000;
 const RESUME_RATE_POLL_MS: u64 = 50;
+/// Gap between successive media-key toggles in a multi-app pause/resume
+/// loop. Has to give `mediaremoted` time to re-elect the NowPlaying
+/// client after the previous toggle silenced (or resumed) one app —
+/// CoreAudio device-state updates fast, but NowPlaying election is an
+/// XPC bookkeeping pass at the daemon level, slower. 40 ms is ~2.5
+/// frames at 60 Hz: imperceptible to the user even at N=3 (80 ms total
+/// added latency), but gives mediaremoted reliable headroom on every
+/// app class we've smoke-tested. Going lower risks NowPlaying-not-
+/// elected-yet failures that look identical to the original
+/// "second app didn't pause" bug.
+const INTER_TOGGLE_SLEEP_MS: u64 = 40;
+/// Fallback cap for the pause loop when process enumeration fails
+/// (pre-14.0 host, selector-code drift, hostile audio source). Keeps
+/// us from spinning forever if `is_audio_playing` mis-reports.
+const MAX_TOGGLE_ITERATIONS: usize = 4;
 
 /// `IOKit/hidsystem/ev_keymap.h` — `NX_KEYTYPE_PLAY` is the
 /// system-defined "play/pause" multimedia key code. The OS routes it
@@ -127,6 +171,13 @@ extern "C" {
         in_qualifier_data: *const c_void,
         io_data_size: *mut u32,
         out_data: *mut c_void,
+    ) -> i32;
+    fn AudioObjectGetPropertyDataSize(
+        in_object_id: u32,
+        in_address: *const AudioObjectPropertyAddress,
+        in_qualifier_data_size: u32,
+        in_qualifier_data: *const c_void,
+        out_data_size: *mut u32,
     ) -> i32;
 }
 
@@ -219,6 +270,84 @@ fn is_audio_playing() -> bool {
     value != 0
 }
 
+/// Returns the number of processes currently producing audio output
+/// via the system HAL. Used to size the multi-app pause loop: each
+/// media-key toggle hits only the elected NowPlaying client, so N
+/// active producers need N successive toggles (with re-election gaps)
+/// to silence everything.
+///
+/// Returns `None` when the host doesn't expose
+/// `kAudioHardwarePropertyProcessObjectList` (pre-macOS 14, or some
+/// future API drift) — caller falls back to `MAX_TOGGLE_ITERATIONS`
+/// guarded by `is_audio_playing`.
+fn count_active_output_processes() -> Option<usize> {
+    let addr = AudioObjectPropertyAddress {
+        selector: KAUDIO_HARDWARE_PROPERTY_PROCESS_OBJECT_LIST,
+        scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+        element: KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+    };
+    let mut bytes: u32 = 0;
+    let status = unsafe {
+        AudioObjectGetPropertyDataSize(
+            KAUDIO_OBJECT_SYSTEM_OBJECT,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut bytes,
+        )
+    };
+    if status != 0 {
+        verbose_log!("[media_control.mac] process-list size lookup failed: {status}");
+        return None;
+    }
+    if bytes == 0 {
+        return Some(0);
+    }
+    let stride = std::mem::size_of::<u32>() as u32;
+    let mut ids = vec![0u32; (bytes / stride) as usize];
+    let mut io_size = bytes;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            KAUDIO_OBJECT_SYSTEM_OBJECT,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut io_size,
+            ids.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if status != 0 {
+        verbose_log!("[media_control.mac] process-list fetch failed: {status}");
+        return None;
+    }
+    ids.truncate((io_size / stride) as usize);
+
+    let mut active = 0usize;
+    for &pid_obj in &ids {
+        let prop = AudioObjectPropertyAddress {
+            selector: KAUDIO_PROCESS_PROPERTY_IS_RUNNING_OUTPUT,
+            scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+            element: KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+        };
+        let mut value: u32 = 0;
+        let mut sz: u32 = std::mem::size_of::<u32>() as u32;
+        let s = unsafe {
+            AudioObjectGetPropertyData(
+                pid_obj,
+                &prop,
+                0,
+                std::ptr::null(),
+                &mut sz,
+                &mut value as *mut u32 as *mut c_void,
+            )
+        };
+        if s == 0 && value != 0 {
+            active += 1;
+        }
+    }
+    Some(active)
+}
+
 /// Synthesize one half (down or up) of a play/pause media-key press
 /// via `+[NSEvent otherEventWithType:…]` → `CGEventPost`. Apple's
 /// public API for posting `NSSystemDefined` subtype-8 events is to
@@ -265,12 +394,11 @@ fn toggle_play_pause() {
 
 #[derive(Default)]
 struct State {
-    /// True iff `pause_now` synthesized a pause toggle. `resume_now`
-    /// only synthesizes the matching play toggle when this is true,
-    /// so we never resume audio the user had paused externally
-    /// before recording, and we never start playing when nothing was
-    /// playing to begin with.
-    did_pause: bool,
+    /// Number of media-key toggles `pause_now` posted to silence the
+    /// active producers. `resume_now` replays up to this many toggles
+    /// (with re-probe between, so an externally-resumed app stops the
+    /// loop early). Zero iff `pause_now` saw nothing playing.
+    toggles_sent: usize,
     /// Default-output device's nominal sample rate at pause-time.
     /// `resume_now` polls until the rate climbs back to this value
     /// (BT profile switchback signal) before posting the play key.
@@ -296,18 +424,45 @@ impl MediaController for MacMediaController {
         };
         *state = State::default();
 
-        if !is_audio_playing() {
-            verbose_log!("[media_control.mac] pause_now: nothing playing, skip");
+        // Cap the loop at the count of currently-active output
+        // producers (one toggle per app — media keys hit only the
+        // elected NowPlaying client). Fall back to MAX_TOGGLE_ITERATIONS
+        // when enumeration is unavailable; `is_audio_playing` is the
+        // actual termination signal either way.
+        let target_n = match count_active_output_processes() {
+            Some(n) => n.min(MAX_TOGGLE_ITERATIONS),
+            None => MAX_TOGGLE_ITERATIONS,
+        };
+
+        if target_n == 0 || !is_audio_playing() {
+            verbose_log!(
+                "[media_control.mac] pause_now: nothing playing (target_n={target_n}), skip"
+            );
             return false;
         }
 
-        toggle_play_pause();
-        state.did_pause = true;
+        let mut sent = 0usize;
+        while sent < target_n {
+            if !is_audio_playing() {
+                break;
+            }
+            toggle_play_pause();
+            sent += 1;
+            if sent < target_n {
+                thread::sleep(Duration::from_millis(INTER_TOGGLE_SLEEP_MS));
+            }
+        }
+
+        if sent == 0 {
+            return false;
+        }
+
+        state.toggles_sent = sent;
         if let Some(d) = default_output_device() {
             state.original_sample_rate = nominal_sample_rate(d);
         }
         verbose_log!(
-            "[media_control.mac] pause_now: posted play/pause key, original_sample_rate={:?}",
+            "[media_control.mac] pause_now: sent {sent}/{target_n} toggles, original_sample_rate={:?}",
             state.original_sample_rate
         );
         true
@@ -317,11 +472,12 @@ impl MediaController for MacMediaController {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if !state.did_pause {
+        if state.toggles_sent == 0 {
             return;
         }
+        let target = state.toggles_sent;
         let original_rate = state.original_sample_rate.take();
-        state.did_pause = false;
+        state.toggles_sent = 0;
         drop(state);
 
         // Wait for BT to switch back to its pre-recording profile
@@ -330,12 +486,12 @@ impl MediaController for MacMediaController {
         // to the pre-pause value — adaptive detection, exits as soon
         // as the OS reports the switch is complete. Wired headsets
         // and BT-stayed-A2DP devices exit on the first poll.
-        if let (Some(d), Some(target)) = (default_output_device(), original_rate) {
+        if let (Some(d), Some(rate)) = (default_output_device(), original_rate) {
             let deadline = Instant::now() + Duration::from_millis(RESUME_RATE_WAIT_TIMEOUT_MS);
             let mut waited_ms = 0u64;
             while Instant::now() < deadline {
-                if let Some(rate) = nominal_sample_rate(d) {
-                    if (rate - target).abs() < 1.0 {
+                if let Some(current) = nominal_sample_rate(d) {
+                    if (current - rate).abs() < 1.0 {
                         break;
                     }
                 }
@@ -343,22 +499,37 @@ impl MediaController for MacMediaController {
                 waited_ms += RESUME_RATE_POLL_MS;
             }
             verbose_log!(
-                "[media_control.mac] resume_now: waited {waited_ms} ms for sample rate to return to {target}"
+                "[media_control.mac] resume_now: waited {waited_ms} ms for sample rate to return to {rate}"
             );
         }
 
-        // Re-probe: if the user started something else playing
-        // during recording (or tapped the AirPod button to resume
-        // music themselves), leave it alone. Only post the toggle
-        // if the device is currently idle — i.e. our pause is still
-        // the reason audio stopped.
-        if is_audio_playing() {
-            verbose_log!(
-                "[media_control.mac] resume_now: device already running, skip toggle"
-            );
-            return;
+        // Replay up to `target` toggles. The re-probe before each
+        // toggle is the early-exit guard: once any audio source is
+        // producing again (a paused app resumed, OR the user started
+        // something else mid-record, OR we caught the AirPod button),
+        // stop — the next toggle would otherwise pause the running
+        // app instead of resuming the next paused one. NowPlaying
+        // election doesn't cleanly route media keys across multiple
+        // *paused* clients, so multi-app resume is best-effort here:
+        // the most-recently-NowPlaying client resumes, others stay
+        // paused (user resumes them manually). Tracked as a known
+        // limitation in the file header.
+        let mut replayed = 0usize;
+        while replayed < target {
+            if is_audio_playing() {
+                verbose_log!(
+                    "[media_control.mac] resume_now: device running after {replayed}/{target} toggles, stop"
+                );
+                break;
+            }
+            toggle_play_pause();
+            replayed += 1;
+            if replayed < target {
+                thread::sleep(Duration::from_millis(INTER_TOGGLE_SLEEP_MS));
+            }
         }
-        toggle_play_pause();
-        verbose_log!("[media_control.mac] resume_now: posted play/pause key");
+        verbose_log!(
+            "[media_control.mac] resume_now: replayed {replayed}/{target} toggles"
+        );
     }
 }

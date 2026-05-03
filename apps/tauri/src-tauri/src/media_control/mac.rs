@@ -1,77 +1,99 @@
-//! macOS MediaController — pauses currently-playing audio in Spotify,
-//! Apple Music, Podcasts, and TV via AppleScript while OpenWhisper is
-//! recording, then resumes after the mic closes and Bluetooth has
-//! switched back to A2DP/stereo.
+//! macOS MediaController — pauses currently-playing audio (Spotify,
+//! Apple Music, browser tabs, podcasts, anything else producing
+//! output) while OpenWhisper is recording, then resumes after the mic
+//! closes and Bluetooth has switched back to A2DP/stereo.
 //!
-//! Why AppleScript and not MediaRemote (`MRMediaRemoteSendCommand`):
-//! - `kMRPause` (opcode 1) is fire-and-forget; we can't tell if the
-//!   command actually paused anything. Sending the matching kMRPlay
-//!   on stop will resume whatever was the most-recent now-playing app
-//!   — including apps the user paused externally before recording —
-//!   which produces the "music starts when I stop a recording with
-//!   nothing playing" regression.
-//! - On macOS 15.4+, `mediaremoted` enforces a `com.apple.*`
-//!   entitlement check that further degrades MediaRemote reliability
-//!   from non-Apple-signed processes.
+//! Implementation: synthesize the system play/pause media key
+//! (`NX_KEYTYPE_PLAY`) via `+[NSEvent otherEventWithType:…]` →
+//! `CGEventPost(kCGHIDEventTap, …)`. The OS treats the event
+//! identically to a hardware F8 press, so every well-behaved audio
+//! source — Spotify, Apple Music, Safari/Chrome/Firefox tab media,
+//! podcast apps — toggles its play state. Same path
+//! BetterTouchTool / Hammerspoon / Caffeine use. No new TCC prompts:
+//! posting at the HID layer reuses our existing Accessibility grant
+//! (the hotkey CGEventTap establishes it at boot).
 //!
-//! AppleScript per-app `if player state is playing then pause` is
-//! synchronous, returns a deterministic "did this app actually pause"
-//! signal, and is naturally pause-only (sending `pause` to a paused
-//! or stopped app is a no-op). State (which apps we paused) lives in
-//! a `Mutex<State>`; on `resume_now` we play only those apps back.
+//! Why NOT the previous AppleScript per-app pause: each
+//! `tell application "X"` invocation triggers a per-app Automation
+//! TCC prompt the first time the user runs it. For a v0.5 headline
+//! feature ("the open alternative to Superwhisper"), stacking 2+
+//! permission prompts per music app is exactly the friction we want
+//! to avoid. AppleScript also can't reach browser-tab media at all.
 //!
-//! Known v1 limitation: browser-tab media (Safari/Chrome/etc.) is not
-//! paused. Browser tabs expose no AppleScript pause command for
-//! per-tab media; the MediaRemote path would handle them but
-//! reintroduces the bug above. Tracked for future work.
+//! Why NOT MediaRemote (`MRMediaRemoteSendCommand` kMRPause/kMRPlay):
+//! macOS 15.4+ enforces a `com.apple.*` entitlement check on
+//! `MRMediaRemoteSendCommand` for non-Apple-signed processes, making
+//! SET commands unreliable. A media-key synthesis path side-steps
+//! the entitlement entirely and works the same on every macOS
+//! version we support.
+//!
+//! Toggle gating (avoids the "stop with nothing playing → music
+//! starts" regression and the "user-started-something-else-during-
+//! recording → we pause it" regression): media keys toggle, so we
+//! probe `kAudioDevicePropertyDeviceIsRunningSomewhere` on the
+//! default-output device before each post.
+//! - `pause_now`: only post (and record `did_pause = true`) if the
+//!   device is currently running. Otherwise leave everything alone.
+//! - `resume_now`: only post if `did_pause` is true AND the device
+//!   is currently NOT running (so we don't pause audio the user
+//!   started in the meantime).
 //!
 //! Resume timing: Bluetooth headphones (AirPods etc.) switch from
-//! A2DP/stereo to HFP/mono the moment the mic opens. Sending `play`
-//! before BT has switched back means music briefly resumes in mono.
-//! We capture the default-output device's nominal sample rate at
-//! pause-time, then on stop poll until the rate has returned to that
-//! value (with a 2 s cap) before sending `play`.
+//! A2DP/stereo to HFP/mono the moment the mic opens. Posting the
+//! play key before BT has switched back means music briefly resumes
+//! in mono. We capture the default-output device's nominal sample
+//! rate at pause-time, then on stop poll until the rate has returned
+//! to that value (with a 2 s cap) before posting. The
+//! `behavior::bt_resume_delay_ms` setting is Windows-only — Windows
+//! has no equivalent live-state signal (see `media_control/windows.rs`
+//! and the BT entry in `openwhisper-platform-gotchas`).
 
-use std::ffi::{c_char, c_void};
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::ffi::c_void;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use objc2::runtime::Bool;
+use objc2::encode::{Encode, Encoding};
+use objc2::msg_send;
+use objc2::runtime::{AnyClass, AnyObject};
 use openwhisper_core::verbose_log;
 
 use super::MediaController;
-
-/// MediaRemote command codes per `Cykey/ios-reversed-headers`.
-/// `kMRPause = 1` is true pause-only (does NOT toggle, does NOT
-/// launch a default music app when nothing is playing). We use it as
-/// a best-effort fallback for media that AppleScript can't reach —
-/// browser tabs primarily. We deliberately do NOT send the matching
-/// `kMRPlay` on resume: that would resume externally-paused apps and
-/// reintroduce the "stop with nothing playing → music starts"
-/// regression we hit earlier. Net effect: a browser tab that this
-/// path pauses stays paused; user manually clicks play in the tab.
-const KMR_PAUSE: u32 = 1;
 
 const fn fourcc(s: &[u8; 4]) -> u32 {
     ((s[0] as u32) << 24) | ((s[1] as u32) << 16) | ((s[2] as u32) << 8) | (s[3] as u32)
 }
 const KAUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE: u32 = fourcc(b"dOut");
 const KAUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
+/// `kAudioDevicePropertyDeviceIsRunningSomewhere` — non-zero when any
+/// process has an active I/O proc on the device. The signal we use to
+/// gate the play/pause toggle so it never starts music that wasn't
+/// already playing.
+const KAUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 const KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL: u32 = fourcc(b"glob");
 const KAUDIO_OBJECT_SYSTEM_OBJECT: u32 = 1;
 const KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN: u32 = 0;
 const RESUME_RATE_WAIT_TIMEOUT_MS: u64 = 2000;
 const RESUME_RATE_POLL_MS: u64 = 50;
 
-/// Apps we know how to drive via AppleScript. Restricted to apps that
-/// expose the `player state` property in their AppleScript
-/// dictionary on macOS 15.x — Apple's Podcasts and TV apps don't, so
-/// referring to them inside `tell application "X"` makes the WHOLE
-/// script fail to compile (compile errors aren't caught by `try`,
-/// only runtime errors). Order is irrelevant.
-const PAUSE_TARGETS: &[&str] = &["Spotify", "Music"];
+/// `IOKit/hidsystem/ev_keymap.h` — `NX_KEYTYPE_PLAY` is the
+/// system-defined "play/pause" multimedia key code. The OS routes it
+/// through the same media-key dispatch as a real F8 press.
+const NX_KEYTYPE_PLAY: i64 = 16;
+/// State byte inside the data1 payload of an `NSSystemDefined` /
+/// subtype-8 event. `0xa = NX_KEYDOWN`, `0xb = NX_KEYUP`. Apps watch
+/// for the down→up pair; sending only one half is unreliable.
+const NX_KEYDOWN: i64 = 0xa;
+const NX_KEYUP: i64 = 0xb;
+/// `NSEventType.systemDefined` raw value.
+const NS_EVENT_TYPE_SYSTEM_DEFINED: u64 = 14;
+/// Subtype tag for `NSSystemDefined` events that carry HID auxiliary
+/// (multimedia) key state.
+const HID_AUX_KEY_SUBTYPE: i16 = 8;
+/// `kCGHIDEventTap` — post media keys at the HID layer so background
+/// apps (Spotify minimised, Music in another Space, etc.) see them
+/// the same way they'd see a real keyboard press.
+const KCG_HID_EVENT_TAP: u32 = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -79,6 +101,21 @@ struct AudioObjectPropertyAddress {
     selector: u32,
     scope: u32,
     element: u32,
+}
+
+/// Local NSPoint mirror with a manual `Encode` impl. We could pull
+/// `objc2-foundation` for `CGPoint`/`NSPoint`, but a 16-byte two-f64
+/// struct doesn't justify a new direct dependency.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+
+unsafe impl Encode for NSPoint {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
 }
 
 #[link(name = "CoreAudio", kind = "framework")]
@@ -93,45 +130,9 @@ extern "C" {
     ) -> i32;
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn dlopen(filename: *const c_char, flag: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
-const RTLD_LAZY: i32 = 0x1;
-
-type MRSendCommandFn = unsafe extern "C" fn(u32, *const c_void) -> Bool;
-
-struct MediaRemoteFns {
-    send_command: MRSendCommandFn,
-}
-unsafe impl Send for MediaRemoteFns {}
-unsafe impl Sync for MediaRemoteFns {}
-
-fn load_media_remote() -> Option<&'static MediaRemoteFns> {
-    static MR: OnceLock<Option<MediaRemoteFns>> = OnceLock::new();
-    MR.get_or_init(|| unsafe {
-        let path = c"/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote";
-        let handle = dlopen(path.as_ptr(), RTLD_LAZY);
-        if handle.is_null() {
-            verbose_log!("[media_control.mac] dlopen MediaRemote failed");
-            return None;
-        }
-        let send = dlsym(handle, c"MRMediaRemoteSendCommand".as_ptr());
-        if send.is_null() {
-            verbose_log!("[media_control.mac] dlsym MRMediaRemoteSendCommand failed");
-            return None;
-        }
-        Some(MediaRemoteFns {
-            send_command: std::mem::transmute::<*mut c_void, MRSendCommandFn>(send),
-        })
-    })
-    .as_ref()
-}
-
-fn mr_send(cmd: u32) {
-    if let Some(fns) = load_media_remote() {
-        let _: Bool = unsafe { (fns.send_command)(cmd, std::ptr::null()) };
-    }
+    fn CGEventPost(tap: u32, event: *const c_void);
 }
 
 fn default_output_device() -> Option<u32> {
@@ -184,70 +185,95 @@ fn nominal_sample_rate(device: u32) -> Option<f64> {
     Some(value)
 }
 
-/// Runs an AppleScript via `osascript` and returns trimmed stdout.
-/// Returns `None` on any failure (TCC denial, syntax error, missing
-/// app); the caller treats `None` as "nothing happened."
-fn run_osascript(script: &str) -> Option<String> {
-    let output = Command::new("osascript").arg("-e").arg(script).output().ok()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        verbose_log!(
-            "[media_control.mac] osascript failed (status={:?}): {}",
-            output.status,
-            stderr.trim()
-        );
-        return None;
+/// Returns true when any process is rendering audio through the
+/// default output device. `kAudioDevicePropertyDeviceIsRunningSomewhere`
+/// is the documented Apple signal for "is the engine currently
+/// active" — Spotify, Apple Music, browser tab media, podcasts apps,
+/// AirPlay all run through CoreAudio I/O procs and therefore flip
+/// this property to non-zero while playing.
+fn is_audio_playing() -> bool {
+    let Some(device) = default_output_device() else {
+        return false;
+    };
+    let addr = AudioObjectPropertyAddress {
+        selector: KAUDIO_DEVICE_PROPERTY_DEVICE_IS_RUNNING_SOMEWHERE,
+        scope: KAUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+        element: KAUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+    };
+    let mut value: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device,
+            &addr,
+            0,
+            std::ptr::null(),
+            &mut size,
+            &mut value as *mut u32 as *mut c_void,
+        )
+    };
+    if status != 0 {
+        verbose_log!("[media_control.mac] is_audio_playing probe failed: {status}");
+        return false;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    value != 0
 }
 
-/// Build an AppleScript that visits each known music app, pauses if
-/// it's currently playing, and emits a comma-separated list of the
-/// apps we paused. Each app is wrapped in `try` so a TCC denial or
-/// missing-app for one doesn't break the rest.
-fn build_pause_script() -> String {
-    let mut s = String::from("set output to \"\"\n");
-    for app in PAUSE_TARGETS {
-        s.push_str(&format!(
-            "try
-    tell application \"{app}\"
-        if it is running then
-            if player state is playing then
-                pause
-                set output to output & \"{app},\"
-            end if
-        end if
-    end tell
-end try
-"
-        ));
+/// Synthesize one half (down or up) of a play/pause media-key press
+/// via `+[NSEvent otherEventWithType:…]` → `CGEventPost`. Apple's
+/// public API for posting `NSSystemDefined` subtype-8 events is to
+/// build them through `NSEvent` and pull the underlying `CGEventRef`
+/// — there's no `CGEventCreate` constructor that fills in the
+/// HID-aux-key fields directly.
+fn post_play_pause_key(state: i64) {
+    unsafe {
+        let Some(cls) = AnyClass::get(c"NSEvent") else {
+            verbose_log!("[media_control.mac] NSEvent class lookup failed");
+            return;
+        };
+        let data1: i64 = (NX_KEYTYPE_PLAY << 16) | (state << 8);
+        let zero = NSPoint { x: 0.0, y: 0.0 };
+        let event: *mut AnyObject = msg_send![
+            cls,
+            otherEventWithType: NS_EVENT_TYPE_SYSTEM_DEFINED,
+            location: zero,
+            modifierFlags: 0xa00u64,
+            timestamp: 0.0f64,
+            windowNumber: 0i64,
+            context: std::ptr::null_mut::<AnyObject>(),
+            subtype: HID_AUX_KEY_SUBTYPE,
+            data1: data1,
+            data2: -1i64,
+        ];
+        if event.is_null() {
+            verbose_log!("[media_control.mac] NSEvent.otherEventWithType returned nil");
+            return;
+        }
+        let cg_event: *const c_void = msg_send![event, CGEvent];
+        if cg_event.is_null() {
+            verbose_log!("[media_control.mac] NSEvent.CGEvent returned null");
+            return;
+        }
+        CGEventPost(KCG_HID_EVENT_TAP, cg_event);
     }
-    s.push_str("return output");
-    s
 }
 
-fn build_play_script(apps: &[String]) -> String {
-    let mut s = String::new();
-    for app in apps {
-        s.push_str(&format!(
-            "try
-    tell application \"{app}\" to if it is running then play
-end try
-"
-        ));
-    }
-    s
+fn toggle_play_pause() {
+    post_play_pause_key(NX_KEYDOWN);
+    post_play_pause_key(NX_KEYUP);
 }
 
 #[derive(Default)]
 struct State {
-    /// Apps we paused via AppleScript. `resume_now` plays back exactly
-    /// these and no others — never sends a generic kMRPlay that could
-    /// resume an externally-paused app.
-    paused_apps: Vec<String>,
+    /// True iff `pause_now` synthesized a pause toggle. `resume_now`
+    /// only synthesizes the matching play toggle when this is true,
+    /// so we never resume audio the user had paused externally
+    /// before recording, and we never start playing when nothing was
+    /// playing to begin with.
+    did_pause: bool,
     /// Default-output device's nominal sample rate at pause-time.
     /// `resume_now` polls until the rate climbs back to this value
-    /// (BT profile switchback signal) before sending `play`.
+    /// (BT profile switchback signal) before posting the play key.
     original_sample_rate: Option<f64>,
 }
 
@@ -270,35 +296,18 @@ impl MediaController for MacMediaController {
         };
         *state = State::default();
 
-        let script = build_pause_script();
-        let paused: Vec<String> = run_osascript(&script)
-            .map(|out| {
-                out.split(',')
-                    .filter(|p| !p.is_empty())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Best-effort: send `kMRPause` (opcode 1, true pause-only) so
-        // browser-tab media gets paused when it's the elected
-        // Now Playing client. No matching `kMRPlay` on resume — that
-        // would resume externally-paused apps. Trade-off: a paused
-        // browser tab stays paused, user manually clicks play.
-        mr_send(KMR_PAUSE);
-
-        if paused.is_empty() {
-            verbose_log!("[media_control.mac] pause_now: AppleScript paused nothing; sent kMRPause best-effort");
+        if !is_audio_playing() {
+            verbose_log!("[media_control.mac] pause_now: nothing playing, skip");
             return false;
         }
 
+        toggle_play_pause();
+        state.did_pause = true;
         if let Some(d) = default_output_device() {
             state.original_sample_rate = nominal_sample_rate(d);
         }
-        state.paused_apps = paused;
         verbose_log!(
-            "[media_control.mac] pause_now: paused {:?}, original_sample_rate={:?}",
-            state.paused_apps,
+            "[media_control.mac] pause_now: posted play/pause key, original_sample_rate={:?}",
             state.original_sample_rate
         );
         true
@@ -308,25 +317,19 @@ impl MediaController for MacMediaController {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        let original_rate = state.original_sample_rate.take();
-        let apps = std::mem::take(&mut state.paused_apps);
-        drop(state);
-
-        if apps.is_empty() {
+        if !state.did_pause {
             return;
         }
+        let original_rate = state.original_sample_rate.take();
+        state.did_pause = false;
+        drop(state);
 
         // Wait for BT to switch back to its pre-recording profile
-        // (HFP→A2DP on AirPods, ~500–1000 ms) before sending play.
-        // Signal: device's nominal sample rate climbs back to the
-        // pre-pause value — adaptive detection, exits as soon as the
-        // OS reports the switch is complete. Wired headsets and
-        // BT-stayed-A2DP devices exit on the first poll. Hardcoded
-        // 2 s timeout is a generous fallback for unusual BT devices
-        // that never report rate change; the
-        // `behavior::bt_resume_delay_ms` setting is Windows-only
-        // (Windows can't observe the switch event, see
-        // `media_control/windows.rs`).
+        // (HFP→A2DP on AirPods, ~500–1000 ms) before posting the
+        // play key. Signal: device's nominal sample rate climbs back
+        // to the pre-pause value — adaptive detection, exits as soon
+        // as the OS reports the switch is complete. Wired headsets
+        // and BT-stayed-A2DP devices exit on the first poll.
         if let (Some(d), Some(target)) = (default_output_device(), original_rate) {
             let deadline = Instant::now() + Duration::from_millis(RESUME_RATE_WAIT_TIMEOUT_MS);
             let mut waited_ms = 0u64;
@@ -344,8 +347,18 @@ impl MediaController for MacMediaController {
             );
         }
 
-        let script = build_play_script(&apps);
-        let _ = run_osascript(&script);
-        verbose_log!("[media_control.mac] resume_now: played {apps:?}");
+        // Re-probe: if the user started something else playing
+        // during recording (or tapped the AirPod button to resume
+        // music themselves), leave it alone. Only post the toggle
+        // if the device is currently idle — i.e. our pause is still
+        // the reason audio stopped.
+        if is_audio_playing() {
+            verbose_log!(
+                "[media_control.mac] resume_now: device already running, skip toggle"
+            );
+            return;
+        }
+        toggle_play_pause();
+        verbose_log!("[media_control.mac] resume_now: posted play/pause key");
     }
 }

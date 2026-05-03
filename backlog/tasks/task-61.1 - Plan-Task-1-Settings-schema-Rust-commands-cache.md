@@ -1,9 +1,10 @@
 ---
 id: TASK-61.1
 title: 'Plan Task 1: Settings schema + Rust commands + cache'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []

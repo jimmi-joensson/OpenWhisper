@@ -1,9 +1,10 @@
 ---
 id: TASK-61.6
 title: 'Plan Task 6: Playwright spec + tauri shim stubs'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []

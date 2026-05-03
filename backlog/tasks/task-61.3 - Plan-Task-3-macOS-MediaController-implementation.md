@@ -1,9 +1,10 @@
 ---
 id: TASK-61.3
 title: 'Plan Task 3: macOS MediaController implementation'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []
@@ -19,6 +20,8 @@ parent_task_id: TASK-61
 - [ ] #5 State protected by mutex; rapid toggle does not queue overlapping fades
 - [ ] #6 Smoke matrix passes: Spotify, Safari/YouTube, no-media-app, cancel-mid-recording, setting=off
 <!-- AC:END -->
+
+
 
 ## Implementation Notes (2026-05-03 release-blocker rework + revert)
 

@@ -1,10 +1,10 @@
 ---
 id: TASK-61.7
 title: Apply audio ducking to Audio settings mic-test preview
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-02'
-updated_date: '2026-05-02'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []
@@ -21,6 +21,7 @@ parent_task_id: TASK-61
 
 ## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
 ### What shipped
 
 Wired the existing `pause_audio_for_recording` / `resume_audio_after_recording` helpers into the preview path. The same SMTC pause/resume + BT switchback wait that fires on a real recording now fires on Audio settings → Test microphone:
@@ -38,3 +39,4 @@ Wired the existing `pause_audio_for_recording` / `resume_audio_after_recording` 
 ### Validation
 - `cargo check` clean from `apps/tauri/src-tauri/` after the change.
 - Manual smoke pending on user box: open Settings → Audio → Test microphone → music pauses → Stop test → music resumes after BT delay (if BT) or instantly (if wired).
+<!-- SECTION:NOTES:END -->

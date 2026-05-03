@@ -1,9 +1,10 @@
 ---
 id: TASK-61.2
 title: 'Plan Task 2: MediaController trait + phase observer'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []

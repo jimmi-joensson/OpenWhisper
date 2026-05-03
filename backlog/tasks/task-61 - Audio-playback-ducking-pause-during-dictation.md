@@ -1,10 +1,10 @@
 ---
 id: TASK-61
 title: Audio playback ducking + pause during dictation
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:12'
-updated_date: '2026-05-01 08:13'
+updated_date: '2026-05-03 10:19'
 labels: []
 dependencies: []
 documentation:

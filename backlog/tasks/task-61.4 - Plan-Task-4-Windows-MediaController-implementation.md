@@ -1,10 +1,10 @@
 ---
 id: TASK-61.4
 title: 'Plan Task 4: Windows MediaController implementation'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
-updated_date: '2026-05-02'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []
@@ -23,6 +23,7 @@ parent_task_id: TASK-61
 
 ## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
 ### Scope deviation from original ACs
 
 Shipped scope is narrower than the original plan ACs and intentionally
@@ -86,3 +87,4 @@ BT, branch `worktree-task-61-audio-ducking`):
 3. If accepted, decide whether AC #2 / #3 / #4 in the Backlog row should
    be (a) removed, (b) marked N/A with a strikethrough, or (c) left
    unchecked as a record of the original plan vs shipped scope.
+<!-- SECTION:NOTES:END -->

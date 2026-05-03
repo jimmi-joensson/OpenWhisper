@@ -1,9 +1,10 @@
 ---
 id: TASK-61.5
 title: 'Plan Task 5: GeneralPane Audio row + usePauseAudio hook'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-04-30 22:18'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies: []

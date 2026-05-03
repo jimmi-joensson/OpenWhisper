@@ -1,10 +1,10 @@
 ---
 id: TASK-61.8
 title: User-configurable BT resume delay setting
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-02'
-updated_date: '2026-05-02'
+updated_date: '2026-05-03 10:19'
 labels:
   - 61-impl
 dependencies:
@@ -28,6 +28,7 @@ parent_task_id: TASK-61
 
 ## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
 ### Why a Slider (not a Select)
 
 Considered a Select with discrete presets (1s, 2s, 3s, …, 10s) before reverting to a Slider. Reasons:
@@ -64,3 +65,4 @@ The codebase uses base-ui (`@base-ui/react`) primitives, not Radix, so I added a
 - Step granularity is 500 ms. If users on faster radios want 250 ms granularity (e.g. dial in 1.75 s precisely), drop the step constant.
 - Slider width is `max-w-sm` (384 px). If the General pane gets wider in a future redesign, the slider can grow to fill more horizontal room.
 - 0 ms is a valid "skip the wait" choice. Users on faster BT radios who'd rather get instant resume + accept the mono blip can dial all the way down.
+<!-- SECTION:NOTES:END -->

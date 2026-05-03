@@ -33,11 +33,6 @@ Tasks tracked via Backlog.md CLI (`backlog task list`), not GitHub Issues.
 
 User-visible changes since v0.4.0, grouped by area:
 
-- **Signed + notarized Mac DMG** (TASK-12) — first OpenWhisper release with a
-  Developer ID Application signature and a stapled Apple notarization ticket.
-  Mac users no longer see the "OpenWhisper can't be opened because Apple cannot
-  check it for malicious software" Gatekeeper warning on first launch. (Mac
-  side only — no Windows impact.)
 - **Home pane + outer sidebar nav** (TASK-65) — main window now lands on a new
   Home pane with a live hotkey hint and a latest-transcript row (hover to
   copy). Outer sidebar nav (Home / Settings / Diagnostics) replaces the old

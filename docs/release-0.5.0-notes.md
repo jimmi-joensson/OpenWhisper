@@ -2,11 +2,6 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 
 ## What's new
 
-**Signed + notarized Mac DMG**
-- First OpenWhisper release built end-to-end with a Developer ID Application signature and an Apple-notarized + stapled DMG
-- Gatekeeper accepts the install on first launch — no manual bypass, no "Apple cannot check it for malicious software" warning
-- (Windows installers were already self-served; no install-flow change there)
-
 **Home pane + outer sidebar nav**
 - Main window now lands on a dedicated Home pane with a live hotkey hint and a latest-transcript row (hover to copy)
 - Outer sidebar nav: Home / Settings / Diagnostics

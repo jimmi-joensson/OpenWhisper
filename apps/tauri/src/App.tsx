@@ -244,7 +244,7 @@ function App() {
                   }
                   automationError={
                     pauseDiagnostic?.reason === "not_authorized"
-                      ? "Automation permission denied — music can't pause during dictation."
+                      ? "Automation permission denied — paused music won't resume after dictation."
                       : null
                   }
                   onAutomationOpenSettings={() => {

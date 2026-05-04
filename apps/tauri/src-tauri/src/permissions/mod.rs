@@ -63,6 +63,21 @@ pub(crate) fn emit_status(
     }
 }
 
+/// Side-effect-free re-probe of the mic permission state. Re-emits
+/// `permissions_status` so the UI banner reflects current grant.
+/// Mac-only on the actual probe (Win has no programmatic check API);
+/// Win re-emits the same `authorized` status it would emit at boot.
+pub fn recheck(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        mac::recheck(app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        emit_status(app, true, "authorized", "");
+    }
+}
+
 /// Fire the system mic prompt when warranted + emit current status.
 /// Idempotent — safe to call every boot. Silent no-op on the prompt side
 /// when mic is already authorized / denied / restricted, or when AX is

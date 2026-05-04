@@ -928,9 +928,33 @@ pub fn run() {
 
                 let main_clone = main.clone();
                 main.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = main_clone.hide();
+                    match event {
+                        WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            let _ = main_clone.hide();
+                        }
+                        // Focus regain = user just came back from
+                        // System Settings (or another app). Re-probe
+                        // every TCC surface that can be revoked or
+                        // granted while we're in the background, so
+                        // banners clear / appear without a relaunch:
+                        //   - Mic: AVCaptureDevice authorizationStatus
+                        //   - Automation: side-effect-free osascript
+                        //     probe (see media_control::probe_authorization)
+                        // AX is handled separately by the AX watcher
+                        // thread (focus.rs::install_ax_watcher) — it
+                        // requires a process restart for CGEventTap to
+                        // pick up the new trust, which is why that
+                        // banner keeps the explicit Restart CTA.
+                        WindowEvent::Focused(true) => {
+                            if let Some(app) = APP_HANDLE.get() {
+                                permissions::recheck(app);
+                                let next = media_control::probe_authorization();
+                                let _ = app
+                                    .emit("media_pause_diagnostic_changed", next);
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }

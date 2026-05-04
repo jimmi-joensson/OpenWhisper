@@ -234,6 +234,40 @@ end try
     s
 }
 
+/// Side-effect-free Automation TCC probe. Mirrors the `pause_now`
+/// dispatch (per-target `try ... on error errNum`) but reads
+/// `player state` instead of calling `pause`, so granted users see no
+/// behavior change. Used on app focus regain to clear the
+/// NotAuthorized banner the moment the user grants in System Settings,
+/// without waiting for the next recording.
+///
+/// Limitation: AppleScript only dispatches AppleEvents to apps that
+/// are currently running, so if neither Spotify nor Music is running
+/// the probe yields no errors and we conservatively assume "ok" — any
+/// stale NotAuthorized state will be re-confirmed at the next real
+/// pause attempt. Acceptable: the Settings-flip flow keeps Spotify
+/// running while the user toggles, so the typical recovery path does
+/// produce a real signal.
+fn build_probe_script() -> String {
+    let mut s = String::from("set errOut to \"\"\n");
+    for app in PAUSE_TARGETS {
+        s.push_str(&format!(
+            "try
+    tell application \"{app}\"
+        if it is running then
+            get player state
+        end if
+    end tell
+on error errMsg number errNum
+    set errOut to errOut & \"{app}:\" & errNum & \",\"
+end try
+"
+        ));
+    }
+    s.push_str("return errOut");
+    s
+}
+
 fn build_play_script(apps: &[String]) -> String {
     let mut s = String::new();
     for app in apps {
@@ -303,6 +337,61 @@ fn set_last_diagnostic(value: Option<PauseDiagnostic>) {
     if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
         *g = value;
     }
+}
+
+/// Re-probe Automation TCC without taking any pause/resume action.
+/// Runs the side-effect-free probe script and updates
+/// `LAST_PAUSE_DIAGNOSTIC` based on the per-target error codes:
+///
+///   - any `-1743`     → `NotAuthorized` (banner stays / re-appears)
+///   - no errors       → `None` (banner clears — assumes grant or no
+///                       running target; either way there's no negative
+///                       signal to act on)
+///   - other errors    → keep prior diagnostic if it was NotAuthorized
+///                       (don't lose a real denial signal because of an
+///                       unrelated AppleScript hiccup)
+///
+/// Called from the main-window focus handler so the banner clears the
+/// instant the user comes back from System Settings with grant flipped.
+pub fn probe_authorization() -> Option<PauseDiagnostic> {
+    let raw = run_osascript(&build_probe_script()).unwrap_or_default();
+    let errors: Vec<(String, i32)> = raw
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .filter_map(|entry| {
+            let (app, code) = entry.split_once(':')?;
+            code.trim().parse::<i32>().ok().map(|n| (app.to_string(), n))
+        })
+        .collect();
+
+    if errors.iter().any(|(_, n)| *n == -1743) {
+        let detail = errors
+            .iter()
+            .map(|(a, n)| format!("{a}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let next = PauseDiagnostic {
+            reason: PauseFailureReason::NotAuthorized,
+            detail,
+        };
+        set_last_diagnostic(Some(next.clone()));
+        return Some(next);
+    }
+
+    if errors.is_empty() {
+        // No negative signal. Clear NotAuthorized state so the banner
+        // dismisses; preserve prior `NoKnownPlayer` / `Other` reasons
+        // since those aren't refuted by a clean probe.
+        if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
+            if matches!(
+                g.as_ref().map(|d| &d.reason),
+                Some(PauseFailureReason::NotAuthorized)
+            ) {
+                *g = None;
+            }
+        }
+    }
+    last_pause_diagnostic()
 }
 
 pub struct MacMediaController {

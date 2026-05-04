@@ -48,7 +48,7 @@ fn emit_for_status(app: &AppHandle, status: i64) {
             false,
             "denied",
             format!(
-                "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen {app_name}."
+                "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone."
             ),
         ),
         AV_RESTRICTED => emit_status(
@@ -60,6 +60,26 @@ fn emit_for_status(app: &AppHandle, status: i64) {
             ),
         ),
         _ => emit_status(app, false, "unknown", format!("Unknown mic auth status: {status}")),
+    }
+}
+
+/// Side-effect-free re-probe — reads the current AVCaptureDevice
+/// authorization status and re-emits via `emit_status`. No prompt is
+/// fired (unlike `request_microphone`, which prompts on
+/// `NotDetermined`). Used on app focus regain so the mic banner clears
+/// the instant the user grants in System Settings, without requiring
+/// an app relaunch.
+pub fn recheck(app: &AppHandle) {
+    unsafe {
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+            return;
+        };
+        let media: *const AnyObject = AVMediaTypeAudio;
+        if media.is_null() {
+            return;
+        }
+        let status: i64 = msg_send![cls, authorizationStatusForMediaType: media];
+        emit_for_status(app, status);
     }
 }
 

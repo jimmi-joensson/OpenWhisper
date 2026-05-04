@@ -36,19 +36,38 @@ pub struct PauseDiagnostic {
 
 #[cfg(target_os = "macos")]
 pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
-    mac::last_pause_diagnostic().map(|d| PauseDiagnostic {
+    mac::last_pause_diagnostic().map(to_ui)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    None
+}
+
+/// Re-probe Automation TCC and return the resulting diagnostic. Mac-
+/// only side-effect-free check — see `mac::probe_authorization`.
+/// Other platforms have no per-app TCC layer that can silently deny,
+/// so they always return `None`.
+#[cfg(target_os = "macos")]
+pub fn probe_authorization() -> Option<PauseDiagnostic> {
+    mac::probe_authorization().map(to_ui)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn probe_authorization() -> Option<PauseDiagnostic> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn to_ui(d: mac::PauseDiagnostic) -> PauseDiagnostic {
+    PauseDiagnostic {
         reason: match d.reason {
             mac::PauseFailureReason::NotAuthorized => "not_authorized",
             mac::PauseFailureReason::NoKnownPlayer => "no_known_player",
             mac::PauseFailureReason::Other => "other",
         },
         detail: d.detail,
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
-    None
+    }
 }
 
 #[cfg(target_os = "windows")]

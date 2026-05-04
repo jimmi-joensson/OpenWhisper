@@ -1,8 +1,8 @@
 ---
-id: DEC-recognizer-ort-engine
-title: Recognizer engine swap to `ort` + DirectML defer (TASK-40)
-status: Frozen
-date: 2026-04-26
+id: decision-3
+title: 'Recognizer engine swap to `ort` + DirectML defer (TASK-40)'
+date: '2026-04-26 00:00'
+status: accepted
 ---
 
 # Recognizer engine swap — `sherpa-onnx` → `pykeio/ort`
@@ -11,7 +11,7 @@ This doc records the outcome of TASK-40: swap the Windows recognizer's
 inference engine from sherpa-onnx to the `ort` Rust crate, add a runtime
 EP probe (TensorRT → CUDA → DirectML → CPU) for cross-vendor GPU
 acceleration, and decide whether DirectML clears CPU on Parakeet-TDT-v3
-int8. Companion to `recognizer-cuda-decision-2026-04-26.md` (TASK-39).
+int8. Companion to `decision-2 - Recognizer CUDA EP defer.md` (TASK-39).
 Raw bench numbers in
 `scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt` (appended below
 TASK-39's CUDA arm).
@@ -112,7 +112,7 @@ floor TASK-39 already documented. Out of scope.
 ## Why the GPU stayed idle on DML too
 
 Same three contributors as the CUDA arm in
-`recognizer-cuda-decision-2026-04-26.md`:
+`decision-2 - Recognizer CUDA EP defer.md`:
 
 1. Parakeet-TDT-v3 int8 encoder (~120 M params @ int8 ≈ 60 MB) is too
    small to saturate the RTX 3070's SMs per encoder frame.
@@ -187,9 +187,9 @@ beats CPU. Re-bench when such hardware shows up.
   (TASK-40 arm appended below TASK-39's CUDA arm)
 - ort 2.0.0-rc.10: https://github.com/pykeio/ort
 - Prior decision (TASK-39 CUDA arm):
-  `backlog/decisions/recognizer-cuda-decision-2026-04-26.md`
+  `backlog/decisions/decision-2 - Recognizer CUDA EP defer.md`
 - Prior decision (Mac CoreML arm):
-  `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`
+  `backlog/decisions/decision-1 - Recognizer bench thresholds.md`
 
 ## Follow-up tasks (NOT scaffolded — file when needed)
 

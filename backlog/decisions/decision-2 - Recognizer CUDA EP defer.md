@@ -1,8 +1,8 @@
 ---
-id: DEC-recognizer-cuda
-title: Recognizer CUDA EP — defer (TASK-39 RTX 3070 bench)
-status: Frozen
-date: 2026-04-26
+id: decision-2
+title: 'Recognizer CUDA EP — defer (TASK-39 RTX 3070 bench)'
+date: '2026-04-26 00:00'
+status: accepted
 ---
 
 # Recognizer CUDA EP — defer
@@ -45,7 +45,7 @@ overhead. That's the cost of going through CUDA EP plumbing for a model
 that can't saturate the GPU — kernel-launch latency dominates.
 
 This is the same failure pattern the Mac arm hit with CoreML EP
-(`backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`):
+(`backlog/decisions/decision-1 - Recognizer bench thresholds.md`):
 the EP loaded, no error message fired, but the accelerator stayed idle.
 On Mac the cure was to switch off ONNX entirely and use FluidAudio's
 hand-tuned `.mlmodelc`. There is no equivalent ANE-class accelerator
@@ -166,7 +166,7 @@ None of these are worth scaffolding now.
   (gitignored; from `developer.download.nvidia.com/compute/cudnn/redist/`)
 - Default-threads change: `core/src/recognizer/sherpa.rs:90` and
   `core/Cargo.toml`
-- Prior decision (Mac CoreML arm): `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`
+- Prior decision (Mac CoreML arm): `backlog/decisions/decision-1 - Recognizer bench thresholds.md`
 
 ## No follow-up task scaffolded
 

@@ -1,8 +1,8 @@
 ---
-id: DEC-recognizer-bench-thresholds
-title: Recognizer bench thresholds (frozen pre-bench, TASK-33)
-status: Frozen
-date: 2026-04-26
+id: decision-1
+title: 'Recognizer bench thresholds (frozen pre-bench, TASK-33)'
+date: '2026-04-26 00:00'
+status: accepted
 ---
 
 # Recognizer bench thresholds — frozen before measuring

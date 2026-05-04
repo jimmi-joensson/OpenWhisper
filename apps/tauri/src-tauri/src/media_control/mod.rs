@@ -18,6 +18,39 @@ mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::MacMediaController as PlatformMediaController;
 
+/// Cross-platform diagnostic surface for the most recent `pause_now`
+/// call. Mac populates this when AppleScript paused nothing because of
+/// a TCC Automation denial — the silent-failure case that prompted
+/// this code. Other platforms return `None` (Windows SMTC has its own
+/// failure modes but they don't manifest as "paused nothing despite
+/// playback" the way Mac does, so no surface needed yet).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PauseDiagnostic {
+    /// Stable machine tag — UI switches on this to render the right
+    /// banner. `not_authorized` = grant Automation in System Settings.
+    /// `no_known_player` = nothing actionable (browser tab etc.).
+    /// `other` = generic failure, detail has the codes.
+    pub reason: &'static str,
+    pub detail: String,
+}
+
+#[cfg(target_os = "macos")]
+pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    mac::last_pause_diagnostic().map(|d| PauseDiagnostic {
+        reason: match d.reason {
+            mac::PauseFailureReason::NotAuthorized => "not_authorized",
+            mac::PauseFailureReason::NoKnownPlayer => "no_known_player",
+            mac::PauseFailureReason::Other => "other",
+        },
+        detail: d.detail,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]

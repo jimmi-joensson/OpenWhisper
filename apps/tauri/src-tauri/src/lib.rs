@@ -29,7 +29,7 @@ mod permissions;
 mod settings;
 mod tray;
 
-use media_control::{MediaController, PlatformMediaController};
+use media_control::{MediaController, PauseDiagnostic, PlatformMediaController};
 
 static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new();
 
@@ -206,6 +206,16 @@ pub(crate) fn do_cancel() -> bool {
 #[tauri::command]
 fn dictation_toggle() -> Result<(), String> {
     do_toggle()
+}
+
+/// Last `pause_now` outcome — `None` when the most recent pause did
+/// pause something (or the feature was never invoked). UI polls this on
+/// recording-stop to render an actionable banner when AppleScript was
+/// blocked by Automation TCC, the silent-failure mode that made users
+/// on built-in speakers think the feature was Bluetooth-only.
+#[tauri::command]
+fn media_get_last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    media_control::last_pause_diagnostic()
 }
 
 #[tauri::command]
@@ -1075,6 +1085,7 @@ pub fn run() {
             behavior::behavior_set_pause_audio_during_dictation,
             behavior::behavior_get_bt_resume_delay_ms,
             behavior::behavior_set_bt_resume_delay_ms,
+            media_get_last_pause_diagnostic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

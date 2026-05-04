@@ -414,10 +414,10 @@ fn spawn_recognizer_warmup() {
         .expect("spawn recognizer warmup");
 }
 
-// One device-state poll every N dictation ticks. 50 ms tick × 40 = 2 s.
-// Slow enough that the cpal enumerate isn't a hot path; fast enough that
-// an unplugged mic surfaces in the picker before the user clicks Test.
-const DEVICE_STATE_TICK_DIVISOR: u64 = 40;
+// Device-state poll cadence. Slow enough that the cpal enumerate isn't
+// a hot path; fast enough that an unplugged mic surfaces in the picker
+// before the user clicks Test.
+const DEVICE_STATE_POLL_MS: u64 = 2000;
 
 fn hash_device_state(state: &AudioDeviceState) -> u64 {
     let mut h = DefaultHasher::new();
@@ -429,15 +429,8 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
     thread::Builder::new()
         .name("openwhisper-dictation-emitter".into())
         .spawn(move || {
-            // Force an emit on the first device-state tick so React's
-            // listener replaces the initial `audio_get_device_state`
-            // snapshot with a live one (host-default may have changed
-            // between mount and first tick on a slow boot).
-            let mut last_device_hash: Option<u64> = None;
-            let mut tick_count: u64 = 0;
             loop {
                 thread::sleep(Duration::from_millis(TICK_MS));
-                tick_count = tick_count.wrapping_add(1);
                 let snap = dictation::dictation_snapshot();
                 let level = audio::audio_current_level();
                 // While recording, snapshot.sample_count is 0 until stop. Show a
@@ -465,19 +458,38 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                 if app.emit("dictation_tick", payload).is_err() {
                     break;
                 }
-                if tick_count % DEVICE_STATE_TICK_DIVISOR == 0 {
-                    let state = refresh_audio_device_state_cache();
-                    let hash = hash_device_state(&state);
-                    if last_device_hash != Some(hash) {
-                        last_device_hash = Some(hash);
-                        if app.emit("audio_device_state", state).is_err() {
-                            break;
-                        }
+            }
+        })
+        .expect("spawn dictation emitter");
+}
+
+// Device enumeration runs on its own thread so the cpal call (per-device
+// CoreAudio I/O on macOS, ~50–500ms) never blocks the 50ms tick emitter.
+// TASK-79: previously this lived inside the emitter and produced a 2s-
+// periodic stutter on the soundbar / mic-test meter that share the
+// `dictation_tick` stream.
+fn spawn_audio_device_poller(app: tauri::AppHandle) {
+    thread::Builder::new()
+        .name("openwhisper-audio-device-poller".into())
+        .spawn(move || {
+            // First iteration: force an emit so React's listener replaces
+            // the initial `audio_get_device_state` snapshot with a live
+            // one (host-default may have changed between mount and first
+            // poll on a slow boot).
+            let mut last_device_hash: Option<u64> = None;
+            loop {
+                thread::sleep(Duration::from_millis(DEVICE_STATE_POLL_MS));
+                let state = refresh_audio_device_state_cache();
+                let hash = hash_device_state(&state);
+                if last_device_hash != Some(hash) {
+                    last_device_hash = Some(hash);
+                    if app.emit("audio_device_state", state).is_err() {
+                        break;
                     }
                 }
             }
         })
-        .expect("spawn dictation emitter");
+        .expect("spawn audio device poller");
 }
 
 /// Center the main window on the monitor that hosts the pill (the
@@ -836,6 +848,7 @@ pub fn run() {
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             spawn_dictation_emitter(app.handle().clone());
+            spawn_audio_device_poller(app.handle().clone());
             spawn_recognizer_warmup();
 
             // Close-to-tray: intercept the main window's close button and

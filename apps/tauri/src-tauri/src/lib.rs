@@ -33,6 +33,14 @@ use media_control::{MediaController, PauseDiagnostic, PlatformMediaController};
 
 static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new();
 
+/// Process-wide AppHandle, set once in `setup`. Lets non-Tauri-context
+/// callers (hotkey thread, resume worker) emit events to the React side
+/// without threading a handle through every layer. We only `set` once so
+/// subsequent calls are no-ops; emitters that fire before `setup`
+/// completes (shouldn't happen in practice — pause/resume only run in
+/// response to user input) silently drop, which is correct.
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
 /// True between `pause_audio_for_recording` returning true and the
 /// matching `resume_audio_after_recording` having fired. Process-wide
 /// because cancel and stop both flow through the resume path; we never
@@ -63,8 +71,16 @@ fn pause_audio_for_recording() {
     let Some(controller) = MEDIA_CONTROLLER.get() else {
         return;
     };
-    if controller.pause_now() {
+    let did_pause = controller.pause_now();
+    if did_pause {
         PAUSED_BY_US.store(true, Ordering::Relaxed);
+    }
+    // Always re-emit the diagnostic so the Settings banner can clear
+    // itself the moment a successful pause happens (user re-granted
+    // Automation between recordings) — not just on the failing edge.
+    if let Some(app) = APP_HANDLE.get() {
+        let payload = media_control::last_pause_diagnostic();
+        let _ = app.emit("media_pause_diagnostic_changed", payload);
     }
 }
 
@@ -216,6 +232,27 @@ fn dictation_toggle() -> Result<(), String> {
 #[tauri::command]
 fn media_get_last_pause_diagnostic() -> Option<PauseDiagnostic> {
     media_control::last_pause_diagnostic()
+}
+
+/// Deep-link to System Settings → Privacy & Security → Automation. The
+/// banner under the pause-during-dictation toggle uses this to give the
+/// user a one-click recovery path when AppleScript hit -1743. Mac-only;
+/// Windows / Linux return `Err` since they don't have an equivalent
+/// per-app Automation grant surface (SMTC needs no TCC).
+#[tauri::command]
+fn open_automation_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Automation settings deep link is macOS-only".into())
+    }
 }
 
 #[tauri::command]
@@ -953,6 +990,7 @@ pub fn run() {
             // Single process-wide MediaController; phase observer in
             // spawn_dictation_emitter reads it on every tick.
             let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
+            let _ = APP_HANDLE.set(app.handle().clone());
             behavior::apply_collection_behavior(
                 app.handle(),
                 behavior_settings.show_in_fullscreen,
@@ -1086,6 +1124,7 @@ pub fn run() {
             behavior::behavior_get_bt_resume_delay_ms,
             behavior::behavior_set_bt_resume_delay_ms,
             media_get_last_pause_diagnostic,
+            open_automation_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

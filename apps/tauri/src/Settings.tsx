@@ -33,6 +33,9 @@ import { Switch } from "./components/ui/switch";
 import { useBtResumeDelay } from "./lib/use-bt-resume-delay";
 import { useDictation } from "./lib/use-dictation";
 import { usePauseAudio } from "./lib/use-pause-audio";
+import { usePauseDiagnostic } from "./lib/use-pause-diagnostic";
+import { Alert, AlertAction, AlertDescription } from "./components/ui/alert";
+import { Button } from "./components/ui/button";
 import { GeneralPane } from "./components/general-pane";
 import "./Settings.css";
 
@@ -177,6 +180,7 @@ function AudioPane() {
   // the slider value has no effect, so disabling matches the
   // user-visible behavior.
   const { enabled: pauseAudio, setEnabled: setPauseAudio } = usePauseAudio();
+  const pauseDiagnostic = usePauseDiagnostic();
   const { delayMs: btResumeDelayMs, setDelayMs: setBtResumeDelayMs } =
     useBtResumeDelay();
 
@@ -535,6 +539,34 @@ function AudioPane() {
             }}
           />
         </Field>
+        {/*
+          TCC denial banner. AppleScript pause silently fails when the
+          user has not granted Automation for OpenWhisper → Spotify (or
+          Music) — error code -1743 from osascript. The Rust side
+          captures this in `last_pause_diagnostic`; we render an
+          actionable banner under the toggle so the user can recover
+          without knowing what TCC is. Only fires on macOS — Windows
+          never returns this reason from `media_get_last_pause_diagnostic`.
+        */}
+        {pauseAudio && pauseDiagnostic?.reason === "not_authorized" && (
+          <Alert variant="destructive">
+            <AlertDescription>
+              Automation permission denied — music can't pause during
+              dictation. Grant access in System Settings.
+            </AlertDescription>
+            <AlertAction>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void invoke("open_automation_settings").catch(() => {});
+                }}
+              >
+                Open Settings
+              </Button>
+            </AlertAction>
+          </Alert>
+        )}
         {SHOW_BT_RESUME_DELAY && (
           <Field>
             {/*

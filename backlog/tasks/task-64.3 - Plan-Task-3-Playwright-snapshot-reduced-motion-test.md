@@ -4,10 +4,12 @@ title: 'Plan Task 3: Playwright snapshot + reduced-motion test'
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:27'
+updated_date: '2026-05-04 08:03'
 labels:
   - 64-impl
 dependencies: []
 parent_task_id: TASK-64
+ordinal: 27000
 ---
 
 ## Acceptance Criteria

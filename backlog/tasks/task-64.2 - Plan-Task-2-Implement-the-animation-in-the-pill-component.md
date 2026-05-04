@@ -4,10 +4,12 @@ title: 'Plan Task 2: Implement the animation in the pill component'
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:26'
+updated_date: '2026-05-04 08:03'
 labels:
   - 64-impl
 dependencies: []
 parent_task_id: TASK-64
+ordinal: 26000
 ---
 
 ## Acceptance Criteria

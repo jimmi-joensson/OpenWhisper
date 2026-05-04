@@ -4,10 +4,12 @@ title: 'Plan Task 6: Wrap Parakeet recognizer in ModelHandle (Windows)'
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:25'
+updated_date: '2026-05-04 08:03'
 labels:
   - 62-impl
 dependencies: []
 parent_task_id: TASK-62
+ordinal: 9000
 ---
 
 ## Acceptance Criteria

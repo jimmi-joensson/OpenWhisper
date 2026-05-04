@@ -4,9 +4,11 @@ title: Post-15.4 multi-app pause + browser-tab coverage exploration
 status: To Do
 assignee: []
 created_date: '2026-05-03 10:19'
+updated_date: '2026-05-04 08:03'
 labels: []
 dependencies: []
 priority: low
+ordinal: 32000
 ---
 
 ## Description

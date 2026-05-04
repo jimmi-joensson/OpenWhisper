@@ -4,12 +4,14 @@ title: 'Release CI: GitHub Actions workflow with Mac sign + notarize secrets'
 status: To Do
 assignee: []
 created_date: '2026-05-01 06:10'
+updated_date: '2026-05-04 08:03'
 labels:
   - release
   - ci
   - macos
 dependencies: []
 priority: medium
+ordinal: 28000
 ---
 
 ## Description

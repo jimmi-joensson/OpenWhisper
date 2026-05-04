@@ -4,12 +4,14 @@ title: Sparkle autoupdate (or tauri-plugin-updater) for Mac releases
 status: To Do
 assignee: []
 created_date: '2026-05-01 06:10'
+updated_date: '2026-05-04 08:03'
 labels:
   - release
   - macos
   - ux
 dependencies: []
 priority: low
+ordinal: 29000
 ---
 
 ## Description

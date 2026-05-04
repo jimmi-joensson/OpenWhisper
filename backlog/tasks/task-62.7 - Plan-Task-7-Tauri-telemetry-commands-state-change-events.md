@@ -4,10 +4,12 @@ title: 'Plan Task 7: Tauri telemetry commands + state-change events'
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:25'
+updated_date: '2026-05-04 08:03'
 labels:
   - 62-impl
 dependencies: []
 parent_task_id: TASK-62
+ordinal: 10000
 ---
 
 ## Acceptance Criteria

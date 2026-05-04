@@ -4,10 +4,12 @@ title: 'Plan Task 11: End-to-end smoke (Mac + Windows)'
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:26'
+updated_date: '2026-05-04 08:03'
 labels:
   - 63-impl
 dependencies: []
 parent_task_id: TASK-63
+ordinal: 24000
 ---
 
 ## Acceptance Criteria

@@ -9,6 +9,8 @@ interface HomePaneProps {
   hotkeyError?: string | null;
   onHotkeyRetry?: () => void;
   micError?: string | null;
+  automationError?: string | null;
+  onAutomationOpenSettings?: () => void;
   recognizerError?: string | null;
   onRecognizerRetry?: () => void;
 }
@@ -17,6 +19,8 @@ export function HomePane({
   hotkeyError,
   onHotkeyRetry,
   micError,
+  automationError,
+  onAutomationOpenSettings,
   recognizerError,
   onRecognizerRetry,
 }: HomePaneProps) {
@@ -38,6 +42,15 @@ export function HomePane({
       {micError && (
         <div data-testid="mic-banner" className="ow-home__banner">
           <HealthBanner message={micError} />
+        </div>
+      )}
+      {automationError && (
+        <div data-testid="automation-banner" className="ow-home__banner">
+          <HealthBanner
+            message={automationError}
+            onRetry={onAutomationOpenSettings}
+            retryLabel="Open Settings"
+          />
         </div>
       )}
       {recognizerError && (

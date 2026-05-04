@@ -20,7 +20,7 @@ priority: high
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-39 proved CUDA EP via sherpa-onnx is a dead end on Parakeet-TDT-v3-int8 (RTX 3070 SM peaked at 4–8% during decode; CUDA decode 41% slower than CPU best of 656 ms). The architectural mismatch — small int8 transducer with sequential joint network — applies to *any* generic ONNX EP, not just CUDA. See `backlog/decisions/recognizer-cuda-decision-2026-04-26.md`.
+TASK-39 proved CUDA EP via sherpa-onnx is a dead end on Parakeet-TDT-v3-int8 (RTX 3070 SM peaked at 4–8% during decode; CUDA decode 41% slower than CPU best of 656 ms). The architectural mismatch — small int8 transducer with sequential joint network — applies to *any* generic ONNX EP, not just CUDA. See `backlog/decisions/decision-2 - Recognizer CUDA EP defer.md`.
 
 But the *engine plumbing* is still wrong for what we want to ship. Today's recognizer is hardcoded to "sherpa-onnx → CPU EP only on Windows." User requirement (2026-04-26): the Windows app should pick the optimal inference path **automatically** based on what's on the box — CPU only, NVIDIA GPU, AMD GPU, Intel iGPU — without per-vendor builds. The current sherpa-onnx wiring can't do that without each-vendor-source-build gymnastics.
 
@@ -74,7 +74,7 @@ Multilingual: no model change needed. The shipped `sherpa-onnx-nemo-parakeet-tdt
   ort ships 22 MB self-contained exe). DirectML feature delta:
   3 KB (uses system `DirectML.dll`).
 - Full decision in
-  `backlog/decisions/recognizer-ort-engine-2026-04-26.md`. Raw
+  `backlog/decisions/decision-3 - Recognizer engine swap to ort.md`. Raw
   numbers in `scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt`.
 
 ## Handover prompt
@@ -102,7 +102,7 @@ full spec.
     and `OPENWHISPER_PROVIDER` from env.
   - CUDA EP empirically dead on Parakeet-TDT-v3-int8 (RTX 3070 SM peak 4%,
     decode 41% slower than CPU best of 656 ms). See
-    `backlog/decisions/recognizer-cuda-decision-2026-04-26.md`.
+    `backlog/decisions/decision-2 - Recognizer CUDA EP defer.md`.
   - The `recognizer` Cargo feature in `core/Cargo.toml` pulls
     `sherpa-onnx 1.12.40` with the `shared` feature. `num_cpus 1.16` was
     added for the thread-default heuristic.
@@ -188,7 +188,7 @@ with `ort`, debug before adding GPU EPs.
       binding, but Windows stays effectively CPU-only. Document and
       close.
 12. Decision in `backlog/decisions/recognizer-ort-engine-<YYYY-MM-DD>.md`,
-    mirroring `recognizer-cuda-decision-2026-04-26.md`.
+    mirroring `decision-2 - Recognizer CUDA EP defer.md`.
 
 ## What you should NOT do
 
@@ -225,7 +225,7 @@ with `ort`, debug before adding GPU EPs.
   the EP DLLs need to be referenced)
 - `scripts/bench/bench-sherpa/` — bench harness; extend or fork
 - `scripts/bench/smoke-with-wpr.ps1` — Windows wrapper with sampler
-- `backlog/decisions/recognizer-cuda-decision-2026-04-26.md` — full
+- `backlog/decisions/decision-2 - Recognizer CUDA EP defer.md` — full
   context on what TASK-39 measured + why ONNX-via-anything underperformed
 - Memory: `feedback_ansi_path_marshaling.md` (sherpa C ABI quirk that
   the new impl needs to handle if `ort` calls into C with non-ASCII

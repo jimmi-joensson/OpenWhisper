@@ -1,3 +1,10 @@
+---
+id: doc-2
+title: 'Settings → General pane scaffold — implementation plan'
+type: plan
+created_date: '2026-04-29 00:00'
+---
+
 # Settings → General pane scaffold — implementation plan
 
 **Backlog parent:** TASK-56

@@ -1,3 +1,10 @@
+---
+id: doc-21
+title: 'Spec: Windows custom titlebar (Slack-style) + sidebar continuity'
+type: spec
+created_date: '2026-05-01 00:00'
+---
+
 # Spec: Windows custom titlebar (Slack-style) + sidebar continuity
 
 **Backlog parent:** TASK-68

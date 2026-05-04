@@ -1,3 +1,10 @@
+---
+id: doc-10
+title: 'Pill loading-state animation — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Pill loading-state animation — implementation plan
 
 **Backlog parent:** TASK-64

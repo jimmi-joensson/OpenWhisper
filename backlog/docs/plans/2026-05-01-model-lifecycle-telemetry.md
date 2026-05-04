@@ -1,3 +1,10 @@
+---
+id: doc-8
+title: 'Model memory telemetry + lifecycle foundation — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Model memory telemetry + lifecycle foundation — implementation plan
 
 **Backlog parent:** TASK-62

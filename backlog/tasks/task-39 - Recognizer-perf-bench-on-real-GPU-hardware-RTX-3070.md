@@ -39,7 +39,7 @@ Outcome decides whether to ship a CUDA-enabled OpenWhisper variant for NVIDIA us
 - [x] #3 CUDA tarball placed under C:\sherpa-onnx-archives; used SHERPA_ONNX_LIB_DIR (not SHERPA_ONNX_ARCHIVE_DIR — sherpa-onnx-sys hardcodes the archive name) with a merged lib dir containing CUDA prebuilt DLLs + onnxruntime.lib stub from CPU prebuilt + CUDA Toolkit 12.4 + cuDNN 9.9 runtime DLLs. bench-sherpa rebuilt without errors.
 - [x] #4 OPENWHISPER_PROVIDER=cuda decode run; nvidia-smi dmon captured non-zero GPU util (peak 4-8% SM) — CUDA EP loaded successfully, just didn't carry the workload
 - [x] #5 CUDA sweep (threads=2/4/6/8) archived in scripts/bench/results/DESKTOP-V7KRON6-2026-04-26.txt under "Arm 2"
-- [x] #6 Decision recorded: backlog/decisions/recognizer-cuda-decision-2026-04-26.md — defer (CUDA 41% slower than CPU on this hardware; ~2.5 GB DLL bloat for a regression)
+- [x] #6 Decision recorded: backlog/decisions/decision-2 - Recognizer CUDA EP defer.md — defer (CUDA 41% slower than CPU on this hardware; ~2.5 GB DLL bloat for a regression)
 - [x] #7 N/A — not shipping CUDA, no follow-up scaffold needed
 <!-- AC:END -->
 
@@ -117,7 +117,7 @@ The Cargo `shared` feature on `sherpa-onnx` runs a build script that
 downloads a sherpa-onnx prebuilt at build time. Setting
 `SHERPA_ONNX_ARCHIVE_DIR=<dir>` makes it use a local archive instead of
 downloading. (Confirmed pattern from the Mac path — see
-`backlog/decisions/recognizer-bench-thresholds-2026-04-26.md` "Side-effect"
+`backlog/decisions/decision-1 - Recognizer bench thresholds.md` "Side-effect"
 note.) Steps:
 
 1. Verify NVIDIA driver supports CUDA 12.x: `nvidia-smi` should print a
@@ -167,7 +167,7 @@ Decision matrix:
 
 Record the decision in
 `backlog/decisions/recognizer-cuda-decision-<YYYY-MM-DD>.md`, mirroring
-the format of `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`.
+the format of `backlog/decisions/decision-1 - Recognizer bench thresholds.md`.
 
 ## What you should NOT do
 
@@ -197,7 +197,7 @@ the format of `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md`.
 - `scripts/bench/smoke-with-wpr.ps1` — Windows wrapper (Get-Counter sampler)
 - `scripts/bench/results/<host>-<date>.txt` — bench archive (gitignored,
   per-host)
-- `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md` — full
+- `backlog/decisions/decision-1 - Recognizer bench thresholds.md` — full
   context on Mac arm + why FluidAudio is the source-of-truth baseline
 - `docs/tauri-port-handover.md` — top-level project context
 - Memory: see ~/.claude/projects/.../MEMORY.md, especially

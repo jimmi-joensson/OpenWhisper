@@ -11,7 +11,7 @@
 //! decoder logic moves into Rust in exchange. ~250 LOC vs an unbounded
 //! per-vendor build matrix.
 //!
-//! See `backlog/decisions/recognizer-cuda-decision-2026-04-26.md` for
+//! See `backlog/decisions/decision-2 - Recognizer CUDA EP defer.md` for
 //! the GPU-EP context that motivates this swap, and TASK-40 spec for the
 //! full I/O reference (encoder/decoder/joiner tensor names + shapes).
 

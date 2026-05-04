@@ -1,3 +1,10 @@
+---
+id: doc-12
+title: 'Setting: Show in fullscreen apps — design'
+type: spec
+created_date: '2026-04-29 00:00'
+---
+
 # Setting: Show in fullscreen apps — design
 
 **Backlog parent:** TASK-58

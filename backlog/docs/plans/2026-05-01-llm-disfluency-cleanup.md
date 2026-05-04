@@ -1,3 +1,10 @@
+---
+id: doc-7
+title: 'LLM-based disfluency cleanup — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # LLM-based disfluency cleanup — implementation plan
 
 **Backlog parent:** TASK-63

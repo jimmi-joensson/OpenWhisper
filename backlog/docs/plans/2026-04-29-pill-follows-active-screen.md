@@ -1,3 +1,10 @@
+---
+id: doc-4
+title: 'Pill follows active screen — implementation plan'
+type: plan
+created_date: '2026-04-29 00:00'
+---
+
 # Pill follows active screen — implementation plan
 
 **Backlog parent:** TASK-55

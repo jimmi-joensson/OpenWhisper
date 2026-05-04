@@ -1,3 +1,10 @@
+---
+id: doc-17
+title: 'Home pane + sidebar nav — v1 spec'
+type: spec
+created_date: '2026-05-01 00:00'
+---
+
 # Home pane + sidebar nav — v1 spec
 
 **Date:** 2026-05-01

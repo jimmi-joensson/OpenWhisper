@@ -1,3 +1,10 @@
+---
+id: doc-15
+title: 'Pill follows active screen — design'
+type: spec
+created_date: '2026-04-29 00:00'
+---
+
 # Pill follows active screen — design
 
 **Backlog parent:** TASK-55

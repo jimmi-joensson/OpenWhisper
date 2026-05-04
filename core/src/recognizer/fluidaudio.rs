@@ -9,7 +9,7 @@
 //! `project_stt_engine` memory rules out hand-rolling NeMo→CoreML
 //! conversion. FluidInference owns that conversion + the ANE-tuned
 //! `.mlmodelc`, but their API is Swift-only. See the bench decision in
-//! `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md` for why
+//! `backlog/decisions/decision-1 - Recognizer bench thresholds.md` for why
 //! sherpa-onnx + ONNX→CoreML EP didn't engage the ANE.
 
 use std::ffi::{CStr, c_char};

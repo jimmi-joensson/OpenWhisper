@@ -1,3 +1,10 @@
+---
+id: doc-19
+title: 'Model memory telemetry + lifecycle foundation — design'
+type: spec
+created_date: '2026-05-01 00:00'
+---
+
 # Model memory telemetry + lifecycle foundation — design
 
 **Backlog parent:** TASK-62

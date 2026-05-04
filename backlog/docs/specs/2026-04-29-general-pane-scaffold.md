@@ -1,3 +1,10 @@
+---
+id: doc-13
+title: 'Settings → General pane scaffold — design'
+type: spec
+created_date: '2026-04-29 00:00'
+---
+
 # Settings → General pane scaffold — design
 
 **Backlog parent:** TASK-56

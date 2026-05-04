@@ -6,8 +6,8 @@
 //! machine via `dictation::dictation_deliver_transcript`.
 //!
 //! Per the bench decisions in
-//! `backlog/decisions/recognizer-bench-thresholds-2026-04-26.md` and
-//! `backlog/decisions/recognizer-ort-engine-2026-04-26.md`, sherpa-onnx
+//! `backlog/decisions/decision-1 - Recognizer bench thresholds.md` and
+//! `backlog/decisions/decision-3 - Recognizer engine swap to ort.md`, sherpa-onnx
 //! + ONNX→CoreML EP did not engage the ANE on macOS — the Mac path uses
 //! FluidAudio (FluidInference's ANE-tuned `.mlmodelc`) through a Swift
 //! `@_cdecl` bridge. Windows runs Parakeet-TDT-v3 directly through the

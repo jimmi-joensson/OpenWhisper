@@ -1,3 +1,10 @@
+---
+id: doc-20
+title: 'Pill scales 1.5x during recording / transcribing — spec'
+type: spec
+created_date: '2026-05-01 00:00'
+---
+
 # Pill scales 1.5x during recording / transcribing — spec
 
 **Backlog parent:** TASK-70

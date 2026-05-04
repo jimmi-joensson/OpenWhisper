@@ -1,3 +1,10 @@
+---
+id: doc-3
+title: 'Launch at login — implementation plan'
+type: plan
+created_date: '2026-04-29 00:00'
+---
+
 # Launch at login — implementation plan
 
 **Backlog parent:** TASK-54

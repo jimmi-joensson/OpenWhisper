@@ -1,3 +1,10 @@
+---
+id: doc-11
+title: 'Windows custom titlebar (Slack-style) + sidebar continuity — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Windows custom titlebar (Slack-style) + sidebar continuity — implementation plan
 
 > **For agentic workers:** Pick up the matching `TASK-68.N` subtask, mark it In Progress, work through the steps, append commit refs to the subtask notes, and check ACs as you go. Steps use checkbox (`- [ ]`) syntax for tracking.

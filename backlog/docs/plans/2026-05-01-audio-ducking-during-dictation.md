@@ -1,3 +1,10 @@
+---
+id: doc-5
+title: 'Pause audio during dictation — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Pause audio during dictation — implementation plan
 
 **Backlog parent:** TASK-61

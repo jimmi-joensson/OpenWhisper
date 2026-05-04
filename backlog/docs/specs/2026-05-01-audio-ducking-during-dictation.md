@@ -1,3 +1,10 @@
+---
+id: doc-16
+title: 'Pause audio during dictation — design'
+type: spec
+created_date: '2026-05-01 00:00'
+---
+
 # Pause audio during dictation — design
 
 **Backlog parent:** TASK-61

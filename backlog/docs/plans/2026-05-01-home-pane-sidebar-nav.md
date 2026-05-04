@@ -1,3 +1,10 @@
+---
+id: doc-6
+title: 'Home pane + sidebar nav (v1) — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Home pane + sidebar nav (v1) — implementation plan
 
 > **For agentic workers:** Implement this plan task-by-task. Pick up the matching `TASK-65.N` subtask, mark it In Progress, work through the steps, append commit refs to the subtask notes, and check ACs as you go. Steps use checkbox (`- [ ]`) syntax for tracking.

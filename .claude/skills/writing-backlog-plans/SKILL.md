@@ -33,7 +33,13 @@ The plan markdown is owned by this skill — there is no separate plan-writing s
 
 ### Plan markdown rules
 
-- **One markdown file per parent task** at `backlog/docs/plans/YYYY-MM-DD-<topic>.md`. Top header includes `**Backlog parent:** TASK-<N>` and (if exists) `**Spec:** backlog/docs/specs/YYYY-MM-DD-<topic>.md`.
+- **Create the file via the Backlog CLI, never `Write` it from scratch.** Backlog's UI and `/api/docs` endpoint require frontmatter (`id`, `title`, `type`, `created_date`); files written by hand without it silently fail to register and show as empty entries in the sidebar. Same rule for specs and decisions. Concretely:
+  - Plan: `backlog doc create "<plan title>" -p plans -t plan` → creates `backlog/docs/plans/doc-N - <title>.md` with valid frontmatter. Edit the body afterward.
+  - Spec: `backlog doc create "<spec title>" -p specs -t spec` → same, under `backlog/docs/specs/`.
+  - Decision: `backlog decision create "<title>" -s accepted` (or `proposed` / `rejected` / `superseded`) → `backlog/decisions/decision-N - <title>.md`. Decision filenames MUST follow `decision-N - …` even if frontmatter is correct; the API ignores other patterns.
+  - Existing date-prefixed plan/spec files (`YYYY-MM-DD-<topic>.md`) keep working as long as their frontmatter is intact — leave them alone, but use the CLI for any new file.
+  See `references/backlog-cli-cheatsheet.md` § "Creating docs and decisions" for full flag detail.
+- **One markdown file per parent task.** After CLI creates the file, top header includes `**Backlog parent:** TASK-<N>` and (if exists) `**Spec:** backlog/docs/specs/<spec-filename>.md`.
 - **Tasks** are `### Task N:` headings, each ~one commit's worth of work. 2–6 verifiable outcomes per task. If a task has more, split it.
 - **Steps** are concrete: name files (verify they exist or mark `(new)`), give code-shape snippets when ambiguous, but don't write the full implementation in the plan.
 - **Outcome ACs** at the end of each task: observable end-states ("test X committed and red", "command Y emits Z"), NOT step commands ("run pytest").

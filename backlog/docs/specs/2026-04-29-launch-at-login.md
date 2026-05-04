@@ -1,3 +1,10 @@
+---
+id: doc-14
+title: 'Launch at login — design'
+type: spec
+created_date: '2026-04-29 00:00'
+---
+
 # Launch at login — design
 
 **Backlog parent:** TASK-54

@@ -1,3 +1,10 @@
+---
+id: doc-1
+title: 'Setting: Show in fullscreen apps — implementation plan'
+type: plan
+created_date: '2026-04-29 00:00'
+---
+
 # Setting: Show in fullscreen apps — implementation plan
 
 **Backlog parent:** TASK-58

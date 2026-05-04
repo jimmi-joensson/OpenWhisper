@@ -1,3 +1,10 @@
+---
+id: doc-9
+title: 'Pill scales 1.5x during recording / transcribing — implementation plan'
+type: plan
+created_date: '2026-05-01 00:00'
+---
+
 # Pill scales 1.5x during recording / transcribing — implementation plan
 
 **Backlog parent:** TASK-70

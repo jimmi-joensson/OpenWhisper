@@ -7,6 +7,7 @@ created_date: '2026-05-04 05:43'
 updated_date: '2026-05-04 08:03'
 labels: []
 dependencies: []
+milestone: m-1
 documentation:
   - backlog/docs/specs/doc-22 - Crash-reporting-in-app-inspector.md
   - backlog/docs/plans/doc-23 - Crash-reporting-in-app-inspector-—-plan.md

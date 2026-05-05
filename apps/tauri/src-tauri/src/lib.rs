@@ -29,9 +29,17 @@ mod permissions;
 mod settings;
 mod tray;
 
-use media_control::{MediaController, PlatformMediaController};
+use media_control::{MediaController, PauseDiagnostic, PlatformMediaController};
 
 static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new();
+
+/// Process-wide AppHandle, set once in `setup`. Lets non-Tauri-context
+/// callers (hotkey thread, resume worker) emit events to the React side
+/// without threading a handle through every layer. We only `set` once so
+/// subsequent calls are no-ops; emitters that fire before `setup`
+/// completes (shouldn't happen in practice — pause/resume only run in
+/// response to user input) silently drop, which is correct.
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 /// True between `pause_audio_for_recording` returning true and the
 /// matching `resume_audio_after_recording` having fired. Process-wide
@@ -63,8 +71,16 @@ fn pause_audio_for_recording() {
     let Some(controller) = MEDIA_CONTROLLER.get() else {
         return;
     };
-    if controller.pause_now() {
+    let did_pause = controller.pause_now();
+    if did_pause {
         PAUSED_BY_US.store(true, Ordering::Relaxed);
+    }
+    // Always re-emit the diagnostic so the Settings banner can clear
+    // itself the moment a successful pause happens (user re-granted
+    // Automation between recordings) — not just on the failing edge.
+    if let Some(app) = APP_HANDLE.get() {
+        let payload = media_control::last_pause_diagnostic();
+        let _ = app.emit("media_pause_diagnostic_changed", payload);
     }
 }
 
@@ -154,6 +170,18 @@ fn core_version() -> String {
 /// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
 /// machine in the core decides whether the toggle starts or stops recording.
 pub(crate) fn do_toggle() -> Result<(), String> {
+    // Gate: starting a recording without mic authorization would flip the
+    // phase machine to RECORDING, fail at audio_start_capture, then
+    // bounce back to ERROR — confusing UX. The mic-banner already tells
+    // the user how to fix this; refuse to leave idle until it's
+    // resolved. Only gate on the begin transition; stop / cancel must
+    // always be allowed in case mic is revoked mid-recording.
+    if !dictation::is_recording() && !permissions::is_mic_authorized() {
+        verbose_log!(
+            "[ow.dictation] toggle blocked: mic not authorized; staying idle"
+        );
+        return Ok(());
+    }
     let action = dictation::dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {
@@ -206,6 +234,60 @@ pub(crate) fn do_cancel() -> bool {
 #[tauri::command]
 fn dictation_toggle() -> Result<(), String> {
     do_toggle()
+}
+
+/// Last `pause_now` outcome — `None` when the most recent pause did
+/// pause something (or the feature was never invoked). UI polls this on
+/// recording-stop to render an actionable banner when AppleScript was
+/// blocked by Automation TCC, the silent-failure mode that made users
+/// on built-in speakers think the feature was Bluetooth-only.
+#[tauri::command]
+fn media_get_last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    media_control::last_pause_diagnostic()
+}
+
+/// Deep-link to System Settings → Privacy & Security → Automation. The
+/// banner under the pause-during-dictation toggle uses this to give the
+/// user a one-click recovery path when AppleScript hit -1743. Mac-only;
+/// Windows / Linux return `Err` since they don't have an equivalent
+/// per-app Automation grant surface (SMTC needs no TCC).
+#[tauri::command]
+fn open_automation_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        open_pref_pane("com.apple.preference.security?Privacy_Automation")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Automation settings deep link is macOS-only".into())
+    }
+}
+
+/// Deep-link to System Settings → Privacy & Security → Microphone.
+/// Mic-banner uses this so the user has the same one-click recovery
+/// affordance the Automation banner already has. Mac-only; on Windows
+/// the OS exposes mic consent through Settings → Privacy → Microphone
+/// and the URI scheme differs — punt until Windows actually has a
+/// blocking-mic banner to wire it to.
+#[tauri::command]
+fn open_microphone_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        open_pref_pane("com.apple.preference.security?Privacy_Microphone")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Microphone settings deep link is macOS-only".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_pref_pane(target: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(format!("x-apple.systempreferences:{target}"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -881,9 +963,57 @@ pub fn run() {
 
                 let main_clone = main.clone();
                 main.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = main_clone.hide();
+                    match event {
+                        WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            let _ = main_clone.hide();
+                        }
+                        // Focus regain = user just came back from
+                        // System Settings (or another app). Re-probe
+                        // every TCC surface that can be revoked or
+                        // granted while we're in the background, so
+                        // banners clear / appear without a relaunch:
+                        //   - Mic: AVCaptureDevice authorizationStatus
+                        //   - Automation: side-effect-free osascript
+                        //     probe (see media_control::probe_authorization)
+                        // AX is handled separately by the AX watcher
+                        // thread (focus.rs::install_ax_watcher) — it
+                        // requires a process restart for CGEventTap to
+                        // pick up the new trust, which is why that
+                        // banner keeps the explicit Restart CTA.
+                        WindowEvent::Focused(true) => {
+                            if let Some(app) = APP_HANDLE.get() {
+                                // Mic re-probe is side-effect-free
+                                // (`AVCaptureDevice authorizationStatusForMediaType:`
+                                // never prompts).
+                                permissions::recheck(app);
+                                // Automation re-probe is gated on an
+                                // existing NotAuthorized state. Probing
+                                // cold would dispatch the very first
+                                // AppleEvent to Spotify here on app
+                                // boot, racing the Accessibility / Mic
+                                // prompts and surfacing the Automation
+                                // dialog before the user has even
+                                // recorded once. Per the OS prompt-
+                                // chain order: AX → Mic → (only on
+                                // first pause) → Automation. The
+                                // focus-poll's job is purely to clear
+                                // a banner the user just resolved.
+                                if matches!(
+                                    media_control::last_pause_diagnostic()
+                                        .as_ref()
+                                        .map(|d| d.reason),
+                                    Some("not_authorized"),
+                                ) {
+                                    let next = media_control::probe_authorization();
+                                    let _ = app.emit(
+                                        "media_pause_diagnostic_changed",
+                                        next,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }
@@ -943,6 +1073,7 @@ pub fn run() {
             // Single process-wide MediaController; phase observer in
             // spawn_dictation_emitter reads it on every tick.
             let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
+            let _ = APP_HANDLE.set(app.handle().clone());
             behavior::apply_collection_behavior(
                 app.handle(),
                 behavior_settings.show_in_fullscreen,
@@ -1075,6 +1206,9 @@ pub fn run() {
             behavior::behavior_set_pause_audio_during_dictation,
             behavior::behavior_get_bt_resume_delay_ms,
             behavior::behavior_set_bt_resume_delay_ms,
+            media_get_last_pause_diagnostic,
+            open_automation_settings,
+            open_microphone_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -13,6 +13,7 @@ import { useDictation } from "./lib/use-dictation";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
+import { usePauseDiagnostic } from "./lib/use-pause-diagnostic";
 import { ThemeProvider } from "./lib/use-theme";
 import {
   EMPTY_LEVELS,
@@ -56,6 +57,7 @@ function App() {
   const dictation = useDictation();
   const hotkey = useHotkeyStatus();
   const permissions = usePermissionsStatus();
+  const pauseDiagnostic = usePauseDiagnostic();
 
   // Windows-only fallback for the WebView2-focused case where the Rust
   // WH_KEYBOARD_LL hook is bypassed by Chromium's raw-input registration
@@ -240,6 +242,17 @@ function App() {
                       ? permissions.status.error
                       : null
                   }
+                  onMicOpenSettings={() => {
+                    void invoke("open_microphone_settings").catch(() => {});
+                  }}
+                  automationError={
+                    pauseDiagnostic?.reason === "not_authorized"
+                      ? "Automation permission denied — paused music won't resume after dictation."
+                      : null
+                  }
+                  onAutomationOpenSettings={() => {
+                    void invoke("open_automation_settings").catch(() => {});
+                  }}
                   recognizerError={recognizerError}
                 />
                 {import.meta.env.DEV && (

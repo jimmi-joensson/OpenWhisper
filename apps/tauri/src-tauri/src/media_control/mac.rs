@@ -202,11 +202,17 @@ fn run_osascript(script: &str) -> Option<String> {
 }
 
 /// Build an AppleScript that visits each known music app, pauses if
-/// it's currently playing, and emits a comma-separated list of the
-/// apps we paused. Each app is wrapped in `try` so a TCC denial or
-/// missing-app for one doesn't break the rest.
+/// it's currently playing, and returns two `||`-separated halves:
+///   `paused_apps || error_codes`
+/// where `paused_apps` is a comma-list of apps we successfully paused,
+/// and `error_codes` is a comma-list of `<App>:<errNum>` entries for
+/// apps that raised an AppleEvent error (TCC denial = -1743, app
+/// missing = -600 / -1728, etc.). Per-app `try ... on error` so one
+/// app's failure doesn't abort the rest, AND we now actually capture
+/// the failure code instead of silently swallowing it — this is what
+/// lets `pause_now` surface a TCC-denied diagnostic to the UI.
 fn build_pause_script() -> String {
-    let mut s = String::from("set output to \"\"\n");
+    let mut s = String::from("set pausedOut to \"\"\nset errOut to \"\"\n");
     for app in PAUSE_TARGETS {
         s.push_str(&format!(
             "try
@@ -214,15 +220,51 @@ fn build_pause_script() -> String {
         if it is running then
             if player state is playing then
                 pause
-                set output to output & \"{app},\"
+                set pausedOut to pausedOut & \"{app},\"
             end if
         end if
     end tell
+on error errMsg number errNum
+    set errOut to errOut & \"{app}:\" & errNum & \",\"
 end try
 "
         ));
     }
-    s.push_str("return output");
+    s.push_str("return pausedOut & \"||\" & errOut");
+    s
+}
+
+/// Side-effect-free Automation TCC probe. Mirrors the `pause_now`
+/// dispatch (per-target `try ... on error errNum`) but reads
+/// `player state` instead of calling `pause`, so granted users see no
+/// behavior change. Used on app focus regain to clear the
+/// NotAuthorized banner the moment the user grants in System Settings,
+/// without waiting for the next recording.
+///
+/// Limitation: AppleScript only dispatches AppleEvents to apps that
+/// are currently running, so if neither Spotify nor Music is running
+/// the probe yields no errors and we conservatively assume "ok" — any
+/// stale NotAuthorized state will be re-confirmed at the next real
+/// pause attempt. Acceptable: the Settings-flip flow keeps Spotify
+/// running while the user toggles, so the typical recovery path does
+/// produce a real signal.
+fn build_probe_script() -> String {
+    let mut s = String::from("set errOut to \"\"\n");
+    for app in PAUSE_TARGETS {
+        s.push_str(&format!(
+            "try
+    tell application \"{app}\"
+        if it is running then
+            get player state
+        end if
+    end tell
+on error errMsg number errNum
+    set errOut to errOut & \"{app}:\" & errNum & \",\"
+end try
+"
+        ));
+    }
+    s.push_str("return errOut");
     s
 }
 
@@ -251,6 +293,107 @@ struct State {
     original_sample_rate: Option<f64>,
 }
 
+/// Process-wide diagnostic populated on every `pause_now`. `None` after
+/// a successful pause; `Some(reason)` when AppleScript paused nothing
+/// AND something appears to have prevented it (most commonly: user has
+/// not granted Automation permission for Spotify / Music in System
+/// Settings → Privacy & Security → Automation → OpenWhisper). The
+/// `media_get_last_pause_diagnostic` Tauri command reads this so the UI
+/// can render an actionable banner — silent failure was the bug we hit
+/// when users on built-in speakers (no Bluetooth profile flip to mask
+/// it) wondered why music kept playing during a recording.
+static LAST_PAUSE_DIAGNOSTIC: Mutex<Option<PauseDiagnostic>> = Mutex::new(None);
+
+/// Structured pause failure. `reason` is a short machine tag the UI can
+/// switch on; `detail` is human-readable (which apps reported what
+/// AppleEvent error codes) for log surfacing.
+#[derive(Debug, Clone)]
+pub struct PauseDiagnostic {
+    pub reason: PauseFailureReason,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PauseFailureReason {
+    /// At least one target app raised AppleEvent error -1743 ("Not
+    /// authorized to send Apple events"). User must grant Automation
+    /// permission in System Settings.
+    NotAuthorized,
+    /// Script ran cleanly but no PAUSE_TARGETS app was both running and
+    /// in `playing` state. Could be: user listening via a browser tab
+    /// (we can't pause those), or audio coming from an app we don't
+    /// know how to drive. Not a bug — just out of scope for v1.
+    NoKnownPlayer,
+    /// Some other AppleScript failure (compile error, app crashed
+    /// mid-script, etc.). Detail field has the codes.
+    Other,
+}
+
+pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
+    LAST_PAUSE_DIAGNOSTIC.lock().ok().and_then(|g| g.clone())
+}
+
+fn set_last_diagnostic(value: Option<PauseDiagnostic>) {
+    if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
+        *g = value;
+    }
+}
+
+/// Re-probe Automation TCC without taking any pause/resume action.
+/// Runs the side-effect-free probe script and updates
+/// `LAST_PAUSE_DIAGNOSTIC` based on the per-target error codes:
+///
+///   - any `-1743`     → `NotAuthorized` (banner stays / re-appears)
+///   - no errors       → `None` (banner clears — assumes grant or no
+///                       running target; either way there's no negative
+///                       signal to act on)
+///   - other errors    → keep prior diagnostic if it was NotAuthorized
+///                       (don't lose a real denial signal because of an
+///                       unrelated AppleScript hiccup)
+///
+/// Called from the main-window focus handler so the banner clears the
+/// instant the user comes back from System Settings with grant flipped.
+pub fn probe_authorization() -> Option<PauseDiagnostic> {
+    let raw = run_osascript(&build_probe_script()).unwrap_or_default();
+    let errors: Vec<(String, i32)> = raw
+        .split(',')
+        .filter(|p| !p.is_empty())
+        .filter_map(|entry| {
+            let (app, code) = entry.split_once(':')?;
+            code.trim().parse::<i32>().ok().map(|n| (app.to_string(), n))
+        })
+        .collect();
+
+    if errors.iter().any(|(_, n)| *n == -1743) {
+        let detail = errors
+            .iter()
+            .map(|(a, n)| format!("{a}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let next = PauseDiagnostic {
+            reason: PauseFailureReason::NotAuthorized,
+            detail,
+        };
+        set_last_diagnostic(Some(next.clone()));
+        return Some(next);
+    }
+
+    if errors.is_empty() {
+        // No negative signal. Clear NotAuthorized state so the banner
+        // dismisses; preserve prior `NoKnownPlayer` / `Other` reasons
+        // since those aren't refuted by a clean probe.
+        if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
+            if matches!(
+                g.as_ref().map(|d| &d.reason),
+                Some(PauseFailureReason::NotAuthorized)
+            ) {
+                *g = None;
+            }
+        }
+    }
+    last_pause_diagnostic()
+}
+
 pub struct MacMediaController {
     state: Mutex<State>,
 }
@@ -270,15 +413,25 @@ impl MediaController for MacMediaController {
         };
         *state = State::default();
 
-        let script = build_pause_script();
-        let paused: Vec<String> = run_osascript(&script)
-            .map(|out| {
-                out.split(',')
-                    .filter(|p| !p.is_empty())
-                    .map(String::from)
-                    .collect()
+        // Script returns `paused_apps||error_codes` (see
+        // build_pause_script). Split, parse both halves so we can tell
+        // "paused nothing because nothing was playing" apart from
+        // "paused nothing because user has not granted Automation".
+        let raw = run_osascript(&build_pause_script()).unwrap_or_default();
+        let (paused_part, errors_part) = raw.split_once("||").unwrap_or((raw.as_str(), ""));
+        let paused: Vec<String> = paused_part
+            .split(',')
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .collect();
+        let errors: Vec<(String, i32)> = errors_part
+            .split(',')
+            .filter(|p| !p.is_empty())
+            .filter_map(|entry| {
+                let (app, code) = entry.split_once(':')?;
+                code.trim().parse::<i32>().ok().map(|n| (app.to_string(), n))
             })
-            .unwrap_or_default();
+            .collect();
 
         // Best-effort: send `kMRPause` (opcode 1, true pause-only) so
         // browser-tab media gets paused when it's the elected
@@ -288,7 +441,49 @@ impl MediaController for MacMediaController {
         mr_send(KMR_PAUSE);
 
         if paused.is_empty() {
-            verbose_log!("[media_control.mac] pause_now: AppleScript paused nothing; sent kMRPause best-effort");
+            // Classify why we paused nothing so the UI can act on it.
+            // -1743 is the AppleEvent canonical "Not authorized" code;
+            // surface it loudly because it's the high-leverage bug
+            // (silent fail when user denies Automation prompt). All
+            // -1743 paths bubble to NotAuthorized even if other apps
+            // had different errors — granting Automation is the fix
+            // and we don't want to dilute the message.
+            let diagnostic = if errors.iter().any(|(_, n)| *n == -1743) {
+                let detail = errors
+                    .iter()
+                    .map(|(a, n)| format!("{a}:{n}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[media_control.mac] pause_now: Automation permission denied for one or more music apps ({detail}). Grant in System Settings → Privacy & Security → Automation → OpenWhisper."
+                );
+                Some(PauseDiagnostic {
+                    reason: PauseFailureReason::NotAuthorized,
+                    detail,
+                })
+            } else if errors.is_empty() {
+                verbose_log!(
+                    "[media_control.mac] pause_now: no known player was playing; sent kMRPause best-effort"
+                );
+                Some(PauseDiagnostic {
+                    reason: PauseFailureReason::NoKnownPlayer,
+                    detail: String::new(),
+                })
+            } else {
+                let detail = errors
+                    .iter()
+                    .map(|(a, n)| format!("{a}:{n}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                eprintln!(
+                    "[media_control.mac] pause_now: AppleScript errors: {detail}"
+                );
+                Some(PauseDiagnostic {
+                    reason: PauseFailureReason::Other,
+                    detail,
+                })
+            };
+            set_last_diagnostic(diagnostic);
             return false;
         }
 
@@ -296,6 +491,7 @@ impl MediaController for MacMediaController {
             state.original_sample_rate = nominal_sample_rate(d);
         }
         state.paused_apps = paused;
+        set_last_diagnostic(None);
         verbose_log!(
             "[media_control.mac] pause_now: paused {:?}, original_sample_rate={:?}",
             state.paused_apps,

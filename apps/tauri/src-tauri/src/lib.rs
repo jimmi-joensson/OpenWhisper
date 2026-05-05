@@ -170,6 +170,18 @@ fn core_version() -> String {
 /// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
 /// machine in the core decides whether the toggle starts or stops recording.
 pub(crate) fn do_toggle() -> Result<(), String> {
+    // Gate: starting a recording without mic authorization would flip the
+    // phase machine to RECORDING, fail at audio_start_capture, then
+    // bounce back to ERROR — confusing UX. The mic-banner already tells
+    // the user how to fix this; refuse to leave idle until it's
+    // resolved. Only gate on the begin transition; stop / cancel must
+    // always be allowed in case mic is revoked mid-recording.
+    if !dictation::is_recording() && !permissions::is_mic_authorized() {
+        verbose_log!(
+            "[ow.dictation] toggle blocked: mic not authorized; staying idle"
+        );
+        return Ok(());
+    }
     let action = dictation::dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {

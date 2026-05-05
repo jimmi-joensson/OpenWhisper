@@ -9,13 +9,18 @@ These are durable values, not implementation details. If a proposed change confl
 
 ---
 
-## Monetization — local dictation must never be paywalled
+## Monetization — local dictation must never be paywalled; cloud is the paid path
 
-Paid tiers are only justified for features that cost the project to run (hosted sync, managed billing, server-side infra). All cloud integrations are BYO API key — never a markup-resale.
+Local dictation (recognizer, hotkey, pill, paste, audio ducking, settings, history-on-device) stays free forever. Paid tiers are only justified for features that cost the project to run — and a **hosted-cloud subscription tier is on the roadmap**: hosted sync, managed accounts, server-side inference upgrades (lower-latency / 100+ language / model-quality), eventually a public REST + MCP surface backed by that account. BYO-keys for cloud LLMs and cloud STT remain free; the paid path is when OW operates the backend.
 
-**Why:** OpenWhisper's positioning is "open alternative to Superwhisper." Superwhisper paywalls good local models — that gap is the wedge. Violating this erases the reason the project exists.
+**Why:** OpenWhisper's positioning is "open alternative to Superwhisper." Superwhisper paywalls good *local* models — that gap is the wedge. Violating it (paywalling local features) erases the reason the project exists. But running a hosted backend has real cost, and a subscription tier on top of the local-first core is how the project funds itself long-term — that's not a contradiction of the wedge, it's how the wedge stays sustainable.
 
-**How to apply:** Reject design proposals that gate any local feature behind payment. Gray-area cases (e.g. "premium voice activity detection") get flagged to the user — values calls are theirs, not yours.
+**How to apply:**
+- Reject any proposal that gates a *local* feature behind payment. The local core stays free forever; this is a hard line, not a default.
+- Hosted/server-side features (sync, accounts, OW-operated inference, hosted API/MCP) are legitimate paid scope — design them additively so the offline-only user loses nothing.
+- BYO-keys for cloud STT/LLM stays free even after the subscription tier launches. The paid offering is "OW runs the backend," not "OW gates BYO config."
+- When designing settings UI for any cloud-eligible feature (cleanup pass, transcription provider, sync), expect a future cloud/lan/local-bundled three-way split (see `backlog/docs/doc-35` for the OpenWhispr reference shape) where the cloud option becomes the natural upgrade-prompt placement. Don't bake in two-way-only assumptions.
+- Gray-area cases (e.g. "premium voice activity detection") get flagged to the user — values calls are theirs, not yours.
 
 ---
 

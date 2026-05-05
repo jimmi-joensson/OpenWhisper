@@ -1,7 +1,7 @@
 ---
 id: TASK-82
 title: Surface AppleScript Automation TCC denial in pause-during-dictation
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 18:55'
 updated_date: '2026-05-04 18:55'
@@ -29,7 +29,7 @@ Companion task TASK-77 covers post-15.4 multi-app + browser-tab pause limits —
 - [x] Diagnostic state stored in process-wide `LAST_PAUSE_DIAGNOSTIC: Mutex<Option<PauseDiagnostic>>`, exposed via `media_get_last_pause_diagnostic` Tauri command for future UI consumption
 - [x] Cross-platform `PauseDiagnostic` struct in `media_control/mod.rs` with stable string `reason` tag (`not_authorized` / `no_known_player` / `other`); Windows returns `None` (SMTC isn't subject to per-app TCC, no equivalent silent-fail mode)
 - [x] Happy path unchanged — when AppleScript pauses successfully, behavior is byte-identical to pre-change
-- [ ] Verified end-to-end in `pnpm dev:tauri`: pause + resume work on built-in speakers when Automation is granted; verbose log shows the eprintln line when grant is missing
+- [x] Verified end-to-end in `pnpm dev:tauri`: pause + resume work on built-in speakers when Automation is granted; verbose log shows the eprintln line when grant is missing. Cross-verified all 7 edges: cancel mid-recording, audio-settings preview, browser-tab music (no false-positive banner), mic banner Open Settings deep-link, pause toggle off (no banner), Spotify + Music both pausing/resuming, AX revoke still surfaces hotkey banner
 <!-- AC:END -->
 
 ## Implementation Plan

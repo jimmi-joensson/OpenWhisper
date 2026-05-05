@@ -971,10 +971,34 @@ pub fn run() {
                         // banner keeps the explicit Restart CTA.
                         WindowEvent::Focused(true) => {
                             if let Some(app) = APP_HANDLE.get() {
+                                // Mic re-probe is side-effect-free
+                                // (`AVCaptureDevice authorizationStatusForMediaType:`
+                                // never prompts).
                                 permissions::recheck(app);
-                                let next = media_control::probe_authorization();
-                                let _ = app
-                                    .emit("media_pause_diagnostic_changed", next);
+                                // Automation re-probe is gated on an
+                                // existing NotAuthorized state. Probing
+                                // cold would dispatch the very first
+                                // AppleEvent to Spotify here on app
+                                // boot, racing the Accessibility / Mic
+                                // prompts and surfacing the Automation
+                                // dialog before the user has even
+                                // recorded once. Per the OS prompt-
+                                // chain order: AX → Mic → (only on
+                                // first pause) → Automation. The
+                                // focus-poll's job is purely to clear
+                                // a banner the user just resolved.
+                                if matches!(
+                                    media_control::last_pause_diagnostic()
+                                        .as_ref()
+                                        .map(|d| d.reason),
+                                    Some("not_authorized"),
+                                ) {
+                                    let next = media_control::probe_authorization();
+                                    let _ = app.emit(
+                                        "media_pause_diagnostic_changed",
+                                        next,
+                                    );
+                                }
                             }
                         }
                         _ => {}

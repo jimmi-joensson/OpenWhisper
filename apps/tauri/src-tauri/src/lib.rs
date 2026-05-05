@@ -243,16 +243,39 @@ fn media_get_last_pause_diagnostic() -> Option<PauseDiagnostic> {
 fn open_automation_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        open_pref_pane("com.apple.preference.security?Privacy_Automation")
     }
     #[cfg(not(target_os = "macos"))]
     {
         Err("Automation settings deep link is macOS-only".into())
     }
+}
+
+/// Deep-link to System Settings → Privacy & Security → Microphone.
+/// Mic-banner uses this so the user has the same one-click recovery
+/// affordance the Automation banner already has. Mac-only; on Windows
+/// the OS exposes mic consent through Settings → Privacy → Microphone
+/// and the URI scheme differs — punt until Windows actually has a
+/// blocking-mic banner to wire it to.
+#[tauri::command]
+fn open_microphone_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        open_pref_pane("com.apple.preference.security?Privacy_Microphone")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Microphone settings deep link is macOS-only".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_pref_pane(target: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(format!("x-apple.systempreferences:{target}"))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1149,6 +1172,7 @@ pub fn run() {
             behavior::behavior_set_bt_resume_delay_ms,
             media_get_last_pause_diagnostic,
             open_automation_settings,
+            open_microphone_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

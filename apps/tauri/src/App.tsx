@@ -242,6 +242,9 @@ function App() {
                       ? permissions.status.error
                       : null
                   }
+                  onMicOpenSettings={() => {
+                    void invoke("open_microphone_settings").catch(() => {});
+                  }}
                   automationError={
                     pauseDiagnostic?.reason === "not_authorized"
                       ? "Automation permission denied — paused music won't resume after dictation."

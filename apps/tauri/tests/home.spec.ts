@@ -178,15 +178,19 @@ test.describe("mic permission banner", () => {
         mic_ok: false,
         mic_state: "denied",
         error:
-          "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone, then reopen OpenWhisper.",
+          "Microphone access denied. Grant it in System Settings → Privacy & Security → Microphone.",
       }),
     );
     const banner = page.getByTestId("mic-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("Microphone access denied");
-    // Mic banner is informational — no Retry button (recovery is via
-    // System Settings, not an in-app button).
-    await expect(banner.getByRole("button")).toHaveCount(0);
+    // Mic banner now exposes an Open Settings shortcut (parity with the
+    // automation banner). Click should invoke `open_microphone_settings`
+    // — the focus-event handler will re-probe and clear the banner when
+    // the user comes back from System Settings with grant flipped.
+    await expect(
+      banner.getByRole("button", { name: "Open Settings" }),
+    ).toBeVisible();
 
     // Recovery clears the banner (e.g., user grants access then reopens).
     await page.evaluate(() =>

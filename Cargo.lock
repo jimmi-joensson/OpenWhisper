@@ -2878,6 +2878,7 @@ dependencies = [
  "rusqlite_migration",
  "rustfft",
  "serde",
+ "serde_json",
  "swift-bridge",
  "swift-bridge-build",
  "tar",

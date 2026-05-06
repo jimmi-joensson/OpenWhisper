@@ -58,7 +58,7 @@ static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 /// call would reset the controller's `paused_sessions` state and the
 /// eventual resume would have nothing to play back.
 fn pause_audio_for_recording() {
-    if !behavior::pause_audio_during_dictation() {
+    if !openwhisper_core::settings::pause_audio_during_dictation() {
         return;
     }
     let Some(controller) = MEDIA_CONTROLLER.get() else {
@@ -818,7 +818,7 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
         .map_err(|e| e.to_string())
 }
 
-/// Apply the gating side-effects for the current `(is_fullscreen, behavior::show_in_fullscreen)`
+/// Apply the gating side-effects for the current `(is_fullscreen, settings::show_in_fullscreen)`
 /// pair. Called both from the fullscreen detector callback (on every
 /// transition) and from the `behavior_show_in_fullscreen_changed` event
 /// listener (when the user toggles the setting while focused on a
@@ -829,7 +829,7 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
 /// to IDLE without emitting a transcript, matching the spec's "don't
 /// surprise-paste into a fullscreen game" rule).
 fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
-    let suppress = is_fullscreen && !behavior::show_in_fullscreen();
+    let suppress = is_fullscreen && !openwhisper_core::settings::show_in_fullscreen();
     hotkey::set_active(app, !suppress);
     let was_recording = suppress && dictation::is_recording();
     if was_recording {
@@ -1134,9 +1134,15 @@ pub fn run() {
             // over-fullscreen rendering on relaunch without having to
             // flip the Switch again.
             let behavior_settings = settings::load_behavior_settings(app.handle());
-            behavior::set_show_in_fullscreen_cache(behavior_settings.show_in_fullscreen);
-            behavior::set_pause_audio_cache(behavior_settings.pause_audio_during_dictation);
-            behavior::set_bt_resume_delay_ms_cache(behavior_settings.bt_resume_delay_ms);
+            openwhisper_core::settings::set_show_in_fullscreen_cache(
+                behavior_settings.show_in_fullscreen,
+            );
+            openwhisper_core::settings::set_pause_audio_cache(
+                behavior_settings.pause_audio_during_dictation,
+            );
+            openwhisper_core::settings::set_bt_resume_delay_ms_cache(
+                behavior_settings.bt_resume_delay_ms,
+            );
             // Single process-wide MediaController; phase observer in
             // spawn_dictation_emitter reads it on every tick.
             let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
@@ -1193,7 +1199,7 @@ pub fn run() {
             let app_for_behavior_event = app.handle().clone();
             app.handle().listen("behavior_show_in_fullscreen_changed", move |event| {
                 let enabled = serde_json::from_str::<bool>(event.payload())
-                    .unwrap_or_else(|_| behavior::show_in_fullscreen());
+                    .unwrap_or_else(|_| openwhisper_core::settings::show_in_fullscreen());
                 behavior::apply_collection_behavior(&app_for_behavior_event, enabled);
                 apply_fullscreen_state(
                     &app_for_behavior_event,

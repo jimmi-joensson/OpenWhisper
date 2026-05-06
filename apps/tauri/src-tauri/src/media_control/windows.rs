@@ -70,9 +70,8 @@ use std::thread;
 use std::time::Duration;
 
 use openwhisper_core::media_gate::MediaController;
+use openwhisper_core::settings;
 use openwhisper_core::verbose_log;
-
-use crate::behavior;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession,
     GlobalSystemMediaTransportControlsSessionManager,
@@ -270,7 +269,7 @@ impl MediaController for WindowsMediaController {
         // is hydrated at boot in `lib.rs::setup`. delay_ms == 0 is a
         // valid "I want instant resume" choice — skip the sleep.
         if is_default_render_bluetooth() {
-            let delay_ms = behavior::bt_resume_delay_ms();
+            let delay_ms = settings::bt_resume_delay_ms();
             if delay_ms > 0 {
                 verbose_log!(
                     "[media_control.win] resume_now: BT endpoint detected, sleeping {delay_ms} ms before play"

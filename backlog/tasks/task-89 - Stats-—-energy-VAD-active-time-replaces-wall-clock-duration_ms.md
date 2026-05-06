@@ -1,11 +1,11 @@
 ---
 id: TASK-89
 title: Stats — energy-VAD active-time replaces wall-clock duration_ms
-status: In Progress
+status: In Review
 assignee:
   - '@claude'
 created_date: '2026-05-06 09:30'
-updated_date: '2026-05-06 09:31'
+updated_date: '2026-05-06 09:34'
 labels: []
 dependencies: []
 ordinal: 60000
@@ -19,10 +19,18 @@ Wall-clock recording duration overcounts when the user leaves the mic on with no
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 core::audio exposes estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64
-- [ ] #2 Threshold and frame size are constants in audio.rs (no settings UI in this task); 20 ms frame, RMS dBFS threshold ≈ -40 dB
-- [ ] #3 dictation_deliver_transcript captures voiced_ms (via dictation state field set by the shell after audio drain) and stats::record_dictation receives voiced_ms in place of wall-clock duration
-- [ ] #4 Apps/tauri shell calls audio::estimate_voiced_ms after audio_drain_samples and pushes the result via a new dictation::dictation_set_voiced_ms entry point
-- [ ] #5 stats-strip.tsx drops the SPEAKING_CEILING_WPM cap once landed (or keeps it as a safety net pending user smoke)
-- [ ] #6 Unit tests: silence-only samples → 0 voiced_ms; pure tone above threshold for 1 s → ~1000 voiced_ms; mixed silent+voiced → only voiced frames counted
+- [x] #1 core::audio exposes estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64
+- [x] #2 Threshold and frame size are constants in audio.rs (no settings UI in this task); 20 ms frame, RMS dBFS threshold ≈ -40 dB
+- [x] #3 dictation_deliver_transcript captures voiced_ms (via dictation state field set by the shell after audio drain) and stats::record_dictation receives voiced_ms in place of wall-clock duration
+- [x] #4 Apps/tauri shell calls audio::estimate_voiced_ms after audio_drain_samples and pushes the result via a new dictation::dictation_set_voiced_ms entry point
+- [x] #5 stats-strip.tsx drops the SPEAKING_CEILING_WPM cap once landed (or keeps it as a safety net pending user smoke)
+- [x] #6 Unit tests: silence-only samples → 0 voiced_ms; pure tone above threshold for 1 s → ~1000 voiced_ms; mixed silent+voiced → only voiced frames counted
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit: 31764d2. cargo test -p openwhisper-core --lib → 41/41 (5 new vad_tests). cargo check -p openwhisper-tauri clean. tsc + 82/82 pw green. Awaiting Rust rebuild via dev-run.sh + manual smoke (record + leave mic running silent, watch Time Saved hold steady).
+
+31764d2 TASK-89: energy-VAD landed; cap removed; 5 vad tests + 41 lib tests green
+<!-- SECTION:NOTES:END -->

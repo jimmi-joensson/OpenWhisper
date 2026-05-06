@@ -1,9 +1,10 @@
 ---
 id: TASK-81.4
 title: 'Plan Task 4: New cli/ workspace member + clap parser scaffold'
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-05-04 15:10'
+updated_date: '2026-05-06'
 labels:
   - 81-impl
 dependencies: []
@@ -20,8 +21,14 @@ Add cli/ to root Cargo.toml workspace members. clap-derive enum with Transcribe,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 cli/ is a workspace member, builds via cargo build -p openwhisper-cli
-- [ ] #2 cargo run -p openwhisper-cli -- --help prints subcommand list
-- [ ] #3 Each subcommand --help succeeds (handlers unimplemented but parser shape correct)
-- [ ] #4 No new dep introduced into core/ or apps/tauri/src-tauri/
+- [x] #1 cli/ is a workspace member, builds via cargo build -p openwhisper-cli
+- [x] #2 cargo run -p openwhisper-cli -- --help prints subcommand list
+- [x] #3 Each subcommand --help succeeds (handlers unimplemented but parser shape correct)
+- [x] #4 No new dep introduced into core/ or apps/tauri/src-tauri/
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Landed in commit `20bd03b`. cli/Cargo.toml introduces clap 4 (derive), anyhow, serde_json, hound and depends on openwhisper-core (path, default-features = false, features = ["recognizer"]). Bin name is `openwhisper`. Commands directory has one file per subcommand; each handler currently bails with a "lands in TASK-81.x" notice that the later tasks (5–8) replace. cli/build.rs (added in commit `c14f61e` alongside Tasks 7+8) emits Swift rpath link-args so dyld finds libswift_Concurrency.dylib at runtime — `cargo:rustc-link-arg` does not propagate cross-crate.
+<!-- SECTION:NOTES:END -->

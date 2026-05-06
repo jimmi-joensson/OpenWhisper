@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod dictation;
 mod ffi_c;
 pub mod media_gate;
+pub mod prelude;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
 pub mod settings;

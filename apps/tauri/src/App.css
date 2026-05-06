@@ -37,6 +37,8 @@
 
   --pill-fill:                rgb(0 0 0 / 0.55);
   --pill-border:              rgb(255 255 255 / 0.08);
+  --surface-sunken:           rgb(0 0 0 / 0.04);
+  --surface-sunken-strong:    rgb(0 0 0 / 0.08);
   --pill-shadow:              0 4px 14px rgb(0 0 0 / 0.35);
   --pill-idle-dot:            rgb(255 255 255 / 0.4);
   --transcript-bg:            rgb(0 0 0 / 0.2);
@@ -102,6 +104,8 @@
   --border:            oklch(0.30 0.005 270);
   --input:             oklch(0.30 0.005 270);
   --ring:              oklch(0.85 0.005 270);
+  --surface-sunken:        rgb(0 0 0 / 0.18);
+  --surface-sunken-strong: rgb(0 0 0 / 0.28);
   color-scheme: dark;
 }
 
@@ -463,6 +467,56 @@ body[data-platform="macos"] .ow-sidebar {
   border-radius: 4px;
   background: rgb(255 255 255 / 0.08);
   border: 1px solid var(--border);
+}
+
+/* Stats strip — full-bleed under the .ow-home padding so the row reads
+   as a single piece of chrome, matching the design canvas's
+   borderTop/borderBottom continuous strip. Negative horizontal margins
+   undo .ow-home's 28px gutter; vertical margins undo the 16px gap so
+   the strip butts straight against the banner above and the hero below. */
+.ow-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-sunken);
+  margin: -16px -28px 0;
+}
+
+.ow-stats-strip__cell {
+  padding: 14px 18px;
+  border-left: 1px solid var(--border);
+}
+
+.ow-stats-strip__cell:first-child {
+  border-left: none;
+}
+
+.ow-stats-strip__label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-foreground);
+}
+
+.ow-stats-strip__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  font-weight: 500;
+  margin-top: 4px;
+  color: var(--foreground);
+}
+
+.ow-stats-strip__cell[data-empty] .ow-stats-strip__value {
+  color: var(--muted-foreground);
+}
+
+.ow-stats-strip__hint {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-top: 2px;
 }
 
 .ow-transcript-row {

@@ -423,31 +423,37 @@ pub fn audio_drain_samples() -> Vec<f32> {
     ENGINE.get().map(|e| e.drain()).unwrap_or_default()
 }
 
-/// Estimate active-speech milliseconds in a sample buffer using an
-/// energy-threshold VAD with hangover. Walks the buffer in 20 ms RMS
-/// frames; a frame above `VAD_THRESHOLD_DBFS` (= -40 dBFS) opens the
-/// active window AND arms a `HANGOVER_MS` (= 600 ms) hold. Subsequent
-/// silent frames still count as active until the hold expires.
-/// Hangover matches the user's mental model of "time spent speaking":
-/// a 100–400 ms breath between words is part of the speech window,
-/// not a silence to be stripped — but a true tail silence (≥600 ms
-/// of continuous low-energy frames) closes the window cleanly.
+/// Estimate active-speech milliseconds as the **speech window**:
+/// the span from the first voiced frame to the last voiced frame in
+/// the recording, inclusive. Lead silence (before the user starts
+/// speaking) and tail silence (after the user finishes, e.g. leaving
+/// the mic on) are trimmed. Mid-recording pauses — sentence-end
+/// breaths, "what to say next" thinking — stay inside the window
+/// because the user is still in dictation mode.
 ///
-/// Trailing partial frames (under 20 ms of leftover samples) are
-/// ignored — they can't push the active count meaningfully and avoid
-/// biasing very short clips.
+/// Walks the buffer in 20 ms RMS frames; a frame above
+/// `VAD_THRESHOLD_DBFS` (= -40 dBFS) is "voiced". Trailing partial
+/// frames (under 20 ms of leftover samples) are ignored — they
+/// can't shift the window endpoints meaningfully and avoid biasing
+/// very short clips.
+///
+/// Why a window, not just summed voiced frames: a per-frame VAD
+/// strips every >600 ms pause as silence, so 51 words with normal
+/// sentence-end breaths showed up as ~22 s of voiced even when the
+/// recording lasted ~67 s. That over-credited Time Saved against
+/// the user's mental model of "active speaking time" (`time_saved =
+/// typing_time − speaking_time`, where speaking_time is full
+/// dictation engagement, not raw vocalization). The window also
+/// preserves the original goal: leaving the mic on after the last
+/// word still trims the trailing silence.
 ///
 /// Used by the stats writer to record "real speech time" in the
 /// `dictations.duration_ms` column instead of wall-clock recording
-/// duration. Wall-clock would credit silence at the tail of a
-/// recording against the user's Time Saved metric — the user could
-/// leave the mic on after speaking and watch their saved time
-/// shrink. Energy-only (no spectral VAD, no neural model) so it's
+/// duration. Energy-only (no spectral VAD, no neural model) so it's
 /// model-agnostic — works regardless of which recognizer transcribes.
 pub fn estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64 {
     const FRAME_MS: u32 = 20;
     const VAD_THRESHOLD_DBFS: f32 = -40.0;
-    const HANGOVER_MS: u32 = 600;
     if samples.is_empty() || sample_rate == 0 {
         return 0;
     }
@@ -456,25 +462,27 @@ pub fn estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64 {
         return 0;
     }
     let threshold_amp = 10f32.powf(VAD_THRESHOLD_DBFS / 20.0);
-    let hangover_frames = (HANGOVER_MS / FRAME_MS) as i32;
 
-    let mut active_frames: u64 = 0;
-    let mut hangover_remaining: i32 = 0;
-    for chunk in samples.chunks(frame_size) {
+    let mut first_voiced: Option<u64> = None;
+    let mut last_voiced: Option<u64> = None;
+    for (frame_idx, chunk) in samples.chunks(frame_size).enumerate() {
         if chunk.len() < frame_size {
             break;
         }
         let sum_sq: f32 = chunk.iter().map(|x| x * x).sum();
         let rms = (sum_sq / chunk.len() as f32).sqrt();
         if rms >= threshold_amp {
-            hangover_remaining = hangover_frames;
-            active_frames += 1;
-        } else if hangover_remaining > 0 {
-            hangover_remaining -= 1;
-            active_frames += 1;
+            let idx = frame_idx as u64;
+            if first_voiced.is_none() {
+                first_voiced = Some(idx);
+            }
+            last_voiced = Some(idx);
         }
     }
-    (active_frames * FRAME_MS as u64) as i64
+    match (first_voiced, last_voiced) {
+        (Some(a), Some(b)) => ((b - a + 1) * FRAME_MS as u64) as i64,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -507,11 +515,10 @@ mod vad_tests {
     }
 
     #[test]
-    fn voiced_then_long_silence_includes_hangover_then_closes() {
-        // 1 s voiced + 2 s silence. After the last voiced frame the
-        // hangover holds the active window open for 600 ms before the
-        // continuous silence closes it. Result = 1000 ms voiced + 600
-        // ms hangover = 1600 ms active.
+    fn tail_silence_after_last_voiced_is_trimmed() {
+        // 1 s voiced + 2 s silence. Leaving the mic on after speaking
+        // must NOT charge the user — speech window ends at last
+        // voiced frame.
         let voiced: Vec<f32> = (0..SR as usize)
             .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
             .collect();
@@ -520,33 +527,47 @@ mod vad_tests {
         combined.extend(silence);
         let ms = estimate_voiced_ms(&combined, SR);
         assert!(
-            (ms - 1600).abs() <= FRAME_MS as i64,
-            "expected ~1600 ms (1000 ms voiced + 600 ms hangover) from 1 s speech + 2 s tail silence, got {ms}",
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms speech window (tail silence trimmed), got {ms}",
         );
     }
 
     #[test]
-    fn short_inter_word_silence_is_bridged_by_hangover() {
-        // Simulate a "speech-pause-speech" pattern: 200 ms voiced,
-        // 300 ms silence (typical inter-word gap, well below 600 ms
-        // hangover), 200 ms voiced. The hangover should hold the
-        // active window through the whole gap, so all three segments
-        // count as one continuous speech window of 700 ms.
+    fn lead_silence_before_first_voiced_is_trimmed() {
+        let silence = vec![0.0f32; SR as usize * 2]; // 2 s lead silence
+        let voiced: Vec<f32> = (0..SR as usize)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let mut combined = silence;
+        combined.extend(voiced);
+        let ms = estimate_voiced_ms(&combined, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms speech window (lead silence trimmed), got {ms}",
+        );
+    }
+
+    #[test]
+    fn mid_recording_pauses_stay_inside_window() {
+        // 200 ms voiced + 800 ms pause (long enough that a hangover
+        // VAD would close the window) + 200 ms voiced. The user is
+        // still in dictation mode through the pause — the whole
+        // 1200 ms span counts as active speaking time.
         let make_voiced = |len: usize| -> Vec<f32> {
             (0..len)
                 .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
                 .collect()
         };
         let voiced_a = make_voiced((SR as usize * 200) / 1000);
-        let gap = vec![0.0f32; (SR as usize * 300) / 1000];
+        let pause = vec![0.0f32; (SR as usize * 800) / 1000];
         let voiced_b = make_voiced((SR as usize * 200) / 1000);
         let mut combined = voiced_a;
-        combined.extend(gap);
+        combined.extend(pause);
         combined.extend(voiced_b);
         let ms = estimate_voiced_ms(&combined, SR);
         assert!(
-            (ms - 700).abs() <= FRAME_MS as i64,
-            "expected ~700 ms (200 + 300 bridged + 200) from a normal between-word gap, got {ms}",
+            (ms - 1200).abs() <= FRAME_MS as i64,
+            "expected ~1200 ms speech window (mid-pause kept), got {ms}",
         );
     }
 

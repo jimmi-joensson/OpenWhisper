@@ -3,10 +3,11 @@ id: TASK-88.4
 title: >-
   Plan Task 4: Stats settings pane — register, render WPM input + Reset Stats
   button
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 06:27'
+updated_date: '2026-05-06 10:25'
 labels:
   - 88-impl
 dependencies:

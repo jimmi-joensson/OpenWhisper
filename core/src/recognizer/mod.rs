@@ -59,6 +59,14 @@ pub trait Recognizer: Send {
 
     /// Decode a 16 kHz mono f32 buffer.
     fn transcribe(&mut self, samples: &[f32]) -> Result<TranscribeResult, String>;
+
+    /// Active execution-provider label for diagnostics. Default
+    /// returns `None`; concrete impls override (Mac FluidAudio → ANE;
+    /// Windows ort → CPU/DirectML/CUDA depending on probe). Returns
+    /// `None` until the engine has loaded — `ensure_loaded` first.
+    fn active_ep(&self) -> Option<String> {
+        None
+    }
 }
 
 static ENGINE: OnceLock<Mutex<Box<dyn Recognizer>>> = OnceLock::new();
@@ -79,6 +87,15 @@ pub fn recognizer_ensure_loaded() -> Result<(), String> {
     let mutex = ENGINE.get_or_init(|| Mutex::new(default_backend()));
     let mut guard = mutex.lock().map_err(|_| "recognizer mutex poisoned".to_string())?;
     guard.ensure_loaded()
+}
+
+/// Active execution-provider label for the loaded backend, or `None`
+/// if the engine hasn't been initialized. Used by `core::diagnostics`
+/// to surface the engaged EP in `RecognizerInfo`.
+pub fn active_ep() -> Option<String> {
+    let mutex = ENGINE.get()?;
+    let guard = mutex.lock().ok()?;
+    guard.active_ep()
 }
 
 /// Decode samples on the calling thread. Caller is expected to be a

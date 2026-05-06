@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod diagnostics;
 pub mod dictation;
 mod ffi_c;
 pub mod media_gate;

@@ -55,6 +55,9 @@ regex = "1.11"
 # Serialize StatsSummary across the swift-bridge / Tauri boundary so
 # the frontend hook gets a typed payload without a hand-rolled FFI.
 serde = { version = "1", features = ["derive"] }
+# Settings persistence on disk — single JSON file per the v0.x schema.
+# core::settings owns the IO so the same code runs from any shell.
+serde_json = "1"
 # pykeio/ort 2.x — the de-facto Rust binding to ONNXRuntime, with first-
 # class DirectML / CUDA / TensorRT EP support behind feature flags. We
 # replaced sherpa-onnx with ort in TASK-40 because sherpa wraps DML behind

@@ -73,6 +73,14 @@ impl Recognizer for FluidAudioBridge {
             elapsed_ms: 0,
         })
     }
+
+    fn active_ep(&self) -> Option<String> {
+        // FluidInference's Parakeet artifact is ANE-tuned; the
+        // .mlmodelc consistently dispatches to the Apple Neural
+        // Engine on M-series. No probing API to confirm at runtime
+        // — static label.
+        Some("ANE".to_string())
+    }
 }
 
 fn last_error() -> Option<String> {

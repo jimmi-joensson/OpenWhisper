@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "apps/tauri/src-tauri", "scripts/bench/bench-sherpa"]
+members = ["cli", "core", "apps/tauri/src-tauri", "scripts/bench/bench-sherpa"]
 
 [profile.release]
 lto = "thin"

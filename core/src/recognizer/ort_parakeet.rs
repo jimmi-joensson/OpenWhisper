@@ -163,6 +163,16 @@ impl Recognizer for OrtParakeet {
         Ok(())
     }
 
+    fn active_ep(&self) -> Option<String> {
+        // `selected_ep` returns "uninitialized" before the first
+        // ensure_loaded call; surface that as None so the diagnostic
+        // doesn't print a placeholder string.
+        match self.selected_ep.as_str() {
+            "uninitialized" => None,
+            other => Some(other.to_string()),
+        }
+    }
+
     fn transcribe(&mut self, samples: &[f32]) -> Result<TranscribeResult, String> {
         let s = self
             .sessions

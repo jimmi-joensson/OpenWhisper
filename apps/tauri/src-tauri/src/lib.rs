@@ -450,6 +450,14 @@ fn spawn_stop_pipeline() {
             let samples = audio::audio_drain_samples();
             let count = samples.len() as u64;
             let drain_ms = t_drain.elapsed().as_millis();
+            // Energy-VAD over the drained samples — the stats writer
+            // reads this off dictation state and uses it as the
+            // recording's effective duration_ms in place of wall-clock,
+            // so silence at the tail doesn't penalize Time Saved.
+            // Sample rate is the constant 16 kHz core resamples to
+            // before exposing samples (audio::TARGET_SAMPLE_RATE).
+            let voiced_ms = audio::estimate_voiced_ms(&samples, 16_000);
+            dictation::dictation_set_voiced_ms(voiced_ms);
             // Empty mic → mark_capture_stopped flips phase back to DONE
             // with "no audio captured". Populated → updates sample_count
             // and reaffirms TRANSCRIBING (no-op vs the optimistic flip).

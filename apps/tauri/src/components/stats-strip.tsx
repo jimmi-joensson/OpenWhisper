@@ -4,27 +4,16 @@ import { useStatsSummary } from "../lib/use-stats-summary";
 /// the average adult typist baseline (matches design + spec default).
 const DEFAULT_WPM = 40;
 
-/// "Slow but real" speech ceiling used to cap the dictation duration in
-/// the time-saved formula. If the user leaves the mic on for 30 seconds
-/// after saying 5 words, raw `seconds_total` would charge them for the
-/// silence and Time Saved would shrink toward 0 (or even render `—` at
-/// short word counts). We cap the effective dictation seconds at the
-/// slowest plausible real-speech rate, so silence at the tail end of a
-/// recording doesn't penalize the credit. The raw duration is still
-/// stored in SQLite — we can drop the cap (or replace with VAD-based
-/// active-time) without a schema change.
-const SPEAKING_CEILING_WPM = 100;
-
-function effectiveDictationSeconds(words: number, dictationSeconds: number): number {
-  if (words === 0) return dictationSeconds;
-  const ceilingSecs = (words / SPEAKING_CEILING_WPM) * 60;
-  return Math.min(dictationSeconds, ceilingSecs);
-}
-
-function timeSavedMs(words: number, dictationSeconds: number, wpm: number): number {
+/// Time saved = time the user would have spent typing the same words
+/// at `wpm`, minus the time they actually spent speaking. The
+/// `seconds_total` value coming from the Rust side is already
+/// active-speech time (energy VAD on the drained samples — see
+/// core::audio::estimate_voiced_ms), so silence at the tail of a
+/// recording doesn't appear here.
+function timeSavedMs(words: number, speechSeconds: number, wpm: number): number {
   const typingMs = (words / wpm) * 60_000;
-  const dictationMs = effectiveDictationSeconds(words, dictationSeconds) * 1000;
-  return Math.max(0, typingMs - dictationMs);
+  const speechMs = speechSeconds * 1000;
+  return Math.max(0, typingMs - speechMs);
 }
 
 function fmtMinutes(ms: number): string {

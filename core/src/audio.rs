@@ -423,6 +423,108 @@ pub fn audio_drain_samples() -> Vec<f32> {
     ENGINE.get().map(|e| e.drain()).unwrap_or_default()
 }
 
+/// Estimate active-speech milliseconds in a sample buffer using an
+/// energy-threshold VAD. Walks the buffer in 20 ms RMS frames and
+/// counts every frame whose RMS amplitude is at or above
+/// `VAD_THRESHOLD_DBFS` (= -40 dBFS). Trailing partial frames
+/// (under 20 ms of leftover samples) are ignored — they can't push
+/// the active count meaningfully and avoid biasing very short
+/// clips.
+///
+/// Used by the stats writer to record "real speech time" in the
+/// `dictations.duration_ms` column instead of wall-clock recording
+/// duration. Wall-clock would credit silence at the tail of a
+/// recording against the user's Time Saved metric — the user could
+/// leave the mic on after speaking and watch their saved time
+/// shrink. This is energy-only (no spectral VAD, no neural model)
+/// so it's model-agnostic — works regardless of which recognizer
+/// transcribes the audio.
+pub fn estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64 {
+    const FRAME_MS: u32 = 20;
+    const VAD_THRESHOLD_DBFS: f32 = -40.0;
+    if samples.is_empty() || sample_rate == 0 {
+        return 0;
+    }
+    let frame_size = ((sample_rate as u64 * FRAME_MS as u64) / 1000) as usize;
+    if frame_size == 0 {
+        return 0;
+    }
+    let threshold_amp = 10f32.powf(VAD_THRESHOLD_DBFS / 20.0);
+    let mut voiced_frames: u64 = 0;
+    for chunk in samples.chunks(frame_size) {
+        if chunk.len() < frame_size {
+            break;
+        }
+        let sum_sq: f32 = chunk.iter().map(|x| x * x).sum();
+        let rms = (sum_sq / chunk.len() as f32).sqrt();
+        if rms >= threshold_amp {
+            voiced_frames += 1;
+        }
+    }
+    (voiced_frames * FRAME_MS as u64) as i64
+}
+
+#[cfg(test)]
+mod vad_tests {
+    use super::estimate_voiced_ms;
+
+    const SR: u32 = 16_000;
+    const FRAME_MS: usize = 20;
+    const SAMPLES_PER_FRAME: usize = (SR as usize * FRAME_MS) / 1000; // 320
+
+    #[test]
+    fn silence_only_returns_zero() {
+        let samples = vec![0.0f32; SAMPLES_PER_FRAME * 50]; // 1 s of silence
+        assert_eq!(estimate_voiced_ms(&samples, SR), 0);
+    }
+
+    #[test]
+    fn pure_tone_above_threshold_counts_full_duration() {
+        // 1 s of 440 Hz at 0.5 amplitude → RMS ~= 0.354 → ~-9 dBFS,
+        // well above the -40 dBFS threshold.
+        let total = SR as usize; // 1 s
+        let samples: Vec<f32> = (0..total)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let ms = estimate_voiced_ms(&samples, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms voiced, got {ms}",
+        );
+    }
+
+    #[test]
+    fn mixed_silence_and_voice_only_counts_voice() {
+        let voiced: Vec<f32> = (0..SR as usize) // 1 s voiced
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let silence = vec![0.0f32; SR as usize * 2]; // 2 s silence
+        let mut combined = voiced;
+        combined.extend(silence);
+        let ms = estimate_voiced_ms(&combined, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms voiced from 1 s of speech in 3 s of audio, got {ms}",
+        );
+    }
+
+    #[test]
+    fn very_quiet_signal_below_threshold_returns_zero() {
+        // -60 dBFS sine = amplitude 0.001 — well below -40 dB threshold.
+        let total = SR as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|i| 0.001 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        assert_eq!(estimate_voiced_ms(&samples, SR), 0);
+    }
+
+    #[test]
+    fn empty_input_is_zero() {
+        assert_eq!(estimate_voiced_ms(&[], SR), 0);
+        assert_eq!(estimate_voiced_ms(&[0.0; 100], 0), 0);
+    }
+}
+
 pub fn audio_is_capturing() -> bool {
     ENGINE.get().map(|e| e.is_capturing()).unwrap_or(false)
 }

@@ -48,6 +48,12 @@ struct State {
     /// can't be converted to wall time directly, hence the parallel
     /// field. Reset on every transition that clears `record_start`.
     record_start_epoch_ms: Option<i64>,
+    /// Active-speech milliseconds reported by the shell after audio
+    /// drain (see [`dictation_set_voiced_ms`]). When `Some`, the stats
+    /// writer uses it instead of wall-clock duration so silence at
+    /// the tail of a recording doesn't count against Time Saved.
+    /// Reset on every transition that clears `record_start`.
+    voiced_ms_at_drain: Option<i64>,
     error_message: String,
     /// Bytes downloaded so far for the current model fetch. 0 when no
     /// download is in progress. Reset to 0 on `mark_loaded` / error so
@@ -68,6 +74,7 @@ impl State {
             sample_count: 0,
             record_start: None,
             record_start_epoch_ms: None,
+            voiced_ms_at_drain: None,
             error_message: String::new(),
             download_bytes_done: 0,
             download_bytes_total: 0,
@@ -204,6 +211,7 @@ pub fn dictation_request_cancel() -> bool {
         }
         s.record_start = None;
         s.record_start_epoch_ms = None;
+        s.voiced_ms_at_drain = None;
         s.transcript.clear();
         s.confidence = 0.0;
         s.sample_count = 0;
@@ -319,6 +327,19 @@ pub fn dictation_mark_transcribing_pending() {
     })
 }
 
+/// Push the active-speech ms estimate from the shell. Called once per
+/// recording, after `audio_drain_samples` and before
+/// `dictation_deliver_transcript`. Stored in dictation state so
+/// `deliver_transcript` can hand it to the stats writer instead of
+/// wall-clock duration. Calling more than once per session overwrites
+/// the prior value (last call wins) — should not happen in practice
+/// since the stop pipeline drains exactly once.
+pub fn dictation_set_voiced_ms(ms: i64) {
+    with_state(|s| {
+        s.voiced_ms_at_drain = Some(ms);
+    });
+}
+
 pub fn dictation_mark_capture_stopped(sample_count: u64) {
     IS_RECORDING.store(false, Ordering::Relaxed);
     with_state(|s| {
@@ -339,10 +360,17 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     IS_RECORDING.store(false, Ordering::Relaxed);
     let (started_at_ms, duration_ms) = with_state(|s| {
         let started_at_ms = s.record_start_epoch_ms.unwrap_or(0);
-        let duration_ms = s
-            .record_start
-            .map(|t| t.elapsed().as_millis() as i64)
-            .unwrap_or(0);
+        // Prefer the shell-reported voiced_ms (energy VAD over the
+        // drained samples) over wall-clock so silence at the tail
+        // of a recording doesn't shrink Time Saved. Falls back to
+        // wall-clock when the shell didn't push a voiced count
+        // (e.g. SwiftUI shell, or a future shell that hasn't been
+        // updated yet).
+        let duration_ms = s.voiced_ms_at_drain.take().unwrap_or_else(|| {
+            s.record_start
+                .map(|t| t.elapsed().as_millis() as i64)
+                .unwrap_or(0)
+        });
         s.transcript = text.to_string();
         s.confidence = confidence;
         s.status_message = "done — pasted to focused app".to_string();
@@ -395,6 +423,7 @@ pub fn dictation_deliver_error(message: &str) {
         s.phase = PHASE_ERROR;
         s.record_start = None;
         s.record_start_epoch_ms = None;
+        s.voiced_ms_at_drain = None;
         s.download_bytes_done = 0;
         s.download_bytes_total = 0;
     })

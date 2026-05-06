@@ -1,10 +1,11 @@
 ---
 id: TASK-87.1
 title: 'Plan Task 1: rusqlite + rusqlite_migration deps + Store module skeleton'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:09'
-updated_date: '2026-05-06 06:20'
+updated_date: '2026-05-06 06:57'
 labels:
   - 87-impl
 dependencies: []

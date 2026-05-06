@@ -1,9 +1,11 @@
 ---
 id: TASK-88.2
 title: 'Plan Task 2: stats_get_summary + stats_reset Tauri cmds + stats_changed event'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:14'
+updated_date: '2026-05-06 08:46'
 labels:
   - 88-impl
 dependencies:

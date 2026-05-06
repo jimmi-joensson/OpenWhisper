@@ -3,13 +3,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openwhisper_core::audio;
 use openwhisper_core::dictation::{
     self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
 use openwhisper_core::recognizer;
+use openwhisper_core::stats::{self, StatsSummary};
+use openwhisper_core::store::Store;
 use openwhisper_core::transcript;
 use openwhisper_core::verbose_log;
 use serde::Serialize;
@@ -164,6 +166,26 @@ fn phase_to_status(phase: u32) -> &'static str {
 #[tauri::command]
 fn core_version() -> String {
     openwhisper_core::core_version()
+}
+
+/// Read-side aggregator for the Home pane stats strip. Day / week
+/// buckets use the user's local timezone (chrono::Local in core).
+#[tauri::command]
+fn stats_get_summary(store: tauri::State<'_, Arc<Store>>) -> Result<StatsSummary, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    stats::get_summary(&store, now_ms).map_err(|e| e.to_string())
+}
+
+/// Wipes all rows from `dictations`. The reset path inside core fires
+/// the registered stats_changed callback, so the frontend hook
+/// re-fetches an empty summary without needing an explicit invoke
+/// on the JS side.
+#[tauri::command]
+fn stats_reset(store: tauri::State<'_, Arc<Store>>) -> Result<(), String> {
+    stats::reset(&store).map_err(|e| e.to_string())
 }
 
 /// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
@@ -950,6 +972,15 @@ pub fn run() {
                             // Tauri commands still resolve their own
                             // State<Arc<Store>> for read paths.
                             openwhisper_core::stats::set_store(arc.clone());
+                            // Bridge core's "stats changed" callback to
+                            // a Tauri event so the React useStatsSummary
+                            // hook refreshes without polling. Fires
+                            // after every successful record_dictation
+                            // insert AND after stats_reset.
+                            let app_for_stats = app.handle().clone();
+                            openwhisper_core::stats::set_on_insert(Box::new(move || {
+                                let _ = app_for_stats.emit("stats_changed", ());
+                            }));
                             app.manage(arc);
                         }
                         Err(e) => {
@@ -1245,6 +1276,8 @@ pub fn run() {
             media_get_last_pause_diagnostic,
             open_automation_settings,
             open_microphone_settings,
+            stats_get_summary,
+            stats_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

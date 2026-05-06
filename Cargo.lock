@@ -2864,6 +2864,7 @@ name = "openwhisper-core"
 version = "0.5.0"
 dependencies = [
  "bzip2",
+ "chrono",
  "coreaudio-rs",
  "cpal",
  "dirs 5.0.1",
@@ -2876,6 +2877,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "rustfft",
+ "serde",
  "swift-bridge",
  "swift-bridge-build",
  "tar",

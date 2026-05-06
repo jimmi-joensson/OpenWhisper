@@ -52,6 +52,9 @@ swift-bridge = { version = "0.1.59", optional = true }
 cpal = "0.17"
 rubato = "0.16"
 regex = "1.11"
+# Serialize StatsSummary across the swift-bridge / Tauri boundary so
+# the frontend hook gets a typed payload without a hand-rolled FFI.
+serde = { version = "1", features = ["derive"] }
 # pykeio/ort 2.x — the de-facto Rust binding to ONNXRuntime, with first-
 # class DirectML / CUDA / TensorRT EP support behind feature flags. We
 # replaced sherpa-onnx with ort in TASK-40 because sherpa wraps DML behind
@@ -99,6 +102,12 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 # Ordered, idempotent schema migrations driven by SQLite's
 # user_version pragma. Apache-2.0 — MIT-compatible.
 rusqlite_migration = "2.5"
+# Local-time day boundary math for stats::get_summary. We deliberately
+# bucket "today" by the user's local midnight, not UTC — counters that
+# rolled over at noon UTC for a US user would feel broken. `clock`
+# enables `chrono::Local`; default features off keeps the dep lean
+# (no serde, no serde_json, no clock-tz tables).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Mac-only — used to query CoreAudio kAudioDevicePropertyTransportType so we
 # can drop virtual mics (Microsoft Teams Audio, Zoom virtual device, Krisp,

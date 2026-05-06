@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -120,6 +120,47 @@ struct SettingsFile {
     behavior: Option<BehaviorSettings>,
     #[serde(default)]
     pill: Option<PillSettings>,
+    #[serde(default)]
+    stats: Option<StatsSettings>,
+}
+
+/// Calibration values for the Home pane stats. Today: typing speed
+/// (used by the Time Saved formula). Lives in JSON next to the other
+/// settings blocks rather than in SQLite — settings are preferences
+/// (different shape, different lifecycle), and a stats reset
+/// shouldn't lose the user's WPM calibration.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatsSettings {
+    /// User's typing speed in words per minute. Default 40 = average
+    /// adult typist baseline. Clamped to [10, 300] on save — out-of-
+    /// range writes are silently coerced (typing speed is a personal
+    /// calibration, not a security boundary; clamp + helper text is
+    /// friendlier than red error states).
+    #[serde(default = "default_user_wpm")]
+    pub user_wpm: u32,
+}
+
+pub const USER_WPM_MIN: u32 = 10;
+pub const USER_WPM_MAX: u32 = 300;
+
+pub fn default_user_wpm() -> u32 {
+    40
+}
+
+impl Default for StatsSettings {
+    fn default() -> Self {
+        Self {
+            user_wpm: default_user_wpm(),
+        }
+    }
+}
+
+impl StatsSettings {
+    fn clamped(self) -> Self {
+        Self {
+            user_wpm: self.user_wpm.clamp(USER_WPM_MIN, USER_WPM_MAX),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -201,6 +242,7 @@ impl Default for BehaviorSettings {
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
 static AUDIO_CURRENT: Mutex<Option<AudioSettings>> = Mutex::new(None);
 static BEHAVIOR_CURRENT: Mutex<Option<BehaviorSettings>> = Mutex::new(None);
+static STATS_CURRENT: Mutex<Option<StatsSettings>> = Mutex::new(None);
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
 /// be fine but the access pattern (read-mostly, write-on-toggle) makes
@@ -280,16 +322,58 @@ pub fn current_settings() -> Option<HotkeySettings> {
 fn save_settings(app: &AppHandle, settings: HotkeySettings) -> Result<(), String> {
     let audio = current_audio_settings();
     let behavior = current_behavior_settings();
+    let stats = current_stats_settings();
     let file = SettingsFile {
         hotkey: None,
         hotkeys: Some(settings.clone()),
         audio,
         behavior,
         pill: Some(current_pill_settings()),
+        stats,
     };
     write_file(app, &file)?;
     if let Ok(mut g) = CURRENT.lock() {
         *g = Some(settings);
+    }
+    Ok(())
+}
+
+pub fn current_stats_settings() -> Option<StatsSettings> {
+    STATS_CURRENT.lock().ok().and_then(|g| *g)
+}
+
+/// Load the stats settings block from disk on first call, cache thereafter.
+/// Missing field → default (40 wpm). Mirrors `load_audio_settings`.
+pub fn load_stats_settings(app: &AppHandle) -> StatsSettings {
+    if let Some(s) = STATS_CURRENT.lock().ok().and_then(|g| *g) {
+        return s;
+    }
+    let file = read_file(app);
+    let settings = file.stats.unwrap_or_default().clamped();
+    if let Ok(mut g) = STATS_CURRENT.lock() {
+        *g = Some(settings);
+    }
+    settings
+}
+
+fn save_stats_settings(app: &AppHandle, settings: StatsSettings) -> Result<(), String> {
+    let clamped = settings.clamped();
+    let file = read_file(app);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.unwrap_or_else(current_pill_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill: Some(pill),
+        stats: Some(clamped),
+    };
+    write_file(app, &merged)?;
+    if let Ok(mut g) = STATS_CURRENT.lock() {
+        *g = Some(clamped);
     }
     Ok(())
 }
@@ -322,12 +406,14 @@ fn save_audio_settings(app: &AppHandle, settings: AudioSettings) -> Result<(), S
     let hotkeys = file.hotkeys.or_else(current_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
     let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio: Some(settings.clone()),
         behavior,
         pill,
+        stats,
     };
     write_file(app, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -367,12 +453,14 @@ pub fn save_behavior_settings(
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
     let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio,
         behavior: Some(settings.clone()),
         pill,
+        stats,
     };
     write_file(app, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -453,12 +541,14 @@ fn save_pill_settings(app: &AppHandle, settings: PillSettings) -> Result<(), Str
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
+    let stats = file.stats.or_else(current_stats_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
         audio,
         behavior,
         pill: Some(settings.clone()),
+        stats,
     };
     write_file(app, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
@@ -475,9 +565,54 @@ pub fn settings_set_pill_follow(app: AppHandle, follow: bool) -> Result<(), Stri
     save_pill_settings(&app, PillSettings { follow_active_screen: follow })
 }
 
+#[tauri::command]
+pub fn settings_get_stats(app: AppHandle) -> StatsSettings {
+    load_stats_settings(&app)
+}
+
+/// Persist a new typing-speed calibration. Out-of-range writes are
+/// silently clamped to [USER_WPM_MIN, USER_WPM_MAX] inside
+/// `save_stats_settings` — the React side mirrors this with helper
+/// text so the UI doesn't surprise the user, but the backend is the
+/// authoritative bound. Emits `settings_stats_changed` so the React
+/// `useUserWpm` hook can refresh without a manual round-trip.
+#[tauri::command]
+pub fn settings_set_user_wpm(app: AppHandle, wpm: u32) -> Result<u32, String> {
+    save_stats_settings(&app, StatsSettings { user_wpm: wpm })?;
+    let stored = current_stats_settings().unwrap_or_default().user_wpm;
+    let _ = app.emit("settings_stats_changed", stored);
+    Ok(stored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_default_user_wpm_is_40() {
+        assert_eq!(StatsSettings::default().user_wpm, 40);
+        assert_eq!(default_user_wpm(), 40);
+    }
+
+    #[test]
+    fn stats_clamp_pulls_below_min_up_and_above_max_down() {
+        assert_eq!(StatsSettings { user_wpm: 5 }.clamped().user_wpm, USER_WPM_MIN);
+        assert_eq!(StatsSettings { user_wpm: 0 }.clamped().user_wpm, USER_WPM_MIN);
+        assert_eq!(StatsSettings { user_wpm: 500 }.clamped().user_wpm, USER_WPM_MAX);
+        // In-range values are passed through untouched.
+        assert_eq!(StatsSettings { user_wpm: 60 }.clamped().user_wpm, 60);
+    }
+
+    #[test]
+    fn stats_legacy_json_without_user_wpm_defaults_to_40() {
+        // settings.json from a build before TASK-88.3 lacks a `stats`
+        // block. Round-trip through the SettingsFile envelope, then
+        // pull the stats default; it must be 40 wpm.
+        let legacy = r#"{"hotkeys":null}"#;
+        let file: SettingsFile = serde_json::from_str(legacy).unwrap();
+        let stats = file.stats.unwrap_or_default();
+        assert_eq!(stats.user_wpm, 40);
+    }
 
     #[test]
     fn behavior_default_pause_audio_is_true() {

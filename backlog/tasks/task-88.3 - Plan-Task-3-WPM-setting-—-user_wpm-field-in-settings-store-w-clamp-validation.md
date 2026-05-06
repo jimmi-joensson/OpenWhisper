@@ -3,9 +3,11 @@ id: TASK-88.3
 title: >-
   Plan Task 3: WPM setting — user_wpm field in settings store w/ clamp
   validation
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:15'
+updated_date: '2026-05-06 10:20'
 labels:
   - 88-impl
 dependencies: []

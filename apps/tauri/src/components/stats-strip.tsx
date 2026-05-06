@@ -1,8 +1,5 @@
 import { useStatsSummary } from "../lib/use-stats-summary";
-
-/// WPM hardcoded until TASK-88.3 lands the user_wpm setting. 40 wpm is
-/// the average adult typist baseline (matches design + spec default).
-const DEFAULT_WPM = 40;
+import { useUserWpm } from "../lib/use-user-wpm";
 
 /// Time saved = time the user would have spent typing the same words
 /// at `wpm`, minus the time they actually spent speaking. The
@@ -32,6 +29,7 @@ interface StatItem {
 
 export function StatsStrip() {
   const { summary } = useStatsSummary();
+  const { wpm } = useUserWpm();
 
   const wordsToday = summary?.words_today ?? 0;
   const wordsWeek = summary?.words_week ?? 0;
@@ -39,7 +37,7 @@ export function StatsStrip() {
   const secondsTotal = summary?.seconds_total ?? 0;
 
   const isEmpty = wordsAllTime === 0;
-  const savedMs = timeSavedMs(wordsAllTime, secondsTotal, DEFAULT_WPM);
+  const savedMs = timeSavedMs(wordsAllTime, secondsTotal, wpm);
 
   const items: StatItem[] = [
     {
@@ -60,7 +58,7 @@ export function StatsStrip() {
     {
       label: "Time saved",
       value: isEmpty ? "—" : fmtMinutes(savedMs),
-      hint: isEmpty ? "vs. typing" : `vs. typing at ${DEFAULT_WPM} wpm`,
+      hint: isEmpty ? "vs. typing" : `vs. typing at ${wpm} wpm`,
     },
   ];
 

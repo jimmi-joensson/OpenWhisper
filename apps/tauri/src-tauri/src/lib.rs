@@ -1109,6 +1109,7 @@ pub fn run() {
             // returns the default and persists nothing — the file is only
             // written on explicit save.
             let _ = settings::load_settings(app.handle());
+            let _ = settings::load_stats_settings(app.handle());
             // Same shape for the audio block: hydrate the in-memory cache
             // and propagate the saved device name into the core's selector
             // so the very first recording opens the user's preferred mic
@@ -1272,6 +1273,8 @@ pub fn run() {
             settings::audio_set_device,
             settings::settings_get_pill,
             settings::settings_set_pill_follow,
+            settings::settings_get_stats,
+            settings::settings_set_user_wpm,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

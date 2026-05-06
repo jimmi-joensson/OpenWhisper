@@ -99,20 +99,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn open_or_init_creates_file_and_user_version_is_zero() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("openwhisper.db");
-        let store = Store::open_or_init(&path).expect("open_or_init");
-        assert!(path.exists(), "db file should exist after open_or_init");
-
-        let version: i64 = store
+    fn user_version(store: &Store) -> i64 {
+        store
             .with_conn(|c| {
                 c.query_row("PRAGMA user_version", [], |r| r.get(0))
                     .map_err(StoreError::from)
             })
-            .expect("query user_version");
-        assert_eq!(version, 0, "no migrations defined yet");
+            .expect("query user_version")
+    }
+
+    #[test]
+    fn open_or_init_creates_file_and_runs_migration_1() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("openwhisper.db");
+        let store = Store::open_or_init(&path).expect("open_or_init");
+        assert!(path.exists(), "db file should exist after open_or_init");
+        assert_eq!(user_version(&store), 1, "migration 1 should be applied");
     }
 
     #[test]
@@ -121,5 +123,86 @@ mod tests {
         let path = dir.path().join("nested").join("a").join("openwhisper.db");
         Store::open_or_init(&path).expect("open_or_init nested");
         assert!(path.exists(), "db file should exist in nested parent");
+    }
+
+    #[test]
+    fn dictations_table_and_index_exist_after_init() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("openwhisper.db");
+        let store = Store::open_or_init(&path).expect("open_or_init");
+
+        let columns: Vec<String> = store
+            .with_conn(|c| {
+                let mut stmt = c.prepare("PRAGMA table_info(dictations)")?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .expect("table_info");
+        assert_eq!(
+            columns,
+            vec![
+                "id",
+                "started_at",
+                "duration_ms",
+                "word_count",
+                "transcript",
+                "confidence",
+                "app_bundle_id",
+                "created_at",
+            ],
+            "dictations columns",
+        );
+
+        let index_exists: i64 = store
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_dictations_started_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(StoreError::from)
+            })
+            .expect("count index");
+        assert_eq!(index_exists, 1, "idx_dictations_started_at should exist");
+    }
+
+    #[test]
+    fn reopen_is_idempotent() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("openwhisper.db");
+        {
+            let store = Store::open_or_init(&path).expect("first open");
+            assert_eq!(user_version(&store), 1);
+        }
+        let store = Store::open_or_init(&path).expect("second open");
+        assert_eq!(user_version(&store), 1, "second open is no-op");
+    }
+
+    #[test]
+    fn dictations_insert_select_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("openwhisper.db");
+        let store = Store::open_or_init(&path).expect("open_or_init");
+
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO dictations (started_at, duration_ms, word_count) VALUES (?, ?, ?)",
+                    [1_000_i64, 2_500_i64, 7_i64],
+                )
+                .map(|_| ())
+                .map_err(StoreError::from)
+            })
+            .expect("insert");
+
+        let count: i64 = store
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM dictations", [], |r| r.get(0))
+                    .map_err(StoreError::from)
+            })
+            .expect("count");
+        assert_eq!(count, 1);
     }
 }

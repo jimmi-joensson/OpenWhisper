@@ -1,9 +1,11 @@
 ---
 id: TASK-87.2
 title: 'Plan Task 2: migration 1 — dictations table + index'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:09'
+updated_date: '2026-05-06 08:38'
 labels:
   - 87-impl
 dependencies:

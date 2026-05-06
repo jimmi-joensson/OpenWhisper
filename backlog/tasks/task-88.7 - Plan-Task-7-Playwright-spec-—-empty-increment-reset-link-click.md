@@ -1,10 +1,11 @@
 ---
 id: TASK-88.7
 title: 'Plan Task 7: Playwright spec — empty / increment / reset / link click'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 06:20'
+updated_date: '2026-05-06 10:28'
 labels:
   - 88-impl
 dependencies:

@@ -299,6 +299,48 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             .__owPillFollow;
           return { follow_active_screen: stored ?? true };
         }
+        if (cmd === "stats_get_summary") {
+          const w = window as unknown as {
+            __owStatsSummary?: {
+              words_today: number;
+              words_week: number;
+              words_all_time: number;
+              seconds_total: number;
+            };
+            __owStatsGetCount?: number;
+          };
+          w.__owStatsGetCount = (w.__owStatsGetCount ?? 0) + 1;
+          return (
+            w.__owStatsSummary ?? {
+              words_today: 0,
+              words_week: 0,
+              words_all_time: 0,
+              seconds_total: 0,
+            }
+          );
+        }
+        if (cmd === "stats_reset") {
+          const w = window as unknown as { __owStatsResetCount?: number };
+          w.__owStatsResetCount = (w.__owStatsResetCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "settings_get_stats") {
+          const w = window as unknown as { __owUserWpm?: number };
+          return { user_wpm: w.__owUserWpm ?? 40 };
+        }
+        if (cmd === "settings_set_user_wpm") {
+          const { wpm } = (args ?? {}) as { wpm: number };
+          const clamped = Math.max(10, Math.min(300, wpm));
+          const w = window as unknown as {
+            __owUserWpm?: number;
+            __owUserWpmSetCount?: number;
+            __owUserWpmLast?: number;
+          };
+          w.__owUserWpm = clamped;
+          w.__owUserWpmSetCount = (w.__owUserWpmSetCount ?? 0) + 1;
+          w.__owUserWpmLast = clamped;
+          return clamped;
+        }
         if (cmd === "settings_set_pill_follow") {
           const { follow } = (args ?? {}) as { follow: boolean };
           const w = window as unknown as {
@@ -417,6 +459,48 @@ export async function emitBtResumeDelayChanged(
   return page.evaluate(
     (value) => window.__owEmit("behavior_bt_resume_delay_changed", value),
     delayMs,
+  );
+}
+
+export interface MockStatsSummary {
+  words_today: number;
+  words_week: number;
+  words_all_time: number;
+  seconds_total: number;
+}
+
+/// Stash a stats summary on the window so the next `stats_get_summary`
+/// invoke (initial mount or post-event refetch) returns this fixture
+/// instead of the all-zeros default.
+export async function setStatsSummary(
+  page: Page,
+  summary: MockStatsSummary,
+): Promise<void> {
+  await page.evaluate((s) => {
+    (window as unknown as { __owStatsSummary?: MockStatsSummary }).__owStatsSummary = s;
+  }, summary);
+}
+
+/// Fire `stats_changed` so the useStatsSummary hook re-fetches.
+export async function emitStatsChanged(page: Page): Promise<number> {
+  return page.evaluate(() => window.__owEmit("stats_changed", null));
+}
+
+/// Stash the WPM fixture so `settings_get_stats` returns it.
+export async function setUserWpm(page: Page, wpm: number): Promise<void> {
+  await page.evaluate((value) => {
+    (window as unknown as { __owUserWpm?: number }).__owUserWpm = value;
+  }, wpm);
+}
+
+/// Fire `settings_stats_changed` so the useUserWpm hook updates.
+export async function emitSettingsStatsChanged(
+  page: Page,
+  wpm: number,
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("settings_stats_changed", value),
+    wpm,
   );
 }
 

@@ -469,27 +469,81 @@ body[data-platform="macos"] .ow-sidebar {
   border: 1px solid var(--border);
 }
 
-/* Stats strip — full-bleed under the .ow-home padding so the row reads
-   as a single piece of chrome, matching the design canvas's
-   borderTop/borderBottom continuous strip. Negative horizontal margins
-   undo .ow-home's 28px gutter; vertical margins undo the 16px gap so
-   the strip butts straight against the banner above and the hero below. */
+/* Home route wrapper. Holds the full-bleed stats strip + the
+   max-width-constrained content column as siblings so the strip can
+   stretch the full content area while the rest of Home stays at a
+   readable measure. */
+.ow-home-route {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+/* Stats strip container — full-bleed, sticks flush against the title
+   bar with no gap. `container-type: inline-size` lets the inner grid
+   collapse based on the strip's own width (sidebar-aware), not the
+   window width. */
+.ow-stats-strip-container {
+  width: 100%;
+  container-type: inline-size;
+  container-name: stats-strip;
+}
+
 .ow-stats-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  border-top: 1px solid var(--border);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border-bottom: 1px solid var(--border);
   background: var(--surface-sunken);
-  margin: -16px -28px 0;
+}
+
+/* Responsive collapse — strict 4 → 2 → 1, not auto-fit. Min cell
+   width ~180px before wrapping; below 760px the strip pairs cells in
+   2x2; below 380px it stacks 1×4. Numbers chosen from the design
+   handoff's ~18px horizontal cell padding + room for 3-digit values. */
+@container stats-strip (max-width: 759px) {
+  .ow-stats-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container stats-strip (max-width: 379px) {
+  .ow-stats-strip {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ow-stats-strip__cell {
   padding: 14px 18px;
   border-left: 1px solid var(--border);
+  min-width: 0;
 }
 
+/* Always reset left border on the first cell of each row so the
+   row-leader cell stays flush. With 4 cells in 4-col mode this is
+   just the first cell; in 2-col it's cells 1 and 3; in 1-col it's
+   every cell. `:nth-child(2n+1)` in 2-col + `*` in 1-col handles
+   both via cascading scoped overrides. */
 .ow-stats-strip__cell:first-child {
   border-left: none;
+}
+
+@container stats-strip (max-width: 759px) {
+  .ow-stats-strip__cell:nth-child(2n+1) {
+    border-left: none;
+  }
+  /* Cells in row 2 also get a top border so the row separator reads. */
+  .ow-stats-strip__cell:nth-child(n+3) {
+    border-top: 1px solid var(--border);
+  }
+}
+
+@container stats-strip (max-width: 379px) {
+  .ow-stats-strip__cell {
+    border-left: none;
+  }
+  .ow-stats-strip__cell:not(:first-child) {
+    border-top: 1px solid var(--border);
+  }
 }
 
 .ow-stats-strip__label {

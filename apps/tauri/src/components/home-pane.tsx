@@ -1,5 +1,6 @@
 import iconSrc from "../assets/icon-128.png";
 import { HealthBanner } from "./health-banner";
+import { StatsStrip } from "./stats-strip";
 import { TranscriptRow } from "./transcript-row";
 import { useCurrentHotkey } from "../lib/use-current-hotkey";
 import { useLastTranscription } from "../lib/use-last-transcription";
@@ -68,6 +69,8 @@ export function HomePane({
           />
         </div>
       )}
+
+      <StatsStrip />
 
       <section className="ow-home__hero">
         <img

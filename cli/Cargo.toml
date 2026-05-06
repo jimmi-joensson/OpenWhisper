@@ -28,3 +28,10 @@ serde_json = "1"
 # Sample WAV reader for `cli transcribe`. Cross-platform and pure
 # Rust — same dep core/ uses for its recognizer smoke example.
 hound = "3.5"
+
+[dev-dependencies]
+# JSON parsing for the smoke test that asserts on `cli --json
+# transcribe ...` output. Already a runtime dep; pulled in here
+# explicitly so the test target sees it without lighting up the
+# default-features path.
+serde_json = "1"

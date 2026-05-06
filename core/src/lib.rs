@@ -3,6 +3,7 @@ pub mod dictation;
 mod ffi_c;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
+pub mod stats;
 pub mod store;
 pub mod transcript;
 pub mod verbose;

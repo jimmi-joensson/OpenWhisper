@@ -943,7 +943,14 @@ pub fn run() {
                     let path = dir.join("openwhisper.db");
                     match openwhisper_core::store::Store::open_or_init(&path) {
                         Ok(store) => {
-                            app.manage(Arc::new(store));
+                            let arc = Arc::new(store);
+                            // Register with core::stats so the dictation
+                            // writer can reach the store without
+                            // threading State through the call chain.
+                            // Tauri commands still resolve their own
+                            // State<Arc<Store>> for read paths.
+                            openwhisper_core::stats::set_store(arc.clone());
+                            app.manage(arc);
                         }
                         Err(e) => {
                             eprintln!(

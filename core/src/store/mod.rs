@@ -92,6 +92,17 @@ impl Store {
         let guard = self.conn.lock().expect("store mutex poisoned");
         f(&guard)
     }
+
+    /// Test-only: build a Store from an arbitrary connection without
+    /// running migrations. Lets `stats::tests` exercise failure paths
+    /// (e.g. an INSERT against a connection that has no `dictations`
+    /// table) without poking at private fields from outside the module.
+    #[cfg(test)]
+    pub(crate) fn from_connection_for_test(conn: Connection) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+        }
+    }
 }
 
 #[cfg(test)]

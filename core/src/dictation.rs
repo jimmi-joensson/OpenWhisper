@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 // Phase values exposed across FFI as u32. Keep in sync with the Swift/C#
 // mirror enums. Only unit variants — no associated data — keeps swift-bridge
@@ -42,6 +42,12 @@ struct State {
     confidence: f32,
     sample_count: u64,
     record_start: Option<Instant>,
+    /// Wall-clock unix-epoch milliseconds at the moment recording began.
+    /// Captured alongside `record_start` so the stats writer has an
+    /// absolute timestamp to put into `dictations.started_at`. `Instant`
+    /// can't be converted to wall time directly, hence the parallel
+    /// field. Reset on every transition that clears `record_start`.
+    record_start_epoch_ms: Option<i64>,
     error_message: String,
     /// Bytes downloaded so far for the current model fetch. 0 when no
     /// download is in progress. Reset to 0 on `mark_loaded` / error so
@@ -61,6 +67,7 @@ impl State {
             confidence: 0.0,
             sample_count: 0,
             record_start: None,
+            record_start_epoch_ms: None,
             error_message: String::new(),
             download_bytes_done: 0,
             download_bytes_total: 0,
@@ -196,6 +203,7 @@ pub fn dictation_request_cancel() -> bool {
             return false;
         }
         s.record_start = None;
+        s.record_start_epoch_ms = None;
         s.transcript.clear();
         s.confidence = 0.0;
         s.sample_count = 0;
@@ -283,8 +291,16 @@ pub fn dictation_mark_capture_started() {
         s.phase = PHASE_RECORDING;
         s.status_message = "recording — tap again to stop".to_string();
         s.record_start = Some(Instant::now());
+        s.record_start_epoch_ms = Some(now_epoch_ms());
     });
     IS_RECORDING.store(true, Ordering::Relaxed);
+}
+
+fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Optimistic phase flip the shell calls the instant the stop hotkey
@@ -311,6 +327,7 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
             s.status_message = "no audio captured".to_string();
             s.phase = PHASE_DONE;
             s.record_start = None;
+            s.record_start_epoch_ms = None;
         } else {
             s.phase = PHASE_TRANSCRIBING;
             s.status_message = "transcribing on ANE…".to_string();
@@ -320,17 +337,31 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
 
 pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     IS_RECORDING.store(false, Ordering::Relaxed);
-    with_state(|s| {
+    let (started_at_ms, duration_ms) = with_state(|s| {
+        let started_at_ms = s.record_start_epoch_ms.unwrap_or(0);
+        let duration_ms = s
+            .record_start
+            .map(|t| t.elapsed().as_millis() as i64)
+            .unwrap_or(0);
         s.transcript = text.to_string();
         s.confidence = confidence;
         s.status_message = "done — pasted to focused app".to_string();
         s.phase = PHASE_DONE;
         s.record_start = None;
+        s.record_start_epoch_ms = None;
+        (started_at_ms, duration_ms)
     });
     // Outside the state lock — the injector spawns its own worker but
     // there's no reason to hold the dictation mutex across the call.
     if let Some(inj) = INJECTOR.get() {
         inj.inject(text);
+    }
+    // Stats write happens after inject so a failing DB doesn't delay the
+    // paste. Stats writer no-ops on empty text and never panics or
+    // mutates dictation phase, so a failure here cannot stall the
+    // state machine in PHASE_TRANSCRIBING / push it to PHASE_ERROR.
+    if let Some(store) = crate::stats::store() {
+        crate::stats::record_dictation(store, started_at_ms, duration_ms, text);
     }
 }
 
@@ -363,6 +394,7 @@ pub fn dictation_deliver_error(message: &str) {
         s.status_message = message.to_string();
         s.phase = PHASE_ERROR;
         s.record_start = None;
+        s.record_start_epoch_ms = None;
         s.download_bytes_done = 0;
         s.download_bytes_total = 0;
     })

@@ -3,9 +3,11 @@ id: TASK-88.1
 title: >-
   Plan Task 1: stats writer — record_dictation in core wired into
   dictation_deliver_transcript
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:14'
+updated_date: '2026-05-06 08:42'
 labels:
   - 88-impl
 dependencies:

@@ -1,9 +1,11 @@
 ---
 id: TASK-87.4
 title: 'Plan Task 4: unit test sweep + concurrent-read safety'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:10'
+updated_date: '2026-05-06 10:19'
 labels:
   - 87-impl
 dependencies:

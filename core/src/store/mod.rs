@@ -192,6 +192,63 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_reads_dont_deadlock_or_panic() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("openwhisper.db");
+        let store = Arc::new(Store::open_or_init(&path).expect("open_or_init"));
+
+        // Seed three rows so SELECT COUNT returns a stable, non-zero
+        // number every iteration — readers can compare against the
+        // same expected value without coordinating.
+        for i in 0..3i64 {
+            store
+                .with_conn(|c| {
+                    c.execute(
+                        "INSERT INTO dictations (started_at, duration_ms, word_count) VALUES (?, ?, ?)",
+                        [i * 1000, 500, 5],
+                    )
+                    .map(|_| ())
+                    .map_err(StoreError::from)
+                })
+                .expect("seed insert");
+        }
+
+        const THREADS: usize = 8;
+        const ITERS: usize = 100;
+        let started = Instant::now();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    for _ in 0..ITERS {
+                        let count: i64 = store
+                            .with_conn(|c| {
+                                c.query_row("SELECT COUNT(*) FROM dictations", [], |r| r.get(0))
+                                    .map_err(StoreError::from)
+                            })
+                            .expect("concurrent count");
+                        assert_eq!(count, 3, "concurrent reader saw inconsistent count");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("reader thread panicked");
+        }
+        // Soft 5 s ceiling — single-mutex serialization of 800 trivial
+        // SELECTs should finish in tens of ms; anything close to the
+        // ceiling indicates a real-world deadlock or contention bug.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "8x100 concurrent reads exceeded 5 s budget — possible deadlock",
+        );
+    }
+
+    #[test]
     fn dictations_insert_select_round_trip() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("openwhisper.db");

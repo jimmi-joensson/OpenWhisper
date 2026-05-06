@@ -256,10 +256,9 @@ export function GeneralPane() {
             render={
               <Button
                 variant="destructive"
-                size="sm"
                 data-testid="stats-reset-trigger"
               >
-                Reset stats…
+                Reset stats
               </Button>
             }
           />

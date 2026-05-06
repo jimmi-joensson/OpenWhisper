@@ -1,11 +1,11 @@
 ---
 id: TASK-88.7
 title: 'Plan Task 7: Playwright spec — empty / increment / reset / link click'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 10:31'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies:
@@ -30,3 +30,9 @@ Commit: b597780. OW_PW_PORT=1430 pnpm test:ui → 87/87 (5 new stats spec cases)
 
 b597780 TASK-88.7: stats spec — 5/5 cases green; pw 87/87 total
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

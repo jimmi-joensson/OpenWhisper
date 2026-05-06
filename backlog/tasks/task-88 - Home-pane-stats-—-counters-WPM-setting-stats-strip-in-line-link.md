@@ -1,10 +1,10 @@
 ---
 id: TASK-88
 title: 'Home-pane stats — counters, WPM setting, stats strip, in-line link'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-06 06:10'
-updated_date: '2026-05-06 06:16'
+updated_date: '2026-05-06 19:03'
 labels: []
 dependencies:
   - TASK-87
@@ -30,3 +30,9 @@ Add a 4-card stats strip on the Home pane (Words Today, Words This Week, Words A
 - [ ] #6 Time-saved card subcaption renders 'vs. typing at <wpm> wpm' where <wpm> is a shadcn Button variant=link with lucide Settings icon suffix that routes to the Stats settings pane
 - [ ] #7 Playwright spec covers: empty state renders zeros + dashes, increment after a simulated dictation, Reset Stats wipes counters back to empty state, link click navigates to Stats pane
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+All subtasks Done via PR #16. Mac + Windows smoke green.
+<!-- SECTION:FINAL_SUMMARY:END -->

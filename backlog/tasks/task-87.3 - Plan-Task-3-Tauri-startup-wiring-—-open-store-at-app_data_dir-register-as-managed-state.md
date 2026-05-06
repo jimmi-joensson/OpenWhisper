@@ -3,11 +3,11 @@ id: TASK-87.3
 title: >-
   Plan Task 3: Tauri startup wiring — open store at app_data_dir, register as
   managed state
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:09'
-updated_date: '2026-05-06 08:42'
+updated_date: '2026-05-06 19:02'
 labels:
   - 87-impl
 dependencies:
@@ -31,3 +31,9 @@ Commit: 5378a40. cargo check -p openwhisper-tauri clean. AC #2 (file appears on 
 
 5378a40 TASK-87.3: open store in setup, app.manage
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

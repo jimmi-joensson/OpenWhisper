@@ -1,11 +1,11 @@
 ---
 id: TASK-88.2
 title: 'Plan Task 2: stats_get_summary + stats_reset Tauri cmds + stats_changed event'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:14'
-updated_date: '2026-05-06 08:50'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies:
@@ -29,3 +29,9 @@ Commit: fc94338. cargo test -p openwhisper-core --lib stats:: → 6/6. AC #3 (ev
 
 fc94338 TASK-88.2: read cmds + stats_changed callback
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,11 +3,11 @@ id: TASK-88.4
 title: >-
   Plan Task 4: Stats settings pane — register, render WPM input + Reset Stats
   button
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 10:28'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies:
@@ -32,3 +32,9 @@ Commit: 28fabe2. Option B per user pick: WPM input + Reset Stats land as rows in
 
 28fabe2 TASK-88.4 (option B): WPM input + Reset rows in General pane (no separate Stats pane per design)
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

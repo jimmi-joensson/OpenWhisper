@@ -3,11 +3,11 @@ id: TASK-88.3
 title: >-
   Plan Task 3: WPM setting — user_wpm field in settings store w/ clamp
   validation
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 10:24'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies: []
@@ -29,3 +29,9 @@ Commit: 7583304. cargo test settings:: → 8/8 (3 new stats tests). cargo check 
 
 7583304 TASK-88.3: user_wpm + clamp + hook + StatsStrip uses live wpm
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

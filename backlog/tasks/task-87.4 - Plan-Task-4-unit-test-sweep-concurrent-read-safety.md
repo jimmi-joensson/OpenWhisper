@@ -1,11 +1,11 @@
 ---
 id: TASK-87.4
 title: 'Plan Task 4: unit test sweep + concurrent-read safety'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:10'
-updated_date: '2026-05-06 10:20'
+updated_date: '2026-05-06 19:02'
 labels:
   - 87-impl
 dependencies:
@@ -29,3 +29,9 @@ Commit: a5bd240. cargo test -p openwhisper-core --lib store:: → 6/6. AC #3 (Wi
 
 a5bd240 TASK-87.4: 8x100 concurrent-read sweep + 5s ceiling
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

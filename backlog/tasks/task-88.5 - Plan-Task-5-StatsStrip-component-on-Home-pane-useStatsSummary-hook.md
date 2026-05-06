@@ -1,10 +1,10 @@
 ---
 id: TASK-88.5
 title: 'Plan Task 5: StatsStrip component on Home pane + useStatsSummary hook'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-06 06:15'
-updated_date: '2026-05-06 09:30'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies:
@@ -33,3 +33,9 @@ dc45c7b TASK-88.5 fixup: design-match + idle-silence cap
 
 4a0af62 TASK-88.5 fixup: full-width strip + container-query 4/2/1 reflow
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-87.1
 title: 'Plan Task 1: rusqlite + rusqlite_migration deps + Store module skeleton'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:09'
-updated_date: '2026-05-06 07:01'
+updated_date: '2026-05-06 19:02'
 labels:
   - 87-impl
 dependencies: []
@@ -26,3 +26,9 @@ ordinal: 48000
 <!-- SECTION:NOTES:BEGIN -->
 Commit: 4c4e54d on branch task-87-persistence (worktree at ../OpenWhisper-task87). cargo test -p openwhisper-core --lib green: 27 tests pass (25 prior + 2 new store::tests). cargo build -p openwhisper-core clean. No user-visible surface — pure infra; awaiting code review. Pre-existing example 'recognizer_smoke' fails to compile without --features recognizer, unchanged by this task.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

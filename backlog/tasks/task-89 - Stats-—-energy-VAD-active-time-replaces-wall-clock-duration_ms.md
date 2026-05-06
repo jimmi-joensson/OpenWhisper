@@ -1,11 +1,11 @@
 ---
 id: TASK-89
 title: Stats — energy-VAD active-time replaces wall-clock duration_ms
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 09:30'
-updated_date: '2026-05-06 09:34'
+updated_date: '2026-05-06 19:03'
 labels: []
 dependencies: []
 ordinal: 60000
@@ -34,3 +34,9 @@ Commit: 31764d2. cargo test -p openwhisper-core --lib → 41/41 (5 new vad_tests
 
 31764d2 TASK-89: energy-VAD landed; cap removed; 5 vad tests + 41 lib tests green
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

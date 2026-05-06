@@ -1,10 +1,10 @@
 ---
 id: TASK-87
 title: Persistence foundation — SQLite via rusqlite in core/
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-06 06:06'
-updated_date: '2026-05-06 06:10'
+updated_date: '2026-05-06 19:03'
 labels: []
 dependencies: []
 documentation:
@@ -28,3 +28,9 @@ Add a thin persistence layer in the core/ Rust crate using rusqlite (bundled SQL
 - [ ] #5 Cross-platform smoke: file lands at ~/Library/Application Support/com.openwhisper.app/openwhisper.db on Mac and %APPDATA%\\com.openwhisper.app\\openwhisper.db on Win
 - [ ] #6 Unit tests cover open-then-reopen round-trip, migration idempotency, and concurrent-read safety
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+All subtasks Done via PR #16. Mac + Windows smoke green.
+<!-- SECTION:FINAL_SUMMARY:END -->

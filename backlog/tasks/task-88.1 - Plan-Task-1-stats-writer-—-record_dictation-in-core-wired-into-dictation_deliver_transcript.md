@@ -3,11 +3,11 @@ id: TASK-88.1
 title: >-
   Plan Task 1: stats writer — record_dictation in core wired into
   dictation_deliver_transcript
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-06 06:14'
-updated_date: '2026-05-06 08:46'
+updated_date: '2026-05-06 19:02'
 labels:
   - 88-impl
 dependencies:
@@ -32,3 +32,9 @@ Commit: acbbb9f. cargo test -p openwhisper-core --lib → 33/33 (3 new stats::te
 
 acbbb9f TASK-88.1: writer + dictation wiring + 3 stats tests green
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged via PR #16 (squash 2415f3a). Cross-platform smoke green: Mac + Windows.
+<!-- SECTION:FINAL_SUMMARY:END -->

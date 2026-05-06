@@ -1,6 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,6 +8,7 @@ use openwhisper_core::audio;
 use openwhisper_core::dictation::{
     self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
+use openwhisper_core::media_gate::{self, MediaController, PauseDiagnostic};
 use openwhisper_core::recognizer;
 use openwhisper_core::stats::{self, StatsSummary};
 use openwhisper_core::store::Store;
@@ -31,7 +31,7 @@ mod permissions;
 mod settings;
 mod tray;
 
-use media_control::{MediaController, PauseDiagnostic, PlatformMediaController};
+use media_control::PlatformMediaController;
 
 static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new();
 
@@ -43,45 +43,33 @@ static MEDIA_CONTROLLER: OnceLock<Arc<PlatformMediaController>> = OnceLock::new(
 /// response to user input) silently drop, which is correct.
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
-/// True between `pause_audio_for_recording` returning true and the
-/// matching `resume_audio_after_recording` having fired. Process-wide
-/// because cancel and stop both flow through the resume path; we never
-/// want to call resume twice or to call it without a prior pause.
-static PAUSED_BY_US: AtomicBool = AtomicBool::new(false);
-
 /// Pause other apps' audio BEFORE opening the mic. Synchronous and
 /// blocking — that is the point: we want fade-out + pause-send to
 /// finish before the mic opens, so Bluetooth headphones don't switch
 /// from A2DP/stereo to HFP/mono with music still mid-playback (audible
 /// quality blip otherwise).
 ///
-/// Idempotent across the preview→recording transition: if the Audio
-/// settings preview had already paused music (PAUSED_BY_US true) and
-/// the user then triggers a recording (which internally stops the
-/// preview without firing our resume hook), this function no-ops and
-/// `resume_audio_after_recording` on stop will fire the single resume
-/// for both. Without this guard, the second `pause_now` call would
-/// reset the controller's `paused_sessions` state and the eventual
-/// resume would have nothing to play back.
+/// Idempotent across the preview→recording transition via
+/// `media_gate::pause`: if the Audio settings preview had already
+/// paused music and the user triggers a recording (which internally
+/// stops the preview without firing our resume hook), this call
+/// no-ops and `resume_audio_after_recording` on stop will fire the
+/// single resume for both. Without that guard, the second `pause_now`
+/// call would reset the controller's `paused_sessions` state and the
+/// eventual resume would have nothing to play back.
 fn pause_audio_for_recording() {
     if !behavior::pause_audio_during_dictation() {
-        return;
-    }
-    if PAUSED_BY_US.load(Ordering::Relaxed) {
         return;
     }
     let Some(controller) = MEDIA_CONTROLLER.get() else {
         return;
     };
-    let did_pause = controller.pause_now();
-    if did_pause {
-        PAUSED_BY_US.store(true, Ordering::Relaxed);
-    }
+    media_gate::pause(controller.as_ref(), media_gate::default_gate_state());
     // Always re-emit the diagnostic so the Settings banner can clear
     // itself the moment a successful pause happens (user re-granted
     // Automation between recordings) — not just on the failing edge.
     if let Some(app) = APP_HANDLE.get() {
-        let payload = media_control::last_pause_diagnostic();
+        let payload = controller.last_pause_diagnostic();
         let _ = app.emit("media_pause_diagnostic_changed", payload);
     }
 }
@@ -92,7 +80,7 @@ fn pause_audio_for_recording() {
 /// state (BT profile switchback) before sending the play command, so
 /// we must NOT block the hotkey path on that wait.
 fn resume_audio_after_recording() {
-    if !PAUSED_BY_US.swap(false, Ordering::Relaxed) {
+    if !media_gate::take_paused_flag(media_gate::default_gate_state()) {
         return;
     }
     thread::Builder::new()
@@ -265,7 +253,7 @@ fn dictation_toggle() -> Result<(), String> {
 /// on built-in speakers think the feature was Bluetooth-only.
 #[tauri::command]
 fn media_get_last_pause_diagnostic() -> Option<PauseDiagnostic> {
-    media_control::last_pause_diagnostic()
+    MEDIA_CONTROLLER.get().and_then(|c| c.last_pause_diagnostic())
 }
 
 /// Deep-link to System Settings → Privacy & Security → Automation. The
@@ -1074,17 +1062,20 @@ pub fn run() {
                                 // first pause) → Automation. The
                                 // focus-poll's job is purely to clear
                                 // a banner the user just resolved.
-                                if matches!(
-                                    media_control::last_pause_diagnostic()
-                                        .as_ref()
-                                        .map(|d| d.reason),
-                                    Some("not_authorized"),
-                                ) {
-                                    let next = media_control::probe_authorization();
-                                    let _ = app.emit(
-                                        "media_pause_diagnostic_changed",
-                                        next,
-                                    );
+                                if let Some(controller) = MEDIA_CONTROLLER.get() {
+                                    if matches!(
+                                        controller
+                                            .last_pause_diagnostic()
+                                            .as_ref()
+                                            .map(|d| d.reason),
+                                        Some("not_authorized"),
+                                    ) {
+                                        let next = controller.probe_authorization();
+                                        let _ = app.emit(
+                                            "media_pause_diagnostic_changed",
+                                            next,
+                                        );
+                                    }
                                 }
                             }
                         }

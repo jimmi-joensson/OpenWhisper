@@ -39,9 +39,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use objc2::runtime::Bool;
+use openwhisper_core::media_gate::{MediaController, PauseDiagnostic};
 use openwhisper_core::verbose_log;
-
-use super::MediaController;
 
 /// MediaRemote command codes per `Cykey/ios-reversed-headers`.
 /// `kMRPause = 1` is true pause-only (does NOT toggle, does NOT
@@ -297,41 +296,19 @@ struct State {
 /// a successful pause; `Some(reason)` when AppleScript paused nothing
 /// AND something appears to have prevented it (most commonly: user has
 /// not granted Automation permission for Spotify / Music in System
-/// Settings → Privacy & Security → Automation → OpenWhisper). The
-/// `media_get_last_pause_diagnostic` Tauri command reads this so the UI
+/// Settings → Privacy & Security → Automation → OpenWhisper). Read via
+/// the `MediaController::last_pause_diagnostic` trait method so the UI
 /// can render an actionable banner — silent failure was the bug we hit
 /// when users on built-in speakers (no Bluetooth profile flip to mask
 /// it) wondered why music kept playing during a recording.
 static LAST_PAUSE_DIAGNOSTIC: Mutex<Option<PauseDiagnostic>> = Mutex::new(None);
 
-/// Structured pause failure. `reason` is a short machine tag the UI can
-/// switch on; `detail` is human-readable (which apps reported what
-/// AppleEvent error codes) for log surfacing.
-#[derive(Debug, Clone)]
-pub struct PauseDiagnostic {
-    pub reason: PauseFailureReason,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PauseFailureReason {
-    /// At least one target app raised AppleEvent error -1743 ("Not
-    /// authorized to send Apple events"). User must grant Automation
-    /// permission in System Settings.
-    NotAuthorized,
-    /// Script ran cleanly but no PAUSE_TARGETS app was both running and
-    /// in `playing` state. Could be: user listening via a browser tab
-    /// (we can't pause those), or audio coming from an app we don't
-    /// know how to drive. Not a bug — just out of scope for v1.
-    NoKnownPlayer,
-    /// Some other AppleScript failure (compile error, app crashed
-    /// mid-script, etc.). Detail field has the codes.
-    Other,
-}
-
-pub fn last_pause_diagnostic() -> Option<PauseDiagnostic> {
-    LAST_PAUSE_DIAGNOSTIC.lock().ok().and_then(|g| g.clone())
-}
+/// Stable machine tags the UI switches on. Match
+/// `openwhisper_core::media_gate::PauseDiagnostic::reason` documented
+/// values:
+const REASON_NOT_AUTHORIZED: &str = "not_authorized";
+const REASON_NO_KNOWN_PLAYER: &str = "no_known_player";
+const REASON_OTHER: &str = "other";
 
 fn set_last_diagnostic(value: Option<PauseDiagnostic>) {
     if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
@@ -339,21 +316,23 @@ fn set_last_diagnostic(value: Option<PauseDiagnostic>) {
     }
 }
 
+fn read_last_diagnostic() -> Option<PauseDiagnostic> {
+    LAST_PAUSE_DIAGNOSTIC.lock().ok().and_then(|g| g.clone())
+}
+
 /// Re-probe Automation TCC without taking any pause/resume action.
 /// Runs the side-effect-free probe script and updates
 /// `LAST_PAUSE_DIAGNOSTIC` based on the per-target error codes:
 ///
-///   - any `-1743`     → `NotAuthorized` (banner stays / re-appears)
+///   - any `-1743`     → `not_authorized` (banner stays / re-appears)
 ///   - no errors       → `None` (banner clears — assumes grant or no
 ///                       running target; either way there's no negative
 ///                       signal to act on)
-///   - other errors    → keep prior diagnostic if it was NotAuthorized
-///                       (don't lose a real denial signal because of an
-///                       unrelated AppleScript hiccup)
-///
-/// Called from the main-window focus handler so the banner clears the
-/// instant the user comes back from System Settings with grant flipped.
-pub fn probe_authorization() -> Option<PauseDiagnostic> {
+///   - other errors    → keep prior diagnostic if it was
+///                       `not_authorized` (don't lose a real denial
+///                       signal because of an unrelated AppleScript
+///                       hiccup)
+fn probe_authorization_inner() -> Option<PauseDiagnostic> {
     let raw = run_osascript(&build_probe_script()).unwrap_or_default();
     let errors: Vec<(String, i32)> = raw
         .split(',')
@@ -370,28 +349,25 @@ pub fn probe_authorization() -> Option<PauseDiagnostic> {
             .map(|(a, n)| format!("{a}:{n}"))
             .collect::<Vec<_>>()
             .join(",");
-        let next = PauseDiagnostic {
-            reason: PauseFailureReason::NotAuthorized,
-            detail,
-        };
+        let next = PauseDiagnostic::new(REASON_NOT_AUTHORIZED, detail);
         set_last_diagnostic(Some(next.clone()));
         return Some(next);
     }
 
     if errors.is_empty() {
-        // No negative signal. Clear NotAuthorized state so the banner
-        // dismisses; preserve prior `NoKnownPlayer` / `Other` reasons
-        // since those aren't refuted by a clean probe.
+        // No negative signal. Clear `not_authorized` state so the
+        // banner dismisses; preserve prior `no_known_player` /
+        // `other` reasons since those aren't refuted by a clean probe.
         if let Ok(mut g) = LAST_PAUSE_DIAGNOSTIC.lock() {
             if matches!(
-                g.as_ref().map(|d| &d.reason),
-                Some(PauseFailureReason::NotAuthorized)
+                g.as_ref().map(|d| d.reason),
+                Some(REASON_NOT_AUTHORIZED)
             ) {
                 *g = None;
             }
         }
     }
-    last_pause_diagnostic()
+    read_last_diagnostic()
 }
 
 pub struct MacMediaController {
@@ -445,7 +421,7 @@ impl MediaController for MacMediaController {
             // -1743 is the AppleEvent canonical "Not authorized" code;
             // surface it loudly because it's the high-leverage bug
             // (silent fail when user denies Automation prompt). All
-            // -1743 paths bubble to NotAuthorized even if other apps
+            // -1743 paths bubble to `not_authorized` even if other apps
             // had different errors — granting Automation is the fix
             // and we don't want to dilute the message.
             let diagnostic = if errors.iter().any(|(_, n)| *n == -1743) {
@@ -457,18 +433,12 @@ impl MediaController for MacMediaController {
                 eprintln!(
                     "[media_control.mac] pause_now: Automation permission denied for one or more music apps ({detail}). Grant in System Settings → Privacy & Security → Automation → OpenWhisper."
                 );
-                Some(PauseDiagnostic {
-                    reason: PauseFailureReason::NotAuthorized,
-                    detail,
-                })
+                Some(PauseDiagnostic::new(REASON_NOT_AUTHORIZED, detail))
             } else if errors.is_empty() {
                 verbose_log!(
                     "[media_control.mac] pause_now: no known player was playing; sent kMRPause best-effort"
                 );
-                Some(PauseDiagnostic {
-                    reason: PauseFailureReason::NoKnownPlayer,
-                    detail: String::new(),
-                })
+                Some(PauseDiagnostic::new(REASON_NO_KNOWN_PLAYER, String::new()))
             } else {
                 let detail = errors
                     .iter()
@@ -478,10 +448,7 @@ impl MediaController for MacMediaController {
                 eprintln!(
                     "[media_control.mac] pause_now: AppleScript errors: {detail}"
                 );
-                Some(PauseDiagnostic {
-                    reason: PauseFailureReason::Other,
-                    detail,
-                })
+                Some(PauseDiagnostic::new(REASON_OTHER, detail))
             };
             set_last_diagnostic(diagnostic);
             return false;
@@ -543,5 +510,13 @@ impl MediaController for MacMediaController {
         let script = build_play_script(&apps);
         let _ = run_osascript(&script);
         verbose_log!("[media_control.mac] resume_now: played {apps:?}");
+    }
+
+    fn last_pause_diagnostic(&self) -> Option<PauseDiagnostic> {
+        read_last_diagnostic()
+    }
+
+    fn probe_authorization(&self) -> Option<PauseDiagnostic> {
+        probe_authorization_inner()
     }
 }

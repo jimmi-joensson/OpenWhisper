@@ -69,6 +69,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use openwhisper_core::media_gate::MediaController;
 use openwhisper_core::verbose_log;
 
 use crate::behavior;
@@ -84,8 +85,6 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
 };
-
-use super::MediaController;
 
 /// Per-thread COM init. `CoInitializeEx` is thread-scoped — `pause_now`
 /// runs on the hotkey thread, `resume_now` is spawned on a fresh

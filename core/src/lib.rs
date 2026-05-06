@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod dictation;
 mod ffi_c;
+pub mod media_gate;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
 pub mod stats;

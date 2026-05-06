@@ -1,5 +1,6 @@
 import iconSrc from "../assets/icon-128.png";
 import { HealthBanner } from "./health-banner";
+import { StatsStrip } from "./stats-strip";
 import { TranscriptRow } from "./transcript-row";
 import { useCurrentHotkey } from "../lib/use-current-hotkey";
 import { useLastTranscription } from "../lib/use-last-transcription";
@@ -31,60 +32,69 @@ export function HomePane({
   const latest = useLastTranscription();
 
   return (
-    <div className="ow-home">
-      {hotkeyError && (
-        <div data-testid="hotkey-banner" className="ow-home__banner">
-          <HealthBanner
-            message={hotkeyError}
-            onRetry={onHotkeyRetry}
-            retryLabel="Restart"
-          />
-        </div>
-      )}
-      {micError && (
-        <div data-testid="mic-banner" className="ow-home__banner">
-          <HealthBanner
-            message={micError}
-            onRetry={onMicOpenSettings}
-            retryLabel="Open Settings"
-          />
-        </div>
-      )}
-      {automationError && (
-        <div data-testid="automation-banner" className="ow-home__banner">
-          <HealthBanner
-            message={automationError}
-            onRetry={onAutomationOpenSettings}
-            retryLabel="Open Settings"
-          />
-        </div>
-      )}
-      {recognizerError && (
-        <div data-testid="recognizer-banner" className="ow-home__banner">
-          <HealthBanner
-            message={recognizerError}
-            onRetry={onRecognizerRetry}
-            retryLabel="Retry"
-          />
-        </div>
-      )}
+    <div className="ow-home-route">
+      {/* Full-bleed strip sits flush against the title bar, outside
+          the content column's max-width gutter. Container query in
+          App.css collapses 4 → 2 → 1 columns by container width. */}
+      <div className="ow-stats-strip-container">
+        <StatsStrip />
+      </div>
 
-      <section className="ow-home__hero">
-        <img
-          src={iconSrc}
-          alt=""
-          data-testid="home-app-icon"
-          className="ow-home__icon"
-          width={64}
-          height={64}
-        />
-        <h1 className="ow-home__headline">Ready when you are</h1>
-        <p className="ow-home__hint" data-testid="home-hotkey-hint">
-          Press <kbd>{chord}</kbd> anywhere — speak — press again to stop.
-        </p>
-      </section>
+      <div className="ow-home">
+        {hotkeyError && (
+          <div data-testid="hotkey-banner" className="ow-home__banner">
+            <HealthBanner
+              message={hotkeyError}
+              onRetry={onHotkeyRetry}
+              retryLabel="Restart"
+            />
+          </div>
+        )}
+        {micError && (
+          <div data-testid="mic-banner" className="ow-home__banner">
+            <HealthBanner
+              message={micError}
+              onRetry={onMicOpenSettings}
+              retryLabel="Open Settings"
+            />
+          </div>
+        )}
+        {automationError && (
+          <div data-testid="automation-banner" className="ow-home__banner">
+            <HealthBanner
+              message={automationError}
+              onRetry={onAutomationOpenSettings}
+              retryLabel="Open Settings"
+            />
+          </div>
+        )}
+        {recognizerError && (
+          <div data-testid="recognizer-banner" className="ow-home__banner">
+            <HealthBanner
+              message={recognizerError}
+              onRetry={onRecognizerRetry}
+              retryLabel="Retry"
+            />
+          </div>
+        )}
 
-      {latest && <TranscriptRow text={latest.text} timestamp={latest.timestamp} />}
+        <section className="ow-home__hero">
+          <img
+            src={iconSrc}
+            alt=""
+            data-testid="home-app-icon"
+            className="ow-home__icon"
+            width={64}
+            height={64}
+          />
+          <h1 className="ow-home__headline">Ready when you are</h1>
+          <p className="ow-home__hint" data-testid="home-hotkey-hint">
+            Press <kbd>{chord}</kbd> anywhere — speak — press again to stop.
+          </p>
+        </section>
+
+        {latest && <TranscriptRow text={latest.text} timestamp={latest.timestamp} />}
+      </div>
     </div>
   );
 }

@@ -3,13 +3,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openwhisper_core::audio;
 use openwhisper_core::dictation::{
     self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
 use openwhisper_core::recognizer;
+use openwhisper_core::stats::{self, StatsSummary};
+use openwhisper_core::store::Store;
 use openwhisper_core::transcript;
 use openwhisper_core::verbose_log;
 use serde::Serialize;
@@ -164,6 +166,26 @@ fn phase_to_status(phase: u32) -> &'static str {
 #[tauri::command]
 fn core_version() -> String {
     openwhisper_core::core_version()
+}
+
+/// Read-side aggregator for the Home pane stats strip. Day / week
+/// buckets use the user's local timezone (chrono::Local in core).
+#[tauri::command]
+fn stats_get_summary(store: tauri::State<'_, Arc<Store>>) -> Result<StatsSummary, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    stats::get_summary(&store, now_ms).map_err(|e| e.to_string())
+}
+
+/// Wipes all rows from `dictations`. The reset path inside core fires
+/// the registered stats_changed callback, so the frontend hook
+/// re-fetches an empty summary without needing an explicit invoke
+/// on the JS side.
+#[tauri::command]
+fn stats_reset(store: tauri::State<'_, Arc<Store>>) -> Result<(), String> {
+    stats::reset(&store).map_err(|e| e.to_string())
 }
 
 /// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
@@ -428,6 +450,14 @@ fn spawn_stop_pipeline() {
             let samples = audio::audio_drain_samples();
             let count = samples.len() as u64;
             let drain_ms = t_drain.elapsed().as_millis();
+            // Energy-VAD over the drained samples — the stats writer
+            // reads this off dictation state and uses it as the
+            // recording's effective duration_ms in place of wall-clock,
+            // so silence at the tail doesn't penalize Time Saved.
+            // Sample rate is the constant 16 kHz core resamples to
+            // before exposing samples (audio::TARGET_SAMPLE_RATE).
+            let voiced_ms = audio::estimate_voiced_ms(&samples, 16_000);
+            dictation::dictation_set_voiced_ms(voiced_ms);
             // Empty mic → mark_capture_stopped flips phase back to DONE
             // with "no audio captured". Populated → updates sample_count
             // and reaffirms TRANSCRIBING (no-op vs the optimistic flip).
@@ -929,6 +959,51 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Persistence layer — open <app_data_dir>/openwhisper.db once
+            // and register the Store as managed state so any Tauri
+            // command can pull it via State<Arc<Store>>. Failures log and
+            // continue: stats are not load-bearing for the dictation
+            // flow, and bricking dictation because the DB is read-only
+            // would be the worse outcome (doc-39 spec, "Failure paths").
+            // The path is identifier-stable across rebrands — if anyone
+            // ever changes `com.openwhisper.app` in tauri.conf.json,
+            // every existing user's stats are orphaned.
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    let path = dir.join("openwhisper.db");
+                    match openwhisper_core::store::Store::open_or_init(&path) {
+                        Ok(store) => {
+                            let arc = Arc::new(store);
+                            // Register with core::stats so the dictation
+                            // writer can reach the store without
+                            // threading State through the call chain.
+                            // Tauri commands still resolve their own
+                            // State<Arc<Store>> for read paths.
+                            openwhisper_core::stats::set_store(arc.clone());
+                            // Bridge core's "stats changed" callback to
+                            // a Tauri event so the React useStatsSummary
+                            // hook refreshes without polling. Fires
+                            // after every successful record_dictation
+                            // insert AND after stats_reset.
+                            let app_for_stats = app.handle().clone();
+                            openwhisper_core::stats::set_on_insert(Box::new(move || {
+                                let _ = app_for_stats.emit("stats_changed", ());
+                            }));
+                            app.manage(arc);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[store] open_or_init failed at {}: {e}",
+                                path.display(),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[store] app_data_dir unresolved: {e}");
+                }
+            }
+
             spawn_dictation_emitter(app.handle().clone());
             spawn_audio_device_poller(app.handle().clone());
             spawn_recognizer_warmup();
@@ -1034,6 +1109,7 @@ pub fn run() {
             // returns the default and persists nothing — the file is only
             // written on explicit save.
             let _ = settings::load_settings(app.handle());
+            let _ = settings::load_stats_settings(app.handle());
             // Same shape for the audio block: hydrate the in-memory cache
             // and propagate the saved device name into the core's selector
             // so the very first recording opens the user's preferred mic
@@ -1197,6 +1273,8 @@ pub fn run() {
             settings::audio_set_device,
             settings::settings_get_pill,
             settings::settings_set_pill_follow,
+            settings::settings_get_stats,
+            settings::settings_set_user_wpm,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,
@@ -1209,6 +1287,8 @@ pub fn run() {
             media_get_last_pause_diagnostic,
             open_automation_settings,
             open_microphone_settings,
+            stats_get_summary,
+            stats_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

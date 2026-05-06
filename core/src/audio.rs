@@ -423,6 +423,171 @@ pub fn audio_drain_samples() -> Vec<f32> {
     ENGINE.get().map(|e| e.drain()).unwrap_or_default()
 }
 
+/// Estimate active-speech milliseconds as the **speech window**:
+/// the span from the first voiced frame to the last voiced frame in
+/// the recording, inclusive. Lead silence (before the user starts
+/// speaking) and tail silence (after the user finishes, e.g. leaving
+/// the mic on) are trimmed. Mid-recording pauses — sentence-end
+/// breaths, "what to say next" thinking — stay inside the window
+/// because the user is still in dictation mode.
+///
+/// Walks the buffer in 20 ms RMS frames; a frame above
+/// `VAD_THRESHOLD_DBFS` (= -40 dBFS) is "voiced". Trailing partial
+/// frames (under 20 ms of leftover samples) are ignored — they
+/// can't shift the window endpoints meaningfully and avoid biasing
+/// very short clips.
+///
+/// Why a window, not just summed voiced frames: a per-frame VAD
+/// strips every >600 ms pause as silence, so 51 words with normal
+/// sentence-end breaths showed up as ~22 s of voiced even when the
+/// recording lasted ~67 s. That over-credited Time Saved against
+/// the user's mental model of "active speaking time" (`time_saved =
+/// typing_time − speaking_time`, where speaking_time is full
+/// dictation engagement, not raw vocalization). The window also
+/// preserves the original goal: leaving the mic on after the last
+/// word still trims the trailing silence.
+///
+/// Used by the stats writer to record "real speech time" in the
+/// `dictations.duration_ms` column instead of wall-clock recording
+/// duration. Energy-only (no spectral VAD, no neural model) so it's
+/// model-agnostic — works regardless of which recognizer transcribes.
+pub fn estimate_voiced_ms(samples: &[f32], sample_rate: u32) -> i64 {
+    const FRAME_MS: u32 = 20;
+    const VAD_THRESHOLD_DBFS: f32 = -40.0;
+    if samples.is_empty() || sample_rate == 0 {
+        return 0;
+    }
+    let frame_size = ((sample_rate as u64 * FRAME_MS as u64) / 1000) as usize;
+    if frame_size == 0 {
+        return 0;
+    }
+    let threshold_amp = 10f32.powf(VAD_THRESHOLD_DBFS / 20.0);
+
+    let mut first_voiced: Option<u64> = None;
+    let mut last_voiced: Option<u64> = None;
+    for (frame_idx, chunk) in samples.chunks(frame_size).enumerate() {
+        if chunk.len() < frame_size {
+            break;
+        }
+        let sum_sq: f32 = chunk.iter().map(|x| x * x).sum();
+        let rms = (sum_sq / chunk.len() as f32).sqrt();
+        if rms >= threshold_amp {
+            let idx = frame_idx as u64;
+            if first_voiced.is_none() {
+                first_voiced = Some(idx);
+            }
+            last_voiced = Some(idx);
+        }
+    }
+    match (first_voiced, last_voiced) {
+        (Some(a), Some(b)) => ((b - a + 1) * FRAME_MS as u64) as i64,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod vad_tests {
+    use super::estimate_voiced_ms;
+
+    const SR: u32 = 16_000;
+    const FRAME_MS: usize = 20;
+    const SAMPLES_PER_FRAME: usize = (SR as usize * FRAME_MS) / 1000; // 320
+
+    #[test]
+    fn silence_only_returns_zero() {
+        let samples = vec![0.0f32; SAMPLES_PER_FRAME * 50]; // 1 s of silence
+        assert_eq!(estimate_voiced_ms(&samples, SR), 0);
+    }
+
+    #[test]
+    fn pure_tone_above_threshold_counts_full_duration() {
+        // 1 s of 440 Hz at 0.5 amplitude → RMS ~= 0.354 → ~-9 dBFS,
+        // well above the -40 dBFS threshold.
+        let total = SR as usize; // 1 s
+        let samples: Vec<f32> = (0..total)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let ms = estimate_voiced_ms(&samples, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms voiced, got {ms}",
+        );
+    }
+
+    #[test]
+    fn tail_silence_after_last_voiced_is_trimmed() {
+        // 1 s voiced + 2 s silence. Leaving the mic on after speaking
+        // must NOT charge the user — speech window ends at last
+        // voiced frame.
+        let voiced: Vec<f32> = (0..SR as usize)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let silence = vec![0.0f32; SR as usize * 2];
+        let mut combined = voiced;
+        combined.extend(silence);
+        let ms = estimate_voiced_ms(&combined, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms speech window (tail silence trimmed), got {ms}",
+        );
+    }
+
+    #[test]
+    fn lead_silence_before_first_voiced_is_trimmed() {
+        let silence = vec![0.0f32; SR as usize * 2]; // 2 s lead silence
+        let voiced: Vec<f32> = (0..SR as usize)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let mut combined = silence;
+        combined.extend(voiced);
+        let ms = estimate_voiced_ms(&combined, SR);
+        assert!(
+            (ms - 1000).abs() <= FRAME_MS as i64,
+            "expected ~1000 ms speech window (lead silence trimmed), got {ms}",
+        );
+    }
+
+    #[test]
+    fn mid_recording_pauses_stay_inside_window() {
+        // 200 ms voiced + 800 ms pause (long enough that a hangover
+        // VAD would close the window) + 200 ms voiced. The user is
+        // still in dictation mode through the pause — the whole
+        // 1200 ms span counts as active speaking time.
+        let make_voiced = |len: usize| -> Vec<f32> {
+            (0..len)
+                .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+                .collect()
+        };
+        let voiced_a = make_voiced((SR as usize * 200) / 1000);
+        let pause = vec![0.0f32; (SR as usize * 800) / 1000];
+        let voiced_b = make_voiced((SR as usize * 200) / 1000);
+        let mut combined = voiced_a;
+        combined.extend(pause);
+        combined.extend(voiced_b);
+        let ms = estimate_voiced_ms(&combined, SR);
+        assert!(
+            (ms - 1200).abs() <= FRAME_MS as i64,
+            "expected ~1200 ms speech window (mid-pause kept), got {ms}",
+        );
+    }
+
+    #[test]
+    fn very_quiet_signal_below_threshold_returns_zero() {
+        // -60 dBFS sine = amplitude 0.001 — well below -40 dB threshold.
+        let total = SR as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|i| 0.001 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SR as f32).sin())
+            .collect();
+        assert_eq!(estimate_voiced_ms(&samples, SR), 0);
+    }
+
+    #[test]
+    fn empty_input_is_zero() {
+        assert_eq!(estimate_voiced_ms(&[], SR), 0);
+        assert_eq!(estimate_voiced_ms(&[0.0; 100], 0), 0);
+    }
+}
+
 pub fn audio_is_capturing() -> bool {
     ENGINE.get().map(|e| e.is_capturing()).unwrap_or(false)
 }

@@ -52,6 +52,9 @@ swift-bridge = { version = "0.1.59", optional = true }
 cpal = "0.17"
 rubato = "0.16"
 regex = "1.11"
+# Serialize StatsSummary across the swift-bridge / Tauri boundary so
+# the frontend hook gets a typed payload without a hand-rolled FFI.
+serde = { version = "1", features = ["derive"] }
 # pykeio/ort 2.x — the de-facto Rust binding to ONNXRuntime, with first-
 # class DirectML / CUDA / TensorRT EP support behind feature flags. We
 # replaced sherpa-onnx with ort in TASK-40 because sherpa wraps DML behind
@@ -90,6 +93,22 @@ dirs = { version = "5", optional = true }
 # count is the safer ceiling — see TASK-39 bench notes.
 num_cpus = { version = "1.16", optional = true }
 
+# Persistence layer — single SQLite file at <app_data_dir>/openwhisper.db,
+# owned by core/ so the state machine (TASK-87/88) writes from the same
+# place every shell reads. `bundled` links a copy of SQLite into the
+# binary (~1 MB) — removes platform variance (Windows ships no system
+# SQLite, older Linux SQLites lack JSON1/FTS5). MIT-licensed.
+rusqlite = { version = "0.39", features = ["bundled"] }
+# Ordered, idempotent schema migrations driven by SQLite's
+# user_version pragma. Apache-2.0 — MIT-compatible.
+rusqlite_migration = "2.5"
+# Local-time day boundary math for stats::get_summary. We deliberately
+# bucket "today" by the user's local midnight, not UTC — counters that
+# rolled over at noon UTC for a US user would feel broken. `clock`
+# enables `chrono::Local`; default features off keeps the dep lean
+# (no serde, no serde_json, no clock-tz tables).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # Mac-only — used to query CoreAudio kAudioDevicePropertyTransportType so we
 # can drop virtual mics (Microsoft Teams Audio, Zoom virtual device, Krisp,
 # BlackHole, etc.) from the picker. cpal classifies aggregate devices on
@@ -103,6 +122,9 @@ coreaudio-rs = { version = "0.14", default-features = false, features = ["core_a
 # Portable WAV reader for the recognizer smoke example (cross-platform —
 # avoids dragging sherpa-onnx into the Mac smoke path just for I/O).
 hound = "3.5"
+# Sandboxed temp dirs for store::tests that exercise open-or-init against
+# a throwaway path.
+tempfile = "3"
 
 [build-dependencies]
 swift-bridge-build = { version = "0.1.59", optional = true }

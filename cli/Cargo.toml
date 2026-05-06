@@ -1,0 +1,30 @@
+[package]
+name = "openwhisper-cli"
+version = "0.5.0"
+edition = "2024"
+license = "MIT"
+authors = ["Jimmi Joensson"]
+description = "Headless CLI for OpenWhisper. Same engine as the desktop app — record, transcribe, enumerate devices, inspect recognizer state, surface crash dumps."
+publish = false
+
+[[bin]]
+name = "openwhisper"
+path = "src/main.rs"
+
+[dependencies]
+# Same library the Tauri shell consumes. `recognizer` enables the
+# in-core ASR path (FluidAudio on Mac via the Swift bridge,
+# ort + Parakeet ONNX on Win/Linux).
+openwhisper-core = { path = "../core", default-features = false, features = ["recognizer"] }
+# clap derive keeps the parser definition close to the subcommand
+# handlers and gives us --help + shell completion for free.
+clap = { version = "4", features = ["derive"] }
+# Rich error context across the I/O + recognizer call chain. Each
+# subcommand handler returns `anyhow::Result<()>` so any error from
+# core surfaces with a stack of `.context(...)` annotations.
+anyhow = "1"
+# JSON output for `--json` mode on every subcommand.
+serde_json = "1"
+# Sample WAV reader for `cli transcribe`. Cross-platform and pure
+# Rust — same dep core/ uses for its recognizer smoke example.
+hound = "3.5"

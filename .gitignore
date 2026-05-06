@@ -125,6 +125,7 @@ recordings/
 *.flac
 !docs/**/*.wav
 !tests/**/fixtures/**
+!cli/tests/**/fixtures/**
 !archive/macos/Resources/samples/**
 # Bench clips + reference transcripts may contain PII / personal voice —
 # always local, never committed.

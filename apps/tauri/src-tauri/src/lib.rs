@@ -929,6 +929,35 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Persistence layer — open <app_data_dir>/openwhisper.db once
+            // and register the Store as managed state so any Tauri
+            // command can pull it via State<Arc<Store>>. Failures log and
+            // continue: stats are not load-bearing for the dictation
+            // flow, and bricking dictation because the DB is read-only
+            // would be the worse outcome (doc-39 spec, "Failure paths").
+            // The path is identifier-stable across rebrands — if anyone
+            // ever changes `com.openwhisper.app` in tauri.conf.json,
+            // every existing user's stats are orphaned.
+            match app.path().app_data_dir() {
+                Ok(dir) => {
+                    let path = dir.join("openwhisper.db");
+                    match openwhisper_core::store::Store::open_or_init(&path) {
+                        Ok(store) => {
+                            app.manage(Arc::new(store));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[store] open_or_init failed at {}: {e}",
+                                path.display(),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[store] app_data_dir unresolved: {e}");
+                }
+            }
+
             spawn_dictation_emitter(app.handle().clone());
             spawn_audio_device_poller(app.handle().clone());
             spawn_recognizer_warmup();

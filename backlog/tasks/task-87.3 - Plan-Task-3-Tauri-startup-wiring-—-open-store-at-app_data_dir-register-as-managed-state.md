@@ -3,9 +3,11 @@ id: TASK-87.3
 title: >-
   Plan Task 3: Tauri startup wiring — open store at app_data_dir, register as
   managed state
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-06 06:09'
+updated_date: '2026-05-06 08:39'
 labels:
   - 87-impl
 dependencies:

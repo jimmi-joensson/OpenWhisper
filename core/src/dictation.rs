@@ -358,26 +358,26 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
 
 pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     IS_RECORDING.store(false, Ordering::Relaxed);
-    let (started_at_ms, duration_ms) = with_state(|s| {
+    let (started_at_ms, duration_ms, wall_clock_ms) = with_state(|s| {
         let started_at_ms = s.record_start_epoch_ms.unwrap_or(0);
+        let wall_clock_ms = s
+            .record_start
+            .map(|t| t.elapsed().as_millis() as i64)
+            .unwrap_or(0);
         // Prefer the shell-reported voiced_ms (energy VAD over the
-        // drained samples) over wall-clock so silence at the tail
-        // of a recording doesn't shrink Time Saved. Falls back to
-        // wall-clock when the shell didn't push a voiced count
-        // (e.g. SwiftUI shell, or a future shell that hasn't been
-        // updated yet).
-        let duration_ms = s.voiced_ms_at_drain.take().unwrap_or_else(|| {
-            s.record_start
-                .map(|t| t.elapsed().as_millis() as i64)
-                .unwrap_or(0)
-        });
+        // drained samples) over wall-clock for the active-speech
+        // metric so leaving the mic on after speaking doesn't
+        // shrink Time Saved. Falls back to wall-clock when the
+        // shell didn't push a voiced count (e.g. SwiftUI shell, or
+        // a future shell that hasn't been updated yet).
+        let duration_ms = s.voiced_ms_at_drain.take().unwrap_or(wall_clock_ms);
         s.transcript = text.to_string();
         s.confidence = confidence;
         s.status_message = "done — pasted to focused app".to_string();
         s.phase = PHASE_DONE;
         s.record_start = None;
         s.record_start_epoch_ms = None;
-        (started_at_ms, duration_ms)
+        (started_at_ms, duration_ms, wall_clock_ms)
     });
     // Outside the state lock — the injector spawns its own worker but
     // there's no reason to hold the dictation mutex across the call.
@@ -389,7 +389,13 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     // mutates dictation phase, so a failure here cannot stall the
     // state machine in PHASE_TRANSCRIBING / push it to PHASE_ERROR.
     if let Some(store) = crate::stats::store() {
-        crate::stats::record_dictation(store, started_at_ms, duration_ms, text);
+        crate::stats::record_dictation(
+            store,
+            started_at_ms,
+            duration_ms,
+            wall_clock_ms,
+            text,
+        );
     }
 }
 

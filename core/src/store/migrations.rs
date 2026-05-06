@@ -20,8 +20,21 @@ CREATE TABLE dictations (
 );
 CREATE INDEX idx_dictations_started_at ON dictations(started_at);";
 
+/// Wall-clock recording duration alongside the VAD speech window in
+/// `duration_ms`. Lets us compare what the user actually saw on the
+/// timer (`wall_clock_ms`) against what we counted as active speech
+/// (`duration_ms`) — useful for tuning the VAD threshold and the
+/// trim behavior. NULL on rows written before this migration so the
+/// column carries diagnostic-only weight; existing aggregates
+/// (Time Saved) only read `duration_ms`.
+const MIGRATION_2_WALL_CLOCK: &str = "\
+ALTER TABLE dictations ADD COLUMN wall_clock_ms INTEGER;";
+
 fn specs() -> Vec<M<'static>> {
-    vec![M::up(MIGRATION_1_DICTATIONS)]
+    vec![
+        M::up(MIGRATION_1_DICTATIONS),
+        M::up(MIGRATION_2_WALL_CLOCK),
+    ]
 }
 
 pub fn apply_pending(conn: &mut Connection) -> Result<(), StoreError> {

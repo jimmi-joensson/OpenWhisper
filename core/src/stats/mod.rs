@@ -88,7 +88,13 @@ fn fire_stats_changed() {
 /// Word count is whitespace-split on the trimmed text. The transcript
 /// itself is NOT persisted today — `transcript` stays NULL until the
 /// history opt-in lands; only counters and timing are kept.
-pub fn record_dictation(store: &Store, started_at_ms: i64, duration_ms: i64, text: &str) {
+pub fn record_dictation(
+    store: &Store,
+    started_at_ms: i64,
+    duration_ms: i64,
+    wall_clock_ms: i64,
+    text: &str,
+) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
@@ -97,9 +103,9 @@ pub fn record_dictation(store: &Store, started_at_ms: i64, duration_ms: i64, tex
     let result = store.with_conn(|c| {
         c.execute(
             "INSERT INTO dictations \
-             (started_at, duration_ms, word_count, transcript, confidence, app_bundle_id) \
-             VALUES (?, ?, ?, NULL, NULL, NULL)",
-            params![started_at_ms, duration_ms, word_count],
+             (started_at, duration_ms, word_count, transcript, confidence, app_bundle_id, wall_clock_ms) \
+             VALUES (?, ?, ?, NULL, NULL, NULL, ?)",
+            params![started_at_ms, duration_ms, word_count, wall_clock_ms],
         )
         .map(|_| ())
         .map_err(StoreError::from)
@@ -207,27 +213,41 @@ mod tests {
     #[test]
     fn empty_text_inserts_nothing() {
         let (_d, store) = fresh_store();
-        record_dictation(&store, 1_000, 500, "");
-        record_dictation(&store, 1_000, 500, "   \t\n  ");
+        record_dictation(&store, 1_000, 500, 600, "");
+        record_dictation(&store, 1_000, 500, 600, "   \t\n  ");
         assert_eq!(row_count(&store), 0);
     }
 
     #[test]
     fn writes_row_with_word_count() {
         let (_d, store) = fresh_store();
-        record_dictation(&store, 1_700_000_000_000, 2_500, "hello world from openwhisper");
-        let (started, duration, words, transcript): (i64, i64, i64, Option<String>) = store
+        record_dictation(
+            &store,
+            1_700_000_000_000,
+            2_500,
+            5_000,
+            "hello world from openwhisper",
+        );
+        let (started, duration, wall_clock, words, transcript): (
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<String>,
+        ) = store
             .with_conn(|c| {
                 c.query_row(
-                    "SELECT started_at, duration_ms, word_count, transcript FROM dictations",
+                    "SELECT started_at, duration_ms, wall_clock_ms, word_count, transcript \
+                     FROM dictations",
                     [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .map_err(StoreError::from)
             })
             .expect("select row");
         assert_eq!(started, 1_700_000_000_000);
         assert_eq!(duration, 2_500);
+        assert_eq!(wall_clock, 5_000);
         assert_eq!(words, 4);
         assert!(transcript.is_none(), "transcript stays NULL until history opt-in");
     }
@@ -302,7 +322,7 @@ mod tests {
         // `open_or_init` so migrations never run.
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory");
         let store = Store::from_connection_for_test(conn);
-        record_dictation(&store, 1_000, 500, "hello world");
+        record_dictation(&store, 1_000, 500, 600, "hello world");
         // No panic = test passes; the eprintln is observable in test
         // output but not asserted.
     }

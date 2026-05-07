@@ -136,29 +136,43 @@ function Readout({
   );
 }
 
-// 60-sample area sparkline. Smooth left-scroll on every poll —
-// classic Activity-Monitor scroll: samples are pinned to fixed x
-// positions in viewBox space (latest at the right edge), and the
-// containing `<g>` translates left by one sample-width over the
-// 1-Hz tick interval. At swap time the transform snaps back to 0;
-// because the path data has shifted indices by one, every sample's
-// screen position is preserved across the swap (no jump). The new
-// sample appears at the right edge with no fanfare.
+// 60-sample area sparkline — Activity-Monitor-style continuous
+// scroll. Two pieces:
 //
-// All animation state in refs (per `openwhisper-animation-philosophy`).
-// Transform-only — no width/height/d-attribute interpolation.
-// Reduced-motion: snaps each tick; values still read.
+//   1. A RAF clock continuously sets `<g>` transform from
+//      `(now - lastSampleTime) / SPARK_TICK_MS`, ramping the slide
+//      offset from 0 to -pxPerSample over the inter-poll interval.
+//      No CSS transition + snap (which created the visible
+//      pause-then-jump previous reviewers flagged); the offset is
+//      derived from real time, so polls arriving early/late don't
+//      produce a hitch.
+//   2. Path uses Catmull-Rom cubic Bezier interpolation through the
+//      sample points (tension 0.5), matching the curvy look of
+//      shadcn's Area Chart `type="monotone"`. A phantom point one
+//      sample-pitch past the right edge mirrors the latest Y so the
+//      line covers the slide gap without an empty fringe; the SVG
+//      clips beyond the viewBox.
 //
-// CSS transforms on SVG inner elements operate in CSS-pixel space,
-// not viewBox units, when `preserveAspectRatio="none"` scales the
-// SVG to its container. ResizeObserver tracks the rendered width
-// and converts the per-sample step into the matching CSS-pixel
-// distance so the slide aligns exactly with the path's visual sample
-// pitch.
+// Animation rules vs. `openwhisper-animation-philosophy`:
+//   - Animation state in refs only (lastDataRef, lastSampleTimeRef,
+//     pxPerSampleCssRef, reducedMotionRef). React doesn't see the
+//     RAF clock.
+//   - Transform-only on the `<g>` — no per-frame d= morph.
+//   - The path d= updates ONCE per data prop change (1 Hz). That's
+//     React's normal render cadence, not animation.
+//   - Reduced-motion: skip transform writes; the path d= still
+//     updates per poll, so the chart redraws but doesn't flow.
+//
+// CSS transforms on SVG inner elements use CSS pixels, not viewBox
+// units, when `preserveAspectRatio="none"` scales the SVG to its
+// container. ResizeObserver tracks the rendered width and converts
+// the per-sample step to CSS pixels so the slide pitch matches the
+// path's visual sample pitch on any container width.
 function Sparkline({ data }: { data: number[] }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const groupRef = useRef<SVGGElement | null>(null);
   const lastDataRef = useRef<number[]>(data);
+  const lastSampleTimeRef = useRef<number>(performance.now());
   const pxPerSampleCssRef = useRef(0);
   const reducedMotionRef = useRef(false);
 
@@ -186,38 +200,43 @@ function Sparkline({ data }: { data: number[] }) {
     return () => mq.removeEventListener("change", update);
   }, []);
 
-  // Animation kick — runs on every data prop change. Snap to
-  // translateX=0 (so the slide always restarts from the right-pinned
-  // position), force a reflow so the next style write is treated as
-  // the start of a new transition, then schedule the slide to
-  // -pxPerSample over the tick interval.
+  // Continuous RAF clock — drives the left-slide between polls.
+  // Resets implicitly when lastSampleTimeRef advances on new data.
+  // No-op when reduced motion is on or width hasn't been measured
+  // yet; the path itself still draws the latest data via React render.
   useLayoutEffect(() => {
-    const prev = lastDataRef.current;
-    if (data === prev) return;
+    let raf = 0;
+    const tick = () => {
+      const g = groupRef.current;
+      if (g && !reducedMotionRef.current && pxPerSampleCssRef.current > 0) {
+        const elapsed = performance.now() - lastSampleTimeRef.current;
+        const progress = Math.max(0, Math.min(1, elapsed / SPARK_TICK_MS));
+        const offset = -progress * pxPerSampleCssRef.current;
+        g.style.transform = `translate3d(${offset.toFixed(2)}px, 0, 0)`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Mark the moment a new poll's data arrived. The RAF clock above
+  // sees lastSampleTimeRef advance and starts a fresh 0→-pxPerSample
+  // ramp from the new "now" baseline. Because the path data has
+  // shifted by one slot in the same render, every old sample's
+  // *screen* position is preserved across the swap; only the new
+  // rightmost sample (and the phantom past it) introduce new content.
+  useLayoutEffect(() => {
+    if (data === lastDataRef.current) return;
+    const wasEmpty = lastDataRef.current.length === 0;
     lastDataRef.current = data;
-    const g = groupRef.current;
-    if (!g) return;
-    const pxCss = pxPerSampleCssRef.current;
-    const wasEmpty = prev.length === 0;
-
-    g.style.transition = "none";
-    g.style.transform = "translate3d(0,0,0)";
-
-    if (
-      reducedMotionRef.current ||
-      wasEmpty ||
-      data.length === 0 ||
-      pxCss === 0
-    ) {
-      // First sample, empty data, reduced-motion, or pre-measure:
-      // leave the group at rest. The path itself already draws the
-      // latest data; a snap-cut is correct here.
-      return;
+    lastSampleTimeRef.current = performance.now();
+    if (wasEmpty || data.length === 0) {
+      // First sample (or cleared): make sure the transform is at
+      // rest before the RAF tick reads `progress = 0`.
+      const g = groupRef.current;
+      if (g) g.style.transform = "translate3d(0,0,0)";
     }
-
-    void g.getBoundingClientRect();
-    g.style.transition = `transform ${SPARK_TICK_MS}ms linear`;
-    g.style.transform = `translate3d(-${pxCss}px,0,0)`;
   }, [data]);
 
   const path = useMemo(() => buildSparkPath(data), [data]);
@@ -256,11 +275,18 @@ function Sparkline({ data }: { data: number[] }) {
   );
 }
 
-// Pin the latest sample to x=W (right edge). Older samples extend
-// leftward at one viewBox-unit-per-sample-pitch increments. During
-// the initial fill the line just grows leftward toward x=0; once
-// the ring is full it spans the full width and each new sample
-// pushes the oldest off the left.
+// Pin the latest sample to x=W (right edge); older samples extend
+// leftward by one viewBox-pitch each. During initial fill the line
+// grows toward x=0; once the ring is full it spans the full width
+// and each new sample pushes the oldest off the left.
+//
+// One phantom point at x=W+pxPerSampleVB sharing the latest Y. The
+// `<g>` slides leftward by pxPerSampleCss over the poll interval,
+// so without the phantom the right edge would briefly bare a gap
+// of pxPerSampleCss. The phantom fills it with a horizontal stub;
+// when the next sample arrives the rightmost segment changes slope
+// to the new value, but cubic Bezier smoothing keeps that local
+// adjustment soft.
 function buildSparkPath(
   data: number[],
 ): { line: string; fill: string } | null {
@@ -271,18 +297,46 @@ function buildSparkPath(
   const usable = SPARK_H_VB - SPARK_PAD_TOP - SPARK_PAD_BOT;
   const pxPerSampleVB = SPARK_W_VB / (RSS_SERIES_LEN - 1);
   const offsetVB = (RSS_SERIES_LEN - data.length) * pxPerSampleVB;
-  const xs = data.map((_, i) => offsetVB + i * pxPerSampleVB);
-  const ys = data.map(
-    (v) => SPARK_PAD_TOP + usable - ((v - min) / span) * usable,
-  );
-  const line = xs
-    .map(
-      (x, i) =>
-        `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`,
-    )
-    .join(" ");
-  const fill = `${line} L ${xs[xs.length - 1].toFixed(1)} ${SPARK_H_VB} L ${xs[0].toFixed(1)} ${SPARK_H_VB} Z`;
+  const points: Array<{ x: number; y: number }> = data.map((v, i) => ({
+    x: offsetVB + i * pxPerSampleVB,
+    y: SPARK_PAD_TOP + usable - ((v - min) / span) * usable,
+  }));
+  // Phantom: one pitch past the latest, same Y. SVG clips it.
+  const last = points[points.length - 1];
+  points.push({ x: last.x + pxPerSampleVB, y: last.y });
+
+  const line = catmullRomToBezier(points);
+  const fillStartX = points[0].x;
+  const fillEndX = points[points.length - 1].x;
+  const fill = `${line} L ${fillEndX.toFixed(2)} ${SPARK_H_VB} L ${fillStartX.toFixed(2)} ${SPARK_H_VB} Z`;
   return { line, fill };
+}
+
+// Catmull-Rom cubic Bezier interpolation, tension 0.5 — the same
+// "monotone-ish" smoothing shadcn's Area Chart uses by default. For
+// each segment Pᵢ→Pᵢ₊₁, control points use the surrounding pair
+// (Pᵢ₋₁, Pᵢ₊₂) to set tangents; endpoints duplicate so the curve
+// terminates with zero second-derivative. RSS time-series rarely
+// have huge spikes between consecutive 1 Hz samples, so the small
+// overshoot Catmull-Rom can produce stays imperceptible.
+function catmullRomToBezier(pts: Array<{ x: number; y: number }>): string {
+  if (pts.length === 0) return "";
+  if (pts.length === 1) return `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+  const tension = 0.5;
+  const n = pts.length;
+  let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(n - 1, i + 2)];
+    const c1x = p1.x + ((p2.x - p0.x) * tension) / 3;
+    const c1y = p1.y + ((p2.y - p0.y) * tension) / 3;
+    const c2x = p2.x - ((p3.x - p1.x) * tension) / 3;
+    const c2y = p2.y - ((p3.y - p1.y) * tension) / 3;
+    d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)} ${c2x.toFixed(2)} ${c2y.toFixed(2)} ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+  }
+  return d;
 }
 
 // Stacked horizontal bar — one segment per loaded model handle plus an

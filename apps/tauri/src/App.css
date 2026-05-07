@@ -823,6 +823,10 @@ body[data-platform="macos"] .ow-sidebar {
   width: 100%;
   height: 96px;
   display: block;
+  /* Clip the phantom right-edge point + any sample mid-slide off
+     the left. Browsers default SVG overflow to hidden when viewBox
+     is set, but be explicit. */
+  overflow: hidden;
 }
 
 .ow-diagnostics__breakdown {

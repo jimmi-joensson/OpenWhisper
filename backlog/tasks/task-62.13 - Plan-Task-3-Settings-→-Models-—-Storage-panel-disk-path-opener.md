@@ -1,10 +1,10 @@
 ---
 id: TASK-62.13
 title: 'Plan Task 3: Settings → Models — Storage panel (disk + path + opener)'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-07 14:00'
-updated_date: '2026-05-07 22:00'
+updated_date: '2026-05-07 22:22'
 labels:
   - 62-impl
 dependencies: []

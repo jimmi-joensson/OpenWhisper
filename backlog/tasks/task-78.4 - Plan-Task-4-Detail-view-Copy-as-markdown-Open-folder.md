@@ -1,11 +1,11 @@
 ---
 id: TASK-78.4
 title: 'Plan Task 4: Detail sheet + Copy-as-markdown + Open-folder'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-04 06:16'
-updated_date: '2026-05-07 17:26'
+updated_date: '2026-05-07 22:22'
 labels:
   - 78-impl
 milestone: m-1

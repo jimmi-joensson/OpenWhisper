@@ -1,10 +1,10 @@
 ---
 id: TASK-62.5
 title: 'Plan Task 5: Wrap Parakeet recognizer in ModelHandle (macOS)'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:25'
-updated_date: '2026-05-07 00:00'
+updated_date: '2026-05-07 22:21'
 labels:
   - 62-impl
 dependencies: []

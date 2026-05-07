@@ -1,11 +1,11 @@
 ---
 id: TASK-78.6
 title: 'Plan Task 6: Report on GitHub button (rescoped from opt-in upload)'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-04 06:16'
-updated_date: '2026-05-07 19:18'
+updated_date: '2026-05-07 22:22'
 labels:
   - 78-impl
 milestone: m-1

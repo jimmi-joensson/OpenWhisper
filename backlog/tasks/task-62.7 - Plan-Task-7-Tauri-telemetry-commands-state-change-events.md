@@ -1,10 +1,10 @@
 ---
 id: TASK-62.7
 title: 'Plan Task 7: Tauri telemetry commands + state-change events'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:25'
-updated_date: '2026-05-07 00:00'
+updated_date: '2026-05-07 22:21'
 labels:
   - 62-impl
 dependencies: []

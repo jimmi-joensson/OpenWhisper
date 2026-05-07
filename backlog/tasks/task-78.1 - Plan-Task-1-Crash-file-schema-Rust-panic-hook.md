@@ -1,11 +1,11 @@
 ---
 id: TASK-78.1
 title: 'Plan Task 1: Crash file schema + Rust panic hook'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-04 06:16'
-updated_date: '2026-05-07 16:44'
+updated_date: '2026-05-07 22:22'
 labels:
   - 78-impl
 milestone: m-1

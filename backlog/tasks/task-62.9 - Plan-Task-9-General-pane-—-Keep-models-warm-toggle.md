@@ -1,10 +1,10 @@
 ---
 id: TASK-62.9
 title: 'Plan Task 9: General pane — Keep models warm toggle'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:26'
-updated_date: '2026-05-07 00:00'
+updated_date: '2026-05-07 22:21'
 labels:
   - 62-impl
 dependencies: []

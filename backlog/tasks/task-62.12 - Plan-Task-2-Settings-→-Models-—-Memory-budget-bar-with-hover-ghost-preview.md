@@ -1,10 +1,10 @@
 ---
 id: TASK-62.12
 title: 'Plan Task 2: Settings → Models — Memory budget bar with hover-ghost preview'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-07 14:00'
-updated_date: '2026-05-07 22:00'
+updated_date: '2026-05-07 22:21'
 labels:
   - 62-impl
 dependencies: []

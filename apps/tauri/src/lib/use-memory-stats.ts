@@ -91,13 +91,18 @@ export function externalClaim(models: ModelMemoryRow[]): number {
   return total;
 }
 
-/// True when the recognizer model is currently resident — Loaded,
-/// Active, or transitioning into/out of resident state. Used by the
-/// RSS breakdown estimator to decide whether to attribute a
-/// Parakeet-weights segment.
-export function isRecognizerResident(models: ModelMemoryRow[]): boolean {
+/// True when the recognizer model is currently resident *inside* this
+/// process — Loaded / Active / mid-transition AND `in_process === true`.
+/// On Mac the recognizer runs on the ANE in a separate pool, so this
+/// stays false even while the model is fully loaded. The RSS breakdown
+/// estimator gates the Parakeet-weights segment on this so the bar
+/// doesn't claim ANE-resident weights are inside RSS.
+export function isRecognizerInProcessResident(
+  models: ModelMemoryRow[],
+): boolean {
   for (const m of models) {
     if (m.label !== "recognizer") continue;
+    if (!m.in_process) return false;
     return (
       m.state === "Loaded" ||
       m.state === "Active" ||
@@ -116,28 +121,28 @@ export interface RssBreakdownMb {
 }
 
 /// V1 placeholder estimator — splits process RSS into the four
-/// canonical segments the design expects. Returns megabytes.
+/// canonical segments the design expects. Returns megabytes summing
+/// (modulo rounding) to `rssMb`.
 ///
-/// Parakeet weights are attributed at a static 612 MB when the
-/// recognizer is resident, 0 otherwise (TASK-62.7's per-model RAM
-/// attribution will replace this with a real number once it lands).
-/// Audio buffers and caches are fixed-ish baselines; app shell
-/// soaks the residual with a 100 MB floor to keep the segment
-/// rendering even on very low RSS readings (cold start before any
-/// model is loaded). When the floor clamps, the segment sum can
-/// exceed `rssMb` slightly — the pane footer already advertises
-/// that these are estimates.
+/// Parakeet weights take a static 612 MB segment ONLY when the
+/// recognizer is in-process resident (Windows shape). On Mac the
+/// weights live in the ANE pool outside RSS, so the segment drops
+/// to zero and the per-model breakdown bar below this one carries
+/// the ANE attribution. Audio buffers / app shell / caches share
+/// the non-Parakeet residual at 28 / 56 / 16 — ratios derived from
+/// the design's Windows-shape fixture (142 / 286 / 84 of the 512 MB
+/// non-Parakeet residual at rss=1100 MB). Proportional rather than
+/// fixed so the segments stay honest at any RSS — including the
+/// ~110 MB Mac case where fixed baselines would oversaturate.
 export function breakdownEstimate(
   rssMb: number,
-  recognizerLoaded: boolean,
+  recognizerInProcessResident: boolean,
 ): RssBreakdownMb {
-  const parakeetMb = recognizerLoaded ? 612 : 0;
-  const audioBuffersMb = 142;
-  const cachesMb = 84;
-  const appShellMb = Math.max(
-    100,
-    rssMb - parakeetMb - audioBuffersMb - cachesMb,
-  );
+  const parakeetMb = recognizerInProcessResident ? 612 : 0;
+  const remainder = Math.max(0, rssMb - parakeetMb);
+  const audioBuffersMb = Math.round(remainder * 0.28);
+  const cachesMb = Math.round(remainder * 0.16);
+  const appShellMb = Math.max(0, remainder - audioBuffersMb - cachesMb);
   return { parakeetMb, audioBuffersMb, appShellMb, cachesMb };
 }
 

@@ -538,4 +538,62 @@ test.describe("diagnostics pane", () => {
       page.getByTestId("diagnostics-rss-segment-shell"),
     ).toBeVisible();
   });
+
+  test("RSS breakdown drops Parakeet segment when recognizer is ANE-resident (Mac)", async ({
+    page,
+  }) => {
+    // Regression for the Mac inconsistency: with the recognizer loaded
+    // on the ANE, the previous estimator hard-coded 612 MB Parakeet
+    // weights inside a ~110 MB process RSS — segments visibly
+    // contradicted the "0.11 GB resident" readout. Per the design,
+    // RSS breakdown shows what's INSIDE RSS only; ANE weights belong
+    // in the per-model breakdown bar below this one.
+    await page.goto("/");
+    await setMemoryStats(page, {
+      system: NORMAL_SYSTEM,
+      process: {
+        rss_bytes: 110 * MB,
+        peak_rss_bytes: 110 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Loaded",
+          estimated_rss_bytes: 0,
+          claimed_bytes: 461 * MB,
+          in_process: false,
+        },
+      ],
+    });
+    await page.getByTestId("sidebar-item-diagnostics").click();
+
+    await expect(
+      page.getByTestId("diagnostics-rss-breakdown"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
+    ).toHaveCount(0);
+    // Audio + Shell + Caches still render, summing to RSS.
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-audio"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-shell"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-caches"),
+    ).toBeVisible();
+    const pctValues = await Promise.all(
+      ["audio", "shell", "caches"].map(async (kind) => {
+        const txt = await page
+          .getByTestId(`diagnostics-rss-segment-${kind}-pct`)
+          .innerText();
+        return parseInt(txt.replace(/%$/, ""), 10);
+      }),
+    );
+    const sum = pctValues.reduce((a, b) => a + b, 0);
+    expect(sum).toBeGreaterThanOrEqual(99);
+    expect(sum).toBeLessThanOrEqual(101);
+  });
 });

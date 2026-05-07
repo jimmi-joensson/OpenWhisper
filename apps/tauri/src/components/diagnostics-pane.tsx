@@ -3,7 +3,7 @@ import {
   RSS_SERIES_LEN,
   breakdownEstimate,
   externalClaim,
-  isRecognizerResident,
+  isRecognizerInProcessResident,
   useMemoryStats,
   type LifecycleState,
   type ModelMemoryRow,
@@ -778,8 +778,8 @@ function RSSBreakdown({
   models: ModelMemoryRow[];
 }) {
   const rssMb = Math.round(rssBytes / (1024 * 1024));
-  const recognizerLoaded = isRecognizerResident(models);
-  const est = breakdownEstimate(rssMb, recognizerLoaded);
+  const recognizerInProcess = isRecognizerInProcessResident(models);
+  const est = breakdownEstimate(rssMb, recognizerInProcess);
   // Order matches the design (largest expected → smallest).
   // Color tokens match doc-43 §"OW RSS Breakdown — segment composition".
   const parts: RSSBreakdownPart[] = [

@@ -505,8 +505,12 @@ mod tests {
 
     #[test]
     fn redact_strips_runtime_home_when_set() {
+        // home_dir() reads HOME on Unix, USERPROFILE on Windows.
+        // Set the platform-correct var so this test exercises the
+        // runtime-home substitution branch on both platforms.
+        let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         unsafe {
-            std::env::set_var("HOME", "/var/myhome");
+            std::env::set_var(home_var, "/var/myhome");
         }
         let out = redact("crash inside /var/myhome/secret");
         assert_eq!(out, "crash inside <HOME>/secret");

@@ -7,13 +7,15 @@ test.describe("sidebar nav", () => {
     await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
 
-    // Click Diagnostics — debug content visible, sidebar still shows the three routes.
+    // Click Diagnostics — pane visible, sidebar still shows the three routes.
     await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveAttribute(
       "aria-current",
       "page",
     );
-    await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Diagnostics" }),
+    ).toBeVisible();
     await expect(page.getByTestId("sidebar-item-home")).toBeVisible();
     await expect(page.getByTestId("sidebar-item-settings")).toBeVisible();
 
@@ -117,14 +119,18 @@ test.describe("scroll", () => {
     });
     expect(scrolled).toBeGreaterThan(0);
 
-    await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
+    // Footer caveat lives at the very bottom of the diagnostics pane;
+    // scrolling to the end brings it into view.
+    await expect(
+      page.getByText(/Per-model RAM is an RSS-delta estimate/),
+    ).toBeInViewport();
   });
 
-  test("transcript Card visible without scroll at default 720x820", async ({ page }) => {
+  test("Memory card visible without scroll at default 720x820", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 820 });
     await page.goto("/");
     await page.getByTestId("sidebar-item-diagnostics").click();
-    await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
+    await expect(page.getByText("Memory", { exact: true })).toBeInViewport();
   });
 });
 

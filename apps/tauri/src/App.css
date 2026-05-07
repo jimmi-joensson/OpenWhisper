@@ -720,3 +720,227 @@ body[data-platform="macos"] .ow-sidebar {
 [data-slot="switch"][data-checked] {
   background-color: var(--info);
 }
+
+/* Diagnostics route. T3 surface — section reveals only, no idle motion.
+   Sparkline + readouts + breakdown bar driven by `useMemoryStats`. */
+.ow-diagnostics {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+}
+
+.ow-diagnostics__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ow-diagnostics__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ow-diagnostics__sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.ow-diagnostics__card {
+  width: 100%;
+}
+
+.ow-diagnostics__card-title {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__caption {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__readout {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ow-diagnostics__readout-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__readout-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.ow-diagnostics__readout-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.05;
+  color: var(--foreground);
+}
+
+.ow-diagnostics__readout[data-emphasised="true"] .ow-diagnostics__readout-value {
+  font-size: 24px;
+}
+
+.ow-diagnostics__readout-unit {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__readout-sub {
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__spark {
+  width: 100%;
+  height: 96px;
+  display: block;
+}
+
+.ow-diagnostics__breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ow-diagnostics__breakdown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.ow-diagnostics__breakdown-total {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__breakdown-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-sunken-strong);
+}
+
+.ow-diagnostics__breakdown-seg {
+  display: block;
+  height: 100%;
+}
+
+.ow-diagnostics__breakdown-seg[data-kind="model"] {
+  background: var(--info);
+}
+
+.ow-diagnostics__breakdown-seg[data-kind="model"] + .ow-diagnostics__breakdown-seg[data-kind="model"] {
+  border-left: 1px solid var(--background);
+  background: color-mix(in oklch, var(--info) 65%, var(--background));
+}
+
+.ow-diagnostics__breakdown-seg[data-kind="other"] {
+  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+  border-left: 1px solid var(--background);
+}
+
+.ow-diagnostics__breakdown-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ow-diagnostics__breakdown-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__breakdown-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ow-diagnostics__breakdown-swatch[data-kind="model"] {
+  background: var(--info);
+}
+
+.ow-diagnostics__breakdown-swatch[data-kind="other"] {
+  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+}
+
+.ow-diagnostics__breakdown-label {
+  color: var(--foreground);
+}
+
+.ow-diagnostics__breakdown-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+}
+
+.ow-diagnostics__breakdown-unit {
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.ow-diagnostics__error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--destructive);
+}
+
+.ow-diagnostics__footer {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__footer-tag {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9.5px;
+  margin-right: 6px;
+  opacity: 0.85;
+}

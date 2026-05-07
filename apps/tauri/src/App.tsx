@@ -32,8 +32,6 @@ function detectPlatform(): Platform {
 }
 
 function App() {
-  const [coreVersion, setCoreVersion] = useState<string | null>(null);
-  const [coreError, setCoreError] = useState<string | null>(null);
   const [route, setRoute] = useState<Route>("home");
   const [settingsPane, setSettingsPane] = useState<SettingsPaneId>("general");
   const platform = detectPlatform();
@@ -85,12 +83,6 @@ function App() {
     dictation.errorMessage.startsWith("recognizer load")
       ? dictation.errorMessage
       : null;
-
-  useEffect(() => {
-    invoke<string>("core_version")
-      .then(setCoreVersion)
-      .catch((e) => setCoreError(String(e)));
-  }, []);
 
   // ⌘, switches the in-window route to Settings. Settings is no longer a
   // separate window — it's a routed view inside the main window, so the
@@ -211,26 +203,7 @@ function App() {
           <main className="ow-app__body">
             {route === "settings" && <SettingsShell active={settingsPane} />}
             {route === "diagnostics" && (
-              <DiagnosticsPane
-                phase={dictation.phase}
-                status={dictation.status}
-                levels={dictation.levels}
-                level={dictation.level}
-                elapsed={dictation.elapsed}
-                samples={dictation.samples}
-                transcript={dictation.transcript}
-                confidence={dictation.confidence}
-                statusMessage={dictation.statusMessage}
-                errorMessage={dictation.errorMessage}
-                canToggle={dictation.canToggle}
-                isRecording={dictation.isRecording}
-                downloadBytesDone={dictation.downloadBytesDone}
-                downloadBytesTotal={dictation.downloadBytesTotal}
-                platform={platform}
-                onToggle={() => void dictation.toggle()}
-                coreVersion={coreVersion}
-                coreError={coreError}
-              />
+              <DiagnosticsPane platform={platform} />
             )}
             {route === "home" && (
               <>

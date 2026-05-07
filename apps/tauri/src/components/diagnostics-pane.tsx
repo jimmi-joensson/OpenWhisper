@@ -1,280 +1,341 @@
-import type { ReactNode } from "react";
-import type { PillStatus } from "../lib/pill-state";
+import { useMemo } from "react";
 import {
-  PHASE_DONE,
-  PHASE_ERROR,
-  PHASE_IDLE,
-  PHASE_LOADING_MODEL,
-  PHASE_RECORDING,
-  PHASE_TRANSCRIBING,
-} from "../lib/dictation";
+  RSS_SERIES_LEN,
+  useMemoryStats,
+  type ModelMemoryRow,
+} from "../lib/use-memory-stats";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
-import { LevelMeter } from "./level-meter";
-import { RecordButton } from "./record-button";
 
 export type Platform = "macos" | "windows";
 
 export interface DiagnosticsPaneProps {
-  title?: string;
-  phase?: number;
-  status?: PillStatus;
-  levels?: number[];
-  level?: number;
-  elapsed?: number;
-  samples?: number;
-  transcript?: string;
-  confidence?: number;
-  statusMessage?: string;
-  errorMessage?: string;
-  canToggle?: boolean;
-  isRecording?: boolean;
-  downloadBytesDone?: number;
-  downloadBytesTotal?: number;
   platform?: Platform;
-  onToggle?: () => void;
-  coreVersion?: string | null;
-  coreError?: string | null;
 }
 
-const PHASE_NAMES: Record<number, string> = {
-  [PHASE_IDLE]: "idle",
-  [PHASE_LOADING_MODEL]: "loading_model",
-  [PHASE_RECORDING]: "recording",
-  [PHASE_TRANSCRIBING]: "transcribing",
-  [PHASE_DONE]: "done",
-  [PHASE_ERROR]: "error",
-};
-
-export function DiagnosticsPane({
-  phase = 0,
-  status = "idle",
-  levels = [],
-  level = 0,
-  elapsed = 0,
-  samples = 0,
-  transcript = "",
-  confidence = 0,
-  statusMessage = "",
-  errorMessage = "",
-  canToggle = true,
-  isRecording = false,
-  downloadBytesDone = 0,
-  downloadBytesTotal = 0,
-  platform = "macos",
-  onToggle,
-  coreVersion,
-  coreError,
-}: DiagnosticsPaneProps) {
-  const statusText =
-    statusMessage ||
-    (status === "recording"
-      ? "recording — tap again to stop"
-      : status === "transcribing"
-        ? "transcribing…"
-        : "idle");
+// Diagnostics — top-level route, sibling to Home and Settings. Today
+// covers Memory only; Performance counters (TASK-78.x) and Crash
+// reports (TASK-78.3) land into the same shell as additional sections
+// when their telemetry exists. Per the design (`backlog/docs/specs/`,
+// chats `chat9.md`), per-model load/release controls live under
+// Settings → Models — the budget bar there is the *decision* surface;
+// this pane is the *debugging* surface.
+export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
+  const { stats, rssSeries, error } = useMemoryStats();
 
   return (
-    <div
-      style={{
-        width: "100%",
-        maxWidth: 580,
-        margin: "0 auto",
-        padding: "20px 28px 24px",
-        color: "var(--foreground)",
-        fontFamily: "var(--font-sys)",
-      }}
-    >
-      <Section title="Rust ↔ React FFI">
-        <KV
-          k="message"
-          v={coreError ? `error: ${coreError}` : "Hello from openwhisper-core (Rust)"}
-        />
-        <KV k="version" v={coreVersion ?? "…"} />
-      </Section>
+    <div className="ow-diagnostics">
+      <header className="ow-diagnostics__header">
+        <h1 className="ow-diagnostics__title">Diagnostics</h1>
+        <p className="ow-diagnostics__sub">
+          OpenWhisper&#39;s memory at a glance. Per-model load and unload
+          live in Settings → Models.
+        </p>
+      </header>
 
-      <p
-        style={{
-          textAlign: "center",
-          color: "var(--muted-foreground)",
-          fontSize: 12.5,
-          margin: "14px 0",
-        }}
-      >
-        {platform === "macos"
-          ? "Right Command to toggle · Escape to cancel while recording"
-          : "Ctrl + Space anywhere · Escape to cancel while recording"}
+      <MemoryCard stats={stats} series={rssSeries} error={error} />
+
+      <p className="ow-diagnostics__footer">
+        <span className="ow-diagnostics__footer-tag">Note</span> Per-model
+        RAM is an RSS-delta estimate captured at load time. Concurrent
+        allocations and ANE-resident memory on macOS may not be
+        reflected. System-wide pressure lives in your OS&#39;s Activity
+        Monitor.
       </p>
-
-      <Section title="Dictation debug">
-        <KV k="platform" v={platform} />
-        <KV
-          k="phase"
-          v={`${phase} (${PHASE_NAMES[phase] ?? "unknown"})`}
-        />
-        <KV k="can_toggle" v={canToggle ? "true" : "false"} />
-        <KV k="is_recording" v={isRecording ? "true" : "false"} />
-        <KV k="level (raw)" v={level.toFixed(4)} />
-        <KV k="last error" v={errorMessage || "—"} />
-      </Section>
-
-      <Section title="Dictation (mic → Rust core → Parakeet)">
-        <KV k="status" v={statusText} />
-        <KV k="elapsed" v={status === "idle" ? "—" : `${elapsed.toFixed(1)} s`} />
-        <KV
-          k="samples"
-          v={status === "idle" ? "—" : `${samples.toLocaleString()} @ 16 kHz`}
-        />
-        <KV
-          k="confidence"
-          v={confidence > 0 ? confidence.toFixed(2) : "—"}
-        />
-
-        <div style={{ marginTop: 12 }}>
-          {phase === PHASE_LOADING_MODEL ? (
-            <ModelLoadProgress
-              done={downloadBytesDone}
-              total={downloadBytesTotal}
-            />
-          ) : (
-            <LevelMeter
-              bars={32}
-              levels={levels}
-              active={status}
-              height={36}
-              minHeight={4}
-              gap={2}
-              fill
-            />
-          )}
-        </div>
-
-        <div style={{ marginTop: 14 }}>
-          <RecordButton phase={phase} onClick={onToggle} />
-        </div>
-      </Section>
-
-      <Section title="transcript">
-        <div
-          className="ow-selectable"
-          style={{
-            background: "var(--transcript-bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            minHeight: 70,
-            maxHeight: 160,
-            overflowY: "auto",
-            padding: "10px 12px",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12.5,
-            color: "var(--foreground)",
-            whiteSpace: "pre-wrap",
-            lineHeight: 1.45,
-          }}
-        >
-          {transcript || (status === "idle" ? "—" : "…")}
-        </div>
-      </Section>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+interface MemoryCardProps {
+  stats: ReturnType<typeof useMemoryStats>["stats"];
+  series: number[];
+  error: string | null;
+}
+
+function MemoryCard({ stats, series, error }: MemoryCardProps) {
+  const rss = stats?.process.rss_bytes ?? 0;
+  const peak = stats?.process.peak_rss_bytes ?? 0;
+  const models = stats?.models ?? [];
+
   return (
-    <Card size="sm" className="mt-3.5">
+    <Card size="sm" className="ow-diagnostics__card">
       <CardHeader>
-        <CardTitle className="text-xs font-normal text-muted-foreground tracking-wide">
-          {title}
-        </CardTitle>
+        <CardTitle className="ow-diagnostics__card-title">Memory</CardTitle>
       </CardHeader>
-      <CardContent>{children}</CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-baseline justify-between gap-4">
+          <div className="flex items-baseline gap-7">
+            <Readout
+              label="OpenWhisper RSS"
+              value={formatBytes(rss).value}
+              unit={formatBytes(rss).unit}
+              sub={`peak ${formatBytes(peak).value} ${formatBytes(peak).unit}`}
+              emphasised
+            />
+            <Readout
+              label="Models loaded"
+              value={String(countLoaded(models))}
+              unit={countLoaded(models) === 1 ? "model" : "models"}
+              sub={`${models.length} registered`}
+            />
+          </div>
+          <span className="ow-diagnostics__caption">
+            Last {RSS_SERIES_LEN} s
+          </span>
+        </div>
+
+        <Sparkline data={series} />
+
+        <Breakdown rssBytes={rss} models={models} />
+
+        {error && (
+          <p
+            className="ow-diagnostics__error"
+            data-testid="diagnostics-error"
+          >
+            telemetry_get_memory failed: {error}
+          </p>
+        )}
+      </CardContent>
     </Card>
   );
 }
 
-// Visual complement to the `status:` KV row when phase=LOADING_MODEL. The
-// row already carries the human text ("downloading model… 234/487 MB (48%)"),
-// so this stays bar-only — determinate fill when Content-Length is known,
-// indeterminate stripe otherwise (or during post-download extract / session
-// load when bytes_total resets to 0).
-function ModelLoadProgress({
-  done,
-  total,
+function Readout({
+  label,
+  value,
+  unit,
+  sub,
+  emphasised,
 }: {
-  done: number;
-  total: number;
+  label: string;
+  value: string;
+  unit: string;
+  sub: string;
+  emphasised?: boolean;
 }) {
-  const determinate = total > 0;
-  const pct = determinate ? Math.min(100, (done / total) * 100) : 0;
-
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        height: 36,
-        justifyContent: "center",
-      }}
-    >
-      <div
-        style={{
-          height: 6,
-          background: "color-mix(in oklch, var(--muted) 70%, transparent)",
-          borderRadius: 3,
-          overflow: "hidden",
-          position: "relative",
-        }}
-      >
-        {determinate ? (
-          <div
-            style={{
-              width: `${pct}%`,
-              height: "100%",
-              background: "var(--primary)",
-              transition: "width 120ms linear",
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              width: "35%",
-              background:
-                "linear-gradient(90deg, transparent 0%, var(--primary) 50%, transparent 100%)",
-              animation: "ow-indeterminate 1.4s ease-in-out infinite",
-            }}
-          />
-        )}
+    <div className="ow-diagnostics__readout" data-emphasised={emphasised}>
+      <div className="ow-diagnostics__readout-label">{label}</div>
+      <div className="ow-diagnostics__readout-row">
+        <span
+          className="ow-diagnostics__readout-value"
+          data-testid={`diagnostics-readout-${slug(label)}`}
+        >
+          {value}
+        </span>
+        <span className="ow-diagnostics__readout-unit">{unit}</span>
       </div>
+      <div className="ow-diagnostics__readout-sub">{sub}</div>
     </div>
   );
 }
 
-function KV({ k, v }: { k: string; v: string }) {
+// 60-sample area sparkline. Discrete redraw on every poll — no
+// interpolated tween. Transform/opacity-only (per
+// openwhisper-animation-philosophy T3) and reduced-motion safe by
+// construction (no animation).
+function Sparkline({ data }: { data: number[] }) {
+  const w = 600;
+  const h = 96;
+  const padTop = 6;
+  const padBot = 4;
+
+  const path = useMemo(() => {
+    if (data.length < 2) return null;
+    const min = Math.min(...data);
+    const max = Math.max(...data);
+    const span = Math.max(1, max - min);
+    const usable = h - padTop - padBot;
+    const xs = data.map(
+      (_, i) => (i / (RSS_SERIES_LEN - 1)) * w,
+    );
+    const ys = data.map(
+      (v) => padTop + usable - ((v - min) / span) * usable,
+    );
+    const line = xs
+      .map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`)
+      .join(" ");
+    const fill = `${line} L ${xs[xs.length - 1].toFixed(1)} ${h} L ${xs[0].toFixed(1)} ${h} Z`;
+    return {
+      line,
+      fill,
+      lastX: xs[xs.length - 1],
+      lastY: ys[ys.length - 1],
+    };
+  }, [data]);
+
+  return (
+    <svg
+      className="ow-diagnostics__spark"
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label="OpenWhisper RSS over the last 60 seconds"
+    >
+      <defs>
+        <linearGradient id="ow-diag-spark-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--primary)" stopOpacity="0.32" />
+          <stop offset="100%" stopColor="var(--primary)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {path && (
+        <>
+          <path d={path.fill} fill="url(#ow-diag-spark-fill)" />
+          <path
+            d={path.line}
+            fill="none"
+            stroke="var(--primary)"
+            strokeWidth="1.6"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          <circle
+            cx={path.lastX}
+            cy={path.lastY}
+            r="2.6"
+            fill="var(--primary)"
+          />
+        </>
+      )}
+    </svg>
+  );
+}
+
+// Stacked horizontal bar — one segment per loaded model handle plus an
+// "Other" remainder covering everything we can't attribute (audio
+// buffers, app shell, caches, OS overhead). All values are real
+// bytes from `telemetry_get_memory`; we never invent finer
+// granularity than the registry exposes.
+function Breakdown({
+  rssBytes,
+  models,
+}: {
+  rssBytes: number;
+  models: ModelMemoryRow[];
+}) {
+  const segments = useMemo(() => buildSegments(rssBytes, models), [
+    rssBytes,
+    models,
+  ]);
+  const total = segments.reduce((s, p) => s + p.value, 0);
+
   return (
     <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "110px 1fr",
-        gap: 8,
-        fontFamily: "var(--font-mono)",
-        fontSize: 12,
-        lineHeight: 1.7,
-        color: "var(--foreground)",
-      }}
+      className="ow-diagnostics__breakdown"
+      data-testid="diagnostics-breakdown"
     >
-      <span style={{ textAlign: "right", color: "var(--muted-foreground)" }}>{k}:</span>
-      <span
-        className="ow-selectable"
-        style={{
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
-      >
-        {v}
-      </span>
+      <div className="ow-diagnostics__breakdown-header">
+        <span className="ow-diagnostics__caption">Resident breakdown</span>
+        <span className="ow-diagnostics__breakdown-total">
+          {formatBytes(rssBytes).value} {formatBytes(rssBytes).unit} resident
+        </span>
+      </div>
+      <div className="ow-diagnostics__breakdown-bar">
+        {segments.map((seg, i) => (
+          <span
+            key={seg.key}
+            className="ow-diagnostics__breakdown-seg"
+            data-kind={seg.kind}
+            style={{
+              flexGrow: total > 0 ? seg.value : i === 0 ? 1 : 0,
+              flexShrink: 0,
+              flexBasis: 0,
+            }}
+            title={`${seg.label}: ${formatBytes(seg.value).value} ${formatBytes(seg.value).unit}`}
+          />
+        ))}
+      </div>
+      <ul className="ow-diagnostics__breakdown-legend">
+        {segments.map((seg) => (
+          <li
+            key={seg.key}
+            className="ow-diagnostics__breakdown-item"
+            data-kind={seg.kind}
+            data-testid={`diagnostics-segment-${seg.key}`}
+          >
+            <span
+              className="ow-diagnostics__breakdown-swatch"
+              data-kind={seg.kind}
+            />
+            <span className="ow-diagnostics__breakdown-label">
+              {seg.label}
+            </span>
+            <span className="ow-diagnostics__breakdown-value">
+              {formatBytes(seg.value).value}
+              <span className="ow-diagnostics__breakdown-unit">
+                {" "}
+                {formatBytes(seg.value).unit}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
+}
+
+interface Segment {
+  key: string;
+  label: string;
+  value: number;
+  kind: "model" | "other";
+}
+
+function buildSegments(rssBytes: number, models: ModelMemoryRow[]): Segment[] {
+  const modelSegs: Segment[] = models
+    .filter((m) => m.estimated_rss_bytes > 0)
+    .map((m) => ({
+      key: `model-${m.label}`,
+      label: prettyLabel(m.label),
+      value: m.estimated_rss_bytes,
+      kind: "model" as const,
+    }));
+  const sumModels = modelSegs.reduce((s, m) => s + m.value, 0);
+  // Saturating subtraction — the per-model deltas are RSS-delta
+  // *snapshots* taken at load time. The live RSS can dip below the
+  // sum (e.g. after compaction), which would otherwise render as a
+  // negative "Other" stripe. Floor at 0 and trust the segments.
+  const other = Math.max(0, rssBytes - sumModels);
+  return [
+    ...modelSegs,
+    { key: "other", label: "Other", value: other, kind: "other" },
+  ];
+}
+
+function countLoaded(models: ModelMemoryRow[]): number {
+  return models.filter(
+    (m) =>
+      m.state === "Loaded" ||
+      m.state === "Active" ||
+      m.state === "Releasing",
+  ).length;
+}
+
+function prettyLabel(label: string): string {
+  // "recognizer" → "Recognizer", "cleanup-llm" → "Cleanup LLM"
+  return label
+    .split(/[-_]/)
+    .map((part) => {
+      if (part.length <= 3 && part === part.toLowerCase()) {
+        // "llm", "ane" — keep as upper acronym
+        return part.toUpperCase();
+      }
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
+function formatBytes(bytes: number): { value: string; unit: "B" | "KB" | "MB" | "GB" } {
+  if (bytes < 1024) return { value: String(bytes), unit: "B" };
+  if (bytes < 1024 * 1024) {
+    return { value: (bytes / 1024).toFixed(0), unit: "KB" };
+  }
+  if (bytes < 1024 * 1024 * 1024) {
+    return { value: (bytes / (1024 * 1024)).toFixed(0), unit: "MB" };
+  }
+  return { value: (bytes / (1024 * 1024 * 1024)).toFixed(2), unit: "GB" };
+}
+
+function slug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }

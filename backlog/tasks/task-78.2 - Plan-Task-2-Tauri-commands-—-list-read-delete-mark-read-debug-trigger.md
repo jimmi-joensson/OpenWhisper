@@ -1,15 +1,16 @@
 ---
 id: TASK-78.2
 title: 'Plan Task 2: Tauri commands — list, read, delete, mark-read, debug-trigger'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-05-04 06:16'
-updated_date: '2026-05-04 08:03'
+updated_date: '2026-05-07 16:46'
 labels:
   - 78-impl
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-78
-milestone: m-1
 ordinal: 36000
 ---
 

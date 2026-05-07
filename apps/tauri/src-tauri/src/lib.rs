@@ -22,6 +22,7 @@ use tauri::LogicalPosition;
 use tauri::PhysicalPosition;
 
 mod behavior;
+mod crashes;
 mod focus;
 mod fullscreen;
 mod hotkey;
@@ -945,59 +946,29 @@ pub fn run() {
         .setup(|app| {
             // Crash inspector — install panic hook BEFORE any other init
             // that could itself panic, so the very first capture path is
-            // already armed. Resolve the dump dir from the OS-correct
-            // app log dir (Library/Logs on Mac, %LOCALAPPDATA%\...\logs
-            // on Windows) or, in debug + test builds, an env-var
-            // override that Playwright (TASK-78.7) seeds with a temp dir.
+            // already armed. The dir resolver in `crashes::` honors the
+            // debug-only OPENWHISPER_CRASH_DIR_OVERRIDE env var that
+            // Playwright (TASK-78.7) uses to seed fixtures into a temp
+            // dir; release builds always go through app_log_dir().
             // Resolution failure degrades to "no crash files" — never
             // blocks boot.
-            {
-                let dir: Option<std::path::PathBuf> = {
-                    #[cfg(debug_assertions)]
-                    {
-                        std::env::var("OPENWHISPER_CRASH_DIR_OVERRIDE")
-                            .ok()
-                            .and_then(|s| {
-                                let trimmed = s.trim();
-                                if trimmed.is_empty() {
-                                    None
-                                } else {
-                                    Some(std::path::PathBuf::from(trimmed))
-                                }
-                            })
-                            .or_else(|| {
-                                app.path()
-                                    .app_log_dir()
-                                    .ok()
-                                    .map(|p| p.join("crashes"))
-                            })
+            match crashes::resolve_crashes_dir(app.handle()) {
+                Some(dir) => match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        openwhisper_core::crashes::install_panic_hook(
+                            dir,
+                            env!("CARGO_PKG_VERSION").to_string(),
+                        );
                     }
-                    #[cfg(not(debug_assertions))]
-                    {
-                        app.path()
-                            .app_log_dir()
-                            .ok()
-                            .map(|p| p.join("crashes"))
+                    Err(e) => {
+                        eprintln!(
+                            "[crashes] mkdir {} failed: {e}",
+                            dir.display(),
+                        );
                     }
-                };
-                match dir {
-                    Some(dir) => match std::fs::create_dir_all(&dir) {
-                        Ok(()) => {
-                            openwhisper_core::crashes::install_panic_hook(
-                                dir,
-                                env!("CARGO_PKG_VERSION").to_string(),
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[crashes] mkdir {} failed: {e}",
-                                dir.display(),
-                            );
-                        }
-                    },
-                    None => {
-                        eprintln!("[crashes] no log dir resolved; panic hook disabled");
-                    }
+                },
+                None => {
+                    eprintln!("[crashes] no log dir resolved; panic hook disabled");
                 }
             }
 
@@ -1387,6 +1358,13 @@ pub fn run() {
             stats_get_summary,
             stats_reset,
             telemetry_get_memory,
+            crashes::crashes_list,
+            crashes::crashes_read,
+            crashes::crashes_delete,
+            crashes::crashes_delete_all,
+            crashes::crashes_mark_read,
+            crashes::crashes_unread_count,
+            crashes::crashes_debug_trigger_panic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

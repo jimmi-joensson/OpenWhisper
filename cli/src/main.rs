@@ -14,6 +14,8 @@
 //!   the desktop's Audio settings pane.
 //! - `recognizer-info` — print the active engine, model version, and
 //!   execution provider after the recognizer loads.
+//! - `memory` — print the running process's RSS + peak. Same readout
+//!   the Diagnostics → Memory pane consumes.
 //! - `crash-dump` — list / read crash files (placeholder until
 //!   TASK-78 lands a concrete reader).
 //!
@@ -50,6 +52,8 @@ enum Command {
     EnumerateDevices,
     /// Print active engine, model version, and execution provider.
     RecognizerInfo,
+    /// Print the running process's RSS + peak.
+    Memory,
     /// Inspect on-disk crash dumps (placeholder until TASK-78).
     CrashDump(commands::crash_dump::Args),
 }
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
         Command::Transcribe(args) => commands::transcribe::run(args, cli.json),
         Command::EnumerateDevices => commands::enumerate_devices::run(cli.json),
         Command::RecognizerInfo => commands::recognizer_info::run(cli.json),
+        Command::Memory => commands::memory::run(cli.json),
         Command::CrashDump(args) => commands::crash_dump::run(args, cli.json),
     }
 }

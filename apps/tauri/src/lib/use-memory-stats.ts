@@ -63,31 +63,46 @@ export function useMemoryStats(): UseMemoryStatsResult {
   useEffect(() => {
     let cancelled = false;
 
-    const fetchStats = async () => {
+    // Two refresh paths, deliberately separate.
+    //
+    // - Poll: fires once per `POLL_MS`. Pushes the latest RSS to the
+    //   sparkline ring AND updates the readout/breakdown stats. This
+    //   is the only writer of the time-series — guarantees a fixed
+    //   1 Hz sample cadence even when state events flurry.
+    // - Event: fires on every `model-state-changed`. Refreshes the
+    //   readout/breakdown stats (so the State column and breakdown
+    //   segments update instantly between polls) but does NOT push
+    //   to the ring. Without this split, a Loaded→Active→Loaded→
+    //   Releasing→Loaded burst on stop-recording would compress
+    //   several "samples" into a sub-second window and the
+    //   sparkline visibly speeds up while the burst clears.
+    const fetchStats = async (pushToRing: boolean) => {
       try {
         const next = await invoke<MemoryStats>("telemetry_get_memory");
         if (cancelled) return;
         setStats(next);
         setError(null);
 
-        const ring = seriesRef.current;
-        ring.push(next.process.rss_bytes);
-        if (ring.length > RSS_SERIES_LEN) {
-          ring.splice(0, ring.length - RSS_SERIES_LEN);
+        if (pushToRing) {
+          const ring = seriesRef.current;
+          ring.push(next.process.rss_bytes);
+          if (ring.length > RSS_SERIES_LEN) {
+            ring.splice(0, ring.length - RSS_SERIES_LEN);
+          }
+          setRssSeries([...ring]);
         }
-        setRssSeries([...ring]);
       } catch (e) {
         if (cancelled) return;
         setError(String(e));
       }
     };
 
-    void fetchStats();
-    const id = window.setInterval(fetchStats, POLL_MS);
+    void fetchStats(true);
+    const id = window.setInterval(() => fetchStats(true), POLL_MS);
 
     let unlisten: UnlistenFn | undefined;
     void listen<ModelStateChangedPayload>("model-state-changed", () => {
-      void fetchStats();
+      void fetchStats(false);
     }).then((fn) => {
       if (cancelled) {
         fn();

@@ -4,12 +4,16 @@ title: Model memory telemetry + lifecycle foundation
 status: To Do
 assignee: []
 created_date: '2026-04-30 22:16'
-updated_date: '2026-05-04 08:03'
+updated_date: '2026-05-07 14:03'
 labels: []
 dependencies: []
 documentation:
   - backlog/docs/specs/2026-05-01-model-lifecycle-telemetry.md
   - backlog/docs/plans/2026-05-01-model-lifecycle-telemetry.md
+  - >-
+    backlog/docs/specs/doc-43 -
+    Diagnostics-Models-design-polish-from-2026-05-07-handoff.md
+  - backlog/docs/plans/doc-44 - Diagnostics-Models-design-polish-—-plan.md
 priority: high
 ordinal: 1000
 ---

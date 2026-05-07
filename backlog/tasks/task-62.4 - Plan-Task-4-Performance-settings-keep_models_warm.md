@@ -24,6 +24,7 @@ ordinal: 7000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: 50e4a30.
 - New `core::settings::PerformanceSettings { keep_models_warm: bool }` (Default: false). `SettingsFile.performance` field added; all 5 sibling save_* functions thread it through to avoid clobbering on parallel saves. `keep_models_warm()` lock-free reader + `set_keep_models_warm_cache(value)` setter + `current_/load_/save_performance_settings`.
 - `core::model_lifecycle::apply_keep_warm(value)` walks a process-global `Vec<Weak<IdleControl>>` registry and flips each handle's `keep_warm` AtomicBool. Dead Weaks are pruned on every sweep (via `retain`). Registry-detection of dropped handles uses `Weak::ptr_eq` so the test stays correct under parallel execution.
 - Refactored `IdleControl` to separate `configured_timeout` (user's setting; `set_idle_timeout` writes it) from `keep_warm` (cluster override; `apply_keep_warm` writes it). `effective_timeout()` combines them — flipping keep-warm OFF restores the original user timeout instead of MAX-stickiness.

@@ -8,7 +8,6 @@ import {
 import { type CrashFile, type UseCrashesResult } from "../lib/use-crashes";
 import {
   formatAbsoluteUtc,
-  formatCrashAsMarkdown,
   formatDuration,
 } from "../lib/crash-markdown";
 import { buildGitHubIssueUrl } from "../lib/crash-github";
@@ -22,8 +21,6 @@ const GITHUB_REPO = "OpenWhisper";
 // `crash.app_version`. Falls back gracefully if missing.
 const APP_VERSION =
   (import.meta.env.VITE_APP_VERSION as string | undefined) ?? "dev";
-
-const COPIED_FLASH_MS = 1200;
 
 export interface CrashDetailSheetProps {
   openId: string | null;
@@ -48,7 +45,6 @@ export function CrashDetailSheet({
   const [crash, setCrash] = useState<CrashFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [eventsOpen, setEventsOpen] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "ok" | "fail">("idle");
   const open = openId !== null;
 
   useEffect(() => {
@@ -56,7 +52,6 @@ export function CrashDetailSheet({
       setCrash(null);
       setError(null);
       setEventsOpen(false);
-      setCopyState("idle");
       return;
     }
     let cancelled = false;
@@ -76,17 +71,22 @@ export function CrashDetailSheet({
     };
   }, [openId, read, markRead]);
 
-  const onCopy = async () => {
+  const onReportOnGitHub = () => {
     if (!crash) return;
-    const md = formatCrashAsMarkdown(crash);
-    try {
-      await navigator.clipboard.writeText(md);
-      setCopyState("ok");
-      window.setTimeout(() => setCopyState("idle"), COPIED_FLASH_MS);
-    } catch {
-      setCopyState("fail");
-      window.setTimeout(() => setCopyState("idle"), COPIED_FLASH_MS);
-    }
+    const url = buildGitHubIssueUrl(crash, {
+      owner: GITHUB_OWNER,
+      repo: GITHUB_REPO,
+      appVersion: crash.app_version || APP_VERSION,
+    });
+    // Goes through `tauri-plugin-opener`'s open_url command —
+    // covered by `opener:default` capability so no per-URL scope
+    // wiring is required (vs. open_path which we shell out for).
+    // Failure is logged + silently swallowed; the user can still
+    // get the report via `Copy backtrace` + the inline identity
+    // block, or via `openwhisper crash-dump` from the CLI.
+    void invoke("plugin:opener|open_url", { url }).catch((e) => {
+      console.error("[plugin:opener|open_url]", e);
+    });
   };
 
   const onCopyBacktrace = async () => {
@@ -101,23 +101,6 @@ export function CrashDetailSheet({
   const onOpenFolder = () => {
     void invoke("crashes_open_folder").catch((e) => {
       console.error("[crashes_open_folder]", e);
-    });
-  };
-
-  const onReportOnGitHub = () => {
-    if (!crash) return;
-    const url = buildGitHubIssueUrl(crash, {
-      owner: GITHUB_OWNER,
-      repo: GITHUB_REPO,
-      appVersion: crash.app_version || APP_VERSION,
-    });
-    // Goes through `tauri-plugin-opener`'s open_url command, which
-    // is in `opener:default` capability — no per-URL scope wiring
-    // needed (vs. `open_path` which we shell out for). Failure is
-    // logged + silently swallowed; the user's fallback is the
-    // Copy GitHub-ready report button next to it.
-    void invoke("plugin:opener|open_url", { url }).catch((e) => {
-      console.error("[plugin:opener|open_url]", e);
     });
   };
 
@@ -184,17 +167,10 @@ export function CrashDetailSheet({
               <button
                 type="button"
                 className="ow-crashes__sheet-primary"
-                data-testid="crash-detail-copy"
-                onClick={onCopy}
+                data-testid="crash-detail-report-github"
+                onClick={onReportOnGitHub}
               >
-                <span>
-                  {copyState === "ok"
-                    ? "✓ Copied"
-                    : copyState === "fail"
-                      ? "Copy failed — try again"
-                      : "Copy GitHub-ready report"}
-                </span>
-                <span className="ow-crashes__sheet-shortcut">⌘C</span>
+                <span>Report on GitHub</span>
               </button>
               <div className="ow-crashes__sheet-secondary">
                 <button
@@ -204,14 +180,6 @@ export function CrashDetailSheet({
                   onClick={onOpenFolder}
                 >
                   Open crash folder
-                </button>
-                <button
-                  type="button"
-                  className="ow-crashes__sheet-ghost"
-                  data-testid="crash-detail-report-github"
-                  onClick={onReportOnGitHub}
-                >
-                  Report on GitHub
                 </button>
                 <span className="ow-crashes__sheet-spacer" />
                 <button

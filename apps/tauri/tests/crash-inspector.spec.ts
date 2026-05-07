@@ -397,39 +397,11 @@ test.describe("crash inspector — detail sheet", () => {
       "frame 3",
     );
 
-    // Sticky footer keeps the primary Copy button visible regardless
-    // of scroll position. Visible-on-mount is the contract here.
-    await expect(page.getByTestId("crash-detail-copy")).toBeVisible();
+    // Sticky footer keeps the primary Report on GitHub button + the
+    // secondary row visible regardless of scroll position.
+    await expect(page.getByTestId("crash-detail-report-github")).toBeVisible();
     await expect(page.getByTestId("crash-detail-open-folder")).toBeVisible();
     await expect(page.getByTestId("crash-detail-delete")).toBeVisible();
-  });
-
-  test("Copy GitHub-ready report writes redacted markdown to clipboard", async ({
-    page,
-  }) => {
-    await openSheet(page, "200");
-
-    const copyBtn = page.getByTestId("crash-detail-copy");
-    await expect(copyBtn).toContainText("Copy GitHub-ready report");
-
-    await copyBtn.click();
-    await expect(copyBtn).toContainText("✓ Copied", { timeout: 2000 });
-
-    // Clipboard contents — assert the headline structure of the
-    // markdown (the formatter unit tests cover the full shape).
-    const clip = await page.evaluate(() => navigator.clipboard.readText());
-    expect(clip).toContain("**OpenWhisper crash report**");
-    expect(clip).toContain("- Version: 0.6.0");
-    expect(clip).toContain("- OS: macos (arm64)");
-    expect(clip).toContain("- When: 2026-05-04 14:33:21 UTC");
-    expect(clip).toContain("Backtrace");
-    expect(clip).toContain("Recent events (2)");
-
-    // Inline ✓ Copied flashes back to the resting label after the
-    // 1.2 s flash window closes.
-    await expect(copyBtn).toContainText("Copy GitHub-ready report", {
-      timeout: 3000,
-    });
   });
 
   test("Open crash folder invokes the Tauri command", async ({ page }) => {
@@ -443,9 +415,14 @@ test.describe("crash inspector — detail sheet", () => {
     expect(count).toBeGreaterThanOrEqual(1);
   });
 
-  test("Report on GitHub opens a prefilled issues URL", async ({ page }) => {
+  test("primary 'Report on GitHub' button opens the prefilled issues URL", async ({
+    page,
+  }) => {
     await openSheet(page, "350");
-    await page.getByTestId("crash-detail-report-github").click();
+    const primary = page.getByTestId("crash-detail-report-github");
+    await expect(primary).toContainText("Report on GitHub");
+    await primary.click();
+
     const calls = await page.evaluate(
       () =>
         (window as unknown as { __owOpenerOpenUrlCalls?: string[] })
@@ -457,8 +434,7 @@ test.describe("crash inspector — detail sheet", () => {
       /^https:\/\/github\.com\/jimmi-joensson\/OpenWhisper\/issues\/new\?/,
     );
     // Use URL parsing so `+`-encoded spaces in the body decode correctly
-    // (`decodeURIComponent` doesn't translate `+`, but
-    // URLSearchParams.get does).
+    // (URLSearchParams.get translates them; decodeURIComponent doesn't).
     const parsed = new URL(url);
     expect(parsed.searchParams.get("labels")).toBe("bug,crash");
     const title = parsed.searchParams.get("title")!;

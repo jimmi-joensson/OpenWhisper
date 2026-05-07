@@ -270,6 +270,19 @@ impl<T: Send + 'static> ModelHandle<T> {
             .expect("ModelHandle::last_load_rss_delta lock poisoned")
     }
 
+    /// Read-only borrow of the loaded model. Returns `None` when the
+    /// handle is `Unloaded` (or transitioning) — does NOT auto-load
+    /// and does NOT transition to `Active`. Used for cheap diagnostic
+    /// readouts (e.g. `Recognizer::active_ep`) that must not trigger
+    /// a 200–500 ms cold load just to render a label.
+    ///
+    /// Holds the inner mutex for the duration of the closure, so keep
+    /// `f` short — concurrent `use_with` callers will block.
+    pub fn try_inspect<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let inner = self.inner.lock().ok()?;
+        inner.as_ref().map(f)
+    }
+
     /// Update the idle timeout. Takes effect immediately for the next
     /// rearm; if currently `Loaded`, also re-arms with the new value
     /// so a "keep warm" → "release after 30 s" flip doesn't have to

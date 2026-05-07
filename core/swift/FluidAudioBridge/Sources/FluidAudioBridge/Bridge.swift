@@ -82,6 +82,26 @@ public func fab_free_string(_ ptr: UnsafeMutablePointer<CChar>?) {
     if let p = ptr { free(UnsafeMutableRawPointer(p)) }
 }
 
+/// Release the AsrManager + .mlmodelc held by FluidAudio so the
+/// Apple Neural Engine drops its weights and the process RSS
+/// returns to baseline. Idempotent — calling on an already-unloaded
+/// state is a no-op. Triggered by Rust's `FluidAudioBridge::Drop`
+/// which fires when `ModelHandle::unload()` releases the handle
+/// after the configured idle timeout (TASK-62.5).
+///
+/// Returns 0 unconditionally — there's no failure path that's
+/// useful to surface; nilling the references hands the resources
+/// to ARC and lets CoreML reclaim them on the next autorelease pool
+/// drain.
+@_cdecl("fab_unload")
+public func fab_unload() -> Int32 {
+    state.lock.lock()
+    state.asr = nil
+    state.loaded = false
+    state.lock.unlock()
+    return 0
+}
+
 /// Idempotent: download Parakeet v3 (first call) and load AsrManager.
 /// Returns 0 on success, nonzero on error (call `fab_last_error`).
 @_cdecl("fab_load")

@@ -6,29 +6,38 @@
 //! (TASK-62.8) reads `current_memory_estimate()` per registered handle
 //! to attribute the process RSS back to the models that caused it.
 //!
-//! ## Scope of this task (TASK-62.2)
+//! ## Async runtime
 //!
-//! Pure state machine, no async, no idle timer. Transitions are
-//! synchronous and run under a `Mutex` covering the state field; the
-//! loader closure runs *between* lock acquisitions so a long load
-//! doesn't block readers calling `state()` from the diagnostics poll.
+//! No async runtime is required. The idle timer is a single
+//! `std::thread::spawn`'d worker per handle, parked on a
+//! `std::sync::Condvar` with `wait_timeout`. The plan
+//! (`backlog/docs/plans/2026-05-01-model-lifecycle-telemetry.md`,
+//! TASK-62.3) explicitly permits the std::thread + condvar fallback
+//! for the recognizer's minutes-cadence timer; it avoids pulling
+//! Tokio into `core/` until TASK-63's cleanup-LLM async pipeline
+//! actually needs it. If a future task wires Tokio into `core/`, the
+//! timer can be migrated without changing the public surface
+//! (`with_idle_timeout`, `set_idle_timeout`).
 //!
-//! Idle timer + `set_idle_timeout` lands in TASK-62.3 (adds Tokio).
-//! Process-global registry + keep-warm hot-reload lands in TASK-62.4.
-//!
-//! ## Concurrency model (intentionally minimal here)
+//! ## Concurrency model
 //!
 //! - `load()` is single-flight against itself and idempotent — second
-//!   caller while a load is in flight gets a clear error
-//!   (`ErrLoadInFlight`); they retry once the loader has settled.
-//!   Proper condvar-style "await Loading" comes with the Tokio runtime
-//!   in 62.3.
+//!   caller while a load is in flight gets a clear error; they retry
+//!   once the loader has settled.
 //! - `use_with` serializes against itself via the `inner` mutex; only
 //!   one closure body runs at a time. Concurrent callers block on the
 //!   inner lock — no error.
-//! - `unload()` while `Active` is rejected (matches plan AC #4).
+//! - `unload()` while `Active` is rejected.
+//! - The idle timer thread races against `use_with` for the state
+//!   lock — whoever wins picks the legal transition. If the timer
+//!   wins, the handle goes Releasing → Unloaded and a subsequent
+//!   `use_with` simply auto-loads (re-runs the loader). If `use_with`
+//!   wins, the timer's `fire_unload` sees state≠Loaded and skips.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::telemetry::query_process_memory;
 
@@ -44,8 +53,8 @@ pub enum LifecycleState {
     /// build / mmap warmup). Transient — bracketed by exactly one
     /// `Loading → Loaded` or `Loading → Unloaded` (on loader failure).
     Loading,
-    /// Resident, idle, ready. Idle timer (TASK-62.3) is what walks
-    /// this back to `Releasing`; this task ships without one.
+    /// Resident, idle, ready. The idle timer fires here once the
+    /// configured `idle_timeout` elapses without a `use_with` call.
     Loaded,
     /// Currently servicing a `use_with` call. Idle timer is paused.
     Active,
@@ -54,12 +63,70 @@ pub enum LifecycleState {
     Releasing,
 }
 
+/// Inputs the idle timer thread reacts to. The timer thread sleeps on
+/// `cv` with `wait_timeout`; rearming bumps `deadline` and notifies;
+/// shutdown bumps `shutdown` and notifies. Drop ordering documented
+/// on `ShutdownSignal`.
+struct TimerCmd {
+    /// `Some(Instant)` = fire `unload()` at or after this time. `None`
+    /// = no fire armed; the timer thread waits indefinitely on `cv`.
+    deadline: Option<Instant>,
+    shutdown: bool,
+}
+
+/// Per-handle idle-timer config. Cloned by reference (Arc) into the
+/// timer thread so rearm/cancel from the main thread reaches the
+/// sleeping worker.
+struct IdleControl {
+    /// `Duration::MAX` = "keep warm" — the timer never fires.
+    /// Otherwise the deadline used on every rearm.
+    timeout: RwLock<Duration>,
+    cmd: Mutex<TimerCmd>,
+    cv: Condvar,
+}
+
+/// Drop guard that lives only on user-facing `ModelHandle` clones —
+/// not on the timer thread's captures. When the last clone of the
+/// handle is dropped, the strong count on this Arc hits 0, `Drop`
+/// runs, and we signal + join the timer thread before the handle's
+/// other Arcs (state, inner, loader) deallocate.
+///
+/// The timer thread does **not** hold an `Arc<ShutdownSignal>` — only
+/// the `Arc<IdleControl>` it shares with the handle. That asymmetry
+/// is what makes "last handle clone dropped" detectable.
+struct ShutdownSignal {
+    idle: Arc<IdleControl>,
+    timer_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for ShutdownSignal {
+    fn drop(&mut self) {
+        // Tell the timer thread to exit + wake it.
+        {
+            let mut cmd = self.idle.cmd.lock().expect("timer cmd poisoned");
+            cmd.shutdown = true;
+            cmd.deadline = None;
+        }
+        self.idle.cv.notify_all();
+        // Join so we don't return while the timer thread still holds
+        // strong refs to the handle's other Arcs.
+        if let Some(jh) = self
+            .timer_thread
+            .lock()
+            .expect("timer_thread mutex poisoned")
+            .take()
+        {
+            let _ = jh.join();
+        }
+    }
+}
+
 /// A loadable, unloadable resource. `T` is the underlying handle the
 /// model exposes — for the recognizer that's `Box<dyn Recognizer>`,
 /// for the future cleanup LLM that's the LLM client.
 ///
 /// Cloning a `ModelHandle` shares state — both clones point at the
-/// same model. Internally everything is `Arc<Mutex<...>>`.
+/// same model. Internally everything is `Arc<...>`.
 pub struct ModelHandle<T: Send + 'static> {
     /// Human-readable identifier surfaced in telemetry rows
     /// (`recognizer`, `cleanup-llm`, …) and log lines.
@@ -72,6 +139,13 @@ pub struct ModelHandle<T: Send + 'static> {
     /// from `query_process_memory()` deltas; documented as estimated.
     last_load_rss_delta: Arc<Mutex<u64>>,
     loader: Arc<dyn Fn() -> Result<T, String> + Send + Sync>,
+    /// `None` when constructed via [`ModelHandle::new`] (no timer);
+    /// `Some(_)` when constructed via [`ModelHandle::with_idle_timeout`].
+    idle: Option<Arc<IdleControl>>,
+    /// See [`ShutdownSignal`]. Held only on user-facing clones; not
+    /// on the timer thread.
+    #[allow(dead_code)]
+    shutdown: Option<Arc<ShutdownSignal>>,
 }
 
 impl<T: Send + 'static> Clone for ModelHandle<T> {
@@ -82,6 +156,8 @@ impl<T: Send + 'static> Clone for ModelHandle<T> {
             inner: Arc::clone(&self.inner),
             last_load_rss_delta: Arc::clone(&self.last_load_rss_delta),
             loader: Arc::clone(&self.loader),
+            idle: self.idle.as_ref().map(Arc::clone),
+            shutdown: self.shutdown.as_ref().map(Arc::clone),
         }
     }
 }
@@ -100,6 +176,46 @@ impl<T: Send + 'static> ModelHandle<T> {
             inner: Arc::new(Mutex::new(None)),
             last_load_rss_delta: Arc::new(Mutex::new(0)),
             loader: Arc::new(loader),
+            idle: None,
+            shutdown: None,
+        }
+    }
+
+    /// Build a handle with an idle-timer worker thread that auto-
+    /// unloads the model after `idle_timeout` of no `use_with`
+    /// activity. Pass [`Duration::MAX`] to disable firing entirely
+    /// (the "keep warm" path); the worker still spawns so a later
+    /// `set_idle_timeout` can re-enable firing without restarting.
+    pub fn with_idle_timeout<F>(label: &str, loader: F, idle_timeout: Duration) -> Self
+    where
+        F: Fn() -> Result<T, String> + Send + Sync + 'static,
+    {
+        let h = Self::new(label, loader);
+        let idle = Arc::new(IdleControl {
+            timeout: RwLock::new(idle_timeout),
+            cmd: Mutex::new(TimerCmd {
+                deadline: None,
+                shutdown: false,
+            }),
+            cv: Condvar::new(),
+        });
+        // Captures for the worker thread — Arcs of the data it needs
+        // to fire `unload`. Crucially does NOT clone `shutdown`, so
+        // when the last user-facing handle drops we can detect it.
+        let timer_thread = spawn_timer_thread(
+            Arc::clone(&idle),
+            Arc::clone(&h.state),
+            Arc::clone(&h.inner),
+            h.label.clone(),
+        );
+        let shutdown = Arc::new(ShutdownSignal {
+            idle: Arc::clone(&idle),
+            timer_thread: Mutex::new(Some(timer_thread)),
+        });
+        Self {
+            idle: Some(idle),
+            shutdown: Some(shutdown),
+            ..h
         }
     }
 
@@ -125,6 +241,26 @@ impl<T: Send + 'static> ModelHandle<T> {
             .last_load_rss_delta
             .lock()
             .expect("ModelHandle::last_load_rss_delta lock poisoned")
+    }
+
+    /// Update the idle timeout. Takes effect immediately for the next
+    /// rearm; if currently `Loaded`, also re-arms with the new value
+    /// so a "keep warm" → "release after 30 s" flip doesn't have to
+    /// wait for a `use_with` cycle to land. Errors if the handle was
+    /// constructed without an idle timer.
+    pub fn set_idle_timeout(&self, new: Duration) -> Result<(), String> {
+        let idle = self
+            .idle
+            .as_ref()
+            .ok_or_else(|| format!("model `{}` has no idle timer", self.label))?;
+        *idle
+            .timeout
+            .write()
+            .expect("idle timeout rwlock poisoned") = new;
+        if matches!(self.state(), LifecycleState::Loaded) {
+            self.arm_timer();
+        }
+        Ok(())
     }
 
     /// Drive an `Unloaded` handle through `Loading → Loaded`. No-op
@@ -178,6 +314,9 @@ impl<T: Send + 'static> ModelHandle<T> {
 
                 let mut state = self.state.lock().expect("state lock poisoned");
                 *state = LifecycleState::Loaded;
+                drop(state);
+
+                self.arm_timer();
                 Ok(())
             }
             Err(e) => {
@@ -233,6 +372,10 @@ impl<T: Send + 'static> ModelHandle<T> {
 
         let mut state = self.state.lock().expect("state lock poisoned");
         *state = LifecycleState::Unloaded;
+        drop(state);
+
+        // No idle deadline makes sense once Unloaded.
+        self.cancel_timer();
         Ok(())
     }
 
@@ -241,10 +384,8 @@ impl<T: Send + 'static> ModelHandle<T> {
     /// inner mutex.
     ///
     /// State sequence per call: caller-state → `Active` → `Loaded`.
-    /// On panic inside the closure the state is restored to `Loaded`
-    /// via the inner lock guard's `Drop` chain (Rust's poison
-    /// machinery), so a transient panic doesn't strand the handle in
-    /// `Active`.
+    /// While Active the idle timer is cancelled; on return to
+    /// `Loaded` it re-arms with the configured timeout.
     pub fn use_with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, String> {
         // Acquire the inner lock *first* so concurrent `use_with`
         // callers serialize against the actual model handle, not just
@@ -260,6 +401,10 @@ impl<T: Send + 'static> ModelHandle<T> {
             inner = self.inner.lock().map_err(|_| "inner lock poisoned")?;
         }
 
+        // Pause the idle timer while we run — guarantees the timer
+        // can't race in and unload the model out from under us.
+        self.cancel_timer();
+
         // Transition state Loaded → Active under the state lock,
         // briefly. Reject if we're not in a usable state.
         {
@@ -267,11 +412,6 @@ impl<T: Send + 'static> ModelHandle<T> {
             match *state {
                 LifecycleState::Loaded => *state = LifecycleState::Active,
                 LifecycleState::Active => {
-                    // Should be unreachable — we hold the inner lock,
-                    // and the inner lock is acquired before transitioning
-                    // Loaded → Active in this same function. Anyone
-                    // observing Active without the inner lock means
-                    // someone broke the invariant.
                     return Err(format!(
                         "model `{}` already Active without inner lock — invariant violation",
                         self.label
@@ -294,17 +434,133 @@ impl<T: Send + 'static> ModelHandle<T> {
             .expect("inner is Some after successful load");
         let result = f(t);
 
-        // Back to Loaded.
+        // Back to Loaded + re-arm the idle timer.
         let mut state = self.state.lock().expect("state lock poisoned");
         *state = LifecycleState::Loaded;
+        drop(state);
+        self.arm_timer();
         Ok(result)
     }
+
+    /// (Re)arm the idle timer with the currently-configured timeout.
+    /// No-op when the handle has no timer or `idle_timeout ==
+    /// Duration::MAX` ("keep warm").
+    fn arm_timer(&self) {
+        if let Some(idle) = &self.idle {
+            let timeout = *idle.timeout.read().expect("timeout rwlock poisoned");
+            let mut cmd = idle.cmd.lock().expect("cmd lock poisoned");
+            if timeout == Duration::MAX {
+                // Keep warm — make sure no stale deadline lingers.
+                cmd.deadline = None;
+            } else {
+                cmd.deadline = Some(Instant::now() + timeout);
+            }
+            drop(cmd);
+            idle.cv.notify_all();
+        }
+    }
+
+    /// Cancel any pending fire. No-op when the handle has no timer.
+    fn cancel_timer(&self) {
+        if let Some(idle) = &self.idle {
+            let mut cmd = idle.cmd.lock().expect("cmd lock poisoned");
+            cmd.deadline = None;
+            drop(cmd);
+            idle.cv.notify_all();
+        }
+    }
+}
+
+/// Spawn the per-handle idle-timer worker. Each handle constructed
+/// via [`ModelHandle::with_idle_timeout`] gets exactly one of these.
+/// The worker runs until `cmd.shutdown == true` is observed, which
+/// [`ShutdownSignal::drop`] sets when the last user-facing handle
+/// clone is dropped.
+fn spawn_timer_thread<T: Send + 'static>(
+    idle: Arc<IdleControl>,
+    state: Arc<Mutex<LifecycleState>>,
+    inner: Arc<Mutex<Option<T>>>,
+    label: String,
+) -> JoinHandle<()> {
+    let thread_label = label.clone();
+    thread::Builder::new()
+        .name(format!("ow-idle-{label}"))
+        .spawn(move || idle_timer_loop(idle, state, inner, thread_label))
+        .expect("spawn idle-timer thread")
+}
+
+fn idle_timer_loop<T: Send + 'static>(
+    idle: Arc<IdleControl>,
+    state: Arc<Mutex<LifecycleState>>,
+    inner: Arc<Mutex<Option<T>>>,
+    label: String,
+) {
+    let already_fired = AtomicBool::new(false);
+    loop {
+        let mut cmd = idle.cmd.lock().expect("cmd lock poisoned");
+        if cmd.shutdown {
+            return;
+        }
+        match cmd.deadline {
+            None => {
+                // No deadline armed — sleep until rearm or shutdown.
+                let guard = idle.cv.wait(cmd).expect("cv wait poisoned");
+                drop(guard);
+                continue;
+            }
+            Some(deadline) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    // Time to fire.
+                    cmd.deadline = None;
+                    drop(cmd);
+                    fire_unload(&state, &inner, &label, &already_fired);
+                    continue;
+                }
+                let wait_for = deadline - now;
+                let (guard, _result) = idle
+                    .cv
+                    .wait_timeout(cmd, wait_for)
+                    .expect("cv wait_timeout poisoned");
+                drop(guard);
+                // Re-loop and re-evaluate. Whether we timed out or
+                // were notified (rearm / cancel / shutdown), the
+                // top-of-loop checks the cmd anew.
+                continue;
+            }
+        }
+    }
+}
+
+/// The actual unload action the timer takes when its deadline elapses.
+/// Race-tolerant: if state is no longer `Loaded` (because `use_with`
+/// transitioned us to `Active` first, or another thread already
+/// unloaded), we silently skip — losing the race is fine.
+fn fire_unload<T: Send + 'static>(
+    state: &Mutex<LifecycleState>,
+    inner: &Mutex<Option<T>>,
+    label: &str,
+    already_fired: &AtomicBool,
+) {
+    already_fired.store(true, Ordering::Relaxed);
+    let _ = label;
+    let mut s = state.lock().expect("state lock poisoned");
+    if !matches!(*s, LifecycleState::Loaded) {
+        return;
+    }
+    *s = LifecycleState::Releasing;
+    drop(s);
+    {
+        let mut g = inner.lock().expect("inner lock poisoned");
+        g.take();
+    }
+    *state.lock().expect("state lock poisoned") = LifecycleState::Unloaded;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
     /// Mock loader — counts call attempts and can be told to fail on
     /// demand. Returns a `u32` payload so the `T` is concrete and
@@ -332,7 +588,6 @@ mod tests {
         h.load().expect("load ok");
         assert_eq!(h.state(), LifecycleState::Loaded);
 
-        // During use_with the closure observes state==Active.
         let observed = h
             .use_with(|t| {
                 assert_eq!(*t, 42);
@@ -355,8 +610,6 @@ mod tests {
         h.load().unwrap();
         h.load().unwrap();
 
-        // The loader closure was only invoked once — subsequent
-        // load() calls observed Loaded and short-circuited.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(h.state(), LifecycleState::Loaded);
     }
@@ -375,11 +628,6 @@ mod tests {
 
     #[test]
     fn unload_during_active_is_rejected() {
-        // We can't easily run two threads inside a single use_with
-        // closure without deadlocking on the inner mutex. Simulate
-        // the "Active" state via direct state poke + assert that
-        // unload() refuses to drop the model. The state field is the
-        // only thing unload() reads to make the call.
         let calls = Arc::new(AtomicUsize::new(0));
         let h: ModelHandle<u32> = ModelHandle::new("mock", mock_loader(calls, 0));
         h.load().unwrap();
@@ -396,14 +644,12 @@ mod tests {
         );
         assert_eq!(h.state(), LifecycleState::Active);
 
-        // Restore Loaded so the handle is in a sane state on drop.
         *h.state.lock().unwrap() = LifecycleState::Loaded;
     }
 
     #[test]
     fn failed_loader_leaves_state_unloaded_and_propagates_error() {
         let calls = Arc::new(AtomicUsize::new(0));
-        // First two load attempts fail, third succeeds.
         let h: ModelHandle<u32> = ModelHandle::new("mock", mock_loader(calls.clone(), 2));
 
         let err = h.load().expect_err("first load should fail");
@@ -414,8 +660,6 @@ mod tests {
         assert!(err.contains("synthetic loader failure"));
         assert_eq!(h.state(), LifecycleState::Unloaded);
 
-        // Third try succeeds — failed loaders did NOT poison the
-        // handle.
         h.load().expect("third load should succeed");
         assert_eq!(h.state(), LifecycleState::Loaded);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -428,11 +672,150 @@ mod tests {
         assert_eq!(h.current_memory_estimate(), 0);
 
         h.load().unwrap();
-        // The mock loader allocates only a u32 payload — the RSS
-        // delta is environment-dependent (often 0 on a quiet test
-        // process). We assert it's a defined value, not negative,
-        // and not stale-as-MAX.
         let est = h.current_memory_estimate();
         assert!(est < u64::MAX / 2, "estimate looks corrupted: {est}");
+    }
+
+    // -----------------------------------------------------------------
+    // Idle timer (TASK-62.3)
+    //
+    // Sleep-based timer tests are inherently scheduler-sensitive.
+    // We use generous timeouts (200–400 ms) to keep flakiness low on
+    // loaded CI runners while still catching the first-order behavior.
+    // -----------------------------------------------------------------
+
+    /// Wait up to `max_wait` for `pred` to become true, polling every
+    /// 10 ms. Avoids the "sleep then check" flakiness for state-change
+    /// assertions that depend on a timer thread's scheduling.
+    fn wait_until<F: FnMut() -> bool>(max_wait: Duration, mut pred: F) -> bool {
+        let deadline = Instant::now() + max_wait;
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        pred()
+    }
+
+    #[test]
+    fn idle_timer_unloads_after_deadline() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-idle",
+            mock_loader(calls.clone(), 0),
+            Duration::from_millis(80),
+        );
+        h.load().unwrap();
+        assert_eq!(h.state(), LifecycleState::Loaded);
+
+        let unloaded = wait_until(Duration::from_millis(500), || {
+            h.state() == LifecycleState::Unloaded
+        });
+        assert!(unloaded, "expected timer to unload; state={:?}", h.state());
+    }
+
+    #[test]
+    fn use_with_extends_idle_window() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-extend",
+            mock_loader(calls.clone(), 0),
+            Duration::from_millis(150),
+        );
+        h.load().unwrap();
+        // Halfway through the original window, use the model — that
+        // resets the timer to a fresh 150 ms window.
+        thread::sleep(Duration::from_millis(75));
+        assert_eq!(h.state(), LifecycleState::Loaded);
+        let _ = h.use_with(|t| *t).unwrap();
+
+        // 100 ms after the use_with — beyond the *original* 150 ms
+        // deadline (now ~175 ms total) but well inside the new
+        // window. Must still be Loaded.
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            h.state(),
+            LifecycleState::Loaded,
+            "use_with did not reset the idle window"
+        );
+
+        // Now wait long enough for the *new* deadline to elapse.
+        let unloaded = wait_until(Duration::from_millis(500), || {
+            h.state() == LifecycleState::Unloaded
+        });
+        assert!(
+            unloaded,
+            "expected eventual unload after extended window; state={:?}",
+            h.state()
+        );
+    }
+
+    #[test]
+    fn keep_warm_via_duration_max_keeps_loaded() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-warm",
+            mock_loader(calls.clone(), 0),
+            Duration::MAX,
+        );
+        h.load().unwrap();
+        // Plenty of wall time — if a fire was going to happen it
+        // would have by now.
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(h.state(), LifecycleState::Loaded);
+    }
+
+    #[test]
+    fn set_idle_timeout_to_max_cancels_pending_fire() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-flip",
+            mock_loader(calls.clone(), 0),
+            Duration::from_millis(80),
+        );
+        h.load().unwrap();
+        // Flip to "keep warm" before the original deadline elapses.
+        thread::sleep(Duration::from_millis(20));
+        h.set_idle_timeout(Duration::MAX).unwrap();
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            h.state(),
+            LifecycleState::Loaded,
+            "set_idle_timeout(MAX) should have cancelled the pending fire"
+        );
+    }
+
+    #[test]
+    fn dropping_last_clone_shuts_down_timer_thread() {
+        // Sanity check: a handle constructed with_idle_timeout, then
+        // dropped, must not deadlock on the join in
+        // `ShutdownSignal::drop`. If the worker fails to honor the
+        // shutdown signal this test hangs — Cargo's per-test timeout
+        // surfaces that as a failure.
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+                "mock-drop",
+                mock_loader(calls.clone(), 0),
+                Duration::from_secs(60),
+            );
+            h.load().unwrap();
+            // h goes out of scope here.
+        }
+        // If we get here without hanging, the timer thread was joined
+        // cleanly.
+        assert!(true);
+    }
+
+    #[test]
+    fn set_idle_timeout_errors_on_handle_without_timer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::new("mock-no-timer", mock_loader(calls, 0));
+        let err = h
+            .set_idle_timeout(Duration::from_millis(50))
+            .expect_err("must error without timer");
+        assert!(err.contains("no idle timer"));
     }
 }

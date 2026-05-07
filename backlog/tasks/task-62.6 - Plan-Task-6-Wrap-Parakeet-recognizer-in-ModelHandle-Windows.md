@@ -22,6 +22,7 @@ ordinal: 9000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: e484b36.
 - ENGINE wrapping (the actual Mac path of TASK-62.5) automatically covers the Win path too — `engine()` in `core::recognizer::mod.rs` is platform-agnostic; `default_backend()` returns `OrtParakeet` on non-macOS targets. No Win-only refactor of `mod.rs` was needed.
 - `OrtParakeet` Drop audit: `Sessions { encoder, decoder, joiner, ... }` already auto-Drops via field iteration; `ort::Session`'s own Drop releases the underlying ORT session. Implicit was sufficient. Added an **explicit** Drop on `OrtParakeet` anyway (a) so the manual Win smoke (AC #2) has a deterministic `eprintln` to wait for, (b) so the resource-release intent is unmistakable to a reader debugging "model still resident after unload". Fires only when sessions were Some — idempotent under repeated drops if any.
 - Cross-compile from this Mac box to `x86_64-pc-windows-gnu` (the Win dev-box's toolchain per `core/Cargo.toml` ort `load-dynamic` rationale) is clean — the Drop addition + the broader 62.5 wrap compile against the Win path. `cargo check -p openwhisper-core --features tauri --target x86_64-pc-windows-gnu` finished without warnings. The final `x86_64-pc-windows-msvc` check still waits for the Windows box; no Mac-side toolchain installs MSVC link.exe.

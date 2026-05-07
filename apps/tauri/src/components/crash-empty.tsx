@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { Bug } from "lucide-react";
 
 const CRASHES_DIR_HINT = "~/Library/Logs/OpenWhisper/crashes/";
 
@@ -15,7 +16,7 @@ export function CrashEmpty() {
   return (
     <div className="ow-crashes-empty" data-testid="crash-list-empty-body">
       <div className="ow-crashes-empty__tile" aria-hidden="true">
-        <CrashStarGlyph size={20} />
+        <CrashGlyph size={20} />
       </div>
       <h2 className="ow-crashes-empty__title">No crashes recorded</h2>
       <p className="ow-crashes-empty__caption">
@@ -37,23 +38,11 @@ export function CrashEmpty() {
   );
 }
 
-/// Star/asterisk glyph from the design — used by the empty state
-/// AND by the Diagnostics overview entry card's destructive-tint
-/// tile. Single source of truth so both surfaces stay aligned.
-export function CrashStarGlyph({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M7 1.5 L 8.5 5 L 12.5 5.4 L 9.5 8 L 10.5 12 L 7 9.8 L 3.5 12 L 4.5 8 L 1.5 5.4 L 5.5 5 Z" />
-    </svg>
-  );
+/// Crash icon — lucide's Bug. Used by the empty state AND by the
+/// Diagnostics overview entry card's destructive-tint tile. Single
+/// source of truth so both surfaces stay aligned. Bug matches the
+/// "Report on GitHub" button next door (TASK-78.6) — same icon
+/// vocabulary as the GitHub `bug` issue label the report becomes.
+export function CrashGlyph({ size = 14 }: { size?: number }) {
+  return <Bug size={size} aria-hidden="true" />;
 }

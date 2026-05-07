@@ -15,7 +15,7 @@ import {
 } from "../lib/use-crashes";
 import { Card, CardContent } from "./ui/card";
 import { CrashList } from "./crash-list";
-import { CrashStarGlyph } from "./crash-empty";
+import { CrashGlyph } from "./crash-empty";
 
 const SPARK_W_VB = 600;
 const SPARK_H_VB = 96;
@@ -169,7 +169,7 @@ function CrashesEntryCard({
       onClick={onOpen}
     >
       <span className="ow-crashes-card__tile" aria-hidden="true">
-        <CrashStarGlyph size={14} />
+        <CrashGlyph size={14} />
       </span>
       <span className="ow-crashes-card__body">
         <span className="ow-crashes-card__title-row">

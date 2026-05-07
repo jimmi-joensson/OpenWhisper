@@ -341,6 +341,44 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           w.__owUserWpmLast = clamped;
           return clamped;
         }
+        if (cmd === "telemetry_get_memory") {
+          const w = window as unknown as {
+            __owMemoryStats?: MockMemoryStats;
+            __owTelemetryGetCount?: number;
+          };
+          w.__owTelemetryGetCount = (w.__owTelemetryGetCount ?? 0) + 1;
+          return (
+            w.__owMemoryStats ?? {
+              process: {
+                rss_bytes: 0,
+                peak_rss_bytes: 0,
+                timestamp_unix_ms: 0,
+              },
+              models: [],
+            }
+          );
+        }
+        if (cmd === "settings_get_performance") {
+          const w = window as unknown as { __owKeepModelsWarm?: boolean };
+          return { keep_models_warm: w.__owKeepModelsWarm ?? false };
+        }
+        if (cmd === "settings_set_keep_models_warm") {
+          const { value } = (args ?? {}) as { value: boolean };
+          const w = window as unknown as {
+            __owKeepModelsWarm?: boolean;
+            __owKeepModelsWarmSetCount?: number;
+            __owKeepModelsWarmLast?: boolean;
+            __owKeepModelsWarmShouldThrow?: boolean;
+          };
+          if (w.__owKeepModelsWarmShouldThrow) {
+            throw new Error("settings_set_keep_models_warm failed");
+          }
+          w.__owKeepModelsWarm = value;
+          w.__owKeepModelsWarmLast = value;
+          w.__owKeepModelsWarmSetCount =
+            (w.__owKeepModelsWarmSetCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "settings_set_pill_follow") {
           const { follow } = (args ?? {}) as { follow: boolean };
           const w = window as unknown as {
@@ -646,6 +684,75 @@ export async function waitForDeviceStateListener(page: Page) {
       );
     },
     DEFAULT_DEVICE_FIXTURE,
+    { timeout: 3000 },
+  );
+}
+
+// ---------------------------------------------------------------
+// Diagnostics — memory telemetry shim helpers (TASK-62.10).
+// ---------------------------------------------------------------
+
+export type MockLifecycleState =
+  | "Unloaded"
+  | "Loading"
+  | "Loaded"
+  | "Active"
+  | "Releasing";
+
+export interface MockProcessMemory {
+  rss_bytes: number;
+  peak_rss_bytes: number;
+  timestamp_unix_ms: number;
+}
+
+export interface MockModelMemoryRow {
+  label: string;
+  state: MockLifecycleState;
+  estimated_rss_bytes: number;
+}
+
+export interface MockMemoryStats {
+  process: MockProcessMemory;
+  models: MockModelMemoryRow[];
+}
+
+/// Stash a MemoryStats fixture on the window so the next
+/// `telemetry_get_memory` invoke returns this snapshot. Called both
+/// before mount (initial paint) and between polls (1 Hz refresh
+/// observation).
+export async function setMemoryStats(
+  page: Page,
+  stats: MockMemoryStats,
+): Promise<void> {
+  await page.evaluate((s) => {
+    (window as unknown as { __owMemoryStats?: MockMemoryStats }).__owMemoryStats = s;
+  }, stats);
+}
+
+/// Fire `model-state-changed` so the diagnostics pane refetches without
+/// waiting for the 1 Hz poll. Mirrors the Rust setup in
+/// `apps/tauri/src-tauri/src/lib.rs` registering an `on_state_change`
+/// callback that emits `{ label, state }`.
+export async function emitModelStateChanged(
+  page: Page,
+  payload: { label: string; state: MockLifecycleState },
+): Promise<number> {
+  return page.evaluate(
+    (value) => window.__owEmit("model-state-changed", value),
+    payload,
+  );
+}
+
+/// Wait for the diagnostics pane to attach its `model-state-changed`
+/// listener (via `useMemoryStats`). Probes by emitting an idempotent
+/// payload — the listener triggers a refetch but doesn't change state.
+export async function waitForModelStateChangedListener(page: Page) {
+  await page.waitForFunction(
+    () =>
+      window.__owEmit("model-state-changed", {
+        label: "__probe",
+        state: "Unloaded",
+      }) > 0,
     { timeout: 3000 },
   );
 }

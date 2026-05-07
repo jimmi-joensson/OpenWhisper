@@ -1,120 +1,148 @@
-import { emitTick, expect, test, waitForTickListener } from "./fixtures/tauri-shim";
+// TASK-62.10 — Diagnostics pane covers MEMORY telemetry only.
+// Performance counters (TASK-78.x) and Crashes (TASK-78.3) land as
+// additional sections when their telemetry exists.
+//
+// MANUAL SMOKE — not CI-testable
+//   The genuine cold-load-after-idle behaviour (Loaded → Unloaded →
+//   first-dictation-after-6-min re-enters PHASE_LOADING_MODEL) cannot
+//   be observed from the React side without a real recognizer load.
+//   Verify on Mac AND Windows by:
+//     1. `pnpm dev:tauri` (Mac) or `pnpm dev:tauri:win` (Windows).
+//     2. Dictate once, then leave the app idle 6+ minutes.
+//     3. Open Diagnostics → confirm Recognizer segment dropped from
+//        the breakdown bar (registry shows Unloaded).
+//     4. Dictate again — first transcription re-enters
+//        PHASE_LOADING_MODEL briefly; second transcription is fast.
+//     5. Toggle Settings → General → "Keep models warm" ON, repeat
+//        step 2: Recognizer segment stays in the breakdown bar past
+//        6 minutes.
+
+import {
+  emitModelStateChanged,
+  expect,
+  setMemoryStats,
+  test,
+  waitForModelStateChangedListener,
+} from "./fixtures/tauri-shim";
+
+const MB = 1024 * 1024;
 
 test.describe("diagnostics pane", () => {
-  test("renders all four debug cards", async ({ page }) => {
+  test("sidebar entry opens pane with Memory card", async ({ page }) => {
     await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
-
-    await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
-    await expect(page.getByText("Dictation debug")).toBeVisible();
-    await expect(page.getByText("Dictation (mic → Rust core → Parakeet)")).toBeVisible();
-    await expect(page.getByText("transcript", { exact: true })).toBeVisible();
-  });
-
-  test("FFI section shows mocked core_version", async ({ page }) => {
-    await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
-    await expect(page.getByText("0.1.0-test")).toBeVisible();
-  });
-
-  test("debug Card reflects tick payload", async ({ page }) => {
-    await page.goto("/");
-    await page.getByTestId("sidebar-item-diagnostics").click();
-    await waitForTickListener(page);
-    await emitTick(page, {
-      phase: 2,
-      status: "recording",
-      is_recording: true,
-      level: 0.4321,
-      can_toggle: true,
+    await setMemoryStats(page, {
+      process: {
+        rss_bytes: 256 * MB,
+        peak_rss_bytes: 320 * MB,
+        timestamp_unix_ms: 1_700_000_000_000,
+      },
+      models: [],
     });
 
-    const debugCard = page
-      .locator("div", { has: page.getByText("Dictation debug", { exact: true }) })
-      .first();
-    await expect(debugCard.getByText("2 (recording)")).toBeVisible();
-    await expect(debugCard.getByText("0.4321")).toBeVisible();
-  });
-
-  test("transcript + KV values selectable", async ({ page }) => {
-    await page.goto("/");
+    await expect(page.getByTestId("sidebar-item-diagnostics")).toBeVisible();
     await page.getByTestId("sidebar-item-diagnostics").click();
-    await waitForTickListener(page);
-    await emitTick(page, {
-      phase: 0,
-      status: "idle",
-      transcript: "selectable transcript text",
-    });
 
-    const transcriptSelect = await page
-      .getByText("selectable transcript text")
-      .evaluate((el) => getComputedStyle(el).userSelect);
-    expect(transcriptSelect).toBe("text");
+    await expect(
+      page.getByRole("heading", { name: "Diagnostics" }),
+    ).toBeVisible();
+    await expect(page.getByText("Memory", { exact: true })).toBeVisible();
+    await expect(page.getByText("OpenWhisper RSS")).toBeVisible();
   });
 
-  test("transcribe-prefix error appears in debug card last error row, no banner anywhere", async ({
+  test("RSS readout reflects telemetry_get_memory snapshot", async ({
     page,
   }) => {
     await page.goto("/");
+    await setMemoryStats(page, {
+      process: {
+        rss_bytes: 612 * MB,
+        peak_rss_bytes: 700 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
     await page.getByTestId("sidebar-item-diagnostics").click();
-    await waitForTickListener(page);
 
-    await emitTick(page, {
-      phase: 5,
-      status: "idle",
-      can_toggle: true,
-      error_message: "transcribe: empty audio buffer",
+    // Initial mount fetches synchronously. The OpenWhisper RSS readout
+    // shows MB at 612 MB.
+    const rssCell = page.getByTestId("diagnostics-readout-openwhisper-rss");
+    await expect(rssCell).toHaveText("612");
+
+    // Stash a higher snapshot + drive a refetch via the event channel —
+    // same code path the 1-Hz poll uses. Avoids real-time waits.
+    await waitForModelStateChangedListener(page);
+    await setMemoryStats(page, {
+      process: {
+        rss_bytes: 800 * MB,
+        peak_rss_bytes: 800 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
+    await emitModelStateChanged(page, {
+      label: "recognizer",
+      state: "Loaded",
     });
 
-    // Debug card's "last error" KV row carries the message.
-    const debugCard = page
-      .locator("div", { has: page.getByText("Dictation debug", { exact: true }) })
-      .first();
-    await expect(debugCard.getByText("transcribe: empty audio buffer")).toBeVisible();
-
-    // No recognizer banner on Diagnostics (banners are home-only).
-    await expect(page.getByTestId("recognizer-banner")).toHaveCount(0);
+    await expect(rssCell).toHaveText("800");
   });
-});
 
-test.describe("phase transitions drive RecordButton", () => {
-  test("idle → loading → recording → transcribing → idle", async ({ page }) => {
+  test("breakdown bar adds a model segment on model-state-changed", async ({
+    page,
+  }) => {
     await page.goto("/");
+    await setMemoryStats(page, {
+      process: {
+        rss_bytes: 280 * MB,
+        peak_rss_bytes: 280 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Unloaded",
+          estimated_rss_bytes: 0,
+        },
+      ],
+    });
     await page.getByTestId("sidebar-item-diagnostics").click();
-    await waitForTickListener(page);
+    await waitForModelStateChangedListener(page);
 
-    // idle: "Record"
-    await emitTick(page, { phase: 0, status: "idle" });
-    await expect(page.getByRole("button", { name: /^Record$/ })).toBeEnabled();
+    // No model segment yet — only the "Other" remainder is visible.
+    await expect(page.getByTestId("diagnostics-segment-other")).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-segment-model-recognizer"),
+    ).toHaveCount(0);
 
-    // loading: "Loading…", disabled
-    await emitTick(page, {
-      phase: 1,
-      status: "idle",
-      can_toggle: false,
-      status_message: "Loading model…",
+    // Recognizer transitions to Loaded with a 612 MB delta. The pane
+    // refetches on the event and the breakdown bar gains a model
+    // segment + matching legend row.
+    await setMemoryStats(page, {
+      process: {
+        rss_bytes: (280 + 612) * MB,
+        peak_rss_bytes: (280 + 612) * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Loaded",
+          estimated_rss_bytes: 612 * MB,
+        },
+      ],
     });
-    await expect(page.getByRole("button", { name: /Loading/ })).toBeDisabled();
-
-    // recording: "Stop & transcribe", enabled
-    await emitTick(page, {
-      phase: 2,
-      status: "recording",
-      is_recording: true,
-      can_toggle: true,
+    await emitModelStateChanged(page, {
+      label: "recognizer",
+      state: "Loaded",
     });
-    await expect(page.getByRole("button", { name: /Stop & transcribe/ })).toBeEnabled();
 
-    // transcribing: "Transcribing…", disabled
-    await emitTick(page, {
-      phase: 3,
-      status: "transcribing",
-      can_toggle: false,
-    });
-    await expect(page.getByRole("button", { name: /Transcribing/ })).toBeDisabled();
-
-    // back to idle: "Record"
-    await emitTick(page, { phase: 0, status: "idle", can_toggle: true });
-    await expect(page.getByRole("button", { name: /^Record$/ })).toBeEnabled();
+    await expect(
+      page.getByTestId("diagnostics-segment-model-recognizer"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("diagnostics-segment-model-recognizer")
+        .getByText("Recognizer"),
+    ).toBeVisible();
   });
 });

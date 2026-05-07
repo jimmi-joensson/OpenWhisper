@@ -525,6 +525,19 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             (w.__owCrashesOpenFolderCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "models_storage_path") {
+          const w = window as unknown as { __owModelsStoragePath?: string };
+          return (
+            w.__owModelsStoragePath ??
+            "/Users/test/Library/Application Support/com.openwhisper.dev/models"
+          );
+        }
+        if (cmd === "models_open_folder") {
+          const w = window as unknown as { __owModelsOpenFolderCount?: number };
+          w.__owModelsOpenFolderCount =
+            (w.__owModelsOpenFolderCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "crashes_debug_trigger_panic") {
           const w = window as unknown as { __owCrashesDebugTriggerCount?: number };
           w.__owCrashesDebugTriggerCount =
@@ -942,6 +955,19 @@ export async function setCrashFiles(
     (window as unknown as { __owCrashFiles?: Record<string, MockCrashFile> })
       .__owCrashFiles = map;
   }, files);
+}
+
+/// Override what `models_storage_path` returns. Otherwise the shim
+/// returns a Mac-shaped placeholder string; tests that need to assert
+/// on a specific path or platform-shaped value can pin it explicitly.
+export async function setModelsStoragePath(
+  page: Page,
+  path: string,
+): Promise<void> {
+  await page.evaluate((p) => {
+    (window as unknown as { __owModelsStoragePath?: string })
+      .__owModelsStoragePath = p;
+  }, path);
 }
 
 /// Wait for the diagnostics pane to attach its `model-state-changed`

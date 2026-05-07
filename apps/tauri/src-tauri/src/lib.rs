@@ -186,6 +186,50 @@ fn telemetry_get_memory() -> openwhisper_core::telemetry::MemoryStats {
     openwhisper_core::telemetry::collect_memory_stats()
 }
 
+/// Resolve the canonical models folder under `app.path().app_data_dir()`.
+///
+/// Resolved at command-time (NOT cached) so that env-overridden config
+/// dirs and a future user-facing "move models folder" affordance both
+/// surface the live path without requiring an app restart. Used by the
+/// Settings → Models storage panel for display + click-to-open.
+/// TASK-62.13.
+#[tauri::command]
+fn models_storage_path(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?
+        .join("models");
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Reveal the models folder in Finder (Mac) / Explorer (Windows).
+///
+/// Mirrors `crashes_open_folder` — shells out via `Command::new` rather
+/// than going through `tauri-plugin-opener` so we don't have to wire a
+/// per-path scope into `capabilities/` for every directory the app
+/// reveals. Path is resolved by us, not user input. Creates the dir if
+/// missing so first-launch (no models downloaded yet) opens an empty
+/// folder rather than silently no-opping. TASK-62.13.
+#[tauri::command]
+fn models_open_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let path_str = models_storage_path(app)?;
+    let dir = std::path::PathBuf::from(&path_str);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {path_str}: {e}"))?;
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    cmd.arg(&dir);
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("spawn reveal {path_str}: {e}"))
+}
+
 /// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
 /// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
 /// machine in the core decides whether the toggle starts or stops recording.
@@ -1358,6 +1402,8 @@ pub fn run() {
             stats_get_summary,
             stats_reset,
             telemetry_get_memory,
+            models_storage_path,
+            models_open_folder,
             crashes::crashes_list,
             crashes::crashes_read,
             crashes::crashes_delete,

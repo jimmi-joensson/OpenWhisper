@@ -5,6 +5,7 @@ import {
   emitShowInFullscreenChanged,
   emitTick,
   expect,
+  setModelsStoragePath,
   test,
   waitForDeviceStateListener,
   waitForTickListener,
@@ -1092,6 +1093,63 @@ test.describe("settings — audio pane", () => {
     // from 0.6 → roughly -4.4 dBFS, and we display one decimal.
     await expect(peakRow).toContainText("dBFS");
     await expect(peakRow).not.toContainText("—");
+  });
+});
+
+test.describe("settings — models pane", () => {
+  test("storage panel renders count + path + reveal button", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setModelsStoragePath(
+      page,
+      "/Users/test/Library/Application Support/com.openwhisper.dev/models",
+    );
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    const panel = page.getByTestId("settings-models-storage");
+    await expect(panel).toBeVisible();
+    await expect(
+      page.getByTestId("settings-models-storage-count"),
+    ).toContainText("1 model installed");
+    // Wait for path resolution — initial render shows "Resolving…".
+    await expect(
+      page.getByTestId("settings-models-storage-path"),
+    ).toContainText("/Users/test/Library");
+
+    const reveal = page.getByTestId("settings-models-storage-reveal");
+    await expect(reveal).toBeVisible();
+    // Mac UA in Playwright defaults to Mac → "Show in Finder".
+    await expect(reveal).toContainText(/Show in (Finder|Explorer)/);
+  });
+
+  test("storage panel reveal button is keyboard-focusable", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+    const reveal = page.getByTestId("settings-models-storage-reveal");
+    await expect(reveal).toBeVisible();
+    await reveal.focus();
+    await expect(reveal).toBeFocused();
+  });
+
+  test("clicking reveal invokes models_open_folder", async ({ page }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    const reveal = page.getByTestId("settings-models-storage-reveal");
+    // Wait for path resolution to enable the button.
+    await expect(reveal).toBeEnabled();
+    await reveal.click();
+
+    const count = await page.evaluate(
+      () =>
+        (window as unknown as { __owModelsOpenFolderCount?: number })
+          .__owModelsOpenFolderCount ?? 0,
+    );
+    expect(count).toBe(1);
   });
 });
 

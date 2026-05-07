@@ -1105,15 +1105,20 @@ body[data-platform="macos"] .ow-titlebar {
 
 
 /* ===========================================================
-   Crash inspector — TASK-78.3
+   Crash inspector — TASK-78.3 + 78.4 (design pass)
    ----------------------------------------------------------
-   Two surfaces:
-   1. Diagnostics overview entry card (`ow-crashes-card`) +
-      quiet-state link (`ow-diagnostics__crashes-quiet`).
-   2. Full-pane crash list view (`ow-crashes`) — pane header,
-      list, row component, empty state.
-   Detail sheet body lands in TASK-78.4.
+   Mirrors the OpenWhisper handoff in
+   /tmp/ow-design/openwhisper/project/Crashes.html. Surfaces:
+     - Diagnostics overview entry card (`ow-crashes-card`) +
+       muted quiet-state link.
+     - Full-pane crash list (`ow-crashes` + `ow-crashes__row`).
+     - Empty composition (`ow-crashes-empty`).
+     - Right-side detail sheet (`ow-crashes__sheet*`).
+   Tokens: `--surface-sunken`, `--surface-sunken-strong`,
+   `--recording`, `--destructive`, `--info`, `--font-mono`.
    =========================================================== */
+
+/* ---------- Diagnostics overview — quiet + entry card ---------- */
 
 .ow-diagnostics__crashes-quiet {
   margin: 0;
@@ -1121,7 +1126,8 @@ body[data-platform="macos"] .ow-titlebar {
   font-size: 11.5px;
   color: var(--muted-foreground);
   padding: 10px 12px;
-  background: var(--muted);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
   border-radius: 6px;
 }
 
@@ -1137,38 +1143,38 @@ body[data-platform="macos"] .ow-titlebar {
 }
 
 /* Entry card on the Diagnostics overview. Sunken card with a
-   destructive-tint glyph tile on the left, label + unread pill,
-   one-line "Last: ..." sub, chevron right. Whole card is the
+   28×28 destructive-tint glyph tile (border + bg), label + unread
+   pill, mono "Last: …" sub, caret right. Whole card is the
    button — clicking anywhere opens the crash list. */
 .ow-crashes-card {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
-  background: var(--muted);
+  background: var(--surface-sunken);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 12px 16px;
   text-align: left;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
   font: inherit;
+  font-family: var(--font-sys);
   color: var(--foreground);
 }
 
 .ow-crashes-card:hover {
-  background: var(--accent);
-  border-color: var(--ring);
+  background: var(--surface-sunken-strong);
 }
 
 .ow-crashes-card__tile {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: 6px;
-  background: rgb(from var(--destructive) r g b / 0.18);
+  border-radius: 7px;
+  background: color-mix(in oklch, var(--destructive) 18%, transparent);
+  border: 1px solid color-mix(in oklch, var(--destructive) 40%, transparent);
   color: var(--destructive);
   flex-shrink: 0;
 }
@@ -1190,7 +1196,6 @@ body[data-platform="macos"] .ow-titlebar {
 .ow-crashes-card__title {
   font-size: 13px;
   font-weight: 500;
-  color: var(--foreground);
 }
 
 .ow-crashes-card__unread {
@@ -1199,38 +1204,35 @@ body[data-platform="macos"] .ow-titlebar {
   background: var(--recording);
   color: white;
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 1px 6px;
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 
 .ow-crashes-card__sub {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--muted-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.ow-crashes-card__chevron {
+.ow-crashes-card__caret {
   color: var(--muted-foreground);
   flex-shrink: 0;
+  display: inline-flex;
 }
 
-/* ---------------------------------------------------------
-   Full-pane crash list. Replaces the entire Diagnostics
-   content area (no second-level sidebar) when view === "crashes".
-   --------------------------------------------------------- */
+/* ---------- Full-pane crash list ---------- */
 
 .ow-crashes {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 20px;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -1240,102 +1242,140 @@ body[data-platform="macos"] .ow-titlebar {
   justify-content: center;
 }
 
+/* Pane header: back link + two-line breadcrumb block + Delete-all.
+   Sits on the same surface as the rest of the diagnostics pane,
+   divided from the list with a single bottom border. */
 .ow-crashes__header {
+  flex-shrink: 0;
+  padding: 14px 22px 12px;
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 0 4px;
+  gap: 14px;
 }
 
 .ow-crashes__breadcrumb {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--muted-foreground);
+  gap: 10px;
+  min-width: 0;
 }
 
+/* Ghost button — back to overview. Matches design `ghostBtnSm`. */
 .ow-crashes__back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  background: none;
-  border: 0;
-  padding: 4px 6px;
-  border-radius: 4px;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 5px 10px;
   cursor: pointer;
-  color: var(--muted-foreground);
-  font: inherit;
+  white-space: nowrap;
 }
 
 .ow-crashes__back:hover {
-  background: var(--accent);
-  color: var(--foreground);
+  background: var(--surface-sunken-strong);
 }
 
 .ow-crashes__breadcrumb-sep {
-  opacity: 0.6;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
-.ow-crashes__breadcrumb-current {
+.ow-crashes__breadcrumb-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ow-crashes__breadcrumb-kicker {
+  font-family: var(--font-mono);
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--foreground);
+  color: var(--muted-foreground);
+  line-height: 1.2;
 }
 
 .ow-crashes__breadcrumb-counts {
-  margin-left: 8px;
-  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.ow-crashes__breadcrumb-counts-strong {
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ow-crashes__breadcrumb-counts-mute,
+.ow-crashes__breadcrumb-counts-sep {
   color: var(--muted-foreground);
 }
 
 .ow-crashes__delete-all {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid color-mix(in oklch, var(--destructive) 50%, transparent);
+  border-radius: 6px;
   color: var(--destructive);
+  font-family: var(--font-sys);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
+.ow-crashes__delete-all:hover {
+  background: color-mix(in oklch, var(--destructive) 12%, transparent);
+}
+
+/* List backdrop — surface-sunken so each row reads against a
+   single block, divided by inter-row borders only. */
 .ow-crashes__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
-}
-
-.ow-crashes__list-item + .ow-crashes__list-item {
-  border-top: 1px solid var(--border);
+  background: var(--surface-sunken);
 }
 
 .ow-crashes__error {
   margin: 0;
-  padding: 8px 12px;
+  padding: 8px 22px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--destructive);
 }
 
-/* ---------------------------------------------------------
-   Row layout: 20 px unread-dot column · body · actions column.
-   Resting actions = chevron only; hover reveals [✓] / [🗑].
-   --------------------------------------------------------- */
+/* ---------- Row ---------- */
 
 .ow-crashes__row {
   display: grid;
   grid-template-columns: 20px 1fr minmax(100px, auto);
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 14px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
   cursor: pointer;
-  background: var(--card);
+  user-select: none;
+  background: transparent;
+}
+
+.ow-crashes__row[data-first] {
+  border-top: none;
 }
 
 .ow-crashes__row:hover {
-  background: var(--accent);
+  background: rgb(255 255 255 / 0.02);
 }
 
 .ow-crashes__row:focus-visible {
@@ -1359,161 +1399,177 @@ body[data-platform="macos"] .ow-titlebar {
 
 .ow-crashes__row-dot[data-active] {
   background: var(--recording);
-  box-shadow: 0 0 0 3px rgb(from var(--recording) r g b / 0.25);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--recording) 25%, transparent);
 }
 
 .ow-crashes__row-body {
   display: flex;
   flex-direction: column;
-  gap: 3px;
   min-width: 0;
-}
-
-.ow-crashes__row-line {
-  font-size: 12px;
-  color: var(--foreground);
 }
 
 .ow-crashes__row-line--meta {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
-.ow-crashes__row-line--mono {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--muted-foreground);
-  letter-spacing: 0.02em;
-}
-
 .ow-crashes__row-when {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--foreground);
   cursor: help;
 }
 
-.ow-crashes__row-chip {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  background: var(--muted);
-  color: var(--muted-foreground);
-  padding: 1px 6px;
-  border-radius: 4px;
-  letter-spacing: 0.02em;
+.ow-crashes__row[data-unread] .ow-crashes__row-when {
+  font-weight: 500;
 }
 
-.ow-crashes__row-chip--uploaded {
-  background: rgb(from var(--info) r g b / 0.18);
-  color: var(--info);
+.ow-crashes__row-mono-mute {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__row-uploaded {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in oklch, var(--info) 22%, transparent);
+  border: 1px solid var(--info-border);
+  color: var(--foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .ow-crashes__row-cause {
+  margin-top: 4px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.ow-crashes__row[data-unread] .ow-crashes__row-cause {
+  font-weight: 500;
+}
+
+.ow-crashes__row-meta-mono {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+/* Resting state shows the caret; hover reveals the bordered icon
+   buttons. Both pre-rendered so Playwright can target them at any
+   visual state — toggled via opacity + display. */
 .ow-crashes__row-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  min-width: 100px;
+  gap: 6px;
+  position: relative;
+}
+
+.ow-crashes__row-actions-rest {
+  color: var(--muted-foreground);
+  display: inline-flex;
+  transition: opacity 120ms ease;
+}
+
+.ow-crashes__row-actions-hover {
+  position: absolute;
+  right: 0;
+  display: inline-flex;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.ow-crashes__row:hover .ow-crashes__row-actions-rest,
+.ow-crashes__row:focus-within .ow-crashes__row-actions-rest {
+  opacity: 0;
+}
+
+.ow-crashes__row:hover .ow-crashes__row-actions-hover,
+.ow-crashes__row:focus-within .ow-crashes__row-actions-hover {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .ow-crashes__row-action {
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 4px;
-  border: 0;
-  background: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
   color: var(--muted-foreground);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, background-color 120ms ease;
-}
-
-.ow-crashes__row:hover .ow-crashes__row-action,
-.ow-crashes__row:focus-visible .ow-crashes__row-action {
-  opacity: 1;
+  padding: 0;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .ow-crashes__row-action:hover {
-  background: var(--secondary);
+  background: var(--surface-sunken-strong);
   color: var(--foreground);
 }
 
-.ow-crashes__row-action--delete:hover {
+/* Trash button picks up destructive red on hover. */
+.ow-crashes__row-action[data-testid^="crash-row-delete-"]:hover {
   color: var(--destructive);
-  background: rgb(from var(--destructive) r g b / 0.12);
+  border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
 }
 
-.ow-crashes__row-chevron {
-  color: var(--muted-foreground);
-  flex-shrink: 0;
-  margin-left: 4px;
-}
-
-/* ---------------------------------------------------------
-   Empty-state composition. Replaces the entire pane (no
-   header). Centred glyph tile + headline + caption + back/
-   open-folder buttons.
-   --------------------------------------------------------- */
+/* ---------- Empty composition ---------- */
 
 .ow-crashes-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  text-align: center;
+  gap: 0;
   padding: 40px 24px;
-  max-width: 480px;
+  max-width: 380px;
 }
 
 .ow-crashes-empty__tile {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   width: 44px;
   height: 44px;
-  border-radius: 8px;
-  background: var(--muted);
+  border-radius: 10px;
+  margin-bottom: 18px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
   color: var(--muted-foreground);
 }
 
-.ow-crashes-empty__glyph {
-  font-family: var(--font-mono);
-  font-size: 22px;
-  font-weight: 600;
-}
-
 .ow-crashes-empty__title {
-  margin: 0;
-  font-size: 16px;
+  margin: 0 0 6px;
+  font-size: 14px;
   font-weight: 500;
+  color: var(--foreground);
 }
 
 .ow-crashes-empty__caption {
-  margin: 0;
-  text-align: center;
+  margin: 0 0 18px;
   font-size: 12px;
   color: var(--muted-foreground);
   line-height: 1.5;
 }
 
-.ow-crashes-empty__caption code {
+.ow-crashes-empty__path {
   font-family: var(--font-mono);
   font-size: 11px;
-  background: var(--muted);
-  padding: 1px 4px;
-  border-radius: 3px;
 }
 
 .ow-crashes-empty__actions {
@@ -1521,40 +1577,334 @@ body[data-platform="macos"] .ow-titlebar {
   gap: 8px;
 }
 
-/* ---------------------------------------------------------
-   Detail sheet placeholder — TASK-78.4 fleshes out the body.
-   --------------------------------------------------------- */
+.ow-crashes-empty__cta {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.ow-crashes-empty__cta:hover {
+  background: var(--surface-sunken-strong);
+}
+
+/* ---------- Detail sheet (right-side, 580 px) ---------- */
+
+@keyframes ow-crashes-sheet-in {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
 
 .ow-crashes__sheet {
   width: 580px;
   max-width: 85vw;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  background: var(--card);
+  border-left: 1px solid var(--border);
+  animation: ow-crashes-sheet-in 220ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ow-crashes__sheet {
+    animation: none;
+  }
+}
+
+.ow-crashes__sheet-header {
+  flex-shrink: 0;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ow-crashes__sheet-kicker {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__sheet-spacer {
+  flex: 1;
+}
+
+.ow-crashes__sheet-close {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  padding: 0;
+}
+
+.ow-crashes__sheet-close:hover {
+  background: var(--surface-sunken-strong);
+  color: var(--foreground);
 }
 
 .ow-crashes__sheet-error {
   margin: 0;
-  padding: 12px 16px;
+  padding: 14px 22px;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--destructive);
 }
 
-.ow-crashes__sheet-placeholder {
+.ow-crashes__sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 22px 18px;
   display: flex;
   flex-direction: column;
+  gap: 18px;
+}
+
+.ow-crashes__sheet-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ow-crashes__sheet-section-header {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  padding: 16px;
 }
 
 .ow-crashes__sheet-message {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
   color: var(--foreground);
 }
 
 .ow-crashes__sheet-meta {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.ow-crashes__sheet-meta-row-mono {
+  font-family: var(--font-mono);
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__sheet-meta-row-mono > span {
+  color: var(--foreground);
+}
+
+.ow-crashes__sheet-meta-mono {
+  font-family: var(--font-mono);
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__sheet-meta-sep {
+  display: inline-block;
+  width: 14px;
+}
+
+.ow-crashes__sheet-location {
+  margin-top: 0;
+}
+
+/* Backtrace block */
+.ow-crashes__sheet-backtrace {
   margin: 0;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--foreground);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Events block */
+.ow-crashes__sheet-events-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.ow-crashes__sheet-events-caret {
+  display: inline-flex;
+  width: 10px;
+  transition: transform 120ms ease;
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__sheet-events-caret[data-open] {
+  transform: rotate(90deg);
+}
+
+.ow-crashes__sheet-events-count {
+  color: var(--muted-foreground);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.ow-crashes__sheet-events {
+  margin-top: 10px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ow-crashes__sheet-events-row {
+  display: grid;
+  grid-template-columns: 70px 88px 1fr 1.2fr;
+  padding: 5px 12px;
   font-family: var(--font-mono);
   font-size: 11px;
+  border-left: 2px solid transparent;
+}
+
+.ow-crashes__sheet-events-row--head {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   color: var(--muted-foreground);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ow-crashes__sheet-events-body {
+  max-height: 180px;
+  overflow: auto;
+}
+
+.ow-crashes__sheet-events-row[data-zebra] {
+  background: rgb(255 255 255 / 0.02);
+}
+
+.ow-crashes__sheet-events-row[data-crash] {
+  border-left-color: var(--recording);
+}
+
+.ow-crashes__sheet-events-row[data-crash] > span[data-crash] {
+  color: var(--recording);
+}
+
+.ow-crashes__sheet-events-mute {
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__sheet-events-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sticky action footer */
+.ow-crashes__sheet-footer {
+  flex-shrink: 0;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ow-crashes__sheet-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  font-family: var(--font-sys);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.ow-crashes__sheet-primary > span:first-child {
+  flex: 1;
+  text-align: left;
+}
+
+.ow-crashes__sheet-shortcut {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: color-mix(in oklch, var(--primary-foreground) 65%, transparent);
+}
+
+.ow-crashes__sheet-secondary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ow-crashes__sheet-ghost,
+.ow-crashes__sheet-destructive {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-sys);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 8px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ow-crashes__sheet-ghost--sm {
+  font-size: 11.5px;
+  padding: 5px 10px;
+}
+
+.ow-crashes__sheet-ghost:hover {
+  background: var(--surface-sunken-strong);
+}
+
+.ow-crashes__sheet-destructive {
+  color: var(--destructive);
+  border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
+}
+
+.ow-crashes__sheet-destructive:hover {
+  background: color-mix(in oklch, var(--destructive) 12%, transparent);
 }

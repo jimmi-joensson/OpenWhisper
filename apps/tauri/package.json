@@ -24,6 +24,8 @@
     "vendor:natives": "node scripts/vendor-natives.cjs",
     "notarize:mac": "node scripts/notarize-mac.cjs",
     "release:mac": "pnpm tauri build && pnpm notarize:mac",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui",
     "test:ui:headed": "playwright test --headed",
@@ -58,6 +60,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "4.2.4",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "4.1.5"
   }
 }

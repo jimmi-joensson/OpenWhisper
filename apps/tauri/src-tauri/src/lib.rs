@@ -1364,6 +1364,7 @@ pub fn run() {
             crashes::crashes_delete_all,
             crashes::crashes_mark_read,
             crashes::crashes_unread_count,
+            crashes::crashes_open_folder,
             crashes::crashes_debug_trigger_panic,
         ])
         .run(tauri::generate_context!())

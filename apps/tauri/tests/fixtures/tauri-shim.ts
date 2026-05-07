@@ -510,6 +510,12 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           w.__owCrashesDeleteAllCount = (w.__owCrashesDeleteAllCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "crashes_open_folder") {
+          const w = window as unknown as { __owCrashesOpenFolderCount?: number };
+          w.__owCrashesOpenFolderCount =
+            (w.__owCrashesOpenFolderCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "crashes_debug_trigger_panic") {
           const w = window as unknown as { __owCrashesDebugTriggerCount?: number };
           w.__owCrashesDebugTriggerCount =

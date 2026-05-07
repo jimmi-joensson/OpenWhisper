@@ -20,6 +20,7 @@ use std::sync::{Mutex, OnceLock};
 use openwhisper_core::crashes::CrashFile;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 const STATE_FILE: &str = "state.json";
 const SUMMARY_MESSAGE_MAX_CHARS: usize = 200;
@@ -335,6 +336,23 @@ pub fn crashes_unread_count(app: AppHandle) -> u32 {
         }
     }
     count
+}
+
+/// Reveal the resolved crashes dir in Finder (Mac) / Explorer (Windows).
+/// Goes through `tauri-plugin-opener` so the platform-specific path
+/// handling (URI escaping, file:// scheme, %LOCALAPPDATA% expansion)
+/// stays inside the plugin. Creates the dir if missing — opening a
+/// non-existent path silently no-ops on some platforms.
+#[tauri::command]
+pub fn crashes_open_folder(app: AppHandle) -> Result<(), String> {
+    let dir = resolve_crashes_dir(&app).ok_or_else(|| "crash dir unresolved".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path_str = dir
+        .to_str()
+        .ok_or_else(|| format!("crash dir not utf-8: {}", dir.display()))?;
+    app.opener()
+        .open_path(path_str, None::<&str>)
+        .map_err(|e| format!("open_path: {e}"))
 }
 
 /// Debug build: spawn a worker that panics, exercising the shared

@@ -7,7 +7,9 @@
 import {
   expect,
   setCrashes,
+  setCrashFiles,
   test,
+  type MockCrashFile,
   type MockCrashSummary,
 } from "./fixtures/tauri-shim";
 
@@ -72,9 +74,11 @@ test.describe("crash inspector — Diagnostics overview entry", () => {
     await expect(
       page.getByTestId("diagnostics-crashes-unread-pill"),
     ).toContainText("2 unread");
-    // Sub-line carries app_version + os from the latest summary.
-    await expect(card).toContainText("0.6.0");
-    await expect(card).toContainText("macos (arm64)");
+    // Sub-line carries the latest crash's truncated panic message
+    // (design's module · signal slot — Rust panics don't have native
+    // signals, so the panic message stands in).
+    await expect(card).toContainText("Last:");
+    await expect(card).toContainText("newer crash");
   });
 });
 
@@ -254,6 +258,173 @@ test.describe("crash inspector — full-pane list", () => {
       "data-unread",
       "true",
       { timeout: 5000 },
+    );
+  });
+});
+
+// TASK-78.4 — detail sheet body, copy-as-markdown, open-folder, delete.
+test.describe("crash inspector — detail sheet", () => {
+  function fixtureFile(id: string): MockCrashFile {
+    return {
+      schema_version: 1,
+      id,
+      ts_unix_ms: Date.UTC(2026, 4, 4, 14, 33, 21),
+      app_version: "0.6.0",
+      os: "macos (arm64)",
+      rust_panic: {
+        thread_name: "tokio-runtime-worker",
+        message: "called `Result::unwrap()` on an `Err` value: ...",
+        location: "core/src/audio.rs:412:17",
+        backtrace: "frame 1\nframe 2\nframe 3",
+      },
+      recording_state: {
+        status_message_at_crash: "transcribing on ANE…",
+        duration_ms: 18234,
+        samples_captured: 291744,
+        model_kind: "Parakeet",
+        device_id_hash: null,
+      },
+      events: [
+        {
+          ts_unix_ms: Date.UTC(2026, 4, 4, 14, 33, 20),
+          kind: "DictationStart",
+          data: {},
+        },
+        {
+          ts_unix_ms: Date.UTC(2026, 4, 4, 14, 33, 21),
+          kind: "Error",
+          data: { message: "boom" },
+        },
+      ],
+    };
+  }
+
+  async function openSheet(page: import("@playwright/test").Page, id: string) {
+    const summary = recentCrash({ id, ts_unix_ms: Date.now() - SECOND });
+    await page.goto("/");
+    await setCrashes(page, [summary]);
+    await setCrashFiles(page, { [id]: fixtureFile(id) });
+    // Grant clipboard access so navigator.clipboard.writeText resolves
+    // in headless Chromium. Scoped to the dev-server origin.
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.getByTestId("sidebar-item-diagnostics").click();
+    await page.getByTestId("diagnostics-crashes-entry").click();
+    await page.getByTestId(`crash-row-${id}`).click();
+    await expect(page.getByTestId("crash-detail-sheet")).toBeVisible();
+  }
+
+  test("sheet header + footer survive backtrace scroll", async ({ page }) => {
+    await openSheet(page, "100");
+
+    // Identity surfaces: panic message, formatted timestamp, model.
+    await expect(page.getByTestId("crash-detail-message")).toContainText(
+      "Result::unwrap()",
+    );
+    await expect(page.getByTestId("crash-detail-sheet")).toContainText(
+      "2026-05-04 14:33:21 UTC",
+    );
+    await expect(page.getByTestId("crash-detail-sheet")).toContainText(
+      "Parakeet",
+    );
+
+    // Backtrace renders as a pre-formatted block with the captured
+    // frames intact.
+    await expect(page.getByTestId("crash-detail-backtrace")).toContainText(
+      "frame 1",
+    );
+    await expect(page.getByTestId("crash-detail-backtrace")).toContainText(
+      "frame 3",
+    );
+
+    // Sticky footer keeps the primary Copy button visible regardless
+    // of scroll position. Visible-on-mount is the contract here.
+    await expect(page.getByTestId("crash-detail-copy")).toBeVisible();
+    await expect(page.getByTestId("crash-detail-open-folder")).toBeVisible();
+    await expect(page.getByTestId("crash-detail-delete")).toBeVisible();
+  });
+
+  test("Copy GitHub-ready report writes redacted markdown to clipboard", async ({
+    page,
+  }) => {
+    await openSheet(page, "200");
+
+    const copyBtn = page.getByTestId("crash-detail-copy");
+    await expect(copyBtn).toContainText("Copy GitHub-ready report");
+
+    await copyBtn.click();
+    await expect(copyBtn).toContainText("✓ Copied", { timeout: 2000 });
+
+    // Clipboard contents — assert the headline structure of the
+    // markdown (the formatter unit tests cover the full shape).
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toContain("**OpenWhisper crash report**");
+    expect(clip).toContain("- Version: 0.6.0");
+    expect(clip).toContain("- OS: macos (arm64)");
+    expect(clip).toContain("- When: 2026-05-04 14:33:21 UTC");
+    expect(clip).toContain("Backtrace");
+    expect(clip).toContain("Recent events (2)");
+
+    // Inline ✓ Copied flashes back to the resting label after the
+    // 1.2 s flash window closes.
+    await expect(copyBtn).toContainText("Copy GitHub-ready report", {
+      timeout: 3000,
+    });
+  });
+
+  test("Open crash folder invokes the Tauri command", async ({ page }) => {
+    await openSheet(page, "300");
+    await page.getByTestId("crash-detail-open-folder").click();
+    const count = await page.evaluate(
+      () =>
+        (window as unknown as { __owCrashesOpenFolderCount?: number })
+          .__owCrashesOpenFolderCount ?? 0,
+    );
+    expect(count).toBeGreaterThanOrEqual(1);
+  });
+
+  test("Events block toggles open + tags the crash row in the table", async ({
+    page,
+  }) => {
+    await openSheet(page, "400");
+
+    // Closed by default — table not in DOM.
+    await expect(
+      page.getByTestId("crash-detail-events-table"),
+    ).toHaveCount(0);
+
+    await page.getByTestId("crash-detail-events-toggle").click();
+    const table = page.getByTestId("crash-detail-events-table");
+    await expect(table).toBeVisible();
+    await expect(table).toContainText("DictationStart");
+    await expect(table).toContainText("Error");
+  });
+
+  test("Delete from inside the sheet closes it and removes the row", async ({
+    page,
+  }) => {
+    await openSheet(page, "500");
+    await page.getByTestId("crash-detail-delete").click();
+
+    await expect(page.getByTestId("crash-detail-sheet")).toHaveCount(0, {
+      timeout: 3000,
+    });
+    // The list itself drops to empty since the fixture only had one row.
+    await expect(page.getByTestId("crash-row-500")).toHaveCount(0, {
+      timeout: 5000,
+    });
+  });
+
+  test("Closing the sheet via ✕ leaves the crash in read state", async ({
+    page,
+  }) => {
+    await openSheet(page, "600");
+    // Already marked-read on open per the contract above.
+    await page.getByTestId("crash-detail-close").click();
+    await expect(page.getByTestId("crash-detail-sheet")).toHaveCount(0);
+    // Row stays in the list, still read.
+    await expect(page.getByTestId("crash-row-600")).not.toHaveAttribute(
+      "data-unread",
+      "true",
     );
   });
 });

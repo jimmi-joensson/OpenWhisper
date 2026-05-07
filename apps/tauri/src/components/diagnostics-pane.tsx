@@ -1,5 +1,4 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AlertOctagon, ChevronRight } from "lucide-react";
 import {
   RSS_SERIES_LEN,
   externalClaim,
@@ -16,6 +15,7 @@ import {
 } from "../lib/use-crashes";
 import { Card, CardContent } from "./ui/card";
 import { CrashList } from "./crash-list";
+import { CrashStarGlyph } from "./crash-empty";
 
 const SPARK_W_VB = 600;
 const SPARK_H_VB = 96;
@@ -155,6 +155,12 @@ function CrashesEntryCard({
     );
   }
 
+  // Last-crash sub-line: relative when + version. Module/signal in the
+  // design fixture (e.g. "recognizer.so · SIGSEGV") don't map to Rust
+  // panics — we substitute the panic message's first segment so the
+  // line still carries useful at-a-glance signal. Truncate hard.
+  const subSig = latest ? truncateSignal(latest.message_truncated) : null;
+
   return (
     <button
       type="button"
@@ -163,7 +169,7 @@ function CrashesEntryCard({
       onClick={onOpen}
     >
       <span className="ow-crashes-card__tile" aria-hidden="true">
-        <AlertOctagon size={16} />
+        <CrashStarGlyph size={14} />
       </span>
       <span className="ow-crashes-card__body">
         <span className="ow-crashes-card__title-row">
@@ -179,17 +185,23 @@ function CrashesEntryCard({
         </span>
         <span className="ow-crashes-card__sub">
           {latest
-            ? `Last: ${formatRelative(latest.ts_unix_ms)} · ${latest.app_version} · ${latest.os}`
+            ? `Last: ${formatRelative(latest.ts_unix_ms)} · ${subSig}`
             : `Last: —`}
         </span>
       </span>
-      <ChevronRight
-        size={16}
-        className="ow-crashes-card__chevron"
-        aria-hidden="true"
-      />
+      <span className="ow-crashes-card__caret" aria-hidden="true">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3.5 2 L 7 5 L 3.5 8" />
+        </svg>
+      </span>
     </button>
   );
+}
+
+function truncateSignal(message: string): string {
+  const max = 48;
+  if (message.length <= max) return message;
+  return message.slice(0, max) + "…";
 }
 
 // Platform label for the section meta — UA-derived since the React

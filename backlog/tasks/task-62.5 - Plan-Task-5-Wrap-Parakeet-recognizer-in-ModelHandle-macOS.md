@@ -24,6 +24,7 @@ ordinal: 8000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: 4ec7b9b.
 - `core::recognizer::ENGINE` is now `OnceLock<ModelHandle<Box<dyn Recognizer>>>` constructed via `ModelHandle::with_idle_timeout("recognizer", loader, RECOGNIZER_IDLE_TIMEOUT)`. `RECOGNIZER_IDLE_TIMEOUT = 5 min` per spec. Loader closure builds the platform default backend AND `ensure_loaded`s it before returning `Ok(backend)` — the handle's `Loaded` state is the same point Mac's old `ensure_loaded()` would have returned.
 - Public surface unchanged: `recognizer_ensure_loaded()` calls `engine().load()`; `recognizer_transcribe(samples)` calls `engine().use_with(|r| r.transcribe(samples))??` (double `?` flattens use_with's `Result<closure-result, String>` and the closure's own `Result<TranscribeResult, String>`).
 - `active_ep()` now uses the new `ModelHandle::try_inspect` non-loading peek (added in this task) — diagnostics readouts must not trigger a 200-500 ms cold load just to render an EP label. Returns `None` while `Unloaded`/transitioning, matching the prior "engine not initialized" behavior.

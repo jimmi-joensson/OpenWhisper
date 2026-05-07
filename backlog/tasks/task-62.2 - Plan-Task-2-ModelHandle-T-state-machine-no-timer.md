@@ -24,6 +24,7 @@ ordinal: 5000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: 14aefc9.
 - New `core::model_lifecycle::{LifecycleState, ModelHandle<T>}`. `pub mod model_lifecycle;` wired in `core/src/lib.rs`.
 - Synchronous state machine, no Tokio yet (idle timer lands TASK-62.3). Concurrency model: `state` and `inner` each `Arc<Mutex<…>>`; loader runs *between* lock acquisitions so a long load doesn't block the diagnostics 1 Hz `state()` poll. Single-flight `load()` errors a second concurrent caller with `ErrLoadInFlight` — proper condvar awaiting comes with the runtime in 62.3.
 - `unload()` rejects from `Active`, `Loading`, `Releasing`; only legal from `Loaded`/`Unloaded`. Failed loader resets to `Unloaded` so callers can retry.

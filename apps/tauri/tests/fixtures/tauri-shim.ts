@@ -433,6 +433,104 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           w.__owShowMainCount = (w.__owShowMainCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "crashes_list") {
+          const w = window as unknown as { __owCrashes?: MockCrashSummary[] };
+          return (w.__owCrashes ?? []).slice().sort((a, b) => b.ts_unix_ms - a.ts_unix_ms);
+        }
+        if (cmd === "crashes_unread_count") {
+          const w = window as unknown as { __owCrashes?: MockCrashSummary[] };
+          return (w.__owCrashes ?? []).filter((c) => c.unread).length;
+        }
+        if (cmd === "crashes_read") {
+          const { id } = (args ?? {}) as { id: string };
+          const w = window as unknown as {
+            __owCrashes?: MockCrashSummary[];
+            __owCrashFiles?: Record<string, MockCrashFile>;
+          };
+          const file = w.__owCrashFiles?.[id];
+          if (file) return file;
+          // Synthesize a minimal CrashFile from the summary if no
+          // explicit fixture was set — keeps test setup terse.
+          const summary = w.__owCrashes?.find((c) => c.id === id);
+          if (!summary) {
+            throw new Error(`crash ${id} not found`);
+          }
+          return {
+            schema_version: 1,
+            id: summary.id,
+            ts_unix_ms: summary.ts_unix_ms,
+            app_version: summary.app_version,
+            os: summary.os,
+            rust_panic: {
+              thread_name: "main",
+              message: summary.message_truncated,
+              location: "test:1:1",
+              backtrace: "<test fixture>",
+            },
+            recording_state: null,
+            events: [],
+          };
+        }
+        if (cmd === "crashes_mark_read") {
+          const { id } = (args ?? {}) as { id: string };
+          const w = window as unknown as {
+            __owCrashes?: MockCrashSummary[];
+            __owCrashesMarkReadCount?: number;
+            __owCrashesMarkReadLast?: string;
+          };
+          if (w.__owCrashes) {
+            for (const c of w.__owCrashes) {
+              if (c.id === id) c.unread = false;
+            }
+          }
+          w.__owCrashesMarkReadCount = (w.__owCrashesMarkReadCount ?? 0) + 1;
+          w.__owCrashesMarkReadLast = id;
+          return null;
+        }
+        if (cmd === "crashes_delete") {
+          const { id } = (args ?? {}) as { id: string };
+          const w = window as unknown as {
+            __owCrashes?: MockCrashSummary[];
+            __owCrashesDeleteCount?: number;
+            __owCrashesDeleteLast?: string;
+          };
+          if (w.__owCrashes) {
+            w.__owCrashes = w.__owCrashes.filter((c) => c.id !== id);
+          }
+          w.__owCrashesDeleteCount = (w.__owCrashesDeleteCount ?? 0) + 1;
+          w.__owCrashesDeleteLast = id;
+          return null;
+        }
+        if (cmd === "crashes_delete_all") {
+          const w = window as unknown as {
+            __owCrashes?: MockCrashSummary[];
+            __owCrashesDeleteAllCount?: number;
+          };
+          w.__owCrashes = [];
+          w.__owCrashesDeleteAllCount = (w.__owCrashesDeleteAllCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "plugin:opener|open_url") {
+          const { url } = (args ?? {}) as { url: string };
+          const w = window as unknown as {
+            __owOpenerOpenUrlCalls?: string[];
+          };
+          w.__owOpenerOpenUrlCalls = w.__owOpenerOpenUrlCalls ?? [];
+          w.__owOpenerOpenUrlCalls.push(url);
+          return null;
+        }
+        if (cmd === "crashes_open_folder") {
+          const w = window as unknown as { __owCrashesOpenFolderCount?: number };
+          w.__owCrashesOpenFolderCount =
+            (w.__owCrashesOpenFolderCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "crashes_debug_trigger_panic") {
+          const w = window as unknown as { __owCrashesDebugTriggerCount?: number };
+          w.__owCrashesDebugTriggerCount =
+            (w.__owCrashesDebugTriggerCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;
@@ -779,6 +877,71 @@ export async function emitModelStateChanged(
     (value) => window.__owEmit("model-state-changed", value),
     payload,
   );
+}
+
+// ---------------------------------------------------------------
+// Crash inspector — TASK-78.3 / 78.7 shim helpers.
+// ---------------------------------------------------------------
+
+export interface MockCrashSummary {
+  id: string;
+  ts_unix_ms: number;
+  app_version: string;
+  os: string;
+  message_truncated: string;
+  unread: boolean;
+  uploaded_at: number | null;
+}
+
+export interface MockCrashFile {
+  schema_version: number;
+  id: string;
+  ts_unix_ms: number;
+  app_version: string;
+  os: string;
+  rust_panic: {
+    thread_name: string;
+    message: string;
+    location: string;
+    backtrace: string;
+  };
+  recording_state:
+    | {
+        status_message_at_crash: string;
+        duration_ms: number;
+        samples_captured: number;
+        model_kind: string | null;
+        device_id_hash: string | null;
+      }
+    | null;
+  events: Array<{ ts_unix_ms: number; kind: string; data: unknown }>;
+}
+
+/// Stash a list of crash summaries. Subsequent `crashes_list` /
+/// `crashes_unread_count` invokes mirror this fixture; mark-read /
+/// delete mutate it in place so a Playwright spec can observe the
+/// state transitions through the same shim.
+export async function setCrashes(
+  page: Page,
+  crashes: MockCrashSummary[],
+): Promise<void> {
+  await page.evaluate((rows) => {
+    (window as unknown as { __owCrashes?: MockCrashSummary[] }).__owCrashes =
+      rows;
+  }, crashes);
+}
+
+/// Optionally seed full crash files by id, so `crashes_read` returns a
+/// hand-picked fixture (otherwise the shim synthesises a minimal one
+/// from the matching summary).
+export async function setCrashFiles(
+  page: Page,
+  files: Record<string, MockCrashFile>,
+): Promise<void> {
+  await page.evaluate((map) => {
+    (window as unknown as { __owCrashFiles?: Record<string, MockCrashFile> })
+      .__owCrashFiles = map;
+  }, files);
 }
 
 /// Wait for the diagnostics pane to attach its `model-state-changed`

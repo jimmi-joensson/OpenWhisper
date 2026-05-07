@@ -1,9 +1,37 @@
 ---
 name: openwhisper-headless-first
-description: Architecture rule — every behavior ships through the public library API + the headless CLI before/while the UI consumes it. UI is the headful layer on top of headless surfaces, never the only place a feature exists. READ before adding a Tauri command, a React-only feature, a private helper inside `apps/tauri/`, or any pub fn in `core/`. Pairs with `openwhisper-orchestration-in-rust` (where logic lives) and TASK-81 doctrine ("CLI feature surface = UI feature surface = library surface").
+description: Architecture rule — every behavior ships through the public library API + the headless CLI before/while the UI consumes it. UI is the headful layer on top of headless surfaces, never the only place a feature exists. READ before opening a new `#[tauri::command]`, a React-only feature, a private helper inside `apps/tauri/`, or any pub fn in `core/`. Two binary gates inside — start gate ("does `cli/src/commands/` already have a placeholder for the parent task?") and finish gate ("does `grep -r TASK-N cli/` return anything?"). If the parent task has a CLI placeholder, the CLI surface is part of the deliverable; "code-complete + UI green" is not done. Pairs with `openwhisper-orchestration-in-rust` (where logic lives) and TASK-81 doctrine ("CLI feature surface = UI feature surface = library surface").
 ---
 
 # Headless-first surface discipline
+
+## The two binary gates
+
+**Gate 1 — before writing the first `#[tauri::command]` for a feature.** Ask:
+
+```
+Does `cli/src/commands/` already have a placeholder for the parent
+task? Grep: `grep -rn "TASK-N\b" cli/`.
+```
+
+If a placeholder exists, the CLI surface is part of the parent task's deliverable. Plan the CLI work into the same change set, not a follow-up. Examples of placeholder shapes that count:
+
+- A `cli/src/commands/<name>.rs` whose handler returns `bail!("... TASK-N")`.
+- An `eprintln!("... see TASK-N ...")` warn-and-skip in a CLI handler.
+- A `default_X_reader()` / similar factory in `core/` that returns `None` with a doc comment naming TASK-N.
+- A trait in `core::diagnostics` with `#[non_exhaustive]` empty struct types and TASK-N comments.
+
+If no placeholder exists, this is a green-field feature — file the CLI surface explicitly during planning.
+
+**Gate 2 — before flipping the parent task to In Review or opening a PR.** Run:
+
+```
+grep -rn "TASK-N\b" cli/ core/src/
+```
+
+Any match in `cli/src/commands/` or in a `default_*_reader`-style factory in `core/` is an unfilled deliverable. The parent task isn't done. Flip the gate; ship the CLI wiring; then re-flip.
+
+These are not heuristics. They are checks you literally execute. The cost of the two greps is seconds. The cost of skipping them, on TASK-78, was building seven Tauri commands + a full UI surface before noticing `cli/src/commands/crash_dump.rs` existed at all.
 
 ## The rule
 
@@ -55,9 +83,41 @@ This is a real exception, not a loophole. If you reach for it, write the follow-
 - A "Diagnostics" UI panel that shows numbers no `cargo test` or `openwhisper memory` invocation can independently confirm.
 - "We'll add the CLI later" without filing the follow-up — *later* never lands.
 
+## Why this skill didn't catch TASK-78 the first pass
+
+A real failure case worth naming, not buried:
+
+In the original TASK-78 implementation pass, seven Tauri commands shipped
+(`crashes_list`, `crashes_read`, `crashes_delete`, `crashes_delete_all`,
+`crashes_mark_read`, `crashes_unread_count`, `crashes_open_folder`) plus a
+full React inspector — without touching the existing CLI placeholder at
+`cli/src/commands/crash_dump.rs`. The placeholder had explicit `TASK-78`
+deferred markers (`bail!("... TASK-78")`, `eprintln!("see TASK-78 ...")`)
+and a stub `default_crash_reader() -> None` in `core::diagnostics`. The
+parity gap was caught only after the user asked "this work was also added
+to the CLI right?"
+
+Three stacked failures:
+
+1. **Plan didn't name the CLI surface.** `backlog/docs/plans/doc-23` listed
+   "Tauri commands" as a deliverable; CLI parity lived only in this skill,
+   not in the plan. The plan was treated as authoritative scope.
+2. **No pre-action gate.** The earlier skill description said *"READ
+   before adding a Tauri command"* — informational, not a checkable
+   binary question. Adding seven commands didn't trigger me to load the
+   skill body. Gate 1 above (now part of this skill) is the fix.
+3. **Placeholder code was invisible.** The strongest possible signal —
+   `bail!("... TASK-78")` already in tree — was never seen because no
+   grep ever ran outside `apps/tauri/` and `core/src/crashes/`. Gate 2
+   above is the fix.
+
+Lesson: the gates run for free. The plan + skill descriptions are
+fallible. Use the gates anyway, every time.
+
 ## Related
 
 - `openwhisper-orchestration-in-rust` — the *where logic lives* skill. This skill is the *how layers expose it* skill.
+- `writing-backlog-plans` — the plan author's discipline. CLI surface should be an explicit deliverable on every plan that has a `cli/src/commands/` placeholder. Reviewer check today.
 - TASK-81 (`backlog/docs/specs/doc-24 - Library-API-audit-and-headless-CLI-—-design.md`) — the audit that introduced the parity doctrine; this skill makes it durable.
 - `cli/src/main.rs` header doc — single-source statement of the parity invariant.
 - `core/src/prelude.rs` — the canonical re-export surface; new `pub` types belong here.

@@ -3035,6 +3035,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "tempfile",
  "windows 0.61.3",
 ]
 

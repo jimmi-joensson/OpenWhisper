@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   RSS_SERIES_LEN,
   externalClaim,
@@ -8,7 +8,14 @@ import {
   type PressureLevel,
   type SystemMemory,
 } from "../lib/use-memory-stats";
+import {
+  formatRelative,
+  useCrashes,
+  type CrashSummary,
+} from "../lib/use-crashes";
 import { Card, CardContent } from "./ui/card";
+import { CrashList } from "./crash-list";
+import { CrashGlyph } from "./crash-empty";
 
 const SPARK_W_VB = 600;
 const SPARK_H_VB = 96;
@@ -33,13 +40,29 @@ export interface DiagnosticsPaneProps {
 }
 
 // Diagnostics — top-level route, sibling to Home and Settings. Today
-// covers Memory only; Performance counters (TASK-78.x) and Crash
-// reports (TASK-78.3) land into the same shell as additional sections
-// when their telemetry exists. Per the design (`backlog/docs/specs/`,
-// chats `chat9.md`), per-model load/release controls live under
-// Settings → Models — the budget bar there is the *decision* surface;
-// this pane is the *debugging* surface.
+// covers Memory + Crashes; per the 2026-05-07 design pivot, Crashes is
+// reached as an entry card on the overview pane (NOT a sub-sidebar)
+// and tapping it swaps the pane content to the full-pane crash list
+// with a `Diagnostics /` breadcrumb. Per-model load/release controls
+// live under Settings → Models — the budget bar there is the
+// *decision* surface; this pane is the *debugging* surface.
+type DiagnosticsView = "overview" | "crashes";
+
 export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
+  const [view, setView] = useState<DiagnosticsView>("overview");
+
+  if (view === "crashes") {
+    return <CrashList onBack={() => setView("overview")} />;
+  }
+
+  return <DiagnosticsOverview onOpenCrashes={() => setView("crashes")} />;
+}
+
+function DiagnosticsOverview({
+  onOpenCrashes,
+}: {
+  onOpenCrashes: () => void;
+}) {
   const {
     stats,
     openWhisperSeries,
@@ -48,6 +71,11 @@ export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
     error,
     lastSampleTimeMs,
   } = useMemoryStats();
+  // Hook polls list + unread at 2 Hz while the overview is mounted.
+  // The card uses the freshest unread count + the latest summary row
+  // to drive the "Last: <relative>" sub-line, per the design.
+  const { list, unreadCount } = useCrashes();
+  const latest: CrashSummary | undefined = list[0];
 
   return (
     <div className="ow-diagnostics">
@@ -75,8 +103,105 @@ export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
           lastSampleTimeMs={lastSampleTimeMs}
         />
       </section>
+
+      <section className="ow-diagnostics__section">
+        <div className="ow-diagnostics__section-header">
+          <h2 className="ow-diagnostics__section-title">Crashes</h2>
+          <span className="ow-diagnostics__section-meta">Live · 2 Hz</span>
+        </div>
+        <CrashesEntryCard
+          unreadCount={unreadCount}
+          totalCount={list.length}
+          latest={latest}
+          onOpen={onOpenCrashes}
+        />
+      </section>
     </div>
   );
+}
+
+interface CrashesEntryCardProps {
+  unreadCount: number;
+  totalCount: number;
+  latest: CrashSummary | undefined;
+  onOpen: () => void;
+}
+
+function CrashesEntryCard({
+  unreadCount,
+  totalCount,
+  latest,
+  onOpen,
+}: CrashesEntryCardProps) {
+  // Quiet branch: no crashes ever recorded. Per the design, the card
+  // is replaced by a one-line muted link rather than hidden — silence
+  // is louder than a missing affordance.
+  if (totalCount === 0) {
+    return (
+      <p
+        className="ow-diagnostics__crashes-quiet"
+        data-testid="diagnostics-crashes-quiet"
+      >
+        No crashes recorded ·{" "}
+        <button
+          type="button"
+          className="ow-diagnostics__crashes-quiet-link"
+          data-testid="diagnostics-crashes-open-folder"
+          onClick={onOpen}
+        >
+          Open Crashes
+        </button>
+      </p>
+    );
+  }
+
+  // Last-crash sub-line: relative when + version. Module/signal in the
+  // design fixture (e.g. "recognizer.so · SIGSEGV") don't map to Rust
+  // panics — we substitute the panic message's first segment so the
+  // line still carries useful at-a-glance signal. Truncate hard.
+  const subSig = latest ? truncateSignal(latest.message_truncated) : null;
+
+  return (
+    <button
+      type="button"
+      className="ow-crashes-card"
+      data-testid="diagnostics-crashes-entry"
+      onClick={onOpen}
+    >
+      <span className="ow-crashes-card__tile" aria-hidden="true">
+        <CrashGlyph size={14} />
+      </span>
+      <span className="ow-crashes-card__body">
+        <span className="ow-crashes-card__title-row">
+          <span className="ow-crashes-card__title">Crash reports</span>
+          {unreadCount > 0 && (
+            <span
+              className="ow-crashes-card__unread"
+              data-testid="diagnostics-crashes-unread-pill"
+            >
+              {unreadCount} unread
+            </span>
+          )}
+        </span>
+        <span className="ow-crashes-card__sub">
+          {latest
+            ? `Last: ${formatRelative(latest.ts_unix_ms)} · ${subSig}`
+            : `Last: —`}
+        </span>
+      </span>
+      <span className="ow-crashes-card__caret" aria-hidden="true">
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3.5 2 L 7 5 L 3.5 8" />
+        </svg>
+      </span>
+    </button>
+  );
+}
+
+function truncateSignal(message: string): string {
+  const max = 48;
+  if (message.length <= max) return message;
+  return message.slice(0, max) + "…";
 }
 
 // Platform label for the section meta — UA-derived since the React
@@ -340,9 +465,18 @@ function PressurePill({ level }: { level: PressureLevel }) {
 //     interpolation cannot be expressed via transform alone, and
 //     the user explicitly asked for continuous flow. Cost is
 //     ~0.4 ms per frame for two 60-point Catmull-Rom paths on a
-//     600×96 SVG — well under the 16 ms RAF budget. Reduced
-//     motion short-circuits to progress=1 so the chart still
-//     updates per poll but doesn't animate frame-by-frame.
+//     600×96 SVG — well under the 16 ms RAF budget.
+//   - **Reduced-motion carve-out:** the slide is intentionally
+//     NOT gated on `prefers-reduced-motion: reduce`. Per the
+//     skill's "essential continuous data motion" exception, the
+//     right-edge advancement is part of how the chart reads as
+//     "live" — without it, every Windows-RDP user (where
+//     `SPI_GETCLIENTAREAANIMATION` is auto-off) and every user
+//     who toggled "Show animations" off sees the chart freeze
+//     between polls and update in 1 Hz steps. The motion is
+//     monotonic, sub-pixel per frame, ~10 px/sec — none of the
+//     attention-grabbing motion (parallax, autoplay, rotation)
+//     WCAG 2.3.3 was written to mitigate.
 function DualSparkline({
   systemSeries,
   rssSeries,
@@ -372,18 +506,6 @@ function DualSparkline({
   const lastSampleTimeRef = useRef<number>(
     lastSampleTimeMs ?? performance.now(),
   );
-  const reducedMotionRef = useRef(false);
-
-  useLayoutEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => {
-      reducedMotionRef.current = mq.matches;
-    };
-    update();
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, []);
 
   // Track new data + monotonically raise the RSS ceiling. The system
   // ceiling is the host's physical total — fixed for the session.
@@ -418,9 +540,7 @@ function DualSparkline({
     let raf = 0;
     const tick = () => {
       const elapsed = performance.now() - lastSampleTimeRef.current;
-      const progress = reducedMotionRef.current
-        ? 1
-        : Math.max(0, Math.min(1, elapsed / SPARK_TICK_MS));
+      const progress = Math.max(0, Math.min(1, elapsed / SPARK_TICK_MS));
 
       const sys = sysDataRef.current;
       const sysLine = sysLineRef.current;

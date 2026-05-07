@@ -22,6 +22,7 @@ use tauri::LogicalPosition;
 use tauri::PhysicalPosition;
 
 mod behavior;
+mod crashes;
 mod focus;
 mod fullscreen;
 mod hotkey;
@@ -943,6 +944,34 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Crash inspector — install panic hook BEFORE any other init
+            // that could itself panic, so the very first capture path is
+            // already armed. The dir resolver in `crashes::` honors the
+            // debug-only OPENWHISPER_CRASH_DIR_OVERRIDE env var that
+            // Playwright (TASK-78.7) uses to seed fixtures into a temp
+            // dir; release builds always go through app_log_dir().
+            // Resolution failure degrades to "no crash files" — never
+            // blocks boot.
+            match crashes::resolve_crashes_dir(app.handle()) {
+                Some(dir) => match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        openwhisper_core::crashes::install_panic_hook(
+                            dir,
+                            env!("CARGO_PKG_VERSION").to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[crashes] mkdir {} failed: {e}",
+                            dir.display(),
+                        );
+                    }
+                },
+                None => {
+                    eprintln!("[crashes] no log dir resolved; panic hook disabled");
+                }
+            }
+
             // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /
             // the shipped SwiftUI app (which calls
             // NSApp.setActivationPolicy(.accessory) in
@@ -1329,6 +1358,14 @@ pub fn run() {
             stats_get_summary,
             stats_reset,
             telemetry_get_memory,
+            crashes::crashes_list,
+            crashes::crashes_read,
+            crashes::crashes_delete,
+            crashes::crashes_delete_all,
+            crashes::crashes_mark_read,
+            crashes::crashes_unread_count,
+            crashes::crashes_open_folder,
+            crashes::crashes_debug_trigger_panic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

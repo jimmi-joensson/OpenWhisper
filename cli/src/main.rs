@@ -59,7 +59,7 @@ enum Command {
     Memory(commands::memory::MemoryArgs),
     /// Read/write the persisted settings.json (Performance block).
     Settings(commands::settings::SettingsArgs),
-    /// Inspect on-disk crash dumps (placeholder until TASK-78).
+    /// Inspect on-disk crash dumps written by the panic hook.
     CrashDump(commands::crash_dump::Args),
 }
 

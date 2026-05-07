@@ -10,6 +10,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { SETTINGS_PANES, type SettingsPaneId } from "../lib/settings-panes";
+import { useCrashesUnreadCount } from "../lib/use-crashes";
 
 const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   general: SlidersHorizontal,
@@ -52,24 +53,42 @@ function RouteSidebar({
   active: Route;
   onSelect: (route: Route) => void;
 }) {
+  // Persistent rail badge: the Diagnostics item carries a small
+  // recording-orange dot whenever an unread crash exists, even if
+  // the user is on a different route. Per spec the dot is never
+  // auto-dismissed by visiting Diagnostics — only by opening each
+  // unread crash (which calls `crashes_mark_read`). Polling lives
+  // here in the sidebar so it runs everywhere the rail does.
+  const unreadCrashes = useCrashesUnreadCount();
+
   return (
     <nav className="ow-sidebar" aria-label="Primary">
-      {ROUTE_ITEMS.map(({ id, label, Icon }) => (
-        <button
-          key={id}
-          type="button"
-          data-testid={`sidebar-item-${id}`}
-          className={
-            "ow-sidebar__item" +
-            (active === id ? " ow-sidebar__item--active" : "")
-          }
-          aria-current={active === id ? "page" : undefined}
-          onClick={() => onSelect(id)}
-        >
-          <Icon size={16} aria-hidden="true" />
-          <span>{label}</span>
-        </button>
-      ))}
+      {ROUTE_ITEMS.map(({ id, label, Icon }) => {
+        const showCrashDot = id === "diagnostics" && unreadCrashes > 0;
+        return (
+          <button
+            key={id}
+            type="button"
+            data-testid={`sidebar-item-${id}`}
+            className={
+              "ow-sidebar__item" +
+              (active === id ? " ow-sidebar__item--active" : "")
+            }
+            aria-current={active === id ? "page" : undefined}
+            onClick={() => onSelect(id)}
+          >
+            <Icon size={16} aria-hidden="true" />
+            <span>{label}</span>
+            {showCrashDot && (
+              <span
+                className="ow-sidebar__badge-dot"
+                data-testid="sidebar-diagnostics-unread-dot"
+                aria-label={`${unreadCrashes} unread crash report${unreadCrashes === 1 ? "" : "s"}`}
+              />
+            )}
+          </button>
+        );
+      })}
     </nav>
   );
 }

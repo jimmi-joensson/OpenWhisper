@@ -7,6 +7,8 @@ created_date: '2026-05-04 06:12'
 
 **Backlog parent:** TASK-78
 
+> **Design pivots — 2026-05-07.** A design-tool handoff (chat7 + chat6 transcripts in the bundle) revised the UX in five load-bearing places: (1) **no sub-sidebar** — Crashes reached as a section card on the Diagnostics overview, full-pane swap; (2) **detail in a right-side sheet** over the dimmed list, with sticky action footer; (3) **mark-read on open** + hover-revealed `[✓]` / `[🗑]` per row, no `…` menu; (4) **single-row delete = no confirm** (Delete-all keeps confirm); (5) **upload dialog** carries an explicit Includes/Excludes block + "Don't ask again for this endpoint" checkbox, and a successful upload swaps the button for a mono `Uploaded · just now` label. Sections below have been rewritten in place; original draft preserved in git history (commit predating this banner).
+
 ## Problem
 
 A Rust panic in OpenWhisper's core or Tauri shell is currently lost: no backtrace, no record on disk, no way for the user to forward it. We saw this concretely once on Windows — a long recording crashed and the only signal was the user's memory of the event. With ~zero crash signal we can't diagnose anything that isn't reproduced live in front of us.
@@ -18,7 +20,7 @@ OpenWhisper is open-source and most reports come in as GitHub Issues. The most v
 - Capture every Rust panic that reaches the panic hook with backtrace + minimal context, written to a versioned JSON file in the OS-correct app log directory.
 - Show captured crashes inside the app under a Diagnostics route. List + detail view, no modal interrupts.
 - One-click "Copy GitHub-ready report" producing redacted markdown ready to paste into an Issue.
-- Optional opt-in upload (per-crash, not blanket-consent) to a configurable endpoint. Default endpoint is a no-op stub — builds work fully offline.
+- One-click "Report on GitHub" — opens a prefilled GitHub issue at `jimmi-joensson/OpenWhisper` with the same redacted markdown the Copy flow produces. No upload endpoint, no settings schema bump, no infrastructure (rescoped 2026-05-07; the original "configurable upload endpoint" design lives in git history + the Report-on-GitHub section below).
 - Cross-platform: macOS + Windows. Same file format, same UI, OS-native log dir.
 
 ## Non-goals (v1)
@@ -104,30 +106,39 @@ Captured by reading the dictation state machine from the panic hook. State lives
 
 The crash inspector lives under the existing top-level **Diagnostics** route in `apps/tauri/src/components/sidebar-nav.tsx` (`Route = "home" | "settings" | "diagnostics"`). It is **not** a Settings sub-pane — Settings stays config-only.
 
-Sub-sidebar inside Diagnostics is conditional:
+**Single rail, no sub-sidebar.** The original draft proposed a Diagnostics sub-sidebar (Overview / Crashes) gated on TASK-62.8. The 2026-05-07 design pass dropped that. Crashes is reached as a **section card on the Diagnostics overview pane** (the same `CrashesSection` row already mocked in `diagnostics.jsx`), with chevron + unread-count badge. Tapping the card swaps the pane content to the full-pane crash inspector — same Diagnostics route, no second-level sidebar — with a `Diagnostics /` breadcrumb-style back link in the inspector header. Sub-sidebar conditional logic (`DIAGNOSTICS_PANES.length >= 2`) is **not** shipped.
 
-- If TASK-62.8 (model RAM/state pane) has already shipped a single-pane Diagnostics view by the time TASK-78 lands → introduce the Diagnostics sub-sidebar with two entries: "Overview" (the existing 62.8 pane) and "Crashes" (the new inspector).
-- If TASK-62.8 has NOT yet shipped → render the crash inspector as the single Diagnostics pane. TASK-62.8 will introduce the sub-sidebar when it adds Overview alongside.
-
-Either way: do not pre-build empty sub-nav.
+Rationale: the user explicitly wanted "no multiple levels of sidebars." The card-as-entry pattern is consistent with the Memory and Performance section cards on the same overview, and lets us add future Diagnostics sub-routes (perf detail, recognizer trace) without ever introducing a nested rail.
 
 ### List view
 
-- Newest-first list of crash files
-- Each row: timestamp (relative + absolute), app version, OS, one-line cause (`rust_panic.message` truncated to ~80 chars), unread indicator
-- Empty-state: "No crashes recorded. 🦄" (no emoji — placeholder text, copy decided in task)
-- Per-row actions in a `…` menu: Mark as read, Delete
+- Newest-first, **full-pane** list across the entire Diagnostics content area (no left-rail second column).
+- Pane header: breadcrumb (`← Diagnostics /` + "Crashes" label) on the left, `unread N · total M` count text in the middle, **Delete all** button on the right.
+- Row layout (single row, three columns): unread dot · body · actions.
+  - Body: timestamp ("2 days ago"), app version + OS chip on the same line; one-line cause (`rust_panic.message` truncated) on a second line; `phase: <X> · model: <Y>` mono meta on a third line.
+  - Actions column on rest: chevron only.
+  - Actions column on hover: small `[✓]` Mark-as-read button (only when `unread`) + `[🗑]` Delete button. **No `…` overflow menu.**
+- **Single-row Delete is one-click — no confirm dialog.** (The undo cost is low: the file is just gone from the inspector list. The on-disk JSON is what matters; if the user deletes the wrong row they re-trigger from a fresh repro. Confirm is reserved for Delete-all.)
+- **Selection marks read.** Clicking a row body (anywhere outside the action buttons) opens the detail sheet AND clears `unread` for that crash. Per-row `[✓]` remains as the "I've triaged this without opening it" affordance.
+- Empty state: list rail collapses entirely; the empty composition fills the pane (44px crash glyph in a muted tile, "No crashes recorded" headline, "We log crashes to `~/Library/Logs/OpenWhisper/crashes/` so you can read or delete them yourself." caption, and a single "Open crash folder" button).
 
 ### Detail view
 
-- Header: full timestamp, app version, OS, model kind, recording phase if any
-- Backtrace pane: monospaced, scrollable, syntax-soft (no language highlighter, just whitespace-pre + monospace)
-- Events pane: collapsible, table of recent events from the ring buffer
-- Action row:
-  - **Copy GitHub-ready report** (primary)
-  - **Open crash folder** (secondary)
-  - **Upload to support endpoint** (tertiary, only visible if upload endpoint is configured)
-  - **Delete** (destructive, confirm dialog)
+Detail is rendered inside a **right-side sheet (slide-over)**, ~580 px wide, layered over a dimmed (40% black + slight blur) backdrop covering the list. The list stays mounted behind the backdrop so the user keeps spatial context. Closing the sheet (header `✕`, backdrop click, or Esc) returns to the list with the row now in the read state.
+
+Sheet layout:
+
+- **Sticky header**: `Crash report` mono kicker on the left, `✕` close button on the right. Single-line, divider below.
+- **Scrollable body**:
+  - Identity block: full panic message (mono, 15px), then a 2–3-line meta strip (absolute timestamp, app version + build, OS + arch, phase/model/session-length).
+  - Backtrace block: `Backtrace` mono kicker + `Copy backtrace` ghost button, then a sunken card with the monospace stack frames (max-height 220 px, internal scroll). No syntax highlighter.
+  - Events block: collapsible (`▸ Events (N)`), opens to a sticky-header table with Time / Phase / Event / Detail columns. The crash event row is left-bordered in recording-orange.
+- **Sticky action footer** (always visible at sheet bottom; doesn't scroll out from under the user when they're paging the backtrace):
+  - **Primary**: `Copy GitHub-ready report` button. After click → label flips to `✓ Copied` for ~1.2s. `⌘C` hint sits on the right.
+  - **Secondary row**: `Open crash folder` ghost · `Upload` ghost (if endpoint configured AND not yet uploaded) OR `Uploaded · just now` mono label (if already uploaded; no enabled re-upload affordance — re-uploading the same crash is not a useful action) · spacer · `Delete` destructive-ghost.
+- **Mark-as-read on open.** Opening the sheet IS the read action; closing the sheet does NOT un-read.
+- **Delete inside the sheet** closes the sheet and returns to the (now-shorter) list.
+- **Upload AlertDialog stacks above the sheet**, doesn't replace it — the list, sheet backdrop, and sheet are all dimmed under the dialog's own backdrop.
 
 ### Copy-as-markdown format
 
@@ -170,27 +181,45 @@ Format renders cleanly as a GitHub Issue body. The `What I was doing` block is t
 
 ### Non-blocking launch notice
 
-On app start, count unread files in the crashes dir. If ≥1:
+On app start, two indicators run in parallel — and they have different lifecycles:
 
-- Show a small toast (or sidebar badge — pick during impl) saying "OpenWhisper recorded N crash report(s). View in Diagnostics."
-- The toast is dismissable; a sidebar badge persists on the Diagnostics nav item until the user opens the inspector.
-- **No modal interrupt.** The very first user impression of a crashed app must not be a forced dialog.
+**Diagnostics rail dot** (sidebar badge — `apps/tauri/src/components/sidebar-nav.tsx`):
+- Lives on the top-level Diagnostics nav item. There is no second-level sidebar to dot.
+- Visible while `unread > 0`. **Cleared only when each unread crash is explicitly marked read** (by opening its sheet or clicking the per-row `[✓]`).
+- Never auto-dismissed by visiting Diagnostics, by time, or by closing the toast. Visiting the route is not the same as reading a specific crash.
+
+**Launch toast** (Sonner — verify at impl time, fall back to project's existing primitive):
+- Fires **only on the run that introduced the new unread**, i.e. when `currentUnread > lastSeenUnreadCount`. We persist `lastSeenUnreadCount` in settings on app shutdown / on each mark-read. Subsequent launches with unread but no delta show only the rail dot, not a fresh toast.
+- Copy mentions the phase if available: "OpenWhisper crashed during recording." (or "…last session." for non-recording phases). Sub-line: "Diagnostics has the report."
+- Buttons: `View` (routes to Diagnostics overview, NOT directly into the inspector — user clicks the Crashes card to enter; this avoids consuming the read action implicitly) and `Dismiss`.
+- 8 s auto-dismiss, hover-to-pause. Closing the toast does NOT clear the rail dot — only opening a crash does.
+
+**No modal interrupt** under any path. The first user impression of a crashed app must not be a forced dialog.
 
 ### Bulk delete
 
-"Delete all" button at top of list, confirm dialog, removes both the JSON files and the sibling `state.json` flags for those entries.
+`Delete all` button in the inspector pane header (right side, destructive-ghost). Triggers an AlertDialog: "Delete all crash reports?" with body copy "<N unread> will be removed too. This can't be undone." Confirm-button label is dynamic: `Delete N reports`. On confirm: removes both the JSON files and the sibling `state.json` entries.
 
-### Opt-in upload
+### Report on GitHub (rescoped from opt-in upload — 2026-05-07)
 
-- Per-crash button, only enabled if `OPENWHISPER_CRASH_UPLOAD_URL` env var or build-time const is set to a non-empty value.
-- Default endpoint: empty string — the button is disabled with a tooltip "No upload endpoint configured for this build."
-- Upload is a single HTTPS POST of the JSON file body to the endpoint. No retry, no queue. If it fails, surface the error in the detail view; the file stays on disk for next attempt.
-- Sets `state.uploaded_at` on success — UI shows ✓ but file is not deleted.
-- Privacy copy: explicit confirm dialog before first upload showing exactly what fields are sent ("backtrace, OS, app version, recording state — no transcripts, no audio, no file paths").
+The original v1 design (preserved in git history) was a configurable HTTPS POST to an arbitrary endpoint behind an Includes/Excludes disclosure dialog and a per-endpoint suppress checkbox. That design assumed a multi-collector world OpenWhisper doesn't actually live in: this is an open-source project whose canonical bug tracker is the GitHub Issues queue at `jimmi-joensson/OpenWhisper`. Building + maintaining a generic upload endpoint that, in practice, only the maintainer would ever configure isn't worth the surface area.
 
-### Unread count for TASK-62.8
+Replaced with a single button that opens a prefilled GitHub issue:
 
-The Diagnostics Overview pane (TASK-62.8) renders an unread-crashes counter sourced from the same `state.json`. Implemented as a Tauri command + `useEffect` poll; no live event needed.
+- **Button placement:** sheet action footer, ghost variant, alongside `Open crash folder`. Label: `Report on GitHub`. Always visible — no env var gating, no settings schema bump, no dialog stack-up.
+- **What clicking does:** opens `https://github.com/jimmi-joensson/OpenWhisper/issues/new?title=…&body=…&labels=bug,crash` in the user's default browser via `tauri-plugin-opener`'s `openUrl`.
+  - Title: `Crash report — vN.M.0 — <truncated panic message>` (≤72 chars).
+  - Body: the same redacted markdown `formatCrashAsMarkdown` produces for the Copy GitHub-ready report flow. Single source of truth — no second formatter.
+  - Labels: `bug,crash`.
+- **Body length cap:** GitHub's documented URL limit is fuzzy but ~8 KB is the practical browser ceiling. We truncate the body to ~6 KB (preserving the identity block in full and trimming the backtrace tail), append a `_Truncated — paste the full report from `Copy GitHub-ready report` if needed._` marker, and rely on the existing Copy flow as the fallback for users who hit the cap.
+- **Auth shape:** the user has to be signed into GitHub in their browser once. That's a one-time, browser-level auth — not a per-crash auth, not a stored token, not infrastructure OW runs.
+- **Privacy:** the redaction step is identical to the Copy flow (per-`String`-field redaction at write time inside the panic hook, formatter inherits clean input). No new disclosure surface needed.
+
+The `Copy GitHub-ready report` flow stays as-is for users who want to paste manually.
+
+### Unread count for TASK-62.8 (Diagnostics overview entry card)
+
+The Diagnostics overview pane (TASK-62.8) renders the **Crashes entry card** sourced from the same `state.json`. The card is the single navigation surface from the overview into the inspector — its unread-count pill (`3 unread`, recording-orange background, white text) and "Last: 2 days ago · recognizer.so · SIGSEGV" mono summary line tell the user what's waiting without forcing them to drill in. Implemented as a Tauri command + `useEffect` poll on the overview pane; no live event needed.
 
 ## Open questions / decided trade-offs
 

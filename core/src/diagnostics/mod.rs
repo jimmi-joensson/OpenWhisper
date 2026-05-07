@@ -85,22 +85,22 @@ pub fn recognizer_info() -> RecognizerInfo {
     }
 }
 
-// --- crash dumps (placeholder surface for TASK-78) ----------------
+// --- crash dumps (TASK-78) -----------------------------------------
 
-/// Opaque crash identifier. The concrete representation lands in
-/// TASK-78 (`<timestamp>.json` filename or similar); consumers
-/// should treat the value as opaque and round-trip it through
-/// `Display` for serialization.
+/// Opaque crash identifier. Wraps the unix-ms filename stem stored
+/// on disk; consumers should treat the value as opaque and
+/// round-trip via `Display` / `as_str()`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CrashId(String);
 
 impl CrashId {
-    /// Construct a `CrashId` from a string token. Visibility is
-    /// `pub(crate)` until TASK-78 lands the concrete file-backed
-    /// reader and decides on the canonical representation.
-    pub(crate) fn _new(token: String) -> Self {
-        Self(token)
+    /// Construct a `CrashId` from a string token. Public so the
+    /// CLI can build ids from a `--id` flag without going through
+    /// the trait. Validation that the token corresponds to an
+    /// actual file on disk is the reader's job.
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
     }
 
     pub fn as_str(&self) -> &str {
@@ -114,37 +114,28 @@ impl std::fmt::Display for CrashId {
     }
 }
 
-/// Placeholder crash dump. Concrete fields land in TASK-78 once the
-/// schema is locked in — backtrace, log tail, app version, OS,
-/// recording-state-at-crash. Today the struct is intentionally
-/// empty so consumer code can compile against the trait surface.
-#[non_exhaustive]
-#[derive(Debug, Clone, Default)]
-pub struct CrashDump {}
+/// A read crash dump. Re-exports the on-disk schema from
+/// `crate::crashes` so the diagnostics trait surface and the
+/// concrete file format are the same type — no double-marshal.
+pub type CrashDump = crate::crashes::CrashFile;
 
-impl CrashDump {
-    /// Construct a `CrashDump`. Visibility mirrors `CrashId::_new`
-    /// — internal until TASK-78 fleshes the schema out.
-    pub(crate) fn _new() -> Self {
-        Self {}
-    }
-}
-
-/// Failure reasons surfaced from `CrashDumpReader::read`. TASK-78
-/// may add variants (e.g. `Locked`, `SchemaMismatch`); the
-/// `#[non_exhaustive]` keeps that future-compatible.
+/// Failure reasons surfaced from `CrashDumpReader::read`.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ReadError {
+    UnsafeId(String),
     NotFound,
     Io(std::io::Error),
+    Parse(serde_json::Error),
 }
 
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsafeId(id) => write!(f, "invalid crash id: {id}"),
             Self::NotFound => f.write_str("crash dump not found"),
             Self::Io(e) => write!(f, "crash dump io: {e}"),
+            Self::Parse(e) => write!(f, "crash dump parse: {e}"),
         }
     }
 }
@@ -152,27 +143,80 @@ impl std::fmt::Display for ReadError {
 impl std::error::Error for ReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotFound => None,
             Self::Io(e) => Some(e),
+            Self::Parse(e) => Some(e),
+            _ => None,
         }
     }
 }
 
-/// Read-side surface for crash dumps. TASK-78 lands the concrete
-/// `FileBackedCrashDumpReader` that lists `<crash_dir>/*.json`; this
-/// trait shape is the contract CLI Task 8 (`cli crash-dump`) and
-/// TASK-78's in-app inspector compile against today.
+impl From<crate::crashes::ReadCrashError> for ReadError {
+    fn from(err: crate::crashes::ReadCrashError) -> Self {
+        match err {
+            crate::crashes::ReadCrashError::UnsafeId(id) => Self::UnsafeId(id),
+            crate::crashes::ReadCrashError::NotFound => Self::NotFound,
+            crate::crashes::ReadCrashError::Io(e) => Self::Io(e),
+            crate::crashes::ReadCrashError::Parse(e) => Self::Parse(e),
+        }
+    }
+}
+
+/// Read-side surface for crash dumps. The CLI (`cli crash-dump`)
+/// and the Tauri shell's `crashes_list` / `crashes_read` commands
+/// both consume this trait via [`default_crash_reader`] so the
+/// "where do crashes live + how do you read them" question has one
+/// answer in core.
 pub trait CrashDumpReader: Send + Sync {
-    fn list(&self) -> Vec<CrashId>;
+    fn list(&self) -> Vec<CrashDump>;
     fn read(&self, id: &CrashId) -> Result<CrashDump, ReadError>;
 }
 
-/// Hook the active crash-dump reader. Today returns `None` so the
-/// CLI's `crash-dump` subcommand can register its surface and exit
-/// cleanly with a "deferred feature" notice. TASK-78 swaps in a
-/// `Some(FileBackedCrashDumpReader)` with no caller-side change.
+/// File-backed reader over `<dir>/<unix-ms>.json` files. The
+/// canonical implementation behind [`default_crash_reader`].
+/// Construct with an explicit dir to inspect crashes from the dev
+/// bundle (`com.openwhisper.dev`) or a Playwright fixture — the
+/// `default_crash_reader` resolver only knows the release path.
+pub struct FileBackedCrashDumpReader {
+    dir: PathBuf,
+}
+
+impl FileBackedCrashDumpReader {
+    pub fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
+    pub fn dir(&self) -> &PathBuf {
+        &self.dir
+    }
+}
+
+impl CrashDumpReader for FileBackedCrashDumpReader {
+    fn list(&self) -> Vec<CrashDump> {
+        match crate::crashes::list_crashes(&self.dir) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[diagnostics] list_crashes {}: {e}",
+                    self.dir.display(),
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn read(&self, id: &CrashId) -> Result<CrashDump, ReadError> {
+        crate::crashes::read_crash(&self.dir, id.as_str()).map_err(Into::into)
+    }
+}
+
+/// Hook the active crash-dump reader. Returns `Some` when the
+/// OS-default crash dir resolves (macOS / Windows with the right
+/// env vars set), `None` on platforms without an established crash
+/// path. CLI surfaces print a clean "no crash dir" notice on `None`
+/// rather than blowing up.
 pub fn default_crash_reader() -> Option<Box<dyn CrashDumpReader>> {
-    None
+    let dir = crate::crashes::default_crash_dir()?;
+    Some(Box::new(FileBackedCrashDumpReader::new(dir)))
 }
 
 #[cfg(test)]
@@ -197,14 +241,58 @@ mod tests {
     }
 
     #[test]
-    fn default_crash_reader_returns_none_until_task_78() {
-        assert!(default_crash_reader().is_none());
+    fn crash_id_round_trips_through_display() {
+        let id = CrashId::new("1717503600123");
+        assert_eq!(id.to_string(), "1717503600123");
+        assert_eq!(id.as_str(), "1717503600123");
     }
 
     #[test]
-    fn crash_id_round_trips_through_display() {
-        let id = CrashId::_new("2026-05-06T12-00-00".into());
-        assert_eq!(id.to_string(), "2026-05-06T12-00-00");
-        assert_eq!(id.as_str(), "2026-05-06T12-00-00");
+    fn file_backed_reader_lists_and_reads() {
+        use crate::crashes::{
+            CrashFile, RustPanic, SCHEMA_VERSION, write_crash_file,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |id: &str, ts: i64, msg: &str| CrashFile {
+            schema_version: SCHEMA_VERSION,
+            id: id.into(),
+            ts_unix_ms: ts,
+            app_version: "0.6.0".into(),
+            os: "macos (arm64)".into(),
+            rust_panic: RustPanic {
+                thread_name: "main".into(),
+                message: msg.into(),
+                location: "x.rs:1:1".into(),
+                backtrace: "<stub>".into(),
+            },
+            recording_state: None,
+            events: vec![],
+        };
+        let older = mk("100", 100, "older crash");
+        let newer = mk("200", 200, "newer crash");
+        write_crash_file(&older, tmp.path()).unwrap();
+        write_crash_file(&newer, tmp.path()).unwrap();
+
+        let reader =
+            FileBackedCrashDumpReader::new(tmp.path().to_path_buf());
+        let listed = reader.list();
+        assert_eq!(listed.len(), 2);
+        // Newest first.
+        assert_eq!(listed[0].id, "200");
+        assert_eq!(listed[1].id, "100");
+
+        let dump = reader.read(&CrashId::new("100")).unwrap();
+        assert_eq!(dump.rust_panic.message, "older crash");
+
+        // Missing → NotFound, not Io.
+        assert!(matches!(
+            reader.read(&CrashId::new("999")),
+            Err(ReadError::NotFound)
+        ));
+        // Path-traversal-shaped → UnsafeId, never reaches the disk.
+        assert!(matches!(
+            reader.read(&CrashId::new("../etc/passwd")),
+            Err(ReadError::UnsafeId(_))
+        ));
     }
 }

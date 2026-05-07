@@ -34,7 +34,7 @@ When in doubt about tier, **demote one**. T2-with-whimsy reads as noise. T1-with
 ## Rules every tier obeys
 
 - **Animate `transform` and `opacity` only.** Width / height / margin / padding / top / left trigger reflow. Banned without an explicit perf trade-off logged in the task spec.
-- **`prefers-reduced-motion: reduce`** snaps motion-transforms to target. Opacity + color transitions still run — they aid comprehension, not vestibular load.
+- **`prefers-reduced-motion: reduce`** snaps motion-transforms to target. Opacity + color transitions still run — they aid comprehension, not vestibular load. **Carve-out — essential continuous data motion:** live-data charts where the motion *is* the data presentation (Diagnostics memory sparkline; future similar surfaces) bypass the snap. Without the slide, the chart can't communicate "live" and freezes to per-poll steps. Justified only when motion is monotonic, sub-pixel per frame, ~10 px/sec or slower, and contains nothing WCAG 2.3.3 was written to mitigate (no parallax, rotation, autoplay, flashing). Document the carve-out at the call site, not just here. Motivating case: Windows-RDP and "Show animations" off both auto-set `prefers-reduced-motion: reduce` for non-vestibular reasons.
 - **Hover behind a media query**: `@media (hover: hover) and (pointer: fine)` — false positives on touchscreens / RDP otherwise.
 - **No `transition: all`.** Name properties.
 - **Animation state in refs, never React state.** RAF writes DOM directly. (Project-wide rule from `feedback_animation_refs_not_state` memory.)
@@ -75,7 +75,7 @@ Before writing animation code:
    - "Alive" / shape morph / interruptible → spring (hand-rolled in RAF; pattern in `PillOverlay.tsx` scale tween).
    - One-shot fade / slide / press → CSS transition + custom-bezier.
    - Constant motion (progress, marquee) → `linear` keyframe.
-4. **Reduced-motion fallback?** Required. No exceptions.
+4. **Reduced-motion fallback?** Required, with one carve-out — essential continuous data motion (see Rules section). The bar is high: motion that is the data, not motion that decorates it. If you're tempted to claim the carve-out, default to "no" and write the snap fallback first.
 5. **Performance:** transform + opacity only? If not, log the trade-off in the task spec.
 
 ## Cross-references

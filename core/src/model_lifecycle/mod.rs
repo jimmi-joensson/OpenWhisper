@@ -39,13 +39,15 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::telemetry::query_process_memory;
+use serde::{Deserialize, Serialize};
+
+use crate::telemetry::{query_process_memory, ModelMemoryRow};
 
 /// Where in the load/use/release cycle a [`ModelHandle`] currently
 /// sits. Order is meaningful for the Diagnostics chip animations
 /// (Loading + Releasing pulse, Active haloes); kept parallel with the
 /// design tokens in `apps/tauri` (`MODEL_STATES`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LifecycleState {
     /// No model in memory, no resources held.
     Unloaded,
@@ -74,10 +76,21 @@ struct TimerCmd {
     shutdown: bool,
 }
 
-/// Per-handle idle-timer config. Cloned by reference (Arc) into the
-/// timer thread so rearm/cancel from the main thread reaches the
-/// sleeping worker.
+/// Per-handle shared state held by the registry's `Weak` and by the
+/// idle-timer worker thread. Originally just idle-timer config — now
+/// also carries the data the telemetry registry walk needs (label,
+/// state Arc, RSS-delta Arc) so we don't need a parallel registry or
+/// an `Arc<HandleInner>` refactor.
 struct IdleControl {
+    /// Human-readable identifier — duplicated from `ModelHandle.label`
+    /// so the registry can yield it without needing back-pointers to
+    /// the user-facing handle.
+    label: String,
+    /// Arc clone of the handle's `state` field. Read by
+    /// `crate::telemetry::collect_memory_stats` walking the registry.
+    state: Arc<Mutex<LifecycleState>>,
+    /// Arc clone of the handle's `last_load_rss_delta` field.
+    last_load_rss_delta: Arc<Mutex<u64>>,
     /// User's configured idle timeout. `set_idle_timeout` writes
     /// this. `apply_keep_warm` does NOT touch this — keep-warm is a
     /// separate flag that overrides without overwriting the user's
@@ -217,6 +230,9 @@ impl<T: Send + 'static> ModelHandle<T> {
         // future flip via the registry below.
         let initial_keep_warm = crate::settings::keep_models_warm();
         let idle = Arc::new(IdleControl {
+            label: h.label.clone(),
+            state: Arc::clone(&h.state),
+            last_load_rss_delta: Arc::clone(&h.last_load_rss_delta),
             configured_timeout: RwLock::new(idle_timeout),
             keep_warm: AtomicBool::new(initial_keep_warm),
             cmd: Mutex::new(TimerCmd {
@@ -332,6 +348,7 @@ impl<T: Send + 'static> ModelHandle<T> {
                 }
             }
         }
+        notify_state_change(&self.label, LifecycleState::Loading);
 
         // Loader runs OUTSIDE the state lock so `state()` callers
         // (the diagnostics 1 Hz poll) can still read `Loading` while
@@ -356,6 +373,7 @@ impl<T: Send + 'static> ModelHandle<T> {
                 *state = LifecycleState::Loaded;
                 drop(state);
 
+                notify_state_change(&self.label, LifecycleState::Loaded);
                 self.arm_timer();
                 Ok(())
             }
@@ -363,6 +381,8 @@ impl<T: Send + 'static> ModelHandle<T> {
                 // Reset state so the next caller can retry.
                 let mut state = self.state.lock().expect("state lock poisoned");
                 *state = LifecycleState::Unloaded;
+                drop(state);
+                notify_state_change(&self.label, LifecycleState::Unloaded);
                 Err(e)
             }
         }
@@ -400,6 +420,7 @@ impl<T: Send + 'static> ModelHandle<T> {
                 }
             }
         }
+        notify_state_change(&self.label, LifecycleState::Releasing);
 
         // Drop the inner outside the state lock — `Drop` impls on the
         // recognizer (FluidAudioBridge / OrtParakeet) may run for tens
@@ -413,6 +434,7 @@ impl<T: Send + 'static> ModelHandle<T> {
         let mut state = self.state.lock().expect("state lock poisoned");
         *state = LifecycleState::Unloaded;
         drop(state);
+        notify_state_change(&self.label, LifecycleState::Unloaded);
 
         // No idle deadline makes sense once Unloaded.
         self.cancel_timer();
@@ -465,6 +487,7 @@ impl<T: Send + 'static> ModelHandle<T> {
                 }
             }
         }
+        notify_state_change(&self.label, LifecycleState::Active);
 
         // Run the closure with the loaded handle. `inner` is `Some`
         // by construction (auto-load above) — the `expect` documents
@@ -478,6 +501,7 @@ impl<T: Send + 'static> ModelHandle<T> {
         let mut state = self.state.lock().expect("state lock poisoned");
         *state = LifecycleState::Loaded;
         drop(state);
+        notify_state_change(&self.label, LifecycleState::Loaded);
         self.arm_timer();
         Ok(result)
     }
@@ -509,6 +533,50 @@ impl<T: Send + 'static> ModelHandle<T> {
             drop(cmd);
             idle.cv.notify_all();
         }
+    }
+}
+
+/// Type of state-change callbacks registered via [`on_state_change`].
+/// Receives the handle's label and its new state. Fires *after* the
+/// transition is committed and the state lock is released, so a
+/// callback that re-enters `state()` will observe the new value.
+pub type StateChangeCallback = Arc<dyn Fn(&str, LifecycleState) + Send + Sync + 'static>;
+
+fn state_change_callbacks() -> &'static Mutex<Vec<StateChangeCallback>> {
+    static CBS: OnceLock<Mutex<Vec<StateChangeCallback>>> = OnceLock::new();
+    CBS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Register a callback fired on every `LifecycleState` transition of
+/// any registered `ModelHandle`. Used by the Tauri shell's setup hook
+/// to bridge transitions into a `model-state-changed` event for the
+/// React Diagnostics pane (TASK-62.7).
+///
+/// Callbacks are stored as `Arc` so they can be cloned cheaply and
+/// shared across threads. Currently no deregister API — callbacks
+/// live for the process lifetime; that matches the only consumer
+/// (the Tauri setup hook) and avoids a per-callback handle. If a
+/// future consumer needs deregistration we can add an opaque token.
+pub fn on_state_change(cb: StateChangeCallback) {
+    state_change_callbacks()
+        .lock()
+        .expect("state-change callbacks poisoned")
+        .push(cb);
+}
+
+/// Fire every registered callback. Called inside the lifecycle
+/// transition methods *after* the state lock is dropped, so callbacks
+/// that re-enter the handle observe the new state. We hold the
+/// callbacks mutex briefly while iterating; callbacks should NOT
+/// re-enter `on_state_change` (would deadlock). The Tauri callback
+/// just emits an event — that's the supported pattern.
+fn notify_state_change(label: &str, new: LifecycleState) {
+    let g = match state_change_callbacks().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    for cb in g.iter() {
+        cb(label, new);
     }
 }
 
@@ -595,6 +663,37 @@ fn registered_handle_count() -> usize {
     g.len()
 }
 
+/// Walk the registry and return one [`ModelMemoryRow`] per live
+/// handle. Reads are lock-free where possible (state Mutex is held
+/// briefly); does NOT acquire the handle's `inner` mutex so the
+/// telemetry poll cannot stall a long `use_with` call.
+///
+/// Surfaced via [`crate::telemetry::collect_memory_stats`] which is
+/// what the Tauri `telemetry_get_memory` command returns. Walking
+/// retains only live `Weak`s — registry compaction happens here as a
+/// side effect.
+pub fn registry_snapshot() -> Vec<ModelMemoryRow> {
+    let mut g = registry().lock().expect("registry lock poisoned");
+    let mut rows = Vec::with_capacity(g.len());
+    g.retain(|weak| {
+        let Some(idle) = weak.upgrade() else {
+            return false;
+        };
+        let state = *idle.state.lock().expect("state lock poisoned");
+        let estimated_rss_bytes = *idle
+            .last_load_rss_delta
+            .lock()
+            .expect("last_load_rss_delta lock poisoned");
+        rows.push(ModelMemoryRow {
+            label: idle.label.clone(),
+            state,
+            estimated_rss_bytes,
+        });
+        true
+    });
+    rows
+}
+
 /// Spawn the per-handle idle-timer worker. Each handle constructed
 /// via [`ModelHandle::with_idle_timeout`] gets exactly one of these.
 /// The worker runs until `cmd.shutdown == true` is observed, which
@@ -674,11 +773,13 @@ fn fire_unload<T: Send + 'static>(
     }
     *s = LifecycleState::Releasing;
     drop(s);
+    notify_state_change(label, LifecycleState::Releasing);
     {
         let mut g = inner.lock().expect("inner lock poisoned");
         g.take();
     }
     *state.lock().expect("state lock poisoned") = LifecycleState::Unloaded;
+    notify_state_change(label, LifecycleState::Unloaded);
 }
 
 #[cfg(test)]
@@ -999,6 +1100,97 @@ mod tests {
             "apply_keep_warm(false) failed to re-arm; state={:?}",
             h.state()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // on_state_change + registry_snapshot (TASK-62.7)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn on_state_change_fires_for_every_transition_in_load_use_unload_cycle() {
+        use std::sync::atomic::AtomicUsize;
+
+        let label = "mock-callback-cycle";
+        let counter = Arc::new(AtomicUsize::new(0));
+        let observed: Arc<Mutex<Vec<(String, LifecycleState)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        {
+            let observed = Arc::clone(&observed);
+            let counter = Arc::clone(&counter);
+            let target_label = label.to_string();
+            on_state_change(Arc::new(move |l: &str, s: LifecycleState| {
+                // Filter on label so concurrent tests' transitions
+                // don't bleed into our observation list.
+                if l == target_label {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    observed.lock().unwrap().push((l.to_string(), s));
+                }
+            }));
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            label,
+            mock_loader(calls, 0),
+            Duration::from_secs(60),
+        );
+        h.load().unwrap();
+        h.use_with(|t| *t).unwrap();
+        h.unload().unwrap();
+
+        let g = observed.lock().unwrap();
+        let states: Vec<LifecycleState> = g.iter().map(|(_, s)| *s).collect();
+        // Expected sequence:
+        //   Loading (load start) → Loaded (load success) →
+        //   Active (use_with start) → Loaded (use_with end) →
+        //   Releasing (unload) → Unloaded (unload complete)
+        assert_eq!(
+            states,
+            vec![
+                LifecycleState::Loading,
+                LifecycleState::Loaded,
+                LifecycleState::Active,
+                LifecycleState::Loaded,
+                LifecycleState::Releasing,
+                LifecycleState::Unloaded,
+            ],
+            "unexpected transition sequence: {:?}",
+            states
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_yields_label_and_state_per_live_handle() {
+        // Construct two handles with distinct labels; load one. Walk
+        // the registry and verify both rows are present with the
+        // expected states. Filter on labels to stay correct under
+        // parallel test execution.
+        let labels = ["snap-a", "snap-b"];
+        let calls = Arc::new(AtomicUsize::new(0));
+        let _ha: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            labels[0],
+            mock_loader(calls.clone(), 0),
+            Duration::from_secs(60),
+        );
+        let hb: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            labels[1],
+            mock_loader(calls, 0),
+            Duration::from_secs(60),
+        );
+        hb.load().unwrap();
+
+        let snapshot = registry_snapshot();
+        let mut by_label: std::collections::HashMap<&str, &ModelMemoryRow> =
+            std::collections::HashMap::new();
+        for row in &snapshot {
+            if labels.contains(&row.label.as_str()) {
+                by_label.insert(row.label.as_str(), row);
+            }
+        }
+        let row_a = by_label.get(labels[0]).expect("snap-a missing");
+        let row_b = by_label.get(labels[1]).expect("snap-b missing");
+        assert_eq!(row_a.state, LifecycleState::Unloaded);
+        assert_eq!(row_b.state, LifecycleState::Loaded);
     }
 
     #[test]

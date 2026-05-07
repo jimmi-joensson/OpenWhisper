@@ -28,14 +28,19 @@ pub use crate::diagnostics::{
 pub use crate::diagnostics::recognizer_info;
 pub use crate::dictation::{DictationSnapshot, Injector};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};
-pub use crate::model_lifecycle::{LifecycleState, ModelHandle, apply_keep_warm};
+pub use crate::model_lifecycle::{
+    LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
+    registry_snapshot,
+};
 pub use crate::settings::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
     PerformanceSettings, PillSettings, StatsSettings, keep_models_warm,
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};
-pub use crate::telemetry::{query_process_memory, ProcessMemory};
+pub use crate::telemetry::{
+    collect_memory_stats, query_process_memory, MemoryStats, ModelMemoryRow, ProcessMemory,
+};
 pub use crate::transcript::FillerLang;
 
 #[cfg(feature = "recognizer")]

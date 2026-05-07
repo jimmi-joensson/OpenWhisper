@@ -176,6 +176,15 @@ fn stats_reset(store: tauri::State<'_, Arc<Store>>) -> Result<(), String> {
     stats::reset(&store).map_err(|e| e.to_string())
 }
 
+/// One-shot memory + per-model snapshot for the Diagnostics → Memory
+/// pane. The pane polls this at ~1 Hz and listens for
+/// `model-state-changed` events between polls so transitions appear
+/// instantly. TASK-62.7.
+#[tauri::command]
+fn telemetry_get_memory() -> openwhisper_core::telemetry::MemoryStats {
+    openwhisper_core::telemetry::collect_memory_stats()
+}
+
 /// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
 /// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
 /// machine in the core decides whether the toggle starts or stops recording.
@@ -1158,6 +1167,26 @@ pub fn run() {
             // spawn_dictation_emitter reads it on every tick.
             let _ = MEDIA_CONTROLLER.set(Arc::new(PlatformMediaController::new()));
             let _ = APP_HANDLE.set(app.handle().clone());
+            // Bridge core's lifecycle transitions onto the React side
+            // as `model-state-changed` events (TASK-62.7). The
+            // Diagnostics → Memory pane polls `telemetry_get_memory`
+            // at ~1 Hz and listens for these events between polls so
+            // a Loaded → Active flicker during dictation is reflected
+            // immediately. Callback fires after the state lock is
+            // released — emit() is allowed to block briefly.
+            openwhisper_core::model_lifecycle::on_state_change(std::sync::Arc::new(
+                |label: &str, state: openwhisper_core::model_lifecycle::LifecycleState| {
+                    if let Some(handle) = APP_HANDLE.get() {
+                        let _ = handle.emit(
+                            "model-state-changed",
+                            serde_json::json!({
+                                "label": label,
+                                "state": state,
+                            }),
+                        );
+                    }
+                },
+            ));
             behavior::apply_collection_behavior(
                 app.handle(),
                 behavior_settings.show_in_fullscreen,
@@ -1299,6 +1328,7 @@ pub fn run() {
             open_microphone_settings,
             stats_get_summary,
             stats_reset,
+            telemetry_get_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

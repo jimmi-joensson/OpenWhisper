@@ -1,18 +1,51 @@
-//! `openwhisper memory` — print the running process's RSS + peak.
+//! `openwhisper memory` — print the running process's RSS + peak,
+//! optionally with per-model rows.
 //!
 //! Same primitive the in-app Diagnostics → Memory pane reads
-//! (`core::telemetry::query_process_memory`). Surfaced headlessly so
+//! (`core::telemetry::collect_memory_stats`). Surfaced headlessly so
 //! external contributors can confirm the engine's footprint without
 //! launching the desktop shell.
 //!
-//! Today: process-level only. Per-model rows land once
-//! `model_lifecycle` exposes a registry (TASK-62.4 / TASK-62.7) and a
-//! recognizer is wrapped in a `ModelHandle` (TASK-62.5 / TASK-62.6).
+//! With no flag: process-level only (RSS + peak). Useful for cheap
+//! probes that don't want to load the recognizer.
+//!
+//! With `--models`: also calls `recognizer_ensure_loaded` so the
+//! `ModelHandle` registry has the recognizer in it, then prints one
+//! row per registered model (label / state / estimated RSS delta).
+//! In a fresh process the recognizer is the only entry; future LLM
+//! handles will appear here too.
 
-use anyhow::Result;
-use openwhisper_core::telemetry::{query_process_memory, ProcessMemory};
+use anyhow::{Context, Result};
+use clap::Args;
+use openwhisper_core::telemetry::{
+    collect_memory_stats, query_process_memory, MemoryStats, ModelMemoryRow, ProcessMemory,
+};
 
-pub fn run(json: bool) -> Result<()> {
+#[derive(Args, Debug)]
+pub struct MemoryArgs {
+    /// Also print per-model rows from the ModelHandle registry. Loads
+    /// the recognizer first (so the registry has it) — adds Mac
+    /// 200-500 ms / Win 100-300 ms cold-load latency on first run.
+    #[arg(long)]
+    pub models: bool,
+}
+
+pub fn run(args: MemoryArgs, json: bool) -> Result<()> {
+    if args.models {
+        // Force the recognizer into the registry so its row appears.
+        // Cheap on warm cache; on the first cold run this downloads +
+        // loads the model.
+        openwhisper_core::recognizer::recognizer_ensure_loaded()
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("recognizer ensure_loaded")?;
+        let stats = collect_memory_stats();
+        if json {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        } else {
+            print_full_text(&stats);
+        }
+        return Ok(());
+    }
     let m = query_process_memory();
     if json {
         print_json(&m)?;
@@ -30,18 +63,31 @@ fn print_text(m: &ProcessMemory) {
 }
 
 fn print_json(m: &ProcessMemory) -> Result<()> {
-    let unix_ms = m
-        .timestamp
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i128)
-        .unwrap_or(-1);
-    let value = serde_json::json!({
-        "rss_bytes": m.rss_bytes,
-        "peak_rss_bytes": m.peak_rss_bytes,
-        "timestamp_unix_ms": unix_ms,
-    });
-    println!("{}", serde_json::to_string_pretty(&value)?);
+    println!("{}", serde_json::to_string_pretty(m)?);
     Ok(())
+}
+
+fn print_full_text(stats: &MemoryStats) {
+    print_text(&stats.process);
+    println!();
+    if stats.models.is_empty() {
+        println!("models          (none registered)");
+        return;
+    }
+    println!("models");
+    for row in &stats.models {
+        println!("  {}", fmt_model_row(row));
+    }
+}
+
+fn fmt_model_row(r: &ModelMemoryRow) -> String {
+    let est = if r.estimated_rss_bytes == 0 {
+        "—".to_string()
+    } else {
+        let mb = r.estimated_rss_bytes as f64 / (1024.0 * 1024.0);
+        format!("{:>6.1} MB", mb)
+    };
+    format!("{:<14} {:<10} est {}", r.label, format!("{:?}", r.state), est)
 }
 
 /// Human-friendly byte formatter — MB up to 1 GB, GB beyond. Tabular

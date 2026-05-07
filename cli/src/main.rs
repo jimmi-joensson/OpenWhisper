@@ -56,7 +56,7 @@ enum Command {
     /// Print active engine, model version, and execution provider.
     RecognizerInfo,
     /// Print the running process's RSS + peak.
-    Memory,
+    Memory(commands::memory::MemoryArgs),
     /// Read/write the persisted settings.json (Performance block).
     Settings(commands::settings::SettingsArgs),
     /// Inspect on-disk crash dumps (placeholder until TASK-78).
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
         Command::Transcribe(args) => commands::transcribe::run(args, cli.json),
         Command::EnumerateDevices => commands::enumerate_devices::run(cli.json),
         Command::RecognizerInfo => commands::recognizer_info::run(cli.json),
-        Command::Memory => commands::memory::run(cli.json),
+        Command::Memory(args) => commands::memory::run(args, cli.json),
         Command::Settings(args) => commands::settings::run(args, cli.json),
         Command::CrashDump(args) => commands::crash_dump::run(args, cli.json),
     }

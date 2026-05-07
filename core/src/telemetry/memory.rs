@@ -20,14 +20,21 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Snapshot of the running OpenWhisper process's memory at a point in
 /// time. Returned by [`query_process_memory`] and consumed by the
 /// Diagnostics pane + future per-model attribution.
-#[derive(Debug, Clone)]
+///
+/// Serializable so the Tauri `telemetry_get_memory` command (TASK-
+/// 62.7) can return it across the IPC boundary without a hand-rolled
+/// bridge. `timestamp_unix_ms` (rather than a `SystemTime` field)
+/// because `SystemTime` has no serde-default; unix-ms round-trips
+/// cleanly to the React side and the CLI JSON output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessMemory {
     /// Resident set size — bytes the OS currently has resident in RAM
     /// for this process. macOS reads `proc_pidinfo`, Windows reads
@@ -37,8 +44,10 @@ pub struct ProcessMemory {
     /// in this process. Tracked across calls; reset only on process
     /// exit. See module docs for the "running max" caveat.
     pub peak_rss_bytes: u64,
-    /// Wall-clock time the snapshot was taken.
-    pub timestamp: SystemTime,
+    /// Wall-clock time the snapshot was taken, as Unix epoch
+    /// milliseconds. `0` if the system clock is set before the Unix
+    /// epoch (which would mean the host is broken in other ways too).
+    pub timestamp_unix_ms: u64,
 }
 
 /// Process-global running max of observed RSS. Updated on every
@@ -86,7 +95,10 @@ pub fn query_process_memory() -> ProcessMemory {
     ProcessMemory {
         rss_bytes,
         peak_rss_bytes,
-        timestamp: SystemTime::now(),
+        timestamp_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
     }
 }
 

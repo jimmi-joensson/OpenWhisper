@@ -448,4 +448,94 @@ test.describe("diagnostics pane", () => {
     ).toHaveCount(0);
     await expect(page.getByTestId("diagnostics-segment-other")).toBeVisible();
   });
+
+  test("RSS breakdown bar renders four canonical segments summing to ~100%", async ({
+    page,
+  }) => {
+    // TASK-62.11 — V1 placeholder estimator splits RSS into Parakeet
+    // weights / Audio buffers / App shell / Caches. With the
+    // recognizer Loaded, all four segments are present; with no
+    // recognizer, the Parakeet segment drops to zero and is hidden.
+    await page.goto("/");
+    await setMemoryStats(page, {
+      system: NORMAL_SYSTEM,
+      process: {
+        rss_bytes: 1100 * MB,
+        peak_rss_bytes: 1100 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Loaded",
+          estimated_rss_bytes: 612 * MB,
+          claimed_bytes: 612 * MB,
+          in_process: true,
+        },
+      ],
+    });
+    await page.getByTestId("sidebar-item-diagnostics").click();
+
+    // Bar wrapper present.
+    await expect(
+      page.getByTestId("diagnostics-rss-breakdown"),
+    ).toBeVisible();
+    // Four canonical legend rows present, in order.
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-audio"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-shell"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-caches"),
+    ).toBeVisible();
+
+    // Percentages sum to within rounding tolerance of 100.
+    const pctValues = await Promise.all(
+      ["parakeet", "audio", "shell", "caches"].map(async (kind) => {
+        const txt = await page
+          .getByTestId(`diagnostics-rss-segment-${kind}-pct`)
+          .innerText();
+        return parseInt(txt.replace(/%$/, ""), 10);
+      }),
+    );
+    const sum = pctValues.reduce((a, b) => a + b, 0);
+    expect(sum).toBeGreaterThanOrEqual(99);
+    expect(sum).toBeLessThanOrEqual(101);
+
+    // Resident readout reads in GB.
+    await expect(
+      page.getByTestId("diagnostics-rss-breakdown-total"),
+    ).toContainText("GB resident");
+  });
+
+  test("RSS breakdown hides Parakeet segment when recognizer is unloaded", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setMemoryStats(page, {
+      system: NORMAL_SYSTEM,
+      process: {
+        rss_bytes: 280 * MB,
+        peak_rss_bytes: 280 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
+    await page.getByTestId("sidebar-item-diagnostics").click();
+
+    await expect(
+      page.getByTestId("diagnostics-rss-breakdown"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-shell"),
+    ).toBeVisible();
+  });
 });

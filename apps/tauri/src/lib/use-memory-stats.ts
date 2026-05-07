@@ -91,6 +91,56 @@ export function externalClaim(models: ModelMemoryRow[]): number {
   return total;
 }
 
+/// True when the recognizer model is currently resident — Loaded,
+/// Active, or transitioning into/out of resident state. Used by the
+/// RSS breakdown estimator to decide whether to attribute a
+/// Parakeet-weights segment.
+export function isRecognizerResident(models: ModelMemoryRow[]): boolean {
+  for (const m of models) {
+    if (m.label !== "recognizer") continue;
+    return (
+      m.state === "Loaded" ||
+      m.state === "Active" ||
+      m.state === "Loading" ||
+      m.state === "Releasing"
+    );
+  }
+  return false;
+}
+
+export interface RssBreakdownMb {
+  parakeetMb: number;
+  audioBuffersMb: number;
+  appShellMb: number;
+  cachesMb: number;
+}
+
+/// V1 placeholder estimator — splits process RSS into the four
+/// canonical segments the design expects. Returns megabytes.
+///
+/// Parakeet weights are attributed at a static 612 MB when the
+/// recognizer is resident, 0 otherwise (TASK-62.7's per-model RAM
+/// attribution will replace this with a real number once it lands).
+/// Audio buffers and caches are fixed-ish baselines; app shell
+/// soaks the residual with a 100 MB floor to keep the segment
+/// rendering even on very low RSS readings (cold start before any
+/// model is loaded). When the floor clamps, the segment sum can
+/// exceed `rssMb` slightly — the pane footer already advertises
+/// that these are estimates.
+export function breakdownEstimate(
+  rssMb: number,
+  recognizerLoaded: boolean,
+): RssBreakdownMb {
+  const parakeetMb = recognizerLoaded ? 612 : 0;
+  const audioBuffersMb = 142;
+  const cachesMb = 84;
+  const appShellMb = Math.max(
+    100,
+    rssMb - parakeetMb - audioBuffersMb - cachesMb,
+  );
+  return { parakeetMb, audioBuffersMb, appShellMb, cachesMb };
+}
+
 /// Total memory OpenWhisper holds across all OS-managed pools.
 /// Equals process RSS (which already counts in-process model
 /// weights) plus the claim from ANE-resident weights on Mac.

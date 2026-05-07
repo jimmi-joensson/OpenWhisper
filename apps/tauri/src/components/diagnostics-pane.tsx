@@ -1,7 +1,9 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   RSS_SERIES_LEN,
+  breakdownEstimate,
   externalClaim,
+  isRecognizerResident,
   useMemoryStats,
   type LifecycleState,
   type ModelMemoryRow,
@@ -16,6 +18,10 @@ import {
 import { Card, CardContent } from "./ui/card";
 import { CrashList } from "./crash-list";
 import { CrashGlyph } from "./crash-empty";
+import {
+  RSSBreakdownBar,
+  type RSSBreakdownPart,
+} from "./diagnostics-rss-breakdown";
 
 const SPARK_W_VB = 600;
 const SPARK_H_VB = 96;
@@ -328,6 +334,8 @@ function MemoryCard({
           </div>
           <PressurePill level={pressure} />
         </div>
+
+        <RSSBreakdown rssBytes={rss} models={models} />
 
         <Breakdown rssBytes={rss} models={models} />
 
@@ -755,6 +763,52 @@ function catmullRomToBezier(pts: Array<{ x: number; y: number }>): string {
     d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)} ${c2x.toFixed(2)} ${c2y.toFixed(2)} ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
   }
   return d;
+}
+
+// Wraps the prop-driven `<RSSBreakdownBar />` with the four
+// canonical segments the design pivot calls for. Source of
+// per-segment values is `breakdownEstimate` — a v1 placeholder
+// until per-component RSS attribution lands. See
+// `diagnostics-rss-breakdown.tsx` for the presentation layer.
+function RSSBreakdown({
+  rssBytes,
+  models,
+}: {
+  rssBytes: number;
+  models: ModelMemoryRow[];
+}) {
+  const rssMb = Math.round(rssBytes / (1024 * 1024));
+  const recognizerLoaded = isRecognizerResident(models);
+  const est = breakdownEstimate(rssMb, recognizerLoaded);
+  // Order matches the design (largest expected → smallest).
+  // Color tokens match doc-43 §"OW RSS Breakdown — segment composition".
+  const parts: RSSBreakdownPart[] = [
+    {
+      kind: "parakeet",
+      label: "Parakeet weights",
+      valueMb: est.parakeetMb,
+      color: "var(--info)",
+    },
+    {
+      kind: "audio",
+      label: "Audio buffers",
+      valueMb: est.audioBuffersMb,
+      color: "color-mix(in oklch, var(--info) 65%, var(--background))",
+    },
+    {
+      kind: "shell",
+      label: "App shell",
+      valueMb: est.appShellMb,
+      color: "color-mix(in oklch, var(--info) 35%, var(--background))",
+    },
+    {
+      kind: "caches",
+      label: "Caches",
+      valueMb: est.cachesMb,
+      color: "color-mix(in oklch, var(--muted-foreground) 60%, transparent)",
+    },
+  ];
+  return <RSSBreakdownBar parts={parts} totalRssMb={rssMb} />;
 }
 
 // Stacked horizontal bar — one segment per loaded model plus an

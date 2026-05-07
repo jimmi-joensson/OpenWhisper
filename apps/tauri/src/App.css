@@ -1124,6 +1124,103 @@ body[data-platform="macos"] .ow-titlebar {
   color: var(--destructive);
 }
 
+/* ===========================================================
+   OW RSS Breakdown — TASK-62.11
+   ----------------------------------------------------------
+   Stacked horizontal bar splitting OpenWhisper's RSS into the
+   four canonical segments (Parakeet weights / Audio buffers /
+   App shell / Caches). Sits between the dual-line memory chart
+   legend and the per-model breakdown — separated from each by
+   the `border-top` divider below.
+   =========================================================== */
+
+.ow-rss-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.ow-rss-breakdown__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ow-rss-breakdown__kicker {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.ow-rss-breakdown__resident {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+.ow-rss-breakdown__bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-sunken-strong);
+}
+
+.ow-rss-breakdown__seg {
+  display: block;
+  height: 100%;
+}
+
+.ow-rss-breakdown__seg + .ow-rss-breakdown__seg {
+  border-left: 1px solid var(--background);
+}
+
+.ow-rss-breakdown__legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ow-rss-breakdown__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-rss-breakdown__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ow-rss-breakdown__label {
+  color: var(--foreground);
+}
+
+.ow-rss-breakdown__pct,
+.ow-rss-breakdown__value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.ow-rss-breakdown__sep {
+  color: var(--muted-foreground);
+  opacity: 0.55;
+}
+
 
 /* ===========================================================
    Crash inspector — TASK-78.3 + 78.4 (design pass)

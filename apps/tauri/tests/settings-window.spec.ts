@@ -477,6 +477,53 @@ test.describe("settings view", () => {
   });
 });
 
+test.describe("settings — keep models warm", () => {
+  test("toggle defaults OFF and flips to ON, persisting via settings_set_keep_models_warm", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+
+    const sw = page.getByRole("switch", { name: "Keep models warm" });
+    await expect(sw).toBeVisible();
+    await expect(sw).not.toBeChecked();
+
+    await sw.click();
+    await expect(sw).toBeChecked();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owKeepModelsWarmLast?: boolean })
+              .__owKeepModelsWarmLast,
+        ),
+      )
+      .toBe(true);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __owKeepModelsWarmSetCount?: number })
+            .__owKeepModelsWarmSetCount ?? 0,
+      ),
+    ).toBe(1);
+  });
+
+  test("toggle hydrates ON when settings_get_performance returns keep_models_warm=true", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owKeepModelsWarm?: boolean }).__owKeepModelsWarm =
+        true;
+    });
+    await page.goto("/");
+    await openSettings(page);
+
+    await expect(
+      page.getByRole("switch", { name: "Keep models warm" }),
+    ).toBeChecked();
+  });
+});
+
 test.describe("settings — shortcuts pane", () => {
   test("renders both rebindable rows", async ({ page }) => {
     await page.goto("/");

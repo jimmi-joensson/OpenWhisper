@@ -1,10 +1,10 @@
 ---
 id: TASK-62.8
 title: 'Plan Task 8: Diagnostics panel UI'
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-04-30 22:26'
-updated_date: '2026-05-04 08:03'
+updated_date: '2026-05-07 00:00'
 labels:
   - 62-impl
 dependencies: []
@@ -14,8 +14,28 @@ ordinal: 11000
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Diagnostics sidebar entry visible in Settings window
-- [ ] #2 Pane renders process RSS + per-model rows, refreshes every ~1 s
-- [ ] #3 State updates propagate immediately on model-state-changed
-- [ ] #4 Estimate caveat surfaced in pane footer
+- [x] #1 Diagnostics sidebar entry visible in Settings window
+- [x] #2 Pane renders process RSS + per-model rows, refreshes every ~1 s
+- [x] #3 State updates propagate immediately on model-state-changed
+- [x] #4 Estimate caveat surfaced in pane footer
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+- AC interpretation: Diagnostics is no longer a Settings sub-pane — it landed earlier as a top-level Route alongside Home and Settings (App.tsx, sidebar-nav.tsx). AC#1 closed against that sidebar entry. AC#2 "per-model rows" reinterpreted as the breakdown-bar segments (one per loaded ModelHandle); per the design (`chats/chat9.md`), the row-style decision surface lives in Settings → Models, deferred to a follow-up task.
+- New `apps/tauri/src/lib/use-memory-stats.ts`. 1-Hz `setInterval` poll of `telemetry_get_memory` + `listen("model-state-changed")` for instant refetch between polls. 60-sample ring of `process.rss_bytes` (matches design's "Last 60 s" caption). Hook intentionally lives in `lib/` — future Settings → Models pane will consume the same telemetry without spinning up a second poll.
+- New `apps/tauri/src/components/diagnostics-pane.tsx`. Memory card: two readouts (OpenWhisper RSS + Models loaded), 60-sample area sparkline (transform/opacity-only — T3 surface, no idle motion, reduced-motion safe), breakdown bar with one info-tinted segment per `models[]` row that has `estimated_rss_bytes > 0` plus a muted "Other" remainder. Footer note explains the RSS-delta estimate caveat (per-load snapshot, ANE-resident memory invisible on macOS) and points to OS Activity Monitor for system-wide pressure.
+- "Other" remainder uses saturating subtraction (`max(0, rss - sum_models)`) so live RSS dipping below the sum (compaction, tail-merge) renders as zero, not a negative stripe.
+- App.tsx: dropped the entire DiagnosticsPaneProps surface (phase / levels / transcript / RecordButton onToggle / coreVersion); the new pane is self-driven. Removed the now-unused `core_version` invoke + state — `general-pane.tsx` already fetches it for the Updates row.
+- `App.css` adds `.ow-diagnostics*` styles (~190 lines). Tabular-nums on all numeric readouts. Segment colors via semantic tokens (`var(--info)`, `color-mix` with `var(--muted-foreground)`) — no raw hex.
+- main-window.spec.ts: ported `getByText("Rust ↔ React FFI")` and `getByText("transcript", { exact: true })` assertions to anchor on the new pane (Diagnostics heading + Memory card visible-in-viewport + footer caveat for the scroll test).
+- `pnpm test:ui` 86/86 green. tsc clean.
+- Awaiting user QA — `pnpm dev:tauri` smoke: open Diagnostics with `recognizer` registered, dictate, observe RSS bump in sparkline + breakdown segment grow on Loaded.
+- Commit: 09714e4.
+- Polish (commit ab82ceb): replaced the per-tick path-redraw with classic Activity-Monitor left-scroll. Samples pinned to fixed viewBox-x positions (latest at right edge); the containing `<g>` translate3ds left by one sample-width over the tick interval, snapping back at swap time. Path-data index shift preserves screen positions across the swap (no jump). Animation state in refs only, transform-only, reduced-motion short-circuits to discrete snap. ResizeObserver converts the per-sample step into CSS-pixel distance so the slide aligns with the visual sample pitch on any container width. Trailing-edge dot dropped — would have popped one sample-width at every swap.
+- Polish (commit d95e758): two more fixes after the first one read as "updates every few seconds": (a) replaced CSS-transition-with-snap with a continuous RAF clock — slide offset is derived from `(now - lastSampleTime)/SPARK_TICK_MS` so poll drift never creates a pause-then-jump hitch; (b) swapped the linear polyline for Catmull-Rom cubic Bezier (tension 0.5), matching shadcn Area Chart's default `type="monotone"` look. Phantom point one sample-pitch past the right edge mirrors the latest Y so the slide gap is covered; SVG `overflow:hidden` clips it. Path d= still updates at React-render cadence only — RAF writes transform exclusively, keeping the philosophy skill's transform/opacity-only rule intact.
+- Polish (commit a428c48): the "still feels batchy" review pointed at two real issues. (a) Auto-scale Y rescaled every poll, jumping all sample Ys; replaced with a fixed monotonic ceiling derived from `peak_rss_bytes`, snapped to a nice ladder (128/256/512 MB/1/2/4/8/16 GB) with 20 % headroom — never contracts in a session. (b) Path d= was static between polls — slide was smooth but the curve shape snapped at React-render cadence. Switched to per-frame d= rebuild via RAF with three pieces: fixed older samples sliding left, a live interp point at the right edge whose Y blends `buf[N-2]→buf[N-1]` over the inter-poll interval, and a phantom one pitch past the interp sharing its Y. At swap time every screen X has the same Y on both sides — genuinely seamless, not just smoothed. **Trade-off logged** per the philosophy skill: animating `d=` violates "transform/opacity only"; justification — true sample-to-sample Y interpolation can't be expressed via transform alone. Cost ~0.2 ms/frame for a 60-point Catmull-Rom path. Reduced motion clamps progress=1 so the curve still updates per poll but doesn't animate per frame. Caption now shows the fixed scale ("Last 60 s · scale 0–N MB").
+- Polish (commit ecded93): sparkline visibly sped up on stop-recording. Cause: the recognizer fires Active→Loaded→Releasing→Loaded transitions in rapid succession at stop, the `model-state-changed` listener was re-using the same `fetchStats` path the 1 Hz poll uses, and that pushed 3-4 extra samples into the RSS ring within a sub-second window. Split the refresh paths in `useMemoryStats`: poll pushes to the ring + updates stats (only writer of the time-series, fixed 1 Hz cadence); event listener only updates stats so the State column + breakdown segments still react instantly between polls without disturbing the sample axis. Both Playwright assertions still pass via the unchanged `setStats` call.
+- Polish (commit 5168830): caught during Windows manual QA — after the 5-min idle unload fired, the OpenWhisper Memory readout correctly dropped to ~88 MB but the breakdown bar kept drawing a full 1.20 GB Recognizer segment with "Other" pinned at 0. Cause: `buildSegments` computed the in-process value as `max(claimed_bytes, estimated_rss_bytes)`. `claim_visible` on the Rust side correctly zeroes `claimed_bytes` on Unloaded, but `last_load_rss_delta` — the source for `estimated_rss_bytes` — is the *last observed* load delta and is never cleared, so the `max()` fell back to the stale 1.18 GB historical figure. Fix: filter `inProcSegs` by the same lifecycle-state set the Rust side uses (`Loaded | Active | Loading | Releasing`). External/ANE segments were already correct via their direct `claimed_bytes > 0` filter — no Mac path change. Regression test in `diagnostics.spec.ts` exercises the stale-rss-delta fixture explicitly.
+<!-- SECTION:NOTES:END -->

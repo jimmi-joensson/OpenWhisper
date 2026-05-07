@@ -112,6 +112,12 @@ rusqlite_migration = "2.5"
 # (no serde, no serde_json, no clock-tz tables).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+# Cross-platform process memory query for the diagnostics telemetry
+# layer (TASK-62). We only need per-process RSS/peak; default features
+# pull in disk/network/component probes we never read. `system` keeps
+# the dep tight to a few hundred KB.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
 # Mac-only — used to query CoreAudio kAudioDevicePropertyTransportType so we
 # can drop virtual mics (Microsoft Teams Audio, Zoom virtual device, Krisp,
 # BlackHole, etc.) from the picker. cpal classifies aggregate devices on

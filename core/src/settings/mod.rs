@@ -23,6 +23,9 @@
 //!   [`AtomicBool`] for the 500 ms watcher loop.
 //! - `stats` — `user_wpm` calibration for the Time Saved formula on
 //!   the Home pane.
+//! - `performance` — `keep_models_warm` (when true, registered
+//!   `ModelHandle`s never auto-release their resident model). Cached
+//!   as [`AtomicBool`] for the lock-free read inside `apply_keep_warm`.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
 //!  load after upgrade and folded into the current `hotkeys` shape;
@@ -156,6 +159,8 @@ struct SettingsFile {
     pill: Option<PillSettings>,
     #[serde(default)]
     stats: Option<StatsSettings>,
+    #[serde(default)]
+    performance: Option<PerformanceSettings>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,12 +281,38 @@ impl Default for BehaviorSettings {
     }
 }
 
+/// Power-user knob: keep model handles resident between sessions.
+///
+/// `false` (default) → every registered `ModelHandle` honors its
+/// configured idle timeout (5 min recognizer / 60 s LLM, etc.) and
+/// auto-unloads after that window of `use_with` inactivity. The next
+/// dictation pays the cold-load latency.
+///
+/// `true` → idle timers are effectively disabled (`Duration::MAX`);
+/// loaded models stay in RAM until app quit. Trades RAM for
+/// first-use latency. Read by `apply_keep_warm` via the lock-free
+/// [`keep_models_warm`] cache.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerformanceSettings {
+    #[serde(default)]
+    pub keep_models_warm: bool,
+}
+
+impl Default for PerformanceSettings {
+    fn default() -> Self {
+        Self {
+            keep_models_warm: false,
+        }
+    }
+}
+
 // --- caches --------------------------------------------------------
 
 static CURRENT: Mutex<Option<HotkeySettings>> = Mutex::new(None);
 static AUDIO_CURRENT: Mutex<Option<AudioSettings>> = Mutex::new(None);
 static BEHAVIOR_CURRENT: Mutex<Option<BehaviorSettings>> = Mutex::new(None);
 static STATS_CURRENT: Mutex<Option<StatsSettings>> = Mutex::new(None);
+static PERFORMANCE_CURRENT: Mutex<Option<PerformanceSettings>> = Mutex::new(None);
 
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
@@ -301,6 +332,13 @@ static PAUSE_AUDIO: AtomicBool = AtomicBool::new(true);
 /// `set_bt_resume_delay_ms_cache` runs at boot still gets a sane
 /// value rather than 0 (which would defeat the purpose of the wait).
 static BT_RESUME_DELAY_MS: AtomicU64 = AtomicU64::new(5000);
+
+/// Lock-free mirror of `performance.keep_models_warm`. Read by
+/// `model_lifecycle::apply_keep_warm` (called from the `set` Tauri
+/// command) and by every `ModelHandle::with_idle_timeout` constructor
+/// so a freshly built handle inherits the current cluster-wide
+/// preference without a separate sync call.
+static KEEP_MODELS_WARM: AtomicBool = AtomicBool::new(false);
 
 /// Lock-free read of `pill.follow_active_screen`. Safe to call from
 /// any thread, including the focus-window watcher.
@@ -339,6 +377,22 @@ pub fn set_pause_audio_cache(value: bool) {
 
 pub fn set_bt_resume_delay_ms_cache(value: u64) {
     BT_RESUME_DELAY_MS.store(value, Ordering::Relaxed);
+}
+
+/// Lock-free read of `performance.keep_models_warm`. Read by
+/// [`crate::model_lifecycle::apply_keep_warm`] and by
+/// [`ModelHandle::with_idle_timeout`] at construction time so a
+/// fresh handle inherits the persisted preference.
+pub fn keep_models_warm() -> bool {
+    KEEP_MODELS_WARM.load(Ordering::Relaxed)
+}
+
+/// Setter for the keep-models-warm cache. Called by the boot-time
+/// hydrate path AND by `settings_set_keep_models_warm` after a
+/// successful save. Returns the previous value so callers can detect
+/// a no-op flip.
+pub fn set_keep_models_warm_cache(value: bool) -> bool {
+    KEEP_MODELS_WARM.swap(value, Ordering::Relaxed)
 }
 
 pub fn current_pill_settings() -> PillSettings {
@@ -409,6 +463,7 @@ pub fn save_settings(path: &Path, settings: HotkeySettings) -> Result<(), String
     let behavior = file.behavior.or_else(current_behavior_settings);
     let stats = file.stats.or_else(current_stats_settings);
     let pill = file.pill.unwrap_or_else(current_pill_settings);
+    let performance = file.performance.or_else(current_performance_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys: Some(settings.clone()),
@@ -416,6 +471,7 @@ pub fn save_settings(path: &Path, settings: HotkeySettings) -> Result<(), String
         behavior,
         pill: Some(pill),
         stats,
+        performance,
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -447,6 +503,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
     let audio = file.audio.or_else(current_audio_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
     let pill = file.pill.unwrap_or_else(current_pill_settings);
+    let performance = file.performance.or_else(current_performance_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
@@ -454,6 +511,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
         behavior,
         pill: Some(pill),
         stats: Some(clamped),
+        performance,
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = STATS_CURRENT.lock() {
@@ -487,6 +545,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
     let behavior = file.behavior.or_else(current_behavior_settings);
     let pill = file.pill.or_else(|| Some(current_pill_settings()));
     let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
@@ -494,6 +553,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
         behavior,
         pill,
         stats,
+        performance,
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -527,6 +587,7 @@ pub fn save_behavior_settings(
     let audio = file.audio.or_else(current_audio_settings);
     let pill = file.pill.or_else(|| Some(current_pill_settings()));
     let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
@@ -534,6 +595,7 @@ pub fn save_behavior_settings(
         behavior: Some(settings.clone()),
         pill,
         stats,
+        performance,
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -548,6 +610,7 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
     let audio = file.audio.or_else(current_audio_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
     let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
     let merged = SettingsFile {
         hotkey: None,
         hotkeys,
@@ -555,9 +618,58 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
         behavior,
         pill: Some(settings.clone()),
         stats,
+        performance,
     };
     write_file(path, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
+    Ok(())
+}
+
+pub fn current_performance_settings() -> Option<PerformanceSettings> {
+    PERFORMANCE_CURRENT.lock().ok().and_then(|g| *g)
+}
+
+/// Load the performance block from disk on the first call, then
+/// cache. Side-effect: hydrates [`KEEP_MODELS_WARM`] so any handle
+/// constructed via `ModelHandle::with_idle_timeout` after this point
+/// sees the persisted value.
+pub fn load_performance_settings(path: &Path) -> PerformanceSettings {
+    if let Some(s) = PERFORMANCE_CURRENT.lock().ok().and_then(|g| *g) {
+        return s;
+    }
+    let file = read_file(path);
+    let settings = file.performance.unwrap_or_default();
+    KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
+    if let Ok(mut g) = PERFORMANCE_CURRENT.lock() {
+        *g = Some(settings);
+    }
+    settings
+}
+
+pub fn save_performance_settings(
+    path: &Path,
+    settings: PerformanceSettings,
+) -> Result<(), String> {
+    let file = read_file(path);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill,
+        stats,
+        performance: Some(settings),
+    };
+    write_file(path, &merged)?;
+    KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
+    if let Ok(mut g) = PERFORMANCE_CURRENT.lock() {
+        *g = Some(settings);
+    }
     Ok(())
 }
 
@@ -643,5 +755,54 @@ mod tests {
     fn behavior_empty_json_uses_full_defaults() {
         let parsed: BehaviorSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, BehaviorSettings::default());
+    }
+
+    #[test]
+    fn performance_default_keep_models_warm_is_false() {
+        assert!(!PerformanceSettings::default().keep_models_warm);
+    }
+
+    #[test]
+    fn performance_legacy_json_without_block_defaults_false() {
+        let legacy = r#"{"hotkeys":null,"behavior":null}"#;
+        let file: SettingsFile = serde_json::from_str(legacy).unwrap();
+        let perf = file.performance.unwrap_or_default();
+        assert!(!perf.keep_models_warm);
+    }
+
+    #[test]
+    fn performance_save_load_round_trip_via_disk() {
+        // Use a real temp dir so we exercise the same write_file
+        // codepath the Tauri shell hits. tempfile is already a
+        // dev-dep used elsewhere in core::store tests.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Wipe the process-global cache so the load() doesn't short-
+        // circuit on a value seeded by a sibling test running in
+        // parallel. The cache is for the process lifetime; tests
+        // share it.
+        if let Ok(mut g) = PERFORMANCE_CURRENT.lock() {
+            *g = None;
+        }
+
+        save_performance_settings(
+            &path,
+            PerformanceSettings {
+                keep_models_warm: true,
+            },
+        )
+        .unwrap();
+
+        // The save populates the cache — confirm.
+        let cached = current_performance_settings().unwrap();
+        assert!(cached.keep_models_warm);
+        assert!(keep_models_warm());
+
+        // And the on-disk JSON contains the new value (load_ short-
+        // circuits on the cache, so we read the file directly).
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed: SettingsFile = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed.performance.unwrap().keep_models_warm);
     }
 }

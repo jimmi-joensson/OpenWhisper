@@ -10,7 +10,9 @@
 //! - `dictation` — phase machine + snapshot
 //! - `diagnostics` — recognizer info + crash-dump trait surface
 //! - `media_gate` — pause/resume gate trait + diagnostic
+//! - `model_lifecycle` — load/unload state machine for resident models
 //! - `settings` — schema types + cache accessors
+//! - `telemetry` — process memory readout
 //! - `transcript` — filter pipeline
 //! - `stats` — read-side aggregator
 //! - `store` — persistence handle
@@ -26,12 +28,21 @@ pub use crate::diagnostics::{
 pub use crate::diagnostics::recognizer_info;
 pub use crate::dictation::{DictationSnapshot, Injector};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};
+pub use crate::model_lifecycle::{
+    LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
+    registry_snapshot,
+};
 pub use crate::settings::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
-    PillSettings, StatsSettings,
+    PerformanceSettings, PillSettings, StatsSettings, keep_models_warm,
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};
+pub use crate::model_lifecycle::ModelClaim;
+pub use crate::telemetry::{
+    collect_memory_stats, query_process_memory, query_system_memory, MemoryStats, ModelMemoryRow,
+    ProcessMemory, SystemMemory,
+};
 pub use crate::transcript::FillerLang;
 
 #[cfg(feature = "recognizer")]

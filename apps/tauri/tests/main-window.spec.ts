@@ -7,13 +7,15 @@ test.describe("sidebar nav", () => {
     await expect(page.getByTestId("sidebar-item-home")).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
 
-    // Click Diagnostics — debug content visible, sidebar still shows the three routes.
+    // Click Diagnostics — pane visible, sidebar still shows the three routes.
     await page.getByTestId("sidebar-item-diagnostics").click();
     await expect(page.getByTestId("sidebar-item-diagnostics")).toHaveAttribute(
       "aria-current",
       "page",
     );
-    await expect(page.getByText("Rust ↔ React FFI")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Diagnostics", exact: true }),
+    ).toBeVisible();
     await expect(page.getByTestId("sidebar-item-home")).toBeVisible();
     await expect(page.getByTestId("sidebar-item-settings")).toBeVisible();
 
@@ -46,19 +48,43 @@ test.describe("sidebar nav", () => {
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();
   });
 
-  test("sidebar starts at window top; titlebar inset over content column", async ({ page }) => {
+  test("titlebar spans full width; sidebar sits below it", async ({ page }) => {
     await page.goto("/");
-    const sidebarBox = await page.getByTestId("sidebar-item-home").boundingBox();
-    // Sidebar's first item is within the top 60 px of the window — i.e. the
-    // sidebar column starts at or near y=0.
-    expect(sidebarBox && sidebarBox.y).toBeLessThan(60);
 
-    // Settings titlebar back-arrow lives inside the content column (x>150),
-    // not full-width above the sidebar.
+    // Full-width titlebar is the topmost element in the layout
+    // (matches design — traffic lights + centered title share one
+    // strip). The sidebar's first item starts BELOW the titlebar.
+    const titleBar = page.locator(".ow-titlebar");
+    const titleBox = await titleBar.boundingBox();
+    expect(titleBox && titleBox.y).toBe(0);
+    const sidebarBox = await page.getByTestId("sidebar-item-home").boundingBox();
+    expect(sidebarBox && titleBox && sidebarBox.y).toBeGreaterThanOrEqual(
+      (titleBox?.height ?? 0),
+    );
+
+    // Centered route title shows on home.
+    await expect(page.locator(".ow-titlebar__title")).toHaveText(
+      "OpenWhisper",
+    );
+
+    // Settings: title text becomes "OpenWhisper — Settings". Back
+    // navigation lives as a breadcrumb at the top of the pane
+    // content (NOT in the titlebar — keeps the titlebar clean per
+    // the design, while preserving an explicit back affordance).
     await page.getByTestId("sidebar-item-settings").click();
+    await expect(page.locator(".ow-titlebar__title")).toHaveText(
+      "OpenWhisper — Settings",
+    );
     const back = page.getByRole("button", { name: "Back to main" });
     const backBox = await back.boundingBox();
-    expect(backBox && backBox.x).toBeGreaterThan(150);
+    // Breadcrumb sits below the titlebar — its top is past the
+    // titlebar's bottom edge.
+    expect(backBox && titleBox && backBox.y).toBeGreaterThanOrEqual(
+      (titleBox?.height ?? 0),
+    );
+    // And inside the content column, not the sidebar (x past the
+    // 180 px sidebar width).
+    expect(backBox && backBox.x).toBeGreaterThan(180);
   });
 
   test("re-entering Settings resets to General regardless of last pane", async ({ page }) => {
@@ -117,14 +143,18 @@ test.describe("scroll", () => {
     });
     expect(scrolled).toBeGreaterThan(0);
 
-    await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
+    // OpenWhisper memory breakdown is the last block in the Memory
+    // card; scrolling to the end brings it into view.
+    await expect(
+      page.getByText("OpenWhisper memory breakdown"),
+    ).toBeInViewport();
   });
 
-  test("transcript Card visible without scroll at default 720x820", async ({ page }) => {
+  test("Memory card visible without scroll at default 720x820", async ({ page }) => {
     await page.setViewportSize({ width: 720, height: 820 });
     await page.goto("/");
     await page.getByTestId("sidebar-item-diagnostics").click();
-    await expect(page.getByText("transcript", { exact: true })).toBeInViewport();
+    await expect(page.getByText("Memory", { exact: true })).toBeInViewport();
   });
 });
 

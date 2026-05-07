@@ -67,6 +67,15 @@ fn cache_root() -> Result<PathBuf, String> {
     Ok(home.join(".cache").join("openwhisper").join("models"))
 }
 
+/// `Some(path)` when the on-disk model cache exists, else `None`.
+/// Non-blocking — never triggers a download. Used by the recognizer's
+/// memory-claim probe to compute the resident weight footprint
+/// without forcing a fetch on first call to Diagnostics.
+pub fn cached_model_dir() -> Option<PathBuf> {
+    let dir = cache_root().ok()?.join(MODEL_NAME);
+    if dir.is_dir() { Some(dir) } else { None }
+}
+
 fn download_to(dest: &Path) -> Result<(), String> {
     eprintln!("[recognizer] downloading {MODEL_URL}");
     let resp = ureq::get(MODEL_URL)

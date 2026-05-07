@@ -40,6 +40,7 @@ import {
 } from "@/lib/use-user-wpm";
 
 type PillSettings = { follow_active_screen: boolean };
+type PerformanceSettings = { keep_models_warm: boolean };
 
 export function GeneralPane() {
   // Hydrated from the platform autostart registration on mount, NOT from
@@ -53,6 +54,7 @@ export function GeneralPane() {
     useShowInFullscreen();
   const [version, setVersion] = useState<string | null>(null);
   const [followActiveScreen, setFollowActiveScreen] = useState(true);
+  const [keepModelsWarm, setKeepModelsWarm] = useState(false);
   const { wpm, setWpm } = useUserWpm();
   const [wpmDraft, setWpmDraft] = useState<string>(String(wpm));
   const [wpmFocused, setWpmFocused] = useState(false);
@@ -113,6 +115,12 @@ export function GeneralPane() {
       .catch(() => setFollowActiveScreen(true));
   }, []);
 
+  useEffect(() => {
+    invoke<PerformanceSettings>("settings_get_performance")
+      .then((s) => setKeepModelsWarm(s.keep_models_warm))
+      .catch(() => setKeepModelsWarm(false));
+  }, []);
+
   const onLaunchAtLoginChange = (next: boolean) => {
     setLaunchAtLogin(next);
     const apply = next ? autostartEnable() : autostartDisable();
@@ -129,6 +137,15 @@ export function GeneralPane() {
       // eslint-disable-next-line no-console
       console.warn("settings_set_pill_follow failed", e);
       setFollowActiveScreen(!next);
+    });
+  };
+
+  const onKeepModelsWarmChange = (next: boolean) => {
+    setKeepModelsWarm(next);
+    invoke("settings_set_keep_models_warm", { value: next }).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.warn("settings_set_keep_models_warm failed", e);
+      setKeepModelsWarm(!next);
     });
   };
 
@@ -286,6 +303,25 @@ export function GeneralPane() {
             </AlertDialogContent>
           </AlertDialogPortal>
         </AlertDialog>
+      </Field>
+
+      <Separator />
+
+      <SectionHeader>Performance</SectionHeader>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor="keep-models-warm">Keep models warm</FieldLabel>
+          <FieldDescription>
+            Keep speech-recognition (and future cleanup) models in memory
+            between sessions. Uses more RAM, eliminates first-use load
+            delay.
+          </FieldDescription>
+        </FieldContent>
+        <Switch
+          id="keep-models-warm"
+          checked={keepModelsWarm}
+          onCheckedChange={onKeepModelsWarmChange}
+        />
       </Field>
 
       <Separator />

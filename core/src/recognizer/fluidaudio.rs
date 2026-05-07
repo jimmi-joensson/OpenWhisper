@@ -18,6 +18,7 @@ use super::{Recognizer, TranscribeResult};
 
 unsafe extern "C" {
     fn fab_load() -> i32;
+    fn fab_unload() -> i32;
     fn fab_transcribe(
         samples: *const f32,
         count: u64,
@@ -80,6 +81,20 @@ impl Recognizer for FluidAudioBridge {
         // Engine on M-series. No probing API to confirm at runtime
         // — static label.
         Some("ANE".to_string())
+    }
+}
+
+impl Drop for FluidAudioBridge {
+    fn drop(&mut self) {
+        // Tell the Swift side to release the AsrManager + .mlmodelc.
+        // Without this, ModelHandle::unload() drops the empty Rust
+        // struct but the Swift global state holds the model weights
+        // resident on the ANE — defeating the idle-timer's purpose.
+        // fab_unload is idempotent and can't fail in any way the Rust
+        // side can act on; we ignore the return code.
+        unsafe {
+            let _ = fab_unload();
+        }
     }
 }
 

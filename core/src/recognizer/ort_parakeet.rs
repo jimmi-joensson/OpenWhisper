@@ -92,6 +92,34 @@ impl Default for OrtParakeet {
     }
 }
 
+impl Drop for OrtParakeet {
+    fn drop(&mut self) {
+        // Explicit drop of the three `ort::Session`s by way of taking
+        // the `Sessions` Option. Auto-derived Drop would do the same,
+        // but the explicit version (a) logs once on idle release so
+        // the manual Windows smoke (TASK-62.6 AC #2: "RSS drops by an
+        // observable amount on Windows") has a deterministic event to
+        // wait for, and (b) makes the resource-release intent
+        // unmistakable to a reader who lands here while debugging
+        // a "model still resident after unload" bug. The plan
+        // (`backlog/docs/plans/2026-05-01-model-lifecycle-telemetry
+        // .md`, Task 6) calls out `ort::Session::drop()` historically
+        // being finicky in some `ort` versions when the runtime is
+        // unloaded mid-process — this Drop runs while the runtime is
+        // still alive (process-global `ORT_INIT` outlives any single
+        // recognizer instance), which is the supported path.
+        if let Some(sessions) = self.sessions.take() {
+            eprintln!(
+                "[recognizer/ort] releasing sessions (encoder/decoder/joiner) — ep was {}",
+                self.selected_ep
+            );
+            // sessions: Sessions{encoder, decoder, joiner, ...} drops
+            // here, releasing each ort::Session in turn.
+            drop(sessions);
+        }
+    }
+}
+
 /// Tracks whether `ort::init_from(...).commit()` has succeeded for this
 /// process. ort's load-dynamic global state must be set exactly once
 /// before any session creation; subsequent attempts are silent no-ops

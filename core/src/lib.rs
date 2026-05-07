@@ -3,12 +3,14 @@ pub mod diagnostics;
 pub mod dictation;
 mod ffi_c;
 pub mod media_gate;
+pub mod model_lifecycle;
 pub mod prelude;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
 pub mod settings;
 pub mod stats;
 pub mod store;
+pub mod telemetry;
 pub mod transcript;
 pub mod verbose;
 

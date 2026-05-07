@@ -443,6 +443,32 @@ test.describe("crash inspector — detail sheet", () => {
     expect(count).toBeGreaterThanOrEqual(1);
   });
 
+  test("Report on GitHub opens a prefilled issues URL", async ({ page }) => {
+    await openSheet(page, "350");
+    await page.getByTestId("crash-detail-report-github").click();
+    const calls = await page.evaluate(
+      () =>
+        (window as unknown as { __owOpenerOpenUrlCalls?: string[] })
+          .__owOpenerOpenUrlCalls ?? [],
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const url = calls[0];
+    expect(url).toMatch(
+      /^https:\/\/github\.com\/jimmi-joensson\/OpenWhisper\/issues\/new\?/,
+    );
+    // Use URL parsing so `+`-encoded spaces in the body decode correctly
+    // (`decodeURIComponent` doesn't translate `+`, but
+    // URLSearchParams.get does).
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("labels")).toBe("bug,crash");
+    const title = parsed.searchParams.get("title")!;
+    expect(title).toContain("Crash report");
+    expect(title).toContain("Result::unwrap()");
+    const body = parsed.searchParams.get("body")!;
+    expect(body).toContain("**OpenWhisper crash report**");
+    expect(body).toContain("Result::unwrap()");
+  });
+
   test("Events block toggles open + tags the crash row in the table", async ({
     page,
   }) => {

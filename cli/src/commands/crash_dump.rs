@@ -23,10 +23,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use openwhisper_core::crashes::build_github_issue_url;
 use openwhisper_core::diagnostics::{
     self, CrashDump, CrashDumpReader, CrashId, FileBackedCrashDumpReader,
     ReadError,
 };
+
+const GITHUB_OWNER: &str = "jimmi-joensson";
+const GITHUB_REPO: &str = "OpenWhisper";
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -49,6 +53,13 @@ pub struct Args {
     /// (`com.openwhisper.dev`) or a temp fixture dir.
     #[arg(long, value_name = "PATH")]
     pub dir: Option<PathBuf>,
+
+    /// Print a prefilled GitHub Issues URL instead of the
+    /// human-readable report. Compose with `--latest` (default) or
+    /// `--id <ID>` to target a specific crash; mutually exclusive
+    /// with `--list`. With `--json`, emits `{ "url": "..." }`.
+    #[arg(long, conflicts_with = "list")]
+    pub github_url: bool,
 }
 
 pub fn run(args: Args, json: bool) -> Result<()> {
@@ -56,12 +67,40 @@ pub fn run(args: Args, json: bool) -> Result<()> {
 
     if args.list {
         list(reader.as_ref(), json)
+    } else if args.github_url {
+        github_url(reader.as_ref(), args.id.as_deref(), json)
     } else if let Some(id) = args.id.as_deref() {
         show_by_id(reader.as_ref(), id, json)
     } else {
         // No flag, or `--latest` explicitly → show the newest crash.
         show_latest(reader.as_ref(), json)
     }
+}
+
+fn github_url(
+    reader: &dyn CrashDumpReader,
+    id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let crash = match id {
+        Some(s) => match reader.read(&CrashId::new(s)) {
+            Ok(c) => c,
+            Err(ReadError::NotFound) => bail!("crash {s} not found"),
+            Err(ReadError::UnsafeId(x)) => bail!("invalid crash id: {x}"),
+            Err(e) => return Err(anyhow::anyhow!(e)),
+        },
+        None => match reader.list().drain(..).next() {
+            Some(c) => c,
+            None => bail!("no crashes recorded"),
+        },
+    };
+    let url = build_github_issue_url(&crash, GITHUB_OWNER, GITHUB_REPO);
+    if json {
+        println!("{}", serde_json::json!({ "url": url }));
+    } else {
+        println!("{url}");
+    }
+    Ok(())
 }
 
 fn resolve_reader(

@@ -323,6 +323,235 @@ pub fn list_crashes(dir: &Path) -> io::Result<Vec<CrashFile>> {
     Ok(out)
 }
 
+/// Format a crash file as a GitHub-ready markdown report. Pure
+/// function; mirror of the TypeScript `formatCrashAsMarkdown` in
+/// `apps/tauri/src/lib/crash-markdown.ts`. Two implementations exist
+/// (one per language) because the React side renders Copy /
+/// Report-on-GitHub flows synchronously without an IPC roundtrip,
+/// and the CLI consumes this Rust version directly. If the shapes
+/// diverge, the contract test in `tests/markdown_contract.rs` pins
+/// both to the same expected output for a fixture crash.
+///
+/// On-disk crash files are already redacted at write time inside the
+/// panic hook, so this formatter does NOT re-redact — its only
+/// contract is "don't re-introduce un-redacted fields."
+pub fn format_as_markdown(crash: &CrashFile) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("**OpenWhisper crash report**".into());
+    lines.push(String::new());
+    lines.push(format!("- Version: {}", crash.app_version));
+    lines.push(format!("- OS: {}", crash.os));
+    lines.push(format!("- When: {}", format_absolute_utc(crash.ts_unix_ms)));
+
+    if let Some(rs) = crash.recording_state.as_ref() {
+        let phase = rs.status_message_at_crash.trim();
+        lines.push(format!(
+            "- Phase at crash: {phase} ({} in)",
+            format_duration(rs.duration_ms),
+        ));
+        if let Some(model) = rs.model_kind.as_ref() {
+            lines.push(format!("- Model: {model}"));
+        }
+    } else {
+        lines.push("- Phase at crash: idle (outside dictation)".into());
+    }
+
+    lines.push(String::new());
+    lines.push("**What I was doing:**".into());
+    lines.push(String::new());
+    lines.push("> _replace this with a quick description before submitting_".into());
+    lines.push(String::new());
+    lines.push("<details>".into());
+    lines.push("<summary>Backtrace (click to expand)</summary>".into());
+    lines.push(String::new());
+    lines.push("```".into());
+    lines.push(crash.rust_panic.message.clone());
+    lines.push(format!("   at {}", crash.rust_panic.location));
+    lines.push(String::new());
+    lines.push(crash.rust_panic.backtrace.clone());
+    lines.push("```".into());
+    lines.push(String::new());
+    lines.push("</details>".into());
+
+    if !crash.events.is_empty() {
+        lines.push(String::new());
+        lines.push("<details>".into());
+        lines.push(format!(
+            "<summary>Recent events ({})</summary>",
+            crash.events.len(),
+        ));
+        lines.push(String::new());
+        lines.push("| time | kind | data |".into());
+        lines.push("| --- | --- | --- |".into());
+        for ev in &crash.events {
+            let time = format_time_of_day(ev.ts_unix_ms);
+            let data_str = format_event_data(&ev.data);
+            lines.push(format!("| {time} | {} | {data_str} |", ev.kind));
+        }
+        lines.push(String::new());
+        lines.push("</details>".into());
+    }
+
+    lines.join("\n")
+}
+
+fn format_absolute_utc(ts_unix_ms: i64) -> String {
+    let secs = ts_unix_ms.div_euclid(1000);
+    let (year, month, day, hour, minute, second) = unix_secs_to_utc(secs);
+    format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC",
+    )
+}
+
+fn format_time_of_day(ts_unix_ms: i64) -> String {
+    let secs = ts_unix_ms.div_euclid(1000);
+    let (_, _, _, hour, minute, second) = unix_secs_to_utc(secs);
+    format!("{hour:02}:{minute:02}:{second:02}")
+}
+
+fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms}ms");
+    }
+    let secs = ms as f64 / 1000.0;
+    if secs < 60.0 {
+        return format!("{secs:.1}s");
+    }
+    let minutes = (secs / 60.0).floor() as u64;
+    let rem = (secs - (minutes as f64) * 60.0).round() as u64;
+    format!("{minutes}m {rem}s")
+}
+
+fn format_event_data(data: &serde_json::Value) -> String {
+    use serde_json::Value;
+    let raw = match data {
+        Value::Null => return String::new(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    raw.replace('|', r"\|").replace('\n', " ").replace('\r', " ")
+}
+
+/// Civil date/time conversion from a UTC Unix timestamp (seconds).
+/// Hand-rolled so core stays free of `chrono::Utc` (we only depend
+/// on `chrono::Local` today) and the formatter stays a pure
+/// no-allocation arithmetic function. Algorithm follows Howard
+/// Hinnant's `civil_from_days` (public domain) — well-tested,
+/// covers the full proleptic Gregorian range we care about.
+fn unix_secs_to_utc(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let hour = (secs_of_day / 3600) as u32;
+    let minute = ((secs_of_day % 3600) / 60) as u32;
+    let second = (secs_of_day % 60) as u32;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if month <= 2 { y + 1 } else { y };
+    (year as i32, month, day, hour, minute, second)
+}
+
+const GH_TITLE_MESSAGE_MAX_CHARS: usize = 72;
+const GH_BODY_BYTE_BUDGET: usize = 6_000;
+const GH_TRUNCATION_MARKER: &str =
+    "\n\n_Truncated — paste the full report from `Copy GitHub-ready report` if needed._";
+
+/// Build a prefilled GitHub Issues URL for a crash. Mirror of the
+/// TypeScript `buildGitHubIssueUrl` in
+/// `apps/tauri/src/lib/crash-github.ts`. Body is truncated at the
+/// 6 KB byte budget; the identity block is preserved in full and
+/// the backtrace tail is trimmed instead.
+pub fn build_github_issue_url(
+    crash: &CrashFile,
+    owner: &str,
+    repo: &str,
+) -> String {
+    let title = build_github_title(crash);
+    let body = build_github_body(crash);
+    format!(
+        "https://github.com/{owner}/{repo}/issues/new?title={}&body={}&labels={}",
+        form_urlencode(&title),
+        form_urlencode(&body),
+        form_urlencode("bug,crash"),
+    )
+}
+
+fn build_github_title(crash: &CrashFile) -> String {
+    let first_line = crash
+        .rust_panic
+        .message
+        .lines()
+        .next()
+        .unwrap_or("");
+    let trimmed = if first_line.chars().count() <= GH_TITLE_MESSAGE_MAX_CHARS {
+        first_line.to_string()
+    } else {
+        let mut out: String = first_line
+            .chars()
+            .take(GH_TITLE_MESSAGE_MAX_CHARS)
+            .collect();
+        out.push('…');
+        out
+    };
+    format!("Crash report — v{} — {trimmed}", crash.app_version)
+}
+
+fn build_github_body(crash: &CrashFile) -> String {
+    let full = format_as_markdown(crash);
+    if full.len() <= GH_BODY_BYTE_BUDGET {
+        return full;
+    }
+    let cap = GH_BODY_BYTE_BUDGET.saturating_sub(GH_TRUNCATION_MARKER.len());
+    let truncated = slice_at_byte_boundary(&full, cap);
+    format!("{truncated}{GH_TRUNCATION_MARKER}")
+}
+
+/// Slice a string at the largest UTF-8 char boundary `<= max_bytes`.
+/// `truncate_unsafe` would split a multi-byte codepoint; this finds
+/// the boundary by walking down from the cap.
+fn slice_at_byte_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    &s[..idx]
+}
+
+/// Percent-encode a string for `application/x-www-form-urlencoded`
+/// — same shape `URLSearchParams.toString()` produces in JS, so the
+/// Rust + TS URL builders emit byte-identical URLs for identical
+/// crash inputs (asserted by the contract test).
+///
+/// Rules: ALPHA / DIGIT / `*-._` pass through; space becomes `+`;
+/// everything else is `%XX`-encoded.
+fn form_urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        let b = *byte;
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
 /// Resolve the OS-default crash dir for the **release** bundle id
 /// (`com.openwhisper.app`). Honors `OPENWHISPER_CRASH_DIR_OVERRIDE`
 /// in debug + test builds so dev workflows can point at a temp dir.
@@ -647,5 +876,130 @@ mod tests {
         let s = os_descriptor();
         assert!(s.contains('('));
         assert!(s.contains(')'));
+    }
+
+    fn fixture(events: Vec<Event>, recording: Option<RecordingStateSnapshot>) -> CrashFile {
+        CrashFile {
+            schema_version: SCHEMA_VERSION,
+            id: "1777905201000".into(),
+            // Date.UTC(2026, 4, 4, 14, 33, 21) = 2026-05-04 14:33:21
+            // UTC. Mirror of the TS test fixture so both formatters
+            // can be eyeballed against the same wall-clock instant.
+            ts_unix_ms: 1_777_905_201_000,
+            app_version: "0.6.0".into(),
+            os: "macos (arm64)".into(),
+            rust_panic: RustPanic {
+                thread_name: "tokio-runtime-worker".into(),
+                message: "called `Result::unwrap()` on an `Err` value".into(),
+                location: "core/src/audio.rs:412:17".into(),
+                backtrace: "frame 1\nframe 2\nframe 3".into(),
+            },
+            recording_state: recording,
+            events,
+        }
+    }
+
+    #[test]
+    fn format_as_markdown_full_shape() {
+        let recording = RecordingStateSnapshot {
+            status_message_at_crash: "transcribing on ANE…".into(),
+            duration_ms: 18234,
+            samples_captured: 291744,
+            model_kind: Some("Parakeet".into()),
+            device_id_hash: None,
+        };
+        let events = vec![Event {
+            ts_unix_ms: 1_777_991_600_000,
+            kind: "DictationStart".into(),
+            data: serde_json::json!({}),
+        }];
+        let out = format_as_markdown(&fixture(events, Some(recording)));
+        assert!(out.contains("**OpenWhisper crash report**"));
+        assert!(out.contains("- Version: 0.6.0"));
+        assert!(out.contains("- OS: macos (arm64)"));
+        assert!(out.contains("- When: 2026-05-04 14:33:21 UTC"));
+        assert!(out.contains("- Phase at crash: transcribing on ANE… (18.2s in)"));
+        assert!(out.contains("- Model: Parakeet"));
+        assert!(out.contains("Recent events (1)"));
+        assert!(out.contains("| DictationStart | {} |"));
+    }
+
+    #[test]
+    fn format_as_markdown_no_recording_state() {
+        let out = format_as_markdown(&fixture(vec![], None));
+        assert!(out.contains("- Phase at crash: idle (outside dictation)"));
+        assert!(!out.contains("- Model:"));
+    }
+
+    #[test]
+    fn format_as_markdown_empty_events_omits_section() {
+        let out = format_as_markdown(&fixture(vec![], None));
+        assert!(!out.contains("Recent events"));
+    }
+
+    #[test]
+    fn format_as_markdown_escapes_pipes_and_newlines_in_event_data() {
+        let events = vec![Event {
+            ts_unix_ms: 1_777_991_601_000,
+            kind: "Error".into(),
+            data: serde_json::json!({ "msg": "a | b\nc" }),
+        }];
+        let out = format_as_markdown(&fixture(events, None));
+        let row = out
+            .lines()
+            .find(|l| l.contains("Error"))
+            .expect("event row");
+        assert!(row.contains(r"\|"));
+        assert!(!row.contains('\n'));
+    }
+
+    #[test]
+    fn build_github_issue_url_short_body_intact() {
+        let url =
+            build_github_issue_url(&fixture(vec![], None), "jimmi-joensson", "OpenWhisper");
+        assert!(url.starts_with(
+            "https://github.com/jimmi-joensson/OpenWhisper/issues/new?title=",
+        ));
+        assert!(url.contains("labels=bug%2Ccrash"));
+        assert!(url.contains("Crash+report"));
+        // Encoded form of the panic message segment.
+        assert!(url.contains("Result%3A%3Aunwrap"));
+    }
+
+    #[test]
+    fn build_github_issue_url_truncates_when_over_budget() {
+        let huge = "frame X\n".repeat(2_000);
+        let mut crash = fixture(vec![], None);
+        crash.rust_panic.backtrace = huge;
+        let url = build_github_issue_url(&crash, "o", "r");
+        // Truncation marker percent-encoded — the literal `%20` for
+        // space, plus the leading underscore + word "Truncated".
+        assert!(url.contains("Truncated"));
+        // Whole URL stays bounded; the body is at most the budget +
+        // marker length + percent-encoding overhead. 12 KB is a safe
+        // ceiling that still fails on >2× regressions.
+        assert!(url.len() < 12_000, "url bytes: {}", url.len());
+    }
+
+    #[test]
+    fn build_github_title_truncates_long_panic_message() {
+        let long_msg = "a".repeat(120);
+        let mut crash = fixture(vec![], None);
+        crash.rust_panic.message = long_msg;
+        let url = build_github_issue_url(&crash, "o", "r");
+        // The encoded title carries 72 `a`s and an ellipsis. Decode
+        // by hand: the percent-encoded ellipsis is %E2%80%A6.
+        assert!(url.contains(&"a".repeat(72)));
+        assert!(url.contains("%E2%80%A6"));
+    }
+
+    #[test]
+    fn form_urlencode_matches_url_search_params_shape() {
+        // ALPHA/DIGIT/* - . _ pass through; space → '+'; ',' → %2C.
+        assert_eq!(form_urlencode("hello"), "hello");
+        assert_eq!(form_urlencode("hello world"), "hello+world");
+        assert_eq!(form_urlencode("bug,crash"), "bug%2Ccrash");
+        assert_eq!(form_urlencode("a-b.c_d*e"), "a-b.c_d*e");
+        assert_eq!(form_urlencode("å"), "%C3%A5");
     }
 }

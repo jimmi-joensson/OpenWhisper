@@ -510,6 +510,15 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           w.__owCrashesDeleteAllCount = (w.__owCrashesDeleteAllCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "plugin:opener|open_url") {
+          const { url } = (args ?? {}) as { url: string };
+          const w = window as unknown as {
+            __owOpenerOpenUrlCalls?: string[];
+          };
+          w.__owOpenerOpenUrlCalls = w.__owOpenerOpenUrlCalls ?? [];
+          w.__owOpenerOpenUrlCalls.push(url);
+          return null;
+        }
         if (cmd === "crashes_open_folder") {
           const w = window as unknown as { __owCrashesOpenFolderCount?: number };
           w.__owCrashesOpenFolderCount =

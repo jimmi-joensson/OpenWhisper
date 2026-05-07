@@ -11,6 +11,17 @@ import {
   formatCrashAsMarkdown,
   formatDuration,
 } from "../lib/crash-markdown";
+import { buildGitHubIssueUrl } from "../lib/crash-github";
+
+// Hard-coded so the button always points at the canonical OW
+// repo. If we ever fork or vendor, this is a one-line swap.
+const GITHUB_OWNER = "jimmi-joensson";
+const GITHUB_REPO = "OpenWhisper";
+// `Cargo.toml` is the source of truth; Vite injects this at build
+// time so the value matches what the panic hook stamps into
+// `crash.app_version`. Falls back gracefully if missing.
+const APP_VERSION =
+  (import.meta.env.VITE_APP_VERSION as string | undefined) ?? "dev";
 
 const COPIED_FLASH_MS = 1200;
 
@@ -20,11 +31,6 @@ export interface CrashDetailSheetProps {
   read: UseCrashesResult["read"];
   markRead: UseCrashesResult["markRead"];
   deleteOne: UseCrashesResult["deleteOne"];
-  /// Endpoint string from the build; when null/empty the Upload
-  /// button is OMITTED (not disabled). Wired in TASK-78.6 — for
-  /// 78.4 we leave it null so the Upload button isn't visible at
-  /// all yet.
-  uploadEndpoint?: string | null;
 }
 
 /// Right-side detail sheet, ~580 px wide. Sticky header + sticky
@@ -38,7 +44,6 @@ export function CrashDetailSheet({
   read,
   markRead,
   deleteOne,
-  uploadEndpoint = null,
 }: CrashDetailSheetProps) {
   const [crash, setCrash] = useState<CrashFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,6 +101,23 @@ export function CrashDetailSheet({
   const onOpenFolder = () => {
     void invoke("crashes_open_folder").catch((e) => {
       console.error("[crashes_open_folder]", e);
+    });
+  };
+
+  const onReportOnGitHub = () => {
+    if (!crash) return;
+    const url = buildGitHubIssueUrl(crash, {
+      owner: GITHUB_OWNER,
+      repo: GITHUB_REPO,
+      appVersion: crash.app_version || APP_VERSION,
+    });
+    // Goes through `tauri-plugin-opener`'s open_url command, which
+    // is in `opener:default` capability — no per-URL scope wiring
+    // needed (vs. `open_path` which we shell out for). Failure is
+    // logged + silently swallowed; the user's fallback is the
+    // Copy GitHub-ready report button next to it.
+    void invoke("plugin:opener|open_url", { url }).catch((e) => {
+      console.error("[plugin:opener|open_url]", e);
     });
   };
 
@@ -183,9 +205,14 @@ export function CrashDetailSheet({
                 >
                   Open crash folder
                 </button>
-                {uploadEndpoint && uploadEndpoint.trim().length > 0 && (
-                  <UploadAffordance crash={crash} />
-                )}
+                <button
+                  type="button"
+                  className="ow-crashes__sheet-ghost"
+                  data-testid="crash-detail-report-github"
+                  onClick={onReportOnGitHub}
+                >
+                  Report on GitHub
+                </button>
                 <span className="ow-crashes__sheet-spacer" />
                 <button
                   type="button"
@@ -357,28 +384,6 @@ function CrashEvents({
         </div>
       )}
     </section>
-  );
-}
-
-function UploadAffordance({ crash }: { crash: CrashFile }) {
-  // Uploaded-state swap is the headline UX rule of this footer per
-  // spec — no re-upload affordance once a crash has been sent.
-  // Wired against the real `uploaded_at` once TASK-78.6 lands; for
-  // 78.4 the `crash` object's uploaded_at lives only on the
-  // CrashSummary, not the full CrashFile, so we render the Upload
-  // button placeholder. 78.6 swaps in the real flow.
-  void crash;
-  return (
-    <button
-      type="button"
-      className="ow-crashes__sheet-ghost"
-      data-testid="crash-detail-upload"
-      // 78.6 wires the dialog. For 78.4 the button surface exists
-      // so the design renders end-to-end.
-      onClick={(e) => e.preventDefault()}
-    >
-      Upload
-    </button>
   );
 }
 

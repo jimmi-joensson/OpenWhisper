@@ -1888,17 +1888,6 @@ body[data-platform="macos"] .ow-titlebar {
   cursor: pointer;
 }
 
-.ow-crashes__sheet-primary > span:first-child {
-  flex: 1;
-  text-align: left;
-}
-
-.ow-crashes__sheet-shortcut {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: color-mix(in oklch, var(--primary-foreground) 65%, transparent);
-}
-
 .ow-crashes__sheet-secondary {
   display: flex;
   align-items: center;

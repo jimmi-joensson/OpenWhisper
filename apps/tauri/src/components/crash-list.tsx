@@ -27,7 +27,7 @@ export interface CrashListProps {
 /// entire pane (no header).
 export function CrashList({ onBack }: CrashListProps) {
   const { list, unreadCount, loading, error, deleteOne, deleteAll, markRead, read } =
-    useCrashes(true);
+    useCrashes();
   const [openId, setOpenId] = useState<string | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
 
@@ -38,16 +38,16 @@ export function CrashList({ onBack }: CrashListProps) {
     void deleteAll().finally(() => setConfirmDeleteAll(false));
   };
 
-  if (isEmpty) {
-    return (
-      <div className="ow-crashes ow-crashes--empty" data-testid="crash-list-empty">
-        <CrashEmpty />
-      </div>
-    );
-  }
-
   return (
-    <div className="ow-crashes" data-testid="crash-list">
+    <div
+      className="ow-crashes"
+      data-testid="crash-list"
+      data-empty={isEmpty || undefined}
+    >
+      {/* Header stays mounted in empty state too — back navigation
+          shouldn't disappear just because the list is momentarily
+          empty (post-Delete-all, fresh install, etc.). Delete-all
+          self-disables when there's nothing to delete. */}
       <header className="ow-crashes__header">
         <div className="ow-crashes__breadcrumb">
           <button
@@ -85,24 +85,31 @@ export function CrashList({ onBack }: CrashListProps) {
           type="button"
           className="ow-crashes__delete-all"
           data-testid="crash-list-delete-all"
+          disabled={isEmpty}
           onClick={() => setConfirmDeleteAll(true)}
         >
           Delete all
         </button>
       </header>
 
-      <div className="ow-crashes__list">
-        {list.map((crash, i) => (
-          <CrashRow
-            key={crash.id}
-            crash={crash}
-            first={i === 0}
-            onOpen={(id) => setOpenId(id)}
-            onMarkRead={(id) => void markRead(id)}
-            onDelete={(id) => void deleteOne(id)}
-          />
-        ))}
-      </div>
+      {isEmpty ? (
+        <div className="ow-crashes__empty-body" data-testid="crash-list-empty">
+          <CrashEmpty />
+        </div>
+      ) : (
+        <div className="ow-crashes__list">
+          {list.map((crash, i) => (
+            <CrashRow
+              key={crash.id}
+              crash={crash}
+              first={i === 0}
+              onOpen={(id) => setOpenId(id)}
+              onMarkRead={(id) => void markRead(id)}
+              onDelete={(id) => void deleteOne(id)}
+            />
+          ))}
+        </div>
+      )}
 
       {error && (
         <p className="ow-crashes__error" data-testid="crash-list-error">

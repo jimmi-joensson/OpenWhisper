@@ -12,6 +12,7 @@ import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 import type { PillStatus } from "../lib/pill-state";
+import { refetchCrashes } from "../lib/use-crashes";
 
 const PILL_STATES: PillStatus[] = ["idle", "recording", "transcribing"];
 
@@ -45,9 +46,17 @@ export function DevToolsPanel({
   const onSimulateCrash = async () => {
     try {
       await invoke("crashes_debug_trigger_panic");
+      // The panic happens on a spawned worker thread, so the file
+      // write doesn't always finish before this `invoke` returns.
+      // Bump the shared store on a short delay so the sidebar dot
+      // and overview entry card pick it up without waiting for
+      // the next 2 s poll. The poll itself is the backstop.
+      window.setTimeout(() => {
+        void refetchCrashes();
+      }, 150);
       setCrashFeedback({
         kind: "ok",
-        message: "Panic dispatched on a worker thread. Check Diagnostics → Crashes (polls every 2 s).",
+        message: "Panic dispatched on a worker thread. Sidebar + Diagnostics update within ~150 ms.",
       });
     } catch (e) {
       setCrashFeedback({

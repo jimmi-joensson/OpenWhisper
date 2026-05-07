@@ -74,7 +74,7 @@ function DiagnosticsOverview({
   // Hook polls list + unread at 2 Hz while the overview is mounted.
   // The card uses the freshest unread count + the latest summary row
   // to drive the "Last: <relative>" sub-line, per the design.
-  const { list, unreadCount } = useCrashes(true);
+  const { list, unreadCount } = useCrashes();
   const latest: CrashSummary | undefined = list[0];
 
   return (

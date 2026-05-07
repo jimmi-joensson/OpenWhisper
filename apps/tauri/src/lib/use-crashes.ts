@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+// Public types + format helpers for the crash inspector. The
+// stateful piece — polling + mutators + hooks — lives in
+// `crashes-store.ts` so a single shared store backs every consumer
+// (sidebar dot + Diagnostics overview entry card + list pane). This
+// file re-exports the hooks under their original names so existing
+// import sites keep working without code edits.
 
 // Mirrors `apps/tauri/src-tauri/src/crashes/mod.rs::CrashSummary`.
 export interface CrashSummary {
@@ -40,8 +44,18 @@ export interface CrashFile {
   }>;
 }
 
-const POLL_MS = 2000;
+export type {
+  CrashesSnapshot,
+} from "./crashes-store";
 
+export {
+  useCrashes,
+  useCrashesUnreadCount,
+  refetchCrashes,
+} from "./crashes-store";
+
+/// Result type the public hooks expose. Kept here for callers that
+/// pulled it from `use-crashes.ts` historically.
 export interface UseCrashesResult {
   list: CrashSummary[];
   unreadCount: number;
@@ -52,79 +66,6 @@ export interface UseCrashesResult {
   deleteOne: (id: string) => Promise<void>;
   deleteAll: () => Promise<void>;
   read: (id: string) => Promise<CrashFile>;
-}
-
-/// Polls `crashes_list` + `crashes_unread_count` at 2 Hz while mounted.
-/// `enabled = false` skips polling — the Diagnostics overview keeps
-/// the unread badge live even when the user is in the crash list pane,
-/// but the list pane wants its own poll cadence and doesn't need the
-/// overview's.
-export function useCrashes(enabled = true): UseCrashesResult {
-  const [list, setList] = useState<CrashSummary[]>([]);
-  const [unreadCount, setUnreadCount] = useState<number>(0);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const cancelledRef = useRef(false);
-
-  const refetch = useCallback(() => setTick((n) => n + 1), []);
-
-  useEffect(() => {
-    cancelledRef.current = false;
-    if (!enabled) {
-      setLoading(false);
-      return;
-    }
-
-    const fetchOnce = async () => {
-      try {
-        const [rows, count] = await Promise.all([
-          invoke<CrashSummary[]>("crashes_list"),
-          invoke<number>("crashes_unread_count"),
-        ]);
-        if (cancelledRef.current) return;
-        setList(rows);
-        setUnreadCount(count);
-        setError(null);
-      } catch (e) {
-        if (cancelledRef.current) return;
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelledRef.current) setLoading(false);
-      }
-    };
-
-    void fetchOnce();
-    const id = window.setInterval(() => {
-      void fetchOnce();
-    }, POLL_MS);
-
-    return () => {
-      cancelledRef.current = true;
-      window.clearInterval(id);
-    };
-  }, [enabled, tick]);
-
-  const markRead = useCallback(async (id: string) => {
-    await invoke("crashes_mark_read", { id });
-    refetch();
-  }, [refetch]);
-
-  const deleteOne = useCallback(async (id: string) => {
-    await invoke("crashes_delete", { id });
-    refetch();
-  }, [refetch]);
-
-  const deleteAll = useCallback(async () => {
-    await invoke("crashes_delete_all");
-    refetch();
-  }, [refetch]);
-
-  const read = useCallback(async (id: string) => {
-    return invoke<CrashFile>("crashes_read", { id });
-  }, []);
-
-  return { list, unreadCount, loading, error, refetch, markRead, deleteOne, deleteAll, read };
 }
 
 /// Format a relative timestamp for the entry card's sub-line and row

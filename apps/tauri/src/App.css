@@ -409,6 +409,20 @@ body[data-platform="macos"] .ow-titlebar {
   font-weight: 500;
 }
 
+/* Persistent rail badge — recording-orange dot with halo. Sits at
+   the right edge of the nav row (`margin-left: auto`) so it never
+   shifts the label position. Cleared when each unread crash is
+   explicitly marked read; never auto-dismissed by route visit. */
+.ow-sidebar__badge-dot {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--recording);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--recording) 25%, transparent);
+  flex-shrink: 0;
+}
+
 .ow-app__body {
   min-height: 0;
   overflow-y: auto;
@@ -1244,9 +1258,18 @@ body[data-platform="macos"] .ow-titlebar {
   min-height: 0;
 }
 
-.ow-crashes--empty {
+.ow-crashes__empty-body {
+  flex: 1 1 auto;
+  display: flex;
   align-items: center;
   justify-content: center;
+  background: var(--surface-sunken);
+}
+
+.ow-crashes__delete-all:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: transparent;
 }
 
 /* Pane header: back link + two-line breadcrumb block + Delete-all.

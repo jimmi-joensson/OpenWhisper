@@ -31,6 +31,58 @@ function recentCrash(
   };
 }
 
+test.describe("crash inspector — sidebar rail dot", () => {
+  test("Diagnostics nav item shows the unread dot when crashes exist", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    // No crashes seeded → no dot.
+    await setCrashes(page, []);
+    await expect(
+      page.getByTestId("sidebar-diagnostics-unread-dot"),
+    ).toHaveCount(0);
+
+    // Seed two unread crashes; sidebar polls every 2 s.
+    await setCrashes(page, [
+      recentCrash({ id: "100", ts_unix_ms: Date.now() - 5_000 }),
+      recentCrash({ id: "200", ts_unix_ms: Date.now() - 1_000 }),
+    ]);
+    await expect(
+      page.getByTestId("sidebar-diagnostics-unread-dot"),
+    ).toBeVisible({ timeout: 5_000 });
+  });
+
+  test("dot persists while on Diagnostics, clears once both crashes are read", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setCrashes(page, [
+      recentCrash({ id: "100", ts_unix_ms: Date.now() - 5_000 }),
+      recentCrash({ id: "200", ts_unix_ms: Date.now() - 1_000 }),
+    ]);
+    await page.getByTestId("sidebar-item-diagnostics").click();
+
+    // Visiting Diagnostics does NOT clear the dot — only opening a
+    // crash counts as "read."
+    await expect(
+      page.getByTestId("sidebar-diagnostics-unread-dot"),
+    ).toBeVisible({ timeout: 5_000 });
+
+    // Mark both crashes via the entry card click → row click flow.
+    // Use the in-pane mark-read controls so we exercise the same
+    // crashes_mark_read command the real UI calls.
+    await page.getByTestId("diagnostics-crashes-entry").click();
+    await page.getByTestId("crash-row-100").hover();
+    await page.getByTestId("crash-row-mark-read-100").click();
+    await page.getByTestId("crash-row-200").hover();
+    await page.getByTestId("crash-row-mark-read-200").click();
+
+    await expect(
+      page.getByTestId("sidebar-diagnostics-unread-dot"),
+    ).toHaveCount(0, { timeout: 5_000 });
+  });
+});
+
 test.describe("crash inspector — Diagnostics overview entry", () => {
   test("entry card hidden in quiet state when no crashes recorded", async ({
     page,
@@ -220,7 +272,7 @@ test.describe("crash inspector — full-pane list", () => {
     });
   });
 
-  test("empty state replaces the pane and exposes Open crash folder", async ({
+  test("empty state keeps the pane header for back navigation", async ({
     page,
   }) => {
     await page.goto("/");
@@ -229,12 +281,21 @@ test.describe("crash inspector — full-pane list", () => {
     // No entry card → use the quiet-state link instead.
     await page.getByTestId("diagnostics-crashes-open-folder").click();
 
+    // Empty composition lives in the body…
     await expect(page.getByTestId("crash-list-empty")).toBeVisible();
-    await expect(
-      page.getByTestId("crash-list-open-folder"),
-    ).toBeVisible();
-    // Pane header (breadcrumb + delete-all) hidden in empty state.
-    await expect(page.getByTestId("crash-list-back")).toHaveCount(0);
+    await expect(page.getByTestId("crash-list-open-folder")).toBeVisible();
+
+    // …but the header stays mounted so back nav is always reachable.
+    await expect(page.getByTestId("crash-list-back")).toBeVisible();
+    await expect(page.getByTestId("crash-list-counts")).toContainText(
+      "0 total",
+    );
+    // Delete-all is rendered but disabled — no rows to delete.
+    await expect(page.getByTestId("crash-list-delete-all")).toBeDisabled();
+
+    // Back returns to the Diagnostics overview.
+    await page.getByTestId("crash-list-back").click();
+    await expect(page.getByTestId("crash-list")).toHaveCount(0);
   });
 
   test("row click opens the detail sheet AND marks the crash read", async ({

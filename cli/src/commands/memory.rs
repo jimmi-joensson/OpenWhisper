@@ -18,7 +18,8 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use openwhisper_core::telemetry::{
-    collect_memory_stats, query_process_memory, MemoryStats, ModelMemoryRow, ProcessMemory,
+    collect_memory_stats, query_process_memory, query_system_memory, MemoryStats, ModelMemoryRow,
+    ProcessMemory, SystemMemory,
 };
 
 #[derive(Args, Debug)]
@@ -46,29 +47,41 @@ pub fn run(args: MemoryArgs, json: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let m = query_process_memory();
+    let process = query_process_memory();
+    let system = query_system_memory();
     if json {
-        print_json(&m)?;
+        let payload = serde_json::json!({
+            "system": system,
+            "process": process,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
-        print_text(&m);
+        print_system(&system);
+        println!();
+        print_process(&process);
     }
     Ok(())
 }
 
-fn print_text(m: &ProcessMemory) {
+fn print_system(s: &SystemMemory) {
+    println!("system total    {}", fmt_bytes(s.total_bytes));
+    println!("system used     {}", fmt_bytes(s.used_bytes));
+    println!("system avail    {}", fmt_bytes(s.available_bytes));
+    println!("swap used       {}", fmt_bytes(s.swap_used_bytes));
+    println!("swap total      {}", fmt_bytes(s.swap_total_bytes));
+}
+
+fn print_process(m: &ProcessMemory) {
     println!("rss             {}", fmt_bytes(m.rss_bytes));
     println!("peak rss        {}", fmt_bytes(m.peak_rss_bytes));
     println!("rss_bytes       {}", m.rss_bytes);
     println!("peak_rss_bytes  {}", m.peak_rss_bytes);
 }
 
-fn print_json(m: &ProcessMemory) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(m)?);
-    Ok(())
-}
-
 fn print_full_text(stats: &MemoryStats) {
-    print_text(&stats.process);
+    print_system(&stats.system);
+    println!();
+    print_process(&stats.process);
     println!();
     if stats.models.is_empty() {
         println!("models          (none registered)");

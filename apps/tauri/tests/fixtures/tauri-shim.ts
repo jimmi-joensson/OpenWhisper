@@ -347,16 +347,38 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             __owTelemetryGetCount?: number;
           };
           w.__owTelemetryGetCount = (w.__owTelemetryGetCount ?? 0) + 1;
-          return (
-            w.__owMemoryStats ?? {
+          const stash = w.__owMemoryStats;
+          if (!stash) {
+            return {
+              system: {
+                total_bytes: 0,
+                used_bytes: 0,
+                available_bytes: 0,
+                swap_total_bytes: 0,
+                swap_used_bytes: 0,
+              },
               process: {
                 rss_bytes: 0,
                 peak_rss_bytes: 0,
                 timestamp_unix_ms: 0,
               },
               models: [],
-            }
-          );
+            };
+          }
+          // Fill in claimed_bytes / in_process defaults so legacy
+          // fixtures that predate ModelClaim keep working: missing
+          // in_process → true, missing claimed_bytes → 0. Specs that
+          // test ANE-resident memory must set both explicitly.
+          return {
+            ...stash,
+            models: stash.models.map((m) => ({
+              label: m.label,
+              state: m.state,
+              estimated_rss_bytes: m.estimated_rss_bytes,
+              claimed_bytes: m.claimed_bytes ?? 0,
+              in_process: m.in_process ?? true,
+            })),
+          };
         }
         if (cmd === "settings_get_performance") {
           const w = window as unknown as { __owKeepModelsWarm?: boolean };
@@ -705,13 +727,29 @@ export interface MockProcessMemory {
   timestamp_unix_ms: number;
 }
 
+export interface MockSystemMemory {
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+  swap_total_bytes: number;
+  swap_used_bytes: number;
+}
+
 export interface MockModelMemoryRow {
   label: string;
   state: MockLifecycleState;
   estimated_rss_bytes: number;
+  /// Static weight footprint reported by the loader. Defaults to 0
+  /// in fixtures that don't care; tests for ANE-resident memory
+  /// must set both `claimed_bytes` and `in_process: false`.
+  claimed_bytes?: number;
+  /// `true` (default) when the claim is already inside RSS; `false`
+  /// for Mac ANE-resident weights.
+  in_process?: boolean;
 }
 
 export interface MockMemoryStats {
+  system: MockSystemMemory;
   process: MockProcessMemory;
   models: MockModelMemoryRow[];
 }

@@ -38,8 +38,10 @@ pub use crate::settings::{
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};
+pub use crate::model_lifecycle::ModelClaim;
 pub use crate::telemetry::{
-    collect_memory_stats, query_process_memory, MemoryStats, ModelMemoryRow, ProcessMemory,
+    collect_memory_stats, query_process_memory, query_system_memory, MemoryStats, ModelMemoryRow,
+    ProcessMemory, SystemMemory,
 };
 pub use crate::transcript::FillerLang;
 

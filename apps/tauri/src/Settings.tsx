@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ArrowLeft } from "lucide-react";
 import {
   cancelJsCapture,
   startJsCapture,
@@ -55,15 +56,28 @@ const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 
 // SettingsShell renders pane content only. The pane chooser lives in the
 // outer SidebarNav (route=settings mode), which owns active-pane state via
-// App.tsx — the back arrow on the titlebar then restores the route-level
-// sidebar (Home/Settings/Diagnostics) by flipping route back to "home".
+// App.tsx. The breadcrumb at the top of every pane returns the user to
+// the Home route by flipping route back to "home" — replaces the
+// titlebar back arrow per the design (titlebar stays clean,
+// back-affordance lives in content where macOS apps conventionally
+// place it).
 interface SettingsShellProps {
   active: SettingsPaneId;
+  onBack: () => void;
 }
 
-export function SettingsShell({ active }: SettingsShellProps) {
+export function SettingsShell({ active, onBack }: SettingsShellProps) {
   return (
     <div className="ow-settings">
+      <button
+        type="button"
+        className="ow-settings__breadcrumb"
+        onClick={onBack}
+        aria-label="Back to main"
+      >
+        <ArrowLeft size={14} aria-hidden="true" />
+        <span>Home</span>
+      </button>
       <div
         className="ow-settings__pane"
         role="tabpanel"

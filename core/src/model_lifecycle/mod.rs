@@ -91,6 +91,13 @@ struct IdleControl {
     state: Arc<Mutex<LifecycleState>>,
     /// Arc clone of the handle's `last_load_rss_delta` field.
     last_load_rss_delta: Arc<Mutex<u64>>,
+    /// Static claim metadata reported by the model author at handle
+    /// construction (see [`ModelClaim`]). Read by
+    /// [`registry_snapshot`] to surface ANE-resident memory in the
+    /// Diagnostics → Memory readout. Constant for the handle's
+    /// lifetime — Parakeet's weight footprint doesn't change across
+    /// load/unload cycles.
+    claim: ModelClaim,
     /// User's configured idle timeout. `set_idle_timeout` writes
     /// this. `apply_keep_warm` does NOT touch this — keep-warm is a
     /// separate flag that overrides without overwriting the user's
@@ -153,6 +160,33 @@ impl Drop for ShutdownSignal {
             let _ = jh.join();
         }
     }
+}
+
+/// Static metadata about the system memory a model occupies once
+/// loaded. Reported once at handle construction (the recognizer
+/// stats its cached weight directory) so the Diagnostics readout
+/// can show the *actual* memory cost, not just the slice that lands
+/// in the calling process's RSS.
+///
+/// On macOS the Parakeet `.mlmodelc` weights live in the ANE pool,
+/// not in the process's working set — `last_load_rss_delta` only
+/// captures the CoreML driver bookkeeping. Reporting `claimed_bytes`
+/// separately lets the UI sum a faithful "OpenWhisper Memory" total
+/// regardless of which OS-managed pool actually holds the pages.
+///
+/// `in_process = true` means the claim is already counted inside
+/// `ProcessMemory.rss_bytes` — don't double-count it. `false` means
+/// it's external (ANE / GPU / disk-mapped non-resident pages) and
+/// should be added to the process RSS for a full-system view.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct ModelClaim {
+    /// Total bytes the loaded model claims from system memory across
+    /// all OS-managed pools (process RSS, ANE residency, etc.).
+    pub claimed_bytes: u64,
+    /// `true` when the claim is already reflected in the calling
+    /// process's RSS (typical for CPU-resident ONNX). `false` when
+    /// the model lives outside RSS (Mac ANE / GPU VRAM).
+    pub in_process: bool,
 }
 
 /// A loadable, unloadable resource. `T` is the underlying handle the
@@ -220,7 +254,30 @@ impl<T: Send + 'static> ModelHandle<T> {
     /// activity. Pass [`Duration::MAX`] to disable firing entirely
     /// (the "keep warm" path); the worker still spawns so a later
     /// `set_idle_timeout` can re-enable firing without restarting.
+    ///
+    /// Defaults the [`ModelClaim`] to all-zero / in-process, which is
+    /// fine for tests and callers that don't yet ship a claim. The
+    /// recognizer uses [`Self::with_idle_timeout_and_claim`] to
+    /// surface its real footprint.
     pub fn with_idle_timeout<F>(label: &str, loader: F, idle_timeout: Duration) -> Self
+    where
+        F: Fn() -> Result<T, String> + Send + Sync + 'static,
+    {
+        Self::with_idle_timeout_and_claim(label, loader, ModelClaim::default(), idle_timeout)
+    }
+
+    /// Like [`Self::with_idle_timeout`] but also records the model's
+    /// memory claim (see [`ModelClaim`]) so the Diagnostics readout
+    /// can show a system-wide-honest total instead of just process RSS.
+    /// Used by the recognizer to declare "Parakeet weights are ~461 MB,
+    /// not-in-process on Mac (ANE-resident), in-process on Win
+    /// (sherpa-onnx CPU)".
+    pub fn with_idle_timeout_and_claim<F>(
+        label: &str,
+        loader: F,
+        claim: ModelClaim,
+        idle_timeout: Duration,
+    ) -> Self
     where
         F: Fn() -> Result<T, String> + Send + Sync + 'static,
     {
@@ -233,6 +290,7 @@ impl<T: Send + 'static> ModelHandle<T> {
             label: h.label.clone(),
             state: Arc::clone(&h.state),
             last_load_rss_delta: Arc::clone(&h.last_load_rss_delta),
+            claim,
             configured_timeout: RwLock::new(idle_timeout),
             keep_warm: AtomicBool::new(initial_keep_warm),
             cmd: Mutex::new(TimerCmd {
@@ -684,10 +742,23 @@ pub fn registry_snapshot() -> Vec<ModelMemoryRow> {
             .last_load_rss_delta
             .lock()
             .expect("last_load_rss_delta lock poisoned");
+        // Only surface a non-zero claim while the model is actually
+        // resident — Unloaded handles release the ANE pool too, so
+        // showing the claim then would lie. Loading/Releasing are
+        // mid-transition and still hold (or are about to release)
+        // the weights, so we keep the claim visible there.
+        let claim_visible = matches!(
+            state,
+            LifecycleState::Loaded | LifecycleState::Active | LifecycleState::Releasing | LifecycleState::Loading
+        );
+        let claimed_bytes = if claim_visible { idle.claim.claimed_bytes } else { 0 };
+        let in_process = idle.claim.in_process;
         rows.push(ModelMemoryRow {
             label: idle.label.clone(),
             state,
             estimated_rss_bytes,
+            claimed_bytes,
+            in_process,
         });
         true
     });

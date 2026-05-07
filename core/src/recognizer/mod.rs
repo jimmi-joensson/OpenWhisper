@@ -18,10 +18,11 @@
 //! Parakeet-TDT v3 is offline (batch). There are no real partials; the
 //! shell pumps the full waveform after stop and gets a single result.
 
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::model_lifecycle::ModelHandle;
+use crate::model_lifecycle::{ModelClaim, ModelHandle};
 
 #[cfg(target_os = "macos")]
 mod fluidaudio;
@@ -95,16 +96,95 @@ const RECOGNIZER_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn engine() -> &'static ModelHandle<Box<dyn Recognizer>> {
     ENGINE.get_or_init(|| {
-        ModelHandle::with_idle_timeout(
+        ModelHandle::with_idle_timeout_and_claim(
             "recognizer",
             || {
                 let mut backend = default_backend();
                 backend.ensure_loaded()?;
                 Ok(backend)
             },
+            recognizer_claim(),
             RECOGNIZER_IDLE_TIMEOUT,
         )
     })
+}
+
+/// Static claim describing how much system memory the loaded
+/// Parakeet recognizer occupies, and which OS pool holds it. Surfaced
+/// via [`crate::telemetry::collect_memory_stats`] so the Diagnostics
+/// readout can show ANE-resident weights on macOS — `last_load_rss_delta`
+/// only sees the CoreML driver bookkeeping (~50 MB), not the ~460 MB
+/// of weights that actually sit in the ANE pool.
+///
+/// On Mac the weight files live under FluidAudio's app-support cache;
+/// we walk the model directory if it exists. On Windows the weights
+/// are ONNX files in our own download cache; we sum their on-disk
+/// sizes. In both cases the claim is the on-disk footprint, which
+/// closely tracks the resident memory cost (mmap'd weights fault into
+/// resident memory on first inference).
+fn recognizer_claim() -> ModelClaim {
+    let claimed_bytes = measure_recognizer_weight_bytes()
+        .unwrap_or(PARAKEET_WEIGHT_BYTES_FALLBACK);
+    ModelClaim {
+        claimed_bytes,
+        in_process: cfg!(not(target_os = "macos")),
+    }
+}
+
+/// Conservative fallback for Parakeet-TDT 0.6B v3's on-disk weight
+/// footprint when the platform-specific measurement fails (e.g. the
+/// model hasn't been downloaded yet, or the cache path moved).
+/// 460 MB rounded to a whole-MB constant so the readout stays stable.
+const PARAKEET_WEIGHT_BYTES_FALLBACK: u64 = 460 * 1024 * 1024;
+
+#[cfg(target_os = "macos")]
+fn measure_recognizer_weight_bytes() -> Option<u64> {
+    // FluidAudio caches FluidInference's `.mlmodelc` bundles under
+    // `~/Library/Application Support/FluidAudio/Models/<id>`. The
+    // bundle is a directory of binary blobs (Encoder/Decoder/etc.),
+    // so we recursively sum file sizes. Falls back to the constant
+    // if the cache is missing — common on first launch before the
+    // bridge has been asked to load anything.
+    let home = std::env::var_os("HOME")?;
+    let base = Path::new(&home)
+        .join("Library/Application Support/FluidAudio/Models");
+    let candidates = [
+        "parakeet-tdt-0.6b-v3",
+        "parakeet-tdt-0.6b-v2",
+    ];
+    for name in candidates {
+        let p = base.join(name);
+        if p.is_dir() {
+            return dir_bytes(&p);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn measure_recognizer_weight_bytes() -> Option<u64> {
+    // sherpa/ort path keeps its weights under our download cache. We
+    // sum every file in the model dir (encoder/decoder/joiner ONNX +
+    // tokens.txt). Non-blocking: returns None before the model has
+    // been downloaded, so the readout falls back to the constant.
+    dir_bytes(&download::cached_model_dir()?)
+}
+
+fn dir_bytes(dir: &Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).ok()?;
+        for entry in entries.flatten() {
+            let meta = entry.metadata().ok()?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    if total == 0 { None } else { Some(total) }
 }
 
 #[cfg(target_os = "macos")]

@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{MemoryRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Snapshot of the running OpenWhisper process's memory at a point in
 /// time. Returned by [`query_process_memory`] and consumed by the
@@ -48,6 +48,34 @@ pub struct ProcessMemory {
     /// milliseconds. `0` if the system clock is set before the Unix
     /// epoch (which would mean the host is broken in other ways too).
     pub timestamp_unix_ms: u64,
+}
+
+/// Host-wide memory snapshot. Surfaced alongside [`ProcessMemory`] so
+/// the Diagnostics → Memory pane can answer "how is my system holding
+/// up?" without forcing the user to alt-tab to Activity Monitor.
+///
+/// Cross-platform via `sysinfo`; values come from `host_statistics64`
+/// on macOS and `GlobalMemoryStatusEx` on Windows. We deliberately
+/// stick to the four fields both platforms agree on (total / used /
+/// available / swap) rather than surface the macOS-specific
+/// compressed/wired/cached split — matches what the design's
+/// "System Memory Used" readout consumes and stays honest on Windows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMemory {
+    /// Total physical memory installed on the host, in bytes.
+    pub total_bytes: u64,
+    /// Bytes currently in use by the system. macOS counts active +
+    /// wired; Windows reports the in-use working set across processes.
+    pub used_bytes: u64,
+    /// Bytes immediately available for new allocations without paging.
+    /// `total_bytes - used_bytes` would not equal this on Mac (cached
+    /// + compressed pages can be reclaimed), so we surface the OS's
+    /// own number.
+    pub available_bytes: u64,
+    /// Total swap (page-file) the OS can grow into.
+    pub swap_total_bytes: u64,
+    /// Swap currently committed.
+    pub swap_used_bytes: u64,
 }
 
 /// Process-global running max of observed RSS. Updated on every
@@ -102,6 +130,27 @@ pub fn query_process_memory() -> ProcessMemory {
     }
 }
 
+/// Snapshot the host-wide memory + swap counters. Same `System` cache
+/// the per-process query reuses — `refresh_memory_specifics` is the
+/// only call that hits the OS, and it's cheap (microseconds).
+///
+/// Returns zeros on the rare platforms where `sysinfo` declines to
+/// supply a value (we've never seen this on Mac or Windows). The
+/// Diagnostics pane treats `total_bytes == 0` as "telemetry not
+/// available yet" and hides the system readout until the next poll.
+pub fn query_system_memory() -> SystemMemory {
+    let sys_lock = SYS.get_or_init(|| std::sync::Mutex::new(System::new()));
+    let mut sys = sys_lock.lock().expect("telemetry::SYS poisoned");
+    sys.refresh_memory_specifics(MemoryRefreshKind::new().with_ram().with_swap());
+    SystemMemory {
+        total_bytes: sys.total_memory(),
+        used_bytes: sys.used_memory(),
+        available_bytes: sys.available_memory(),
+        swap_total_bytes: sys.total_swap(),
+        swap_used_bytes: sys.used_swap(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +168,35 @@ mod tests {
             "peak ({}) must be >= current ({})",
             m.peak_rss_bytes,
             m.rss_bytes
+        );
+    }
+
+    #[test]
+    fn system_memory_reports_nonzero_total_and_consistent_used() {
+        let s = query_system_memory();
+        assert!(
+            s.total_bytes > 0,
+            "expected non-zero total system memory, got {}",
+            s.total_bytes
+        );
+        assert!(
+            s.used_bytes <= s.total_bytes,
+            "used ({}) must be <= total ({})",
+            s.used_bytes,
+            s.total_bytes
+        );
+        assert!(
+            s.available_bytes <= s.total_bytes,
+            "available ({}) must be <= total ({})",
+            s.available_bytes,
+            s.total_bytes
+        );
+        assert!(
+            s.swap_used_bytes <= s.swap_total_bytes
+                || s.swap_total_bytes == 0,
+            "swap_used ({}) must be <= swap_total ({}) when swap is enabled",
+            s.swap_used_bytes,
+            s.swap_total_bytes
         );
     }
 

@@ -225,18 +225,25 @@ body {
 }
 
 .ow-titlebar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
-  height: 36px;
+  height: 38px;
+  /* macOS: reserve ~80 px on the left for the traffic-light overlay
+     so the back button sits clear of them. Windows: minimal left
+     pad. The right side carries the WindowControls cluster on
+     Windows; on macOS the cluster collapses to nothing. */
   padding: 0 14px;
   border-bottom: 1px solid var(--border);
-  /* Match sidebar's tinted background so the seam between the inset
-     titlebar and the (left) sidebar reads as one continuous panel. */
   background: rgb(0 0 0 / 0.15);
   user-select: none;
   -webkit-user-select: none;
+}
+
+body[data-platform="macos"] .ow-titlebar {
+  padding-left: 80px;
 }
 
 /* Windows: close button must sit flush against the window edge per OS
@@ -244,37 +251,6 @@ body {
    scopes this to Windows. */
 .ow-titlebar:has(.ow-window-controls) {
   padding-right: 0;
-}
-
-.ow-titlebar--home,
-.ow-titlebar--diagnostics {
-  /* No content in the strip on these routes — just drag space. */
-  border-bottom-color: transparent;
-}
-
-.ow-titlebar__back {
-  display: inline-grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--foreground);
-  cursor: pointer;
-  font-size: 15px;
-  font-family: inherit;
-  padding: 0;
-}
-
-.ow-titlebar__back:hover {
-  background: color-mix(in oklch, var(--foreground) 8%, transparent);
-}
-
-.ow-titlebar__back:focus-visible {
-  outline: none;
-  border-color: var(--info-border);
-  box-shadow: 0 0 0 2px var(--info-bg);
 }
 
 .ow-titlebar__icon {
@@ -306,11 +282,24 @@ body {
   box-shadow: 0 0 0 2px var(--info-bg);
 }
 
+/* Centered title — absolutely positioned so the strip's flex
+   children (back button on the left, WindowControls on the right)
+   don't shift the centering off-axis. `pointer-events: none` keeps
+   it from intercepting drag-region hits on the title text itself,
+   while `data-tauri-drag-region` on the element ensures Tauri's
+   drag.js still recognises it as draggable. */
 .ow-titlebar__title {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin: 0;
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   letter-spacing: -0.005em;
+  color: var(--muted-foreground);
+  pointer-events: none;
 }
 
 /* Windows-only chrome: min/max/close cluster, right-aligned in the
@@ -377,11 +366,9 @@ body {
   overflow-y: auto;
 }
 
-/* Mac: traffic-light buttons render at the top-left over the sidebar.
-   Reserve 38 px so the sidebar's first item clears the overlay zone. */
-body[data-platform="macos"] .ow-sidebar {
-  padding-top: 38px;
-}
+/* Sidebar starts directly below the full-width titlebar — the
+   titlebar already reserves the macOS traffic-light overlay zone,
+   so no extra padding-top is needed here. */
 
 .ow-sidebar__item {
   display: flex;
@@ -759,12 +746,38 @@ body[data-platform="macos"] .ow-sidebar {
   width: 100%;
 }
 
-.ow-diagnostics__card-title {
+.ow-diagnostics__section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Section header sits OUTSIDE the card. Title left, meta right —
+   matches the design's Diagnostics layout where each section
+   (Memory, Performance, Crashes) reads as its own block with a
+   monospace caption above. */
+.ow-diagnostics__section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+}
+
+.ow-diagnostics__section-title {
+  margin: 0;
   font-family: var(--font-mono);
   font-size: 11.5px;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__section-meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
   color: var(--muted-foreground);
 }
 
@@ -776,7 +789,67 @@ body[data-platform="macos"] .ow-sidebar {
   color: var(--muted-foreground);
 }
 
+.ow-diagnostics__caption--right {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Top-right of the chart: stack of "Last 60 s" + min/peak summary
+   for the OpenWhisper window. Right-aligned so it reads cleanly
+   against the readout cluster on the left. */
+.ow-diagnostics__window-stats {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.ow-diagnostics__window-extrema {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__readout-row-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ow-diagnostics__readouts {
+  display: flex;
+  align-items: flex-start;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
 .ow-diagnostics__readout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ow-diagnostics__readout-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-top: 7px;
+  flex-shrink: 0;
+}
+
+.ow-diagnostics__readout-swatch[data-kind="system"] {
+  background: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
+}
+
+.ow-diagnostics__readout-swatch[data-kind="app"] {
+  background: var(--info);
+}
+
+.ow-diagnostics__readout-body {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -790,7 +863,7 @@ body[data-platform="macos"] .ow-sidebar {
   color: var(--muted-foreground);
 }
 
-.ow-diagnostics__readout-row {
+.ow-diagnostics__readout-value-row {
   display: flex;
   align-items: baseline;
   gap: 4px;
@@ -827,6 +900,93 @@ body[data-platform="macos"] .ow-sidebar {
      the left. Browsers default SVG overflow to hidden when viewBox
      is set, but be explicit. */
   overflow: hidden;
+}
+
+.ow-diagnostics__grid {
+  stroke: color-mix(in oklch, var(--muted-foreground) 18%, transparent);
+  stroke-width: 1;
+}
+
+.ow-diagnostics__legend-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+}
+
+.ow-diagnostics__legend {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.ow-diagnostics__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.ow-diagnostics__legend-swatch[data-kind="system"] {
+  background: color-mix(in oklch, var(--muted-foreground) 70%, transparent);
+}
+
+.ow-diagnostics__legend-swatch[data-kind="app"] {
+  background: var(--info);
+}
+
+.ow-diagnostics__pressure {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ow-diagnostics__pressure-caption {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-diagnostics__pressure-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ow-diagnostics__pressure-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ow-diagnostics__pressure-dot[data-level="normal"] {
+  background: oklch(0.78 0.15 145);
+}
+
+.ow-diagnostics__pressure-dot[data-level="warning"] {
+  background: oklch(0.78 0.15 80);
+}
+
+.ow-diagnostics__pressure-dot[data-level="critical"] {
+  background: var(--destructive);
 }
 
 .ow-diagnostics__breakdown {
@@ -875,6 +1035,16 @@ body[data-platform="macos"] .ow-sidebar {
   border-left: 1px solid var(--background);
 }
 
+/* External (out-of-process) model claim — Mac ANE / GPU VRAM.
+   Solid fill since this is a real present cost, not a forecast
+   (stripes are reserved for the budget bar's ghost / preview
+   state). Lighter shade of the same blue so it reads as the same
+   OpenWhisper signal in a different pool. */
+.ow-diagnostics__breakdown-seg[data-kind="model-external"] {
+  background: color-mix(in oklch, var(--info) 65%, var(--background));
+  border-left: 1px solid var(--background);
+}
+
 .ow-diagnostics__breakdown-legend {
   display: flex;
   gap: 14px;
@@ -903,6 +1073,10 @@ body[data-platform="macos"] .ow-sidebar {
   background: var(--info);
 }
 
+.ow-diagnostics__breakdown-swatch[data-kind="model-external"] {
+  background: color-mix(in oklch, var(--info) 65%, var(--background));
+}
+
 .ow-diagnostics__breakdown-swatch[data-kind="other"] {
   background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
 }
@@ -929,22 +1103,3 @@ body[data-platform="macos"] .ow-sidebar {
   color: var(--destructive);
 }
 
-.ow-diagnostics__footer {
-  margin: 0;
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: var(--surface-sunken);
-  border: 1px solid var(--border);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--muted-foreground);
-}
-
-.ow-diagnostics__footer-tag {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 9.5px;
-  margin-right: 6px;
-  opacity: 0.85;
-}

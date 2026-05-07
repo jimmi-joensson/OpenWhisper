@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
@@ -29,6 +28,21 @@ const PILL_BAR_COUNT = 12;
 function detectPlatform(): Platform {
   if (typeof navigator === "undefined") return "macos";
   return /win/i.test(navigator.platform) ? "windows" : "macos";
+}
+
+// Centered titlebar text per route. Mirrors the design's
+// "OpenWhisper — Settings" / "OpenWhisper — Diagnostics" / plain
+// "OpenWhisper" pattern. Sits in the same strip as the traffic
+// lights on macOS.
+function titlebarTitle(route: Route): string {
+  switch (route) {
+    case "home":
+      return "OpenWhisper";
+    case "settings":
+      return "OpenWhisper — Settings";
+    case "diagnostics":
+      return "OpenWhisper — Diagnostics";
+  }
 }
 
 function App() {
@@ -160,16 +174,27 @@ function App() {
   return (
     <ThemeProvider>
     <div className="ow-app">
-      {/* Layout: sidebar column from y=0; titlebar is INSET inside the
-          content column only (TASK-68). Drag region — `data-tauri-drag-region`
-          on the inset titlebar + on the h1 (Tauri 2.10's drag.js only checks
-          `e.target.getAttribute`, not ancestors, so descendants must opt in
-          individually). The back button explicitly opts OUT via `="false"`
-          so its onClick still fires (per tauri#9901). The whole drag flow
-          only works because the main window has `acceptFirstMouse: true` set
-          in tauri.conf.json — without it, WKWebView swallows the first
-          NSLeftMouseDown and AppKit never sees a chance to start the window
-          drag (tauri#9503). */}
+      {/* Layout: full-width titlebar at y=0 (matches design — traffic
+          lights + centered route title share one strip), then the
+          sidebar / content shell below. Drag region —
+          `data-tauri-drag-region` on the titlebar + on the h1 (Tauri
+          2.10's drag.js only checks `e.target.getAttribute`, not
+          ancestors, so descendants must opt in individually). The
+          back button explicitly opts OUT via `="false"` so its
+          onClick still fires (per tauri#9901). The whole drag flow
+          only works because the main window has `acceptFirstMouse:
+          true` set in tauri.conf.json — without it, WKWebView
+          swallows the first NSLeftMouseDown and AppKit never sees a
+          chance to start the window drag (tauri#9503). */}
+      <header
+        className={`ow-titlebar ow-titlebar--${route}`}
+        data-tauri-drag-region
+      >
+        <h1 className="ow-titlebar__title" data-tauri-drag-region>
+          {titlebarTitle(route)}
+        </h1>
+        <WindowControls platform={platform} />
+      </header>
       <div className="ow-app__shell">
         <SidebarNav
           route={route}
@@ -178,30 +203,10 @@ function App() {
           onSettingsPaneSelect={setSettingsPane}
         />
         <div className="ow-app__column">
-          <header
-            className={`ow-titlebar ow-titlebar--${route}`}
-            data-tauri-drag-region
-          >
-            {route === "settings" && (
-              <>
-                <button
-                  type="button"
-                  className="ow-titlebar__back"
-                  onClick={goBack}
-                  aria-label="Back to main"
-                  data-tauri-drag-region="false"
-                >
-                  <ArrowLeft size={16} aria-hidden="true" />
-                </button>
-                <h1 className="ow-titlebar__title" data-tauri-drag-region>
-                  Settings
-                </h1>
-              </>
-            )}
-            <WindowControls platform={platform} />
-          </header>
           <main className="ow-app__body">
-            {route === "settings" && <SettingsShell active={settingsPane} />}
+            {route === "settings" && (
+              <SettingsShell active={settingsPane} onBack={goBack} />
+            )}
             {route === "diagnostics" && (
               <DiagnosticsPane platform={platform} />
             )}

@@ -1,7 +1,9 @@
-/* In-window settings shell — sidebar/pane grid. The window titlebar
-   (back-arrow + "Settings") lives at the App level so it shares the
-   strip with the macOS traffic-light buttons. Reuses the OKLCH tokens
-   from App.css. */
+/* In-window settings shell. Title ("OpenWhisper — Settings") lives in
+   the full-width window titlebar at the App level. Back navigation
+   sits as a breadcrumb at the top of every pane below — keeps the
+   titlebar clean (matches design) while preserving an explicit
+   "return to Home" affordance in content where macOS apps
+   conventionally place it. Reuses the OKLCH tokens from App.css. */
 
 .ow-settings {
   height: 100%;
@@ -10,12 +12,45 @@
   color: var(--foreground);
   font-family: var(--font-sys);
   font-size: 13px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Breadcrumb back-link — fixed above the scroll container so it
+   doesn't scroll out of view as the user moves down a long pane. */
+.ow-settings__breadcrumb {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 28px 0;
+  padding: 4px 8px 4px 4px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  width: max-content;
+}
+
+.ow-settings__breadcrumb:hover {
+  color: var(--foreground);
+  background: color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+
+.ow-settings__breadcrumb:focus-visible {
+  outline: none;
+  border-color: var(--info-border);
+  box-shadow: 0 0 0 2px var(--info-bg);
 }
 
 .ow-settings__pane {
-  padding: 24px 28px 28px;
+  padding: 12px 28px 28px;
   overflow-y: auto;
   min-height: 0;
+  flex: 1 1 auto;
 }
 
 .ow-settings__pane-stub {

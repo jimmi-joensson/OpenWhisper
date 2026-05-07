@@ -24,6 +24,7 @@ ordinal: 6000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: f8e0a20.
 - New `ModelHandle::with_idle_timeout(label, loader, idle)` ctor + `set_idle_timeout(new)` setter. `Duration::MAX` = keep warm; flipping to MAX cancels any pending fire immediately.
 - **No Tokio in core/.** Plan permitted std::thread + Condvar fallback for the recognizer's minutes-cadence timer; chose that path to avoid pulling Tokio into core/ until TASK-63's cleanup-LLM async pipeline actually needs it. Public surface (`with_idle_timeout` / `set_idle_timeout`) is runtime-agnostic — future Tokio swap is non-breaking.
 - One std::thread::spawn worker per handle, parked on `Condvar::wait_timeout`. Rearm = bump deadline + notify. Cancel = clear deadline + notify. `ShutdownSignal` Drop guard (held only on user-facing handle clones, not on the timer's captures) signals + joins when the last clone drops — detectable because timer thread doesn't hold the shutdown Arc. Test `dropping_last_clone_shuts_down_timer_thread` is the canary.

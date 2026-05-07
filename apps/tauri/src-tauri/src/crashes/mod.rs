@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use openwhisper_core::crashes::CrashFile;
+use openwhisper_core::crashes::{self, CrashFile, ReadCrashError};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
@@ -135,78 +135,50 @@ fn truncate_message(s: &str) -> String {
 }
 
 fn read_crash_file(dir: &Path, id: &str) -> Result<CrashFile, String> {
-    if !is_safe_id(id) {
-        return Err(format!("invalid crash id: {id}"));
-    }
-    let path = dir.join(format!("{id}.json"));
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    serde_json::from_str::<CrashFile>(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
+    crashes::read_crash(dir, id).map_err(read_err_to_string)
 }
 
-/// IDs come from the webview, so reject anything that could escape the
-/// crash dir before joining it into a path. Only digits + '-' allowed
-/// (filenames are unix-ms; future-proof for negative epochs is moot but
-/// the dash keeps the regex simple).
+fn read_err_to_string(err: ReadCrashError) -> String {
+    err.to_string()
+}
+
+// `is_safe_id` now lives in `core::crashes` — both the CLI and the
+// Tauri shell take untrusted ids (CLI from a flag, shell from the
+// webview), so the validation belongs in the library. Re-export
+// locally so existing call sites stay terse.
 fn is_safe_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() < 64
-        && id.chars().all(|c| c.is_ascii_digit() || c == '-')
+    crashes::is_safe_id(id)
 }
 
-/// Enumerate crash files in `dir`, returning newest-first summaries.
-/// Files that fail to parse are logged and skipped — they do NOT abort
-/// the list. Caller already holds the state IO lock and has loaded the
-/// state — separated from the command body so tests can drive it
-/// without an `AppHandle`.
+/// Enumerate crash files in `dir`, returning newest-first summaries
+/// decorated with the shell-only `unread` / `uploaded_at` fields
+/// from `state.json`. The library function `list_crashes` returns
+/// the on-disk schema; we layer state.json on top here — the shell
+/// is the only owner of UI state.
 fn list_summaries(dir: &Path, state: &CrashesState) -> Vec<CrashSummary> {
-    let entries = match fs::read_dir(dir) {
-        Ok(it) => it,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
+    let crashes_vec = match crashes::list_crashes(dir) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("[crashes] list read_dir failed: {e}");
+            eprintln!("[crashes] list_crashes failed: {e}");
             return Vec::new();
         }
     };
-    let mut out: Vec<CrashSummary> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !is_safe_id(stem) {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let raw = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[crashes] read {}: {e}", path.display());
-                continue;
+    crashes_vec
+        .into_iter()
+        .map(|crash| {
+            let entry_state =
+                state.entries.get(&crash.id).cloned().unwrap_or_default();
+            CrashSummary {
+                message_truncated: truncate_message(&crash.rust_panic.message),
+                id: crash.id,
+                ts_unix_ms: crash.ts_unix_ms,
+                app_version: crash.app_version,
+                os: crash.os,
+                unread: entry_state.unread,
+                uploaded_at: entry_state.uploaded_at,
             }
-        };
-        let crash: CrashFile = match serde_json::from_str(&raw) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[crashes] parse {}: {e}", path.display());
-                continue;
-            }
-        };
-        let entry_state = state.entries.get(&crash.id).cloned().unwrap_or_default();
-        out.push(CrashSummary {
-            message_truncated: truncate_message(&crash.rust_panic.message),
-            id: crash.id,
-            ts_unix_ms: crash.ts_unix_ms,
-            app_version: crash.app_version,
-            os: crash.os,
-            unread: entry_state.unread,
-            uploaded_at: entry_state.uploaded_at,
-        });
-    }
-    out.sort_by(|a, b| b.ts_unix_ms.cmp(&a.ts_unix_ms));
-    out
+        })
+        .collect()
 }
 
 #[tauri::command]

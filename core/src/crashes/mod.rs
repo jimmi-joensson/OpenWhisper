@@ -218,6 +218,154 @@ pub fn write_crash_file(file: &CrashFile, dir: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Reject ids that could escape the crash dir before joining them
+/// into a path. Filenames are unix-ms strings; only ASCII digits
+/// (and optional leading `-` for future-proofing) are allowed. Used
+/// by every read path that takes an external id (CLI, Tauri command).
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() < 64
+        && id.chars().all(|c| c.is_ascii_digit() || c == '-')
+}
+
+/// Errors surfaced from [`read_crash`]. Distinguishes "the file
+/// you asked for isn't there" from "filesystem said no" so callers
+/// can render the right message.
+#[derive(Debug)]
+pub enum ReadCrashError {
+    UnsafeId(String),
+    NotFound,
+    Io(io::Error),
+    Parse(serde_json::Error),
+}
+
+impl std::fmt::Display for ReadCrashError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsafeId(id) => write!(f, "invalid crash id: {id}"),
+            Self::NotFound => f.write_str("crash file not found"),
+            Self::Io(e) => write!(f, "crash file io: {e}"),
+            Self::Parse(e) => write!(f, "crash file parse: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadCrashError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Parse(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Read a single crash file by id. Validates the id before joining
+/// it into a path so the function is safe to call with external
+/// input (CLI flag, IPC command).
+pub fn read_crash(dir: &Path, id: &str) -> Result<CrashFile, ReadCrashError> {
+    if !is_safe_id(id) {
+        return Err(ReadCrashError::UnsafeId(id.to_string()));
+    }
+    let path = dir.join(format!("{id}.json"));
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(ReadCrashError::NotFound)
+        }
+        Err(e) => return Err(ReadCrashError::Io(e)),
+    };
+    serde_json::from_str::<CrashFile>(&raw).map_err(ReadCrashError::Parse)
+}
+
+/// Enumerate crash files in `dir`, newest first. Files that fail to
+/// parse are logged to stderr and skipped — they do NOT abort the
+/// listing. Missing dir returns `Ok(empty)` so first-run consumers
+/// don't have to special-case `NotFound`.
+///
+/// Single source of truth used by both the CLI's `crash-dump --list`
+/// and the Tauri shell's `crashes_list` command. Per the
+/// `openwhisper-headless-first` doctrine: list semantics live in the
+/// library, both shells consume them.
+pub fn list_crashes(dir: &Path) -> io::Result<Vec<CrashFile>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out: Vec<CrashFile> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_safe_id(stem) {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[crashes] read {}: {e}", path.display());
+                continue;
+            }
+        };
+        match serde_json::from_str::<CrashFile>(&raw) {
+            Ok(file) => out.push(file),
+            Err(e) => {
+                eprintln!("[crashes] parse {}: {e}", path.display());
+            }
+        }
+    }
+    out.sort_by(|a, b| b.ts_unix_ms.cmp(&a.ts_unix_ms));
+    Ok(out)
+}
+
+/// Resolve the OS-default crash dir for the **release** bundle id
+/// (`com.openwhisper.app`). Honors `OPENWHISPER_CRASH_DIR_OVERRIDE`
+/// in debug + test builds so dev workflows can point at a temp dir.
+///
+/// Returns `None` when the OS isn't macOS or Windows, or when the
+/// expected env var (`HOME` / `LOCALAPPDATA`) isn't set. Callers
+/// (CLI, in-process integrations) can always pass an explicit dir
+/// to bypass the resolver.
+///
+/// **Bundle id caveat:** dev Tauri builds write to
+/// `com.openwhisper.dev/crashes/`, not `com.openwhisper.app`. The
+/// CLI's `--dir` flag is the canonical override for inspecting
+/// dev-build crashes.
+pub fn default_crash_dir() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(s) = std::env::var("OPENWHISPER_CRASH_DIR_OVERRIDE") {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join("Library/Logs/com.openwhisper.app/crashes"),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(local).join("com.openwhisper.app/logs/crashes"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
 fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

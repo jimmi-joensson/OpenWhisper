@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-05-04 06:16'
-updated_date: '2026-05-07 17:55'
+updated_date: '2026-05-07 18:04'
 labels:
   - 78-impl
 milestone: m-1
@@ -23,3 +23,9 @@ ordinal: 38000
 - [ ] #5 Delete-all empties both crash files and state.json entries; confirm dialog uses dynamic count copy
 - [ ] #6 crashes_summary command exists and returns the latest crash's relative-when + module + signal for the entry card's sub-line
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+76206ff shared crashes-store via useSyncExternalStore; sidebar rail dot in lockstep with list. Implements rail-dot AC; launch toast / lastSeenUnreadCount / crashes_summary still pending.
+<!-- SECTION:NOTES:END -->

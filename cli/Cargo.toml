@@ -28,6 +28,11 @@ serde_json = "1"
 # Sample WAV reader for `cli transcribe`. Cross-platform and pure
 # Rust — same dep core/ uses for its recognizer smoke example.
 hound = "3.5"
+# Resolves the OS-specific config dir so `cli settings` reads/writes
+# the same settings.json the Tauri shell consumes
+# (~/Library/Application Support/com.openwhisper.app/settings.json on
+# Mac; %APPDATA%\com.openwhisper.app\settings.json on Windows).
+dirs = "5"
 
 [dev-dependencies]
 # JSON parsing for the smoke test that asserts on `cli --json

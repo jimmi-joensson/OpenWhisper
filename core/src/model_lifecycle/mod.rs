@@ -35,7 +35,7 @@
 //!   wins, the timer's `fire_unload` sees state≠Loaded and skips.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -78,11 +78,32 @@ struct TimerCmd {
 /// timer thread so rearm/cancel from the main thread reaches the
 /// sleeping worker.
 struct IdleControl {
-    /// `Duration::MAX` = "keep warm" — the timer never fires.
-    /// Otherwise the deadline used on every rearm.
-    timeout: RwLock<Duration>,
+    /// User's configured idle timeout. `set_idle_timeout` writes
+    /// this. `apply_keep_warm` does NOT touch this — keep-warm is a
+    /// separate flag that overrides without overwriting the user's
+    /// preference, so flipping keep-warm off restores the original
+    /// timeout.
+    configured_timeout: RwLock<Duration>,
+    /// Cluster-wide override flipped by
+    /// [`apply_keep_warm`]. When `true`, [`effective_timeout`]
+    /// returns `Duration::MAX` regardless of `configured_timeout`,
+    /// which prevents the timer from firing.
+    keep_warm: AtomicBool,
     cmd: Mutex<TimerCmd>,
     cv: Condvar,
+}
+
+impl IdleControl {
+    fn effective_timeout(&self) -> Duration {
+        if self.keep_warm.load(Ordering::Relaxed) {
+            Duration::MAX
+        } else {
+            *self
+                .configured_timeout
+                .read()
+                .expect("configured_timeout rwlock poisoned")
+        }
+    }
 }
 
 /// Drop guard that lives only on user-facing `ModelHandle` clones —
@@ -191,14 +212,20 @@ impl<T: Send + 'static> ModelHandle<T> {
         F: Fn() -> Result<T, String> + Send + Sync + 'static,
     {
         let h = Self::new(label, loader);
+        // Inherit the cluster-wide keep-warm preference at construction
+        // time. `apply_keep_warm` will reach this handle on every
+        // future flip via the registry below.
+        let initial_keep_warm = crate::settings::keep_models_warm();
         let idle = Arc::new(IdleControl {
-            timeout: RwLock::new(idle_timeout),
+            configured_timeout: RwLock::new(idle_timeout),
+            keep_warm: AtomicBool::new(initial_keep_warm),
             cmd: Mutex::new(TimerCmd {
                 deadline: None,
                 shutdown: false,
             }),
             cv: Condvar::new(),
         });
+        register_handle(&idle);
         // Captures for the worker thread — Arcs of the data it needs
         // to fire `unload`. Crucially does NOT clone `shutdown`, so
         // when the last user-facing handle drops we can detect it.
@@ -254,9 +281,9 @@ impl<T: Send + 'static> ModelHandle<T> {
             .as_ref()
             .ok_or_else(|| format!("model `{}` has no idle timer", self.label))?;
         *idle
-            .timeout
+            .configured_timeout
             .write()
-            .expect("idle timeout rwlock poisoned") = new;
+            .expect("configured_timeout rwlock poisoned") = new;
         if matches!(self.state(), LifecycleState::Loaded) {
             self.arm_timer();
         }
@@ -443,14 +470,15 @@ impl<T: Send + 'static> ModelHandle<T> {
     }
 
     /// (Re)arm the idle timer with the currently-configured timeout.
-    /// No-op when the handle has no timer or `idle_timeout ==
-    /// Duration::MAX` ("keep warm").
+    /// No-op when the handle has no timer. When the effective timeout
+    /// is `Duration::MAX` (either because `configured_timeout` is MAX
+    /// or because `keep_warm` is set), clears any pending deadline so
+    /// the timer goes fully dormant.
     fn arm_timer(&self) {
         if let Some(idle) = &self.idle {
-            let timeout = *idle.timeout.read().expect("timeout rwlock poisoned");
+            let timeout = idle.effective_timeout();
             let mut cmd = idle.cmd.lock().expect("cmd lock poisoned");
             if timeout == Duration::MAX {
-                // Keep warm — make sure no stale deadline lingers.
                 cmd.deadline = None;
             } else {
                 cmd.deadline = Some(Instant::now() + timeout);
@@ -469,6 +497,89 @@ impl<T: Send + 'static> ModelHandle<T> {
             idle.cv.notify_all();
         }
     }
+}
+
+/// Process-global registry of every live `ModelHandle` with an idle
+/// timer. Stores `Weak<IdleControl>` so dropped handles fall out of
+/// the list naturally on the next [`apply_keep_warm`] sweep — we
+/// don't need a separate deregister hook on `ShutdownSignal::drop`.
+///
+/// Read-side usage (TASK-62.4): the Tauri
+/// `settings_set_keep_models_warm` command persists the new value,
+/// flips the lock-free atomic in [`crate::settings`], then calls
+/// [`apply_keep_warm`] which walks this registry and pushes the new
+/// flag into every live `IdleControl`.
+fn registry() -> &'static Mutex<Vec<Weak<IdleControl>>> {
+    static REGISTRY: OnceLock<Mutex<Vec<Weak<IdleControl>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn register_handle(idle: &Arc<IdleControl>) {
+    let mut g = registry().lock().expect("registry lock poisoned");
+    // Compact dead Weaks while we're here so the list doesn't grow
+    // unbounded across long sessions where handles are constructed
+    // and dropped.
+    g.retain(|w| w.strong_count() > 0);
+    g.push(Arc::downgrade(idle));
+}
+
+/// Push a new cluster-wide keep-warm value into every registered
+/// `ModelHandle` without restarting the app. Called by the Tauri
+/// `settings_set_keep_models_warm` command after the JSON write
+/// succeeds and the lock-free `KEEP_MODELS_WARM` cache has been
+/// updated.
+///
+/// On `keep_warm = true`: clears any pending deadline on each handle
+/// — the timer thread wakes, sees `effective_timeout == MAX`, parks.
+///
+/// On `keep_warm = false`: re-arms each `Loaded` handle with the
+/// user's `configured_timeout`. `Active` / `Loading` / `Unloaded`
+/// handles are left alone — the next legal transition will arm the
+/// timer.
+pub fn apply_keep_warm(keep_warm: bool) {
+    let mut g = registry().lock().expect("registry lock poisoned");
+    g.retain(|weak| {
+        let Some(idle) = weak.upgrade() else {
+            return false;
+        };
+        idle.keep_warm.store(keep_warm, Ordering::Relaxed);
+        let mut cmd = idle.cmd.lock().expect("cmd lock poisoned");
+        if keep_warm {
+            // Cancel any pending fire — keep-warm wins.
+            cmd.deadline = None;
+        } else {
+            // Re-arm only if a deadline was already set (i.e. we
+            // were on a fire path that keep-warm hadn't cancelled
+            // yet, or we're flipping back from on→off and the
+            // handle is currently Loaded — in which case there
+            // wasn't a deadline armed). To handle the latter
+            // cleanly without re-reading state, we set a fresh
+            // deadline here from the configured timeout. The
+            // timer's race-tolerant `fire_unload` skips if state
+            // isn't `Loaded` at fire time, so doing this when the
+            // handle is Active/Loading/Unloaded is safe.
+            let timeout = *idle
+                .configured_timeout
+                .read()
+                .expect("configured_timeout rwlock poisoned");
+            if timeout < Duration::MAX {
+                cmd.deadline = Some(Instant::now() + timeout);
+            }
+        }
+        drop(cmd);
+        idle.cv.notify_all();
+        true
+    });
+}
+
+/// Number of registered handles with at least one strong reference.
+/// Test helper; kept `pub(crate)` so external consumers don't take a
+/// dependency on the count.
+#[cfg(test)]
+fn registered_handle_count() -> usize {
+    let mut g = registry().lock().expect("registry lock poisoned");
+    g.retain(|w| w.strong_count() > 0);
+    g.len()
 }
 
 /// Spawn the per-handle idle-timer worker. Each handle constructed
@@ -817,5 +928,107 @@ mod tests {
             .set_idle_timeout(Duration::from_millis(50))
             .expect_err("must error without timer");
         assert!(err.contains("no idle timer"));
+    }
+
+    // -----------------------------------------------------------------
+    // Registry + apply_keep_warm (TASK-62.4)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn apply_keep_warm_true_cancels_pending_fire_on_registered_handle() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-keepwarm-on",
+            mock_loader(calls, 0),
+            Duration::from_millis(80),
+        );
+        h.load().unwrap();
+
+        // Flip keep-warm ON before the deadline elapses.
+        thread::sleep(Duration::from_millis(20));
+        apply_keep_warm(true);
+
+        // Wait past the original deadline. Handle must still be
+        // Loaded — the registry sweep cancelled the pending fire.
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            h.state(),
+            LifecycleState::Loaded,
+            "apply_keep_warm(true) failed to cancel the pending fire"
+        );
+
+        // Reset so other tests aren't influenced by the global flag.
+        apply_keep_warm(false);
+    }
+
+    #[test]
+    fn apply_keep_warm_false_rearms_with_configured_timeout() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+            "mock-keepwarm-off",
+            mock_loader(calls, 0),
+            Duration::from_millis(80),
+        );
+        h.load().unwrap();
+        apply_keep_warm(true);
+        // Confirm handle is parked Loaded indefinitely.
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(h.state(), LifecycleState::Loaded);
+
+        // Flip back OFF — registry sweep re-arms with the original
+        // configured timeout. Handle should auto-unload after ~80 ms.
+        apply_keep_warm(false);
+        let unloaded = wait_until(Duration::from_millis(500), || {
+            h.state() == LifecycleState::Unloaded
+        });
+        assert!(
+            unloaded,
+            "apply_keep_warm(false) failed to re-arm; state={:?}",
+            h.state()
+        );
+    }
+
+    #[test]
+    fn dropped_handles_fall_out_of_registry() {
+        // Identify our handle's `IdleControl` Arc via `Weak::ptr_eq`
+        // so the test stays correct under parallel execution: other
+        // tests' handles may also be in the registry, but we only
+        // care that *our specific* Weak is pruned after drop.
+        let weak_to_dead_handle = {
+            let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
+                "mock-reg-drop",
+                mock_loader(Arc::new(AtomicUsize::new(0)), 0),
+                Duration::from_secs(60),
+            );
+            let live_weak = Arc::downgrade(h.idle.as_ref().unwrap());
+            assert!(
+                live_weak.strong_count() > 0,
+                "handle Arc should be live before drop"
+            );
+            // Sanity: our weak resolves to a registry entry by
+            // pointer identity (not just an Arc with the same data).
+            let in_registry = registry()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|w| Weak::ptr_eq(w, &live_weak));
+            assert!(in_registry, "handle should be registered before drop");
+            live_weak
+        };
+
+        // Trigger a sweep — apply_keep_warm walks the registry with
+        // retain, dropping dead Weaks. After our handle drops, our
+        // Weak is dead.
+        apply_keep_warm(false);
+
+        let still_present = registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|w| Weak::ptr_eq(w, &weak_to_dead_handle));
+        assert!(
+            !still_present,
+            "registry should have pruned the dropped handle's Weak"
+        );
     }
 }

@@ -2982,6 +2982,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 5.0.1",
  "hound",
  "openwhisper-core",
  "serde_json",

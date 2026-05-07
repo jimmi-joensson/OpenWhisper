@@ -28,10 +28,10 @@ pub use crate::diagnostics::{
 pub use crate::diagnostics::recognizer_info;
 pub use crate::dictation::{DictationSnapshot, Injector};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};
-pub use crate::model_lifecycle::{LifecycleState, ModelHandle};
+pub use crate::model_lifecycle::{LifecycleState, ModelHandle, apply_keep_warm};
 pub use crate::settings::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
-    PillSettings, StatsSettings,
+    PerformanceSettings, PillSettings, StatsSettings, keep_models_warm,
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};

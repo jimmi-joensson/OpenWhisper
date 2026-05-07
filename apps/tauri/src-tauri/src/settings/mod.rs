@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 // observer) reach `openwhisper_core::settings::X` directly.
 pub use core::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
-    PillSettings, StatsSettings, current_pill_settings, current_settings,
+    PerformanceSettings, PillSettings, StatsSettings, current_pill_settings, current_settings,
     current_stats_settings, default_cancel_hotkey, default_settings,
     default_toggle_hotkey, follow_active_screen,
 };
@@ -57,6 +57,13 @@ pub fn load_behavior_settings(app: &AppHandle) -> BehaviorSettings {
     match settings_path(app) {
         Ok(p) => core::load_behavior_settings(&p),
         Err(_) => BehaviorSettings::default(),
+    }
+}
+
+pub fn load_performance_settings(app: &AppHandle) -> PerformanceSettings {
+    match settings_path(app) {
+        Ok(p) => core::load_performance_settings(&p),
+        Err(_) => PerformanceSettings::default(),
     }
 }
 
@@ -137,6 +144,31 @@ pub fn settings_set_pill_follow(app: AppHandle, follow: bool) -> Result<(), Stri
 #[tauri::command]
 pub fn settings_get_stats(app: AppHandle) -> StatsSettings {
     load_stats_settings(&app)
+}
+
+/// Read the persisted Performance settings (currently just
+/// `keep_models_warm`). Returns the default (`false`) on first run
+/// before any save has happened.
+#[tauri::command]
+pub fn settings_get_performance(app: AppHandle) -> PerformanceSettings {
+    load_performance_settings(&app)
+}
+
+/// Persist the keep-models-warm flag and push it into every
+/// registered `ModelHandle` in the same call. Order: write JSON →
+/// flip lock-free atomic (handled inside core's
+/// `save_performance_settings`) → call `apply_keep_warm` so live
+/// handles reconfigure without an app restart. Per the
+/// model-lifecycle spec (`backlog/docs/specs/2026-05-01-model-
+/// lifecycle-telemetry.md`) the setter is the single source of
+/// truth for in-process effect; reads come from
+/// `openwhisper_core::settings::keep_models_warm()`.
+#[tauri::command]
+pub fn settings_set_keep_models_warm(app: AppHandle, value: bool) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    core::save_performance_settings(&path, PerformanceSettings { keep_models_warm: value })?;
+    openwhisper_core::model_lifecycle::apply_keep_warm(value);
+    Ok(())
 }
 
 /// Persist a new typing-speed calibration. Out-of-range writes are

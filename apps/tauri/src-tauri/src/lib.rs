@@ -1101,6 +1101,17 @@ pub fn run() {
             // written on explicit save.
             let _ = settings::load_settings(app.handle());
             let _ = settings::load_stats_settings(app.handle());
+            // Hydrate the keep-models-warm cache before any
+            // `ModelHandle::with_idle_timeout` is constructed so the
+            // first handle inherits the persisted value rather than
+            // the default false. Pushes a no-op `apply_keep_warm`
+            // call too so any handles registered before this point
+            // (none today, but defensive against future ordering
+            // changes) get reconfigured.
+            let perf_settings = settings::load_performance_settings(app.handle());
+            openwhisper_core::model_lifecycle::apply_keep_warm(
+                perf_settings.keep_models_warm,
+            );
             // Same shape for the audio block: hydrate the in-memory cache
             // and propagate the saved device name into the core's selector
             // so the very first recording opens the user's preferred mic
@@ -1272,6 +1283,8 @@ pub fn run() {
             settings::settings_set_pill_follow,
             settings::settings_get_stats,
             settings::settings_set_user_wpm,
+            settings::settings_get_performance,
+            settings::settings_set_keep_models_warm,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

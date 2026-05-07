@@ -3,6 +3,7 @@ import {
   RSS_SERIES_LEN,
   externalClaim,
   useMemoryStats,
+  type LifecycleState,
   type ModelMemoryRow,
   type PressureLevel,
   type SystemMemory,
@@ -727,7 +728,11 @@ interface Segment {
 //      available (the loader's authoritative number), falling back
 //      to `estimated_rss_bytes` (the legacy RSS-delta) so older
 //      handles without a registered claim still render. Stack
-//      inside the RSS portion of the bar.
+//      inside the RSS portion of the bar. Only included while the
+//      model is actually resident — `estimated_rss_bytes` is the
+//      *last* observed load delta and is never cleared on unload,
+//      so without the state gate an idle-released model would keep
+//      drawing a full segment after its weights have been freed.
 //   2. "Other" — process RSS residual not attributable to a known
 //      in-process model. Audio buffers, app shell, caches, OS
 //      overhead. Computed by saturating subtraction so a momentary
@@ -736,9 +741,18 @@ interface Segment {
 //      Sized by `claimed_bytes`. Stack PAST the RSS portion of the
 //      bar; this is the headline change for the user, since on Mac
 //      Parakeet is mostly invisible to RSS.
+function isResident(state: LifecycleState): boolean {
+  return (
+    state === "Loaded" ||
+    state === "Active" ||
+    state === "Loading" ||
+    state === "Releasing"
+  );
+}
+
 function buildSegments(rssBytes: number, models: ModelMemoryRow[]): Segment[] {
   const inProcSegs: Segment[] = models
-    .filter((m) => m.in_process)
+    .filter((m) => m.in_process && isResident(m.state))
     .map((m) => ({
       key: `model-${m.label}`,
       label: prettyLabel(m.label),

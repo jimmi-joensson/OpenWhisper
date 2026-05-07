@@ -381,4 +381,71 @@ test.describe("diagnostics pane", () => {
         .getByText("Recognizer", { exact: true }),
     ).toBeVisible();
   });
+
+  test("idle-released recognizer drops its breakdown segment even with stale rss-delta", async ({
+    page,
+  }) => {
+    // Regression for a Windows-only visual bug: after the 5-min idle
+    // unload fires, the registry sets `claimed_bytes = 0` but the
+    // `estimated_rss_bytes` field on `ModelHandle` is the *last
+    // observed* load delta and is never cleared. Without an explicit
+    // state gate, `buildSegments` falls back to the stale rss-delta
+    // and renders a full ~1.2 GB Recognizer segment even though the
+    // weights are gone — RSS readout shows 88 MB while the breakdown
+    // claims 1.2 GB. Visible contradiction.
+    await page.goto("/");
+    await setMemoryStats(page, {
+      system: NORMAL_SYSTEM,
+      process: {
+        rss_bytes: (88 + 1180) * MB,
+        peak_rss_bytes: (88 + 1180) * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Loaded",
+          estimated_rss_bytes: 1180 * MB,
+          claimed_bytes: 640 * MB,
+          in_process: true,
+        },
+      ],
+    });
+    await page.getByTestId("sidebar-item-diagnostics").click();
+    await waitForModelStateChangedListener(page);
+    await expect(
+      page.getByTestId("diagnostics-segment-model-recognizer"),
+    ).toBeVisible();
+
+    // Idle unload: RSS drops back to baseline, registry zeroes
+    // `claimed_bytes`, but `estimated_rss_bytes` retains the historic
+    // 1180 MB delta. The segment must disappear; "Other" must equal
+    // the full process RSS.
+    await setMemoryStats(page, {
+      system: NORMAL_SYSTEM,
+      process: {
+        rss_bytes: 88 * MB,
+        peak_rss_bytes: (88 + 1180) * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [
+        {
+          label: "recognizer",
+          state: "Unloaded",
+          estimated_rss_bytes: 1180 * MB,
+          claimed_bytes: 0,
+          in_process: true,
+        },
+      ],
+    });
+    await emitModelStateChanged(page, {
+      label: "recognizer",
+      state: "Unloaded",
+    });
+
+    await expect(
+      page.getByTestId("diagnostics-segment-model-recognizer"),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("diagnostics-segment-other")).toBeVisible();
+  });
 });

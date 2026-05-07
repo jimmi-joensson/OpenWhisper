@@ -29,4 +29,5 @@ ordinal: 4000
 - `peak_rss_bytes` is a process-global running max of every observed RSS (`AtomicU64::fetch_max`). `sysinfo` 0.32 doesn't expose a peak field; spec note kept — switch to native `task_info().resident_size_max` / `PeakWorkingSetSize` in a follow-up if accuracy bites.
 - `cargo test -p openwhisper-core --lib` 64/64 green. `cargo check -p openwhisper-core` and `cargo check -p openwhisper-tauri` clean.
 - Awaiting user QA — pure-Rust core primitive with no UI surface yet (UI lands in TASK-62.8); reviewer can verify via `cargo test -p openwhisper-core --lib telemetry`.
+- Win-side re-check follow-up, commit db5d7db: `rss_grows_after_large_allocation_and_peak_tracks_high_watermark` was passing on Mac but failed on Windows with `before == after` after a 64 MB `vec![0u8; N]`. Cause: `alloc_zeroed` for large allocs on Windows goes through `VirtualAlloc(MEM_COMMIT)`, charging commit but not Working Set until first touch. Fixed by faulting pages in via volatile writes at 4 KB stride. Product code unchanged — `sysinfo` → `WorkingSetSize` is still the correct user-visible metric.
 <!-- SECTION:NOTES:END -->

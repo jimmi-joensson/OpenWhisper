@@ -123,6 +123,8 @@ function App() {
         setRoute("settings");
       } else if (evt.payload === "main") {
         setRoute("home");
+      } else if (evt.payload === "diagnostics") {
+        setRoute("diagnostics");
       }
     }).then((fn) => {
       unlisten = fn;

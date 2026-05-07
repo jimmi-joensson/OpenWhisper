@@ -5,11 +5,16 @@ import {
   emitShowInFullscreenChanged,
   emitTick,
   expect,
+  setMemoryStats,
   setModelsStoragePath,
+  setPhysicalRamMb,
   test,
   waitForDeviceStateListener,
   waitForTickListener,
 } from "./fixtures/tauri-shim";
+
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
 
 // Settings is now an in-window route inside App, not a separate window.
 // All specs mount the main App tree and navigate via ⌘, or the
@@ -1132,6 +1137,170 @@ test.describe("settings — models pane", () => {
     await expect(reveal).toBeVisible();
     await reveal.focus();
     await expect(reveal).toBeFocused();
+  });
+
+  test("budget bar renders at the top of the pane with physical readout", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setPhysicalRamMb(page, 24576);
+    await setMemoryStats(page, {
+      system: {
+        total_bytes: 24 * GB,
+        used_bytes: 14 * GB,
+        available_bytes: 10 * GB,
+        swap_total_bytes: 4 * GB,
+        swap_used_bytes: 0,
+      },
+      process: {
+        rss_bytes: 1100 * MB,
+        peak_rss_bytes: 1100 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    const bar = page.getByTestId("settings-models-budget-bar");
+    await expect(bar).toBeVisible();
+    await expect(
+      page.getByTestId("settings-models-budget-physical"),
+    ).toContainText("of 24.00 GB physical");
+    // Parakeet is enabled-by-default → its segment renders.
+    await expect(
+      page.getByTestId("settings-models-budget-seg-parakeet-en"),
+    ).toBeVisible();
+  });
+
+  test("hovering a disabled row reveals ghost segment + add chip + amber headroom", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setPhysicalRamMb(page, 24576);
+    await setMemoryStats(page, {
+      system: {
+        total_bytes: 24 * GB,
+        used_bytes: 14 * GB,
+        available_bytes: 10 * GB,
+        swap_total_bytes: 4 * GB,
+        swap_used_bytes: 0,
+      },
+      process: {
+        rss_bytes: 1100 * MB,
+        peak_rss_bytes: 1100 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    const bar = page.getByTestId("settings-models-budget-bar");
+    const llamaRow = page.getByTestId("settings-models-row-llama-3.2-3b-cleanup");
+
+    // Rest state — no preview attribute, no chip.
+    await expect(bar).toHaveAttribute("data-preview-mode", "rest");
+    await expect(
+      page.getByTestId("settings-models-row-llama-3.2-3b-cleanup-chip"),
+    ).toHaveCount(0);
+
+    // Hover the disabled Llama row.
+    await llamaRow.hover();
+    await expect(bar).toHaveAttribute("data-preview-mode", "add");
+    await expect(
+      page.getByTestId("settings-models-budget-ghost-llama-3.2-3b-cleanup"),
+    ).toBeVisible();
+    const chip = page.getByTestId(
+      "settings-models-row-llama-3.2-3b-cleanup-chip",
+    );
+    await expect(chip).toBeVisible();
+    await expect(chip).toContainText("+2.3 GB");
+    await expect(
+      page.getByTestId("settings-models-budget-headroom"),
+    ).toHaveAttribute("data-tone", "amber");
+  });
+
+  test("hovering an enabled row marks departing segment + remove chip + green headroom", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await setPhysicalRamMb(page, 24576);
+    await setMemoryStats(page, {
+      system: {
+        total_bytes: 24 * GB,
+        used_bytes: 14 * GB,
+        available_bytes: 10 * GB,
+        swap_total_bytes: 4 * GB,
+        swap_used_bytes: 0,
+      },
+      process: {
+        rss_bytes: 1100 * MB,
+        peak_rss_bytes: 1100 * MB,
+        timestamp_unix_ms: 0,
+      },
+      models: [],
+    });
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    // Enable Llama first via its toggle so it becomes a removable row.
+    await page
+      .getByTestId("settings-models-row-llama-3.2-3b-cleanup-toggle")
+      .click();
+
+    // Now hover the enabled Llama row.
+    await page
+      .getByTestId("settings-models-row-llama-3.2-3b-cleanup")
+      .hover();
+
+    const bar = page.getByTestId("settings-models-budget-bar");
+    await expect(bar).toHaveAttribute("data-preview-mode", "remove");
+    await expect(
+      page.getByTestId("settings-models-budget-seg-llama-3.2-3b-cleanup"),
+    ).toHaveAttribute("data-departing", "true");
+    const chip = page.getByTestId(
+      "settings-models-row-llama-3.2-3b-cleanup-chip",
+    );
+    await expect(chip).toContainText("−2.3 GB");
+    await expect(
+      page.getByTestId("settings-models-budget-headroom"),
+    ).toHaveAttribute("data-tone", "green");
+  });
+
+  test("footer caveat sits below the budget bar and links to Diagnostics", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Models" }).click();
+
+    const caveat = page.getByTestId("settings-models-budget-caveat");
+    const link = page.getByTestId("settings-models-caveat-link");
+    await expect(caveat).toBeVisible();
+    await expect(link).toBeVisible();
+    await expect(link).toContainText("Diagnostics → Memory");
+
+    // Caveat sits between the budget bar and the model list in DOM order.
+    const order = await page.evaluate(() => {
+      const list = [
+        "settings-models-budget-bar",
+        "settings-models-budget-caveat",
+        "settings-models-list",
+      ];
+      return list.map((id) => {
+        const el = document.querySelector(`[data-testid="${id}"]`);
+        return el ? Array.prototype.indexOf.call(el.parentElement!.children, el) : -1;
+      });
+    });
+    expect(order[0]).toBeLessThan(order[1]);
+    expect(order[1]).toBeLessThan(order[2]);
+
+    // Click navigates to Diagnostics route via ow_navigate.
+    await link.click();
+    await expect(
+      page.getByRole("heading", { name: "Diagnostics", exact: true }),
+    ).toBeVisible();
   });
 
   test("clicking reveal invokes models_open_folder", async ({ page }) => {

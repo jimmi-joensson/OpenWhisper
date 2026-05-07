@@ -525,6 +525,10 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             (w.__owCrashesOpenFolderCount ?? 0) + 1;
           return null;
         }
+        if (cmd === "system_physical_ram_mb") {
+          const w = window as unknown as { __owPhysicalRamMb?: number };
+          return w.__owPhysicalRamMb ?? 24576;
+        }
         if (cmd === "models_storage_path") {
           const w = window as unknown as { __owModelsStoragePath?: string };
           return (
@@ -559,6 +563,25 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             eventId: number;
           };
           handlers.get(event)?.delete(eventId);
+          return null;
+        }
+        if (cmd === "plugin:event|emit" || cmd === "plugin:event|emit_to") {
+          // Outbound webview emit — fire the same registered listeners
+          // so listen() handlers in the React tree see the event. Without
+          // this, components calling `emit("ow_navigate", "X")` would
+          // hit the default `return null` branch and the listener side
+          // would never wake.
+          const { event, payload } = (args ?? {}) as {
+            event: string;
+            payload?: unknown;
+          };
+          const set = handlers.get(event);
+          if (set) {
+            for (const id of set) {
+              const cb = callbacks.get(id);
+              if (cb) cb({ event, payload, id });
+            }
+          }
           return null;
         }
         return null;
@@ -968,6 +991,19 @@ export async function setModelsStoragePath(
     (window as unknown as { __owModelsStoragePath?: string })
       .__owModelsStoragePath = p;
   }, path);
+}
+
+/// Override what `system_physical_ram_mb` returns. Default 24 576 MB
+/// (24 GB) matches the design mock; tests that need a different
+/// machine size set it explicitly here.
+export async function setPhysicalRamMb(
+  page: Page,
+  mb: number,
+): Promise<void> {
+  await page.evaluate((value) => {
+    (window as unknown as { __owPhysicalRamMb?: number }).__owPhysicalRamMb =
+      value;
+  }, mb);
 }
 
 /// Wait for the diagnostics pane to attach its `model-state-changed`

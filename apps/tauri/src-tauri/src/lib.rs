@@ -186,6 +186,24 @@ fn telemetry_get_memory() -> openwhisper_core::telemetry::MemoryStats {
     openwhisper_core::telemetry::collect_memory_stats()
 }
 
+/// Physical RAM in MB, cached at first call. Anchors the Settings →
+/// Models budget bar; physical RAM is static for the session, so a
+/// dedicated boot-time read keeps the bar's denominator stable even
+/// if the live telemetry stream blips. TASK-62.12.
+#[tauri::command]
+fn system_physical_ram_mb() -> u64 {
+    static CACHED: OnceLock<u64> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // collect_memory_stats already returns total_bytes from the
+        // shared sysinfo cache — reuse rather than rolling our own
+        // System handle. Bytes → MB via integer division (the bar's
+        // resolution doesn't need decimals; "24.00 GB" rounds the
+        // 23 998 → 23.44 GB precision out anyway).
+        let stats = openwhisper_core::telemetry::collect_memory_stats();
+        stats.system.total_bytes / (1024 * 1024)
+    })
+}
+
 /// Resolve the canonical models folder under `app.path().app_data_dir()`.
 ///
 /// Resolved at command-time (NOT cached) so that env-overridden config
@@ -1402,6 +1420,7 @@ pub fn run() {
             stats_get_summary,
             stats_reset,
             telemetry_get_memory,
+            system_physical_ram_mb,
             models_storage_path,
             models_open_folder,
             crashes::crashes_list,

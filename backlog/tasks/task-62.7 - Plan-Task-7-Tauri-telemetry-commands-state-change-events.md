@@ -23,6 +23,7 @@ ordinal: 10000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: 6ef3f3e.
 - New `core::telemetry::{ModelMemoryRow, MemoryStats, collect_memory_stats}`. Aggregates `query_process_memory` + `model_lifecycle::registry_snapshot()` into a single Serialize-friendly readout the Tauri command can ship to React unchanged.
 - `core::model_lifecycle::registry_snapshot()` walks the existing Weak registry, reads each handle's label / state / RSS-delta, prunes dead Weaks as a side effect. Reads do NOT acquire the handle's `inner` mutex — telemetry must not contend with active transcription. Crucially, Tauri's 1 Hz poll never blocks on `use_with`.
 - Refactor for telemetry surfacing: `IdleControl` extended to carry `label: String`, `state: Arc<Mutex<LifecycleState>>`, `last_load_rss_delta: Arc<Mutex<u64>>` (Arc clones from the user-facing handle). Avoided the bigger `Arc<HandleInner>` refactor.

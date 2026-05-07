@@ -1,10 +1,16 @@
-import { useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import {
   RSS_SERIES_LEN,
   useMemoryStats,
   type ModelMemoryRow,
 } from "../lib/use-memory-stats";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+
+const SPARK_W_VB = 600;
+const SPARK_H_VB = 96;
+const SPARK_PAD_TOP = 6;
+const SPARK_PAD_BOT = 4;
+const SPARK_TICK_MS = 1000;
 
 export type Platform = "macos" | "windows";
 
@@ -130,44 +136,97 @@ function Readout({
   );
 }
 
-// 60-sample area sparkline. Discrete redraw on every poll — no
-// interpolated tween. Transform/opacity-only (per
-// openwhisper-animation-philosophy T3) and reduced-motion safe by
-// construction (no animation).
+// 60-sample area sparkline. Smooth left-scroll on every poll —
+// classic Activity-Monitor scroll: samples are pinned to fixed x
+// positions in viewBox space (latest at the right edge), and the
+// containing `<g>` translates left by one sample-width over the
+// 1-Hz tick interval. At swap time the transform snaps back to 0;
+// because the path data has shifted indices by one, every sample's
+// screen position is preserved across the swap (no jump). The new
+// sample appears at the right edge with no fanfare.
+//
+// All animation state in refs (per `openwhisper-animation-philosophy`).
+// Transform-only — no width/height/d-attribute interpolation.
+// Reduced-motion: snaps each tick; values still read.
+//
+// CSS transforms on SVG inner elements operate in CSS-pixel space,
+// not viewBox units, when `preserveAspectRatio="none"` scales the
+// SVG to its container. ResizeObserver tracks the rendered width
+// and converts the per-sample step into the matching CSS-pixel
+// distance so the slide aligns exactly with the path's visual sample
+// pitch.
 function Sparkline({ data }: { data: number[] }) {
-  const w = 600;
-  const h = 96;
-  const padTop = 6;
-  const padBot = 4;
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const groupRef = useRef<SVGGElement | null>(null);
+  const lastDataRef = useRef<number[]>(data);
+  const pxPerSampleCssRef = useRef(0);
+  const reducedMotionRef = useRef(false);
 
-  const path = useMemo(() => {
-    if (data.length < 2) return null;
-    const min = Math.min(...data);
-    const max = Math.max(...data);
-    const span = Math.max(1, max - min);
-    const usable = h - padTop - padBot;
-    const xs = data.map(
-      (_, i) => (i / (RSS_SERIES_LEN - 1)) * w,
-    );
-    const ys = data.map(
-      (v) => padTop + usable - ((v - min) / span) * usable,
-    );
-    const line = xs
-      .map((x, i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`)
-      .join(" ");
-    const fill = `${line} L ${xs[xs.length - 1].toFixed(1)} ${h} L ${xs[0].toFixed(1)} ${h} Z`;
-    return {
-      line,
-      fill,
-      lastX: xs[xs.length - 1],
-      lastY: ys[ys.length - 1],
+  useLayoutEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const update = () => {
+      const w = el.getBoundingClientRect().width;
+      pxPerSampleCssRef.current = w / (RSS_SERIES_LEN - 1);
     };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => {
+      reducedMotionRef.current = mq.matches;
+    };
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+
+  // Animation kick — runs on every data prop change. Snap to
+  // translateX=0 (so the slide always restarts from the right-pinned
+  // position), force a reflow so the next style write is treated as
+  // the start of a new transition, then schedule the slide to
+  // -pxPerSample over the tick interval.
+  useLayoutEffect(() => {
+    const prev = lastDataRef.current;
+    if (data === prev) return;
+    lastDataRef.current = data;
+    const g = groupRef.current;
+    if (!g) return;
+    const pxCss = pxPerSampleCssRef.current;
+    const wasEmpty = prev.length === 0;
+
+    g.style.transition = "none";
+    g.style.transform = "translate3d(0,0,0)";
+
+    if (
+      reducedMotionRef.current ||
+      wasEmpty ||
+      data.length === 0 ||
+      pxCss === 0
+    ) {
+      // First sample, empty data, reduced-motion, or pre-measure:
+      // leave the group at rest. The path itself already draws the
+      // latest data; a snap-cut is correct here.
+      return;
+    }
+
+    void g.getBoundingClientRect();
+    g.style.transition = `transform ${SPARK_TICK_MS}ms linear`;
+    g.style.transform = `translate3d(-${pxCss}px,0,0)`;
   }, [data]);
+
+  const path = useMemo(() => buildSparkPath(data), [data]);
 
   return (
     <svg
+      ref={svgRef}
       className="ow-diagnostics__spark"
-      viewBox={`0 0 ${w} ${h}`}
+      viewBox={`0 0 ${SPARK_W_VB} ${SPARK_H_VB}`}
       preserveAspectRatio="none"
       role="img"
       aria-label="OpenWhisper RSS over the last 60 seconds"
@@ -178,27 +237,52 @@ function Sparkline({ data }: { data: number[] }) {
           <stop offset="100%" stopColor="var(--primary)" stopOpacity="0" />
         </linearGradient>
       </defs>
-      {path && (
-        <>
-          <path d={path.fill} fill="url(#ow-diag-spark-fill)" />
-          <path
-            d={path.line}
-            fill="none"
-            stroke="var(--primary)"
-            strokeWidth="1.6"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-          <circle
-            cx={path.lastX}
-            cy={path.lastY}
-            r="2.6"
-            fill="var(--primary)"
-          />
-        </>
-      )}
+      <g ref={groupRef} className="ow-diagnostics__spark-group">
+        {path && (
+          <>
+            <path d={path.fill} fill="url(#ow-diag-spark-fill)" />
+            <path
+              d={path.line}
+              fill="none"
+              stroke="var(--primary)"
+              strokeWidth="1.6"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          </>
+        )}
+      </g>
     </svg>
   );
+}
+
+// Pin the latest sample to x=W (right edge). Older samples extend
+// leftward at one viewBox-unit-per-sample-pitch increments. During
+// the initial fill the line just grows leftward toward x=0; once
+// the ring is full it spans the full width and each new sample
+// pushes the oldest off the left.
+function buildSparkPath(
+  data: number[],
+): { line: string; fill: string } | null {
+  if (data.length < 2) return null;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const span = Math.max(1, max - min);
+  const usable = SPARK_H_VB - SPARK_PAD_TOP - SPARK_PAD_BOT;
+  const pxPerSampleVB = SPARK_W_VB / (RSS_SERIES_LEN - 1);
+  const offsetVB = (RSS_SERIES_LEN - data.length) * pxPerSampleVB;
+  const xs = data.map((_, i) => offsetVB + i * pxPerSampleVB);
+  const ys = data.map(
+    (v) => SPARK_PAD_TOP + usable - ((v - min) / span) * usable,
+  );
+  const line = xs
+    .map(
+      (x, i) =>
+        `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${ys[i].toFixed(1)}`,
+    )
+    .join(" ");
+  const fill = `${line} L ${xs[xs.length - 1].toFixed(1)} ${SPARK_H_VB} L ${xs[0].toFixed(1)} ${SPARK_H_VB} Z`;
+  return { line, fill };
 }
 
 // Stacked horizontal bar — one segment per loaded model handle plus an

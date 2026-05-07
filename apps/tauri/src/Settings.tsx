@@ -35,6 +35,7 @@ import { useBtResumeDelay } from "./lib/use-bt-resume-delay";
 import { useDictation } from "./lib/use-dictation";
 import { usePauseAudio } from "./lib/use-pause-audio";
 import { GeneralPane } from "./components/general-pane";
+import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
 
 // Step granularity (ms) for the BT resume delay slider. 500 ms gives
@@ -85,18 +86,9 @@ export function SettingsShell({ active, onBack }: SettingsShellProps) {
       >
         {active === "general" && <GeneralPane />}
         {active === "audio" && <AudioPane />}
-        {active === "models" && <PaneStub title="Models" />}
+        {active === "models" && <SettingsModelsPane />}
         {active === "shortcuts" && <ShortcutsPane />}
       </div>
-    </div>
-  );
-}
-
-function PaneStub({ title }: { title: string }) {
-  return (
-    <div className="ow-settings__pane-stub">
-      <h2>{title}</h2>
-      <p>Coming soon.</p>
     </div>
   );
 }

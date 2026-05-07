@@ -414,7 +414,7 @@ function CrashEvents({
 /// GitHub mark — Lucide doesn't ship a brand-faithful version, and
 /// adding `@primer/octicons-react` or `simple-icons` for one glyph
 /// is overkill. Inline SVG matches the existing project pattern
-/// (see `CrashStarGlyph` in `crash-empty.tsx`). Source: GitHub
+/// (see `CrashGlyph` in `crash-empty.tsx`). Source: GitHub
 /// Octicons `mark-github` (MIT-licensed,
 /// https://github.com/primer/octicons).
 function GitHubGlyph({ size = 14 }: { size?: number }) {

@@ -91,6 +91,61 @@ export function externalClaim(models: ModelMemoryRow[]): number {
   return total;
 }
 
+/// True when the recognizer model is currently resident *inside* this
+/// process — Loaded / Active / mid-transition AND `in_process === true`.
+/// On Mac the recognizer runs on the ANE in a separate pool, so this
+/// stays false even while the model is fully loaded. The RSS breakdown
+/// estimator gates the Parakeet-weights segment on this so the bar
+/// doesn't claim ANE-resident weights are inside RSS.
+export function isRecognizerInProcessResident(
+  models: ModelMemoryRow[],
+): boolean {
+  for (const m of models) {
+    if (m.label !== "recognizer") continue;
+    if (!m.in_process) return false;
+    return (
+      m.state === "Loaded" ||
+      m.state === "Active" ||
+      m.state === "Loading" ||
+      m.state === "Releasing"
+    );
+  }
+  return false;
+}
+
+export interface RssBreakdownMb {
+  parakeetMb: number;
+  audioBuffersMb: number;
+  appShellMb: number;
+  cachesMb: number;
+}
+
+/// V1 placeholder estimator — splits process RSS into the four
+/// canonical segments the design expects. Returns megabytes summing
+/// (modulo rounding) to `rssMb`.
+///
+/// Parakeet weights take a static 612 MB segment ONLY when the
+/// recognizer is in-process resident (Windows shape). On Mac the
+/// weights live in the ANE pool outside RSS, so the segment drops
+/// to zero and the per-model breakdown bar below this one carries
+/// the ANE attribution. Audio buffers / app shell / caches share
+/// the non-Parakeet residual at 28 / 56 / 16 — ratios derived from
+/// the design's Windows-shape fixture (142 / 286 / 84 of the 512 MB
+/// non-Parakeet residual at rss=1100 MB). Proportional rather than
+/// fixed so the segments stay honest at any RSS — including the
+/// ~110 MB Mac case where fixed baselines would oversaturate.
+export function breakdownEstimate(
+  rssMb: number,
+  recognizerInProcessResident: boolean,
+): RssBreakdownMb {
+  const parakeetMb = recognizerInProcessResident ? 612 : 0;
+  const remainder = Math.max(0, rssMb - parakeetMb);
+  const audioBuffersMb = Math.round(remainder * 0.28);
+  const cachesMb = Math.round(remainder * 0.16);
+  const appShellMb = Math.max(0, remainder - audioBuffersMb - cachesMb);
+  return { parakeetMb, audioBuffersMb, appShellMb, cachesMb };
+}
+
 /// Total memory OpenWhisper holds across all OS-managed pools.
 /// Equals process RSS (which already counts in-process model
 /// weights) plus the claim from ANE-resident weights on Mac.

@@ -1010,26 +1010,54 @@ body[data-platform="macos"] .ow-titlebar {
   background: var(--destructive);
 }
 
-.ow-diagnostics__breakdown {
+.ow-diagnostics__error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--destructive);
+}
+
+/* ===========================================================
+   OW RSS Breakdown — TASK-62.11
+   ----------------------------------------------------------
+   Stacked horizontal bar splitting OpenWhisper's RSS into the
+   four canonical segments (Parakeet weights / Audio buffers /
+   App shell / Caches). Sits between the dual-line memory chart
+   legend and the per-model breakdown — separated from each by
+   the `border-top` divider below.
+   =========================================================== */
+
+.ow-rss-breakdown {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
-.ow-diagnostics__breakdown-header {
+.ow-rss-breakdown__header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  gap: 12px;
 }
 
-.ow-diagnostics__breakdown-total {
+.ow-rss-breakdown__kicker {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.ow-rss-breakdown__resident {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   color: var(--muted-foreground);
 }
 
-.ow-diagnostics__breakdown-bar {
+.ow-rss-breakdown__bar {
   display: flex;
   height: 6px;
   border-radius: 3px;
@@ -1037,36 +1065,16 @@ body[data-platform="macos"] .ow-titlebar {
   background: var(--surface-sunken-strong);
 }
 
-.ow-diagnostics__breakdown-seg {
+.ow-rss-breakdown__seg {
   display: block;
   height: 100%;
 }
 
-.ow-diagnostics__breakdown-seg[data-kind="model"] {
-  background: var(--info);
-}
-
-.ow-diagnostics__breakdown-seg[data-kind="model"] + .ow-diagnostics__breakdown-seg[data-kind="model"] {
-  border-left: 1px solid var(--background);
-  background: color-mix(in oklch, var(--info) 65%, var(--background));
-}
-
-.ow-diagnostics__breakdown-seg[data-kind="other"] {
-  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+.ow-rss-breakdown__seg + .ow-rss-breakdown__seg {
   border-left: 1px solid var(--background);
 }
 
-/* External (out-of-process) model claim — Mac ANE / GPU VRAM.
-   Solid fill since this is a real present cost, not a forecast
-   (stripes are reserved for the budget bar's ghost / preview
-   state). Lighter shade of the same blue so it reads as the same
-   OpenWhisper signal in a different pool. */
-.ow-diagnostics__breakdown-seg[data-kind="model-external"] {
-  background: color-mix(in oklch, var(--info) 65%, var(--background));
-  border-left: 1px solid var(--background);
-}
-
-.ow-diagnostics__breakdown-legend {
+.ow-rss-breakdown__legend {
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
@@ -1075,7 +1083,7 @@ body[data-platform="macos"] .ow-titlebar {
   list-style: none;
 }
 
-.ow-diagnostics__breakdown-item {
+.ow-rss-breakdown__item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1083,45 +1091,27 @@ body[data-platform="macos"] .ow-titlebar {
   color: var(--muted-foreground);
 }
 
-.ow-diagnostics__breakdown-swatch {
+.ow-rss-breakdown__swatch {
   width: 8px;
   height: 8px;
   border-radius: 2px;
   flex-shrink: 0;
 }
 
-.ow-diagnostics__breakdown-swatch[data-kind="model"] {
-  background: var(--info);
-}
-
-.ow-diagnostics__breakdown-swatch[data-kind="model-external"] {
-  background: color-mix(in oklch, var(--info) 65%, var(--background));
-}
-
-.ow-diagnostics__breakdown-swatch[data-kind="other"] {
-  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
-}
-
-.ow-diagnostics__breakdown-label {
+.ow-rss-breakdown__label {
   color: var(--foreground);
 }
 
-.ow-diagnostics__breakdown-value {
+.ow-rss-breakdown__pct,
+.ow-rss-breakdown__value {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  color: var(--foreground);
-}
-
-.ow-diagnostics__breakdown-unit {
   color: var(--muted-foreground);
-  font-size: 10px;
 }
 
-.ow-diagnostics__error {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--destructive);
+.ow-rss-breakdown__sep {
+  color: var(--muted-foreground);
+  opacity: 0.55;
 }
 
 

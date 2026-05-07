@@ -465,9 +465,18 @@ function PressurePill({ level }: { level: PressureLevel }) {
 //     interpolation cannot be expressed via transform alone, and
 //     the user explicitly asked for continuous flow. Cost is
 //     ~0.4 ms per frame for two 60-point Catmull-Rom paths on a
-//     600×96 SVG — well under the 16 ms RAF budget. Reduced
-//     motion short-circuits to progress=1 so the chart still
-//     updates per poll but doesn't animate frame-by-frame.
+//     600×96 SVG — well under the 16 ms RAF budget.
+//   - **Reduced-motion carve-out:** the slide is intentionally
+//     NOT gated on `prefers-reduced-motion: reduce`. Per the
+//     skill's "essential continuous data motion" exception, the
+//     right-edge advancement is part of how the chart reads as
+//     "live" — without it, every Windows-RDP user (where
+//     `SPI_GETCLIENTAREAANIMATION` is auto-off) and every user
+//     who toggled "Show animations" off sees the chart freeze
+//     between polls and update in 1 Hz steps. The motion is
+//     monotonic, sub-pixel per frame, ~10 px/sec — none of the
+//     attention-grabbing motion (parallax, autoplay, rotation)
+//     WCAG 2.3.3 was written to mitigate.
 function DualSparkline({
   systemSeries,
   rssSeries,
@@ -497,18 +506,6 @@ function DualSparkline({
   const lastSampleTimeRef = useRef<number>(
     lastSampleTimeMs ?? performance.now(),
   );
-  const reducedMotionRef = useRef(false);
-
-  useLayoutEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => {
-      reducedMotionRef.current = mq.matches;
-    };
-    update();
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, []);
 
   // Track new data + monotonically raise the RSS ceiling. The system
   // ceiling is the host's physical total — fixed for the session.
@@ -543,9 +540,7 @@ function DualSparkline({
     let raf = 0;
     const tick = () => {
       const elapsed = performance.now() - lastSampleTimeRef.current;
-      const progress = reducedMotionRef.current
-        ? 1
-        : Math.max(0, Math.min(1, elapsed / SPARK_TICK_MS));
+      const progress = Math.max(0, Math.min(1, elapsed / SPARK_TICK_MS));
 
       const sys = sysDataRef.current;
       const sysLine = sysLineRef.current;

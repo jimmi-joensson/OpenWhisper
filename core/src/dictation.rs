@@ -184,6 +184,35 @@ pub fn dictation_snapshot() -> DictationSnapshot {
     })
 }
 
+/// Snapshot for the crash inspector. Reads the dictation state via
+/// `try_lock` so a panic inside the holder of the state lock does not
+/// deadlock the panic hook.
+///
+/// Returns `None` when state is uninitialized, the lock is held by the
+/// panicker, OR the phase is `IDLE` (crash was outside a dictation —
+/// per spec, `recording_state` should be `null` in that case).
+pub fn try_snapshot_for_crash() -> Option<crate::crashes::RecordingStateSnapshot> {
+    let mutex = STATE.get()?;
+    let guard = mutex.try_lock().ok()?;
+    if guard.phase == PHASE_IDLE {
+        return None;
+    }
+    let duration_ms = guard
+        .record_start
+        .map(|t| t.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    Some(crate::crashes::RecordingStateSnapshot {
+        status_message_at_crash: guard.status_message.clone(),
+        duration_ms,
+        samples_captured: guard.sample_count,
+        // Plumbing the active engine name + hashed device id is follow-up
+        // scope; v1 schema permits these to be `null` and the inspector
+        // handles missing values.
+        model_kind: None,
+        device_id_hash: None,
+    })
+}
+
 pub fn dictation_request_toggle() -> u32 {
     with_state(|s| {
         if !s.can_toggle() {
@@ -235,7 +264,11 @@ pub fn dictation_mark_loading_model() {
         // memory…" once it reaches session build. Cached-model boots stay
         // on this string for the brief window before session build kicks in.
         s.status_message = "loading model…".to_string();
-    })
+    });
+    crate::crashes::event_buffer::push_event(
+        "PhaseChange",
+        serde_json::json!({ "to": "LoadingModel" }),
+    );
 }
 
 /// Bridge for the recognizer's download path. Callers may invoke this many
@@ -281,7 +314,8 @@ pub fn dictation_mark_loaded() {
             s.phase = PHASE_IDLE;
             s.status_message = "idle — tap Record, speak, tap again".to_string();
         }
-    })
+    });
+    crate::crashes::event_buffer::push_event("ModelLoaded", serde_json::json!({}));
 }
 
 /// Recognizer has finished downloading the archive and is now extracting /
@@ -302,6 +336,7 @@ pub fn dictation_mark_capture_started() {
         s.record_start_epoch_ms = Some(now_epoch_ms());
     });
     IS_RECORDING.store(true, Ordering::Relaxed);
+    crate::crashes::event_buffer::push_event("DictationStart", serde_json::json!({}));
 }
 
 fn now_epoch_ms() -> i64 {
@@ -324,7 +359,11 @@ pub fn dictation_mark_transcribing_pending() {
     with_state(|s| {
         s.phase = PHASE_TRANSCRIBING;
         s.status_message = "transcribing…".to_string();
-    })
+    });
+    crate::crashes::event_buffer::push_event(
+        "PhaseChange",
+        serde_json::json!({ "to": "Transcribing" }),
+    );
 }
 
 /// Push the active-speech ms estimate from the shell. Called once per
@@ -432,7 +471,11 @@ pub fn dictation_deliver_error(message: &str) {
         s.voiced_ms_at_drain = None;
         s.download_bytes_done = 0;
         s.download_bytes_total = 0;
-    })
+    });
+    crate::crashes::event_buffer::push_event(
+        "Error",
+        serde_json::json!({ "message": message }),
+    );
 }
 
 #[cfg(test)]
@@ -555,6 +598,36 @@ mod tests {
         assert_eq!(dictation_snapshot().phase(), PHASE_ERROR);
         // User can toggle from Error to start fresh.
         assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+    }
+
+    #[test]
+    fn try_snapshot_returns_none_when_idle() {
+        let _lock = start();
+        // STATE is initialized by `start()` via `with_state` — phase=IDLE.
+        // Crash outside a dictation should produce no recording_state.
+        assert!(try_snapshot_for_crash().is_none());
+    }
+
+    #[test]
+    fn try_snapshot_returns_some_during_recording() {
+        let _lock = start();
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        let snap = try_snapshot_for_crash().expect("recording snapshot");
+        assert_eq!(snap.status_message_at_crash, "recording — tap again to stop");
+        assert_eq!(snap.samples_captured, 0);
+        assert!(snap.model_kind.is_none());
+        assert!(snap.device_id_hash.is_none());
+    }
+
+    #[test]
+    fn try_snapshot_returns_some_during_transcribing() {
+        let _lock = start();
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        dictation_mark_capture_stopped(16000);
+        let snap = try_snapshot_for_crash().expect("transcribing snapshot");
+        assert_eq!(snap.samples_captured, 16000);
     }
 
     #[test]

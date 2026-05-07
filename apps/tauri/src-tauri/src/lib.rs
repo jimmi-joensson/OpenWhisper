@@ -943,6 +943,64 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Crash inspector — install panic hook BEFORE any other init
+            // that could itself panic, so the very first capture path is
+            // already armed. Resolve the dump dir from the OS-correct
+            // app log dir (Library/Logs on Mac, %LOCALAPPDATA%\...\logs
+            // on Windows) or, in debug + test builds, an env-var
+            // override that Playwright (TASK-78.7) seeds with a temp dir.
+            // Resolution failure degrades to "no crash files" — never
+            // blocks boot.
+            {
+                let dir: Option<std::path::PathBuf> = {
+                    #[cfg(debug_assertions)]
+                    {
+                        std::env::var("OPENWHISPER_CRASH_DIR_OVERRIDE")
+                            .ok()
+                            .and_then(|s| {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(std::path::PathBuf::from(trimmed))
+                                }
+                            })
+                            .or_else(|| {
+                                app.path()
+                                    .app_log_dir()
+                                    .ok()
+                                    .map(|p| p.join("crashes"))
+                            })
+                    }
+                    #[cfg(not(debug_assertions))]
+                    {
+                        app.path()
+                            .app_log_dir()
+                            .ok()
+                            .map(|p| p.join("crashes"))
+                    }
+                };
+                match dir {
+                    Some(dir) => match std::fs::create_dir_all(&dir) {
+                        Ok(()) => {
+                            openwhisper_core::crashes::install_panic_hook(
+                                dir,
+                                env!("CARGO_PKG_VERSION").to_string(),
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[crashes] mkdir {} failed: {e}",
+                                dir.display(),
+                            );
+                        }
+                    },
+                    None => {
+                        eprintln!("[crashes] no log dir resolved; panic hook disabled");
+                    }
+                }
+            }
+
             // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /
             // the shipped SwiftUI app (which calls
             // NSApp.setActivationPolicy(.accessory) in

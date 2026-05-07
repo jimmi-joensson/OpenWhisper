@@ -9,6 +9,7 @@ pub mod recognizer;
 pub mod settings;
 pub mod stats;
 pub mod store;
+pub mod telemetry;
 pub mod transcript;
 pub mod verbose;
 

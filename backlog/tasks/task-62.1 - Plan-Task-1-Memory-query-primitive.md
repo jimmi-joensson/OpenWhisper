@@ -23,6 +23,7 @@ ordinal: 4000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+- Commit: e671946.
 - New module `core/src/telemetry/{mod.rs,memory.rs}`; `pub mod telemetry;` wired into `core/src/lib.rs`.
 - Added `sysinfo = "0.32"` (default-features off, `system` only) to `core/Cargo.toml`. Cross-platform per-process RSS via `sysinfo::Process::memory()` (Mac proc_pidinfo / Win GetProcessMemoryInfo under the hood).
 - `peak_rss_bytes` is a process-global running max of every observed RSS (`AtomicU64::fetch_max`). `sysinfo` 0.32 doesn't expose a peak field; spec note kept — switch to native `task_info().resident_size_max` / `PeakWorkingSetSize` in a follow-up if accuracy bites.

@@ -143,10 +143,12 @@ test.describe("scroll", () => {
     });
     expect(scrolled).toBeGreaterThan(0);
 
-    // OpenWhisper memory breakdown is the last block in the Memory
-    // card; scrolling to the end brings it into view.
+    // OpenWhisper RSS Breakdown is the last block in the Memory card
+    // (the per-model breakdown bar that previously sat below it was
+    // retired in favour of the design's single-bar shape); scrolling
+    // to the end brings the kicker into view.
     await expect(
-      page.getByText("OpenWhisper memory breakdown"),
+      page.getByText("OpenWhisper RSS Breakdown"),
     ).toBeInViewport();
   });
 

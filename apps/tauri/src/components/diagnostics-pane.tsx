@@ -1,11 +1,10 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   RSS_SERIES_LEN,
   breakdownEstimate,
   externalClaim,
   isRecognizerInProcessResident,
   useMemoryStats,
-  type LifecycleState,
   type ModelMemoryRow,
   type PressureLevel,
   type SystemMemory,
@@ -336,8 +335,6 @@ function MemoryCard({
         </div>
 
         <RSSBreakdown rssBytes={rss} models={models} />
-
-        <Breakdown rssBytes={rss} models={models} />
 
         {error && (
           <p
@@ -809,159 +806,6 @@ function RSSBreakdown({
     },
   ];
   return <RSSBreakdownBar parts={parts} totalRssMb={rssMb} />;
-}
-
-// Stacked horizontal bar — one segment per loaded model plus an
-// "Other" remainder covering everything in process RSS we can't
-// attribute (audio buffers, app shell, caches, OS overhead).
-//
-// The denominator is the system-wide-honest total: process RSS +
-// ANE-resident model claims. In-process model segments (if any)
-// stack inside the RSS portion; ANE-resident segments stack past
-// it. On Mac with Parakeet loaded the bar reads roughly:
-//   [Other (process residual) | Recognizer (ANE)]
-// On Windows the same model's weights are in RSS, so the bar reads:
-//   [Recognizer (in-process) | Other]
-function Breakdown({
-  rssBytes,
-  models,
-}: {
-  rssBytes: number;
-  models: ModelMemoryRow[];
-}) {
-  const segments = useMemo(() => buildSegments(rssBytes, models), [
-    rssBytes,
-    models,
-  ]);
-  const total = segments.reduce((s, p) => s + p.value, 0);
-
-  return (
-    <div
-      className="ow-diagnostics__breakdown"
-      data-testid="diagnostics-breakdown"
-    >
-      <div className="ow-diagnostics__breakdown-header">
-        <span className="ow-diagnostics__caption">OpenWhisper memory breakdown</span>
-        <span className="ow-diagnostics__breakdown-total">
-          {formatBytes(total).value} {formatBytes(total).unit} total
-        </span>
-      </div>
-      <div className="ow-diagnostics__breakdown-bar">
-        {segments.map((seg, i) => (
-          <span
-            key={seg.key}
-            className="ow-diagnostics__breakdown-seg"
-            data-kind={seg.kind}
-            style={{
-              flexGrow: total > 0 ? seg.value : i === 0 ? 1 : 0,
-              flexShrink: 0,
-              flexBasis: 0,
-            }}
-            title={`${seg.label}: ${formatBytes(seg.value).value} ${formatBytes(seg.value).unit}`}
-          />
-        ))}
-      </div>
-      <ul className="ow-diagnostics__breakdown-legend">
-        {segments.map((seg) => (
-          <li
-            key={seg.key}
-            className="ow-diagnostics__breakdown-item"
-            data-kind={seg.kind}
-            data-testid={`diagnostics-segment-${seg.key}`}
-          >
-            <span
-              className="ow-diagnostics__breakdown-swatch"
-              data-kind={seg.kind}
-            />
-            <span className="ow-diagnostics__breakdown-label">
-              {seg.label}
-            </span>
-            <span className="ow-diagnostics__breakdown-value">
-              {formatBytes(seg.value).value}
-              <span className="ow-diagnostics__breakdown-unit">
-                {" "}
-                {formatBytes(seg.value).unit}
-              </span>
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-interface Segment {
-  key: string;
-  label: string;
-  value: number;
-  kind: "model" | "model-external" | "other";
-}
-
-// Compose the breakdown from three buckets:
-//   1. In-process model segments — sized by `claimed_bytes` when
-//      available (the loader's authoritative number), falling back
-//      to `estimated_rss_bytes` (the legacy RSS-delta) so older
-//      handles without a registered claim still render. Stack
-//      inside the RSS portion of the bar. Only included while the
-//      model is actually resident — `estimated_rss_bytes` is the
-//      *last* observed load delta and is never cleared on unload,
-//      so without the state gate an idle-released model would keep
-//      drawing a full segment after its weights have been freed.
-//   2. "Other" — process RSS residual not attributable to a known
-//      in-process model. Audio buffers, app shell, caches, OS
-//      overhead. Computed by saturating subtraction so a momentary
-//      dip below the sum doesn't render a negative stripe.
-//   3. Out-of-process model segments — Mac ANE / GPU VRAM weights.
-//      Sized by `claimed_bytes`. Stack PAST the RSS portion of the
-//      bar; this is the headline change for the user, since on Mac
-//      Parakeet is mostly invisible to RSS.
-function isResident(state: LifecycleState): boolean {
-  return (
-    state === "Loaded" ||
-    state === "Active" ||
-    state === "Loading" ||
-    state === "Releasing"
-  );
-}
-
-function buildSegments(rssBytes: number, models: ModelMemoryRow[]): Segment[] {
-  const inProcSegs: Segment[] = models
-    .filter((m) => m.in_process && isResident(m.state))
-    .map((m) => ({
-      key: `model-${m.label}`,
-      label: prettyLabel(m.label),
-      value: Math.max(m.claimed_bytes, m.estimated_rss_bytes),
-      kind: "model" as const,
-    }))
-    .filter((s) => s.value > 0);
-  const sumInProc = inProcSegs.reduce((s, m) => s + m.value, 0);
-  const other = Math.max(0, rssBytes - sumInProc);
-  const externalSegs: Segment[] = models
-    .filter((m) => !m.in_process && m.claimed_bytes > 0)
-    .map((m) => ({
-      key: `model-${m.label}`,
-      label: `${prettyLabel(m.label)} (ANE)`,
-      value: m.claimed_bytes,
-      kind: "model-external" as const,
-    }));
-  return [
-    ...inProcSegs,
-    { key: "other", label: "Other", value: other, kind: "other" },
-    ...externalSegs,
-  ];
-}
-
-function prettyLabel(label: string): string {
-  // "recognizer" → "Recognizer", "cleanup-llm" → "Cleanup LLM"
-  return label
-    .split(/[-_]/)
-    .map((part) => {
-      if (part.length <= 3 && part === part.toLowerCase()) {
-        return part.toUpperCase();
-      }
-      return part.charAt(0).toUpperCase() + part.slice(1);
-    })
-    .join(" ");
 }
 
 function formatBytes(bytes: number): { value: string; unit: "B" | "KB" | "MB" | "GB" } {

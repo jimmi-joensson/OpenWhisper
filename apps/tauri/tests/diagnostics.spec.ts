@@ -162,22 +162,13 @@ test.describe("diagnostics pane", () => {
     );
     await expect(owCell).toHaveText("604");
 
-    // Sub-text exposes the split.
+    // Sub-text exposes the split — the readout's sub-line is now the
+    // sole carrier of the ANE attribution (the per-model breakdown bar
+    // was retired in favour of a single design-faithful RSS Breakdown
+    // bar; ANE weights are out-of-RSS by definition).
     await expect(
       page.getByText(/143 MB process \+ 461 MB ANE/),
     ).toBeVisible();
-
-    // Breakdown bar carries an out-of-process segment for the
-    // recognizer + the in-process Other residual.
-    const externalSeg = page.getByTestId(
-      "diagnostics-segment-model-recognizer",
-    );
-    await expect(externalSeg).toBeVisible();
-    await expect(externalSeg).toHaveAttribute(
-      "data-kind",
-      "model-external",
-    );
-    await expect(externalSeg.getByText(/Recognizer \(ANE\)/)).toBeVisible();
   });
 
   test("memory poll keeps running after leaving the pane", async ({
@@ -313,7 +304,7 @@ test.describe("diagnostics pane", () => {
     expect(afterVisible).toBeGreaterThan(afterHidden);
   });
 
-  test("breakdown bar adds a model segment on model-state-changed", async ({
+  test("RSS breakdown bar gains the Parakeet segment on a Windows-shape recognizer load", async ({
     page,
   }) => {
     await page.goto("/");
@@ -337,16 +328,18 @@ test.describe("diagnostics pane", () => {
     await page.getByTestId("sidebar-item-diagnostics").click();
     await waitForModelStateChangedListener(page);
 
-    // No model segment yet — only the "Other" remainder is visible.
-    await expect(page.getByTestId("diagnostics-segment-other")).toBeVisible();
+    // Cold: Parakeet segment hidden; the residual three (audio /
+    // shell / caches) carry the full 280 MB process RSS.
     await expect(
-      page.getByTestId("diagnostics-segment-model-recognizer"),
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
     ).toHaveCount(0);
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-shell"),
+    ).toBeVisible();
 
-    // Recognizer transitions to Loaded with a 612 MB claim
-    // (Windows-shape — in-process). The pane refetches on the
-    // event and the breakdown bar gains an in-process model
-    // segment + matching legend row.
+    // Recognizer transitions to in-process Loaded with a 612 MB
+    // claim (Windows shape). The pane refetches and the RSS
+    // breakdown gains the Parakeet weights segment.
     await setMemoryStats(page, {
       system: NORMAL_SYSTEM,
       process: {
@@ -370,83 +363,8 @@ test.describe("diagnostics pane", () => {
     });
 
     await expect(
-      page.getByTestId("diagnostics-segment-model-recognizer"),
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
     ).toBeVisible();
-    await expect(
-      page.getByTestId("diagnostics-segment-model-recognizer"),
-    ).toHaveAttribute("data-kind", "model");
-    await expect(
-      page
-        .getByTestId("diagnostics-segment-model-recognizer")
-        .getByText("Recognizer", { exact: true }),
-    ).toBeVisible();
-  });
-
-  test("idle-released recognizer drops its breakdown segment even with stale rss-delta", async ({
-    page,
-  }) => {
-    // Regression for a Windows-only visual bug: after the 5-min idle
-    // unload fires, the registry sets `claimed_bytes = 0` but the
-    // `estimated_rss_bytes` field on `ModelHandle` is the *last
-    // observed* load delta and is never cleared. Without an explicit
-    // state gate, `buildSegments` falls back to the stale rss-delta
-    // and renders a full ~1.2 GB Recognizer segment even though the
-    // weights are gone — RSS readout shows 88 MB while the breakdown
-    // claims 1.2 GB. Visible contradiction.
-    await page.goto("/");
-    await setMemoryStats(page, {
-      system: NORMAL_SYSTEM,
-      process: {
-        rss_bytes: (88 + 1180) * MB,
-        peak_rss_bytes: (88 + 1180) * MB,
-        timestamp_unix_ms: 0,
-      },
-      models: [
-        {
-          label: "recognizer",
-          state: "Loaded",
-          estimated_rss_bytes: 1180 * MB,
-          claimed_bytes: 640 * MB,
-          in_process: true,
-        },
-      ],
-    });
-    await page.getByTestId("sidebar-item-diagnostics").click();
-    await waitForModelStateChangedListener(page);
-    await expect(
-      page.getByTestId("diagnostics-segment-model-recognizer"),
-    ).toBeVisible();
-
-    // Idle unload: RSS drops back to baseline, registry zeroes
-    // `claimed_bytes`, but `estimated_rss_bytes` retains the historic
-    // 1180 MB delta. The segment must disappear; "Other" must equal
-    // the full process RSS.
-    await setMemoryStats(page, {
-      system: NORMAL_SYSTEM,
-      process: {
-        rss_bytes: 88 * MB,
-        peak_rss_bytes: (88 + 1180) * MB,
-        timestamp_unix_ms: 0,
-      },
-      models: [
-        {
-          label: "recognizer",
-          state: "Unloaded",
-          estimated_rss_bytes: 1180 * MB,
-          claimed_bytes: 0,
-          in_process: true,
-        },
-      ],
-    });
-    await emitModelStateChanged(page, {
-      label: "recognizer",
-      state: "Unloaded",
-    });
-
-    await expect(
-      page.getByTestId("diagnostics-segment-model-recognizer"),
-    ).toHaveCount(0);
-    await expect(page.getByTestId("diagnostics-segment-other")).toBeVisible();
   });
 
   test("RSS breakdown bar renders four canonical segments summing to ~100%", async ({

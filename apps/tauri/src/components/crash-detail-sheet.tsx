@@ -323,11 +323,11 @@ function CopyBacktraceButton({
       data-testid="crash-detail-copy-backtrace"
       onClick={onClick}
     >
-      Copy backtrace
       <span className="ow-crashes__copy-btn-icon" aria-hidden="true">
         <Copy size={13} className="ow-crashes__copy-btn-icon-copy" />
         <CircleCheck size={13} className="ow-crashes__copy-btn-icon-check" />
       </span>
+      Copy backtrace
     </button>
   );
 }

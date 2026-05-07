@@ -415,6 +415,39 @@ test.describe("crash inspector — detail sheet", () => {
     expect(count).toBeGreaterThanOrEqual(1);
   });
 
+  test("Copy backtrace writes to clipboard and flashes the copied state", async ({
+    page,
+  }) => {
+    await openSheet(page, "320");
+    const btn = page.getByTestId("crash-detail-copy-backtrace");
+
+    // Idle state — no copied attribute, idle aria-label.
+    await expect(btn).toHaveAttribute("aria-label", "Copy backtrace");
+    await expect(btn).not.toHaveAttribute("data-copied", "true");
+
+    await btn.click();
+
+    // Gate on data-copied flipping — the React handler only sets it
+    // AFTER `navigator.clipboard.writeText` resolves, so this also
+    // confirms the write completed before we read the OS clipboard.
+    // Cross-test serialisation matters too: Playwright runs specs in
+    // parallel and the OS clipboard is process-shared.
+    await expect(btn).toHaveAttribute("data-copied", "true");
+    await expect(btn).toHaveAttribute("aria-label", "Backtrace copied");
+
+    // Clipboard receives the raw backtrace string from the fixture.
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toContain("frame 1");
+    expect(clip).toContain("frame 3");
+
+    // Auto-reverts after the flash window. Generous timeout to absorb
+    // CI scheduler jitter; the actual revert lands ~1.2 s after click.
+    await expect(btn).not.toHaveAttribute("data-copied", "true", {
+      timeout: 3000,
+    });
+    await expect(btn).toHaveAttribute("aria-label", "Copy backtrace");
+  });
+
   test("primary 'Report on GitHub' button opens the prefilled issues URL", async ({
     page,
   }) => {

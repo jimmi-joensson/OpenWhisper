@@ -1919,6 +1919,60 @@ body[data-platform="macos"] .ow-titlebar {
   background: var(--surface-sunken-strong);
 }
 
+/* Copy-backtrace button — icon morphs from Copy → CircleCheck on
+   success. T2 micro-animation per `openwhisper-animation-philosophy`:
+   transform + opacity only, custom-bezier ease-out, ≤180 ms opacity
+   with a 220 ms back-ease scale for a subtle land-and-settle pop on
+   the check. Reduced-motion snaps both layers to target instantly. */
+.ow-crashes__copy-btn {
+  gap: 6px;
+}
+
+.ow-crashes__copy-btn-icon {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+}
+
+.ow-crashes__copy-btn-icon-copy,
+.ow-crashes__copy-btn-icon-check {
+  position: absolute;
+  inset: 0;
+  transition:
+    opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.ow-crashes__copy-btn-icon-copy {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.ow-crashes__copy-btn-icon-check {
+  opacity: 0;
+  transform: scale(0.55);
+  color: var(--info);
+}
+
+.ow-crashes__copy-btn[data-copied] .ow-crashes__copy-btn-icon-copy {
+  opacity: 0;
+  transform: scale(0.55);
+}
+
+.ow-crashes__copy-btn[data-copied] .ow-crashes__copy-btn-icon-check {
+  opacity: 1;
+  transform: scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ow-crashes__copy-btn-icon-copy,
+  .ow-crashes__copy-btn-icon-check {
+    transition: none;
+  }
+}
+
 .ow-crashes__sheet-destructive {
   color: var(--destructive);
   border-color: color-mix(in oklch, var(--destructive) 50%, transparent);

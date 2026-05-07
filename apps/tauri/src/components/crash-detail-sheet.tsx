@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CircleCheck, Copy } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -11,6 +12,10 @@ import {
   formatDuration,
 } from "../lib/crash-markdown";
 import { buildGitHubIssueUrl } from "../lib/crash-github";
+
+// Copy-success flash duration. Long enough to register as feedback,
+// short enough that a second click feels responsive.
+const COPY_FLASH_MS = 1200;
 
 // Hard-coded so the button always points at the canonical OW
 // repo. If we ever fork or vendor, this is a one-line swap.
@@ -251,21 +256,14 @@ function CrashBacktrace({
 }: {
   backtrace: string;
   location: string;
-  onCopy: () => void;
+  onCopy: () => Promise<void> | void;
 }) {
   return (
     <section className="ow-crashes__sheet-section">
       <header className="ow-crashes__sheet-section-header">
         <span className="ow-crashes__sheet-kicker">Backtrace</span>
         <span className="ow-crashes__sheet-spacer" />
-        <button
-          type="button"
-          className="ow-crashes__sheet-ghost ow-crashes__sheet-ghost--sm"
-          data-testid="crash-detail-copy-backtrace"
-          onClick={onCopy}
-        >
-          Copy backtrace
-        </button>
+        <CopyBacktraceButton onCopy={onCopy} />
       </header>
       <pre
         className="ow-crashes__sheet-backtrace"
@@ -274,6 +272,63 @@ function CrashBacktrace({
         {backtrace}
       </pre>
     </section>
+  );
+}
+
+/// Copy-backtrace button with icon-morph success feedback.
+/// Two icons (`Copy`, `CircleCheck`) stacked in a fixed-size slot,
+/// cross-faded + scaled via CSS transitions on the `data-copied`
+/// attribute. T2 surface (button feedback) per
+/// `openwhisper-animation-philosophy`: ≤180 ms cap, transform +
+/// opacity only, custom-bezier ease-out, reduced-motion snaps.
+/// Auto-revert after `COPY_FLASH_MS` so a quick eye glance still
+/// catches the success state without leaving a stale check on
+/// screen.
+function CopyBacktraceButton({
+  onCopy,
+}: {
+  onCopy: () => Promise<void> | void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const onClick = async () => {
+    try {
+      await onCopy();
+      setCopied(true);
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        timerRef.current = null;
+      }, COPY_FLASH_MS);
+    } catch {
+      // Best-effort — secondary action, no surface needed.
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className="ow-crashes__sheet-ghost ow-crashes__sheet-ghost--sm ow-crashes__copy-btn"
+      data-copied={copied || undefined}
+      aria-label={copied ? "Backtrace copied" : "Copy backtrace"}
+      data-testid="crash-detail-copy-backtrace"
+      onClick={onClick}
+    >
+      <span className="ow-crashes__copy-btn-icon" aria-hidden="true">
+        <Copy size={13} className="ow-crashes__copy-btn-icon-copy" />
+        <CircleCheck size={13} className="ow-crashes__copy-btn-icon-check" />
+      </span>
+      Copy backtrace
+    </button>
   );
 }
 

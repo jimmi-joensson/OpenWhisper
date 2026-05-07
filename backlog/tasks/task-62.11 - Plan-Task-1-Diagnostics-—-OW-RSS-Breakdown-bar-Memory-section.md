@@ -4,7 +4,7 @@ title: 'Plan Task 1: Diagnostics — OW RSS Breakdown bar (Memory section)'
 status: In Review
 assignee: []
 created_date: '2026-05-07 13:59'
-updated_date: '2026-05-07 20:10'
+updated_date: '2026-05-07 22:00'
 labels:
   - 62-impl
 dependencies: []
@@ -26,4 +26,6 @@ ordinal: 61000
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented in 23f1be2 — adds <RSSBreakdownBar /> + breakdownEstimate() + 7 vitest cases + 2 Playwright cases (113→114 specs). Estimator signature is breakdownEstimate(rssMb, recognizerLoaded) — boolean arg over models[] for cleaner unit tests; recognizer-resident check exposed as separate isRecognizerResident() helper.
+
+Windows code-side validation pass (2026-05-08): cargo -p openwhisper-core green; vitest 22/22; Playwright 121/121 incl. tests/diagnostics.spec.ts:307 (recognizer-load → 4-segment) and :434 (unloaded → Parakeet hidden). isRecognizerInProcessResident path verified — recognizer module reports in_process: cfg!(not(target_os="macos")), so the Windows in-process branch is reached. Live click-through in pnpm dev:tauri:win still owed by user before flipping past In Review.
 <!-- SECTION:NOTES:END -->

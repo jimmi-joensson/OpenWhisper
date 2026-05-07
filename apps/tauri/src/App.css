@@ -1103,3 +1103,458 @@ body[data-platform="macos"] .ow-titlebar {
   color: var(--destructive);
 }
 
+
+/* ===========================================================
+   Crash inspector — TASK-78.3
+   ----------------------------------------------------------
+   Two surfaces:
+   1. Diagnostics overview entry card (`ow-crashes-card`) +
+      quiet-state link (`ow-diagnostics__crashes-quiet`).
+   2. Full-pane crash list view (`ow-crashes`) — pane header,
+      list, row component, empty state.
+   Detail sheet body lands in TASK-78.4.
+   =========================================================== */
+
+.ow-diagnostics__crashes-quiet {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  padding: 10px 12px;
+  background: var(--muted);
+  border-radius: 6px;
+}
+
+.ow-diagnostics__crashes-quiet-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--info);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Entry card on the Diagnostics overview. Sunken card with a
+   destructive-tint glyph tile on the left, label + unread pill,
+   one-line "Last: ..." sub, chevron right. Whole card is the
+   button — clicking anywhere opens the crash list. */
+.ow-crashes-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  font: inherit;
+  color: var(--foreground);
+}
+
+.ow-crashes-card:hover {
+  background: var(--accent);
+  border-color: var(--ring);
+}
+
+.ow-crashes-card__tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgb(from var(--destructive) r g b / 0.18);
+  color: var(--destructive);
+  flex-shrink: 0;
+}
+
+.ow-crashes-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ow-crashes-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ow-crashes-card__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ow-crashes-card__unread {
+  display: inline-flex;
+  align-items: center;
+  background: var(--recording);
+  color: white;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.ow-crashes-card__sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ow-crashes-card__chevron {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------
+   Full-pane crash list. Replaces the entire Diagnostics
+   content area (no second-level sidebar) when view === "crashes".
+   --------------------------------------------------------- */
+
+.ow-crashes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ow-crashes--empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.ow-crashes__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+}
+
+.ow-crashes__breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font: inherit;
+}
+
+.ow-crashes__back:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.ow-crashes__breadcrumb-sep {
+  opacity: 0.6;
+}
+
+.ow-crashes__breadcrumb-current {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--foreground);
+}
+
+.ow-crashes__breadcrumb-counts {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+
+.ow-crashes__delete-all {
+  color: var(--destructive);
+}
+
+.ow-crashes__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+}
+
+.ow-crashes__list-item + .ow-crashes__list-item {
+  border-top: 1px solid var(--border);
+}
+
+.ow-crashes__error {
+  margin: 0;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--destructive);
+}
+
+/* ---------------------------------------------------------
+   Row layout: 20 px unread-dot column · body · actions column.
+   Resting actions = chevron only; hover reveals [✓] / [🗑].
+   --------------------------------------------------------- */
+
+.ow-crashes__row {
+  display: grid;
+  grid-template-columns: 20px 1fr minmax(100px, auto);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  background: var(--card);
+}
+
+.ow-crashes__row:hover {
+  background: var(--accent);
+}
+
+.ow-crashes__row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.ow-crashes__row-dot-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ow-crashes__row-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ow-crashes__row-dot[data-active] {
+  background: var(--recording);
+  box-shadow: 0 0 0 3px rgb(from var(--recording) r g b / 0.25);
+}
+
+.ow-crashes__row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ow-crashes__row-line {
+  font-size: 12px;
+  color: var(--foreground);
+}
+
+.ow-crashes__row-line--meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ow-crashes__row-line--mono {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  letter-spacing: 0.02em;
+}
+
+.ow-crashes__row-when {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--foreground);
+  cursor: help;
+}
+
+.ow-crashes__row-chip {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+
+.ow-crashes__row-chip--uploaded {
+  background: rgb(from var(--info) r g b / 0.18);
+  color: var(--info);
+}
+
+.ow-crashes__row-cause {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ow-crashes__row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.ow-crashes__row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  border: 0;
+  background: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.ow-crashes__row:hover .ow-crashes__row-action,
+.ow-crashes__row:focus-visible .ow-crashes__row-action {
+  opacity: 1;
+}
+
+.ow-crashes__row-action:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.ow-crashes__row-action--delete:hover {
+  color: var(--destructive);
+  background: rgb(from var(--destructive) r g b / 0.12);
+}
+
+.ow-crashes__row-chevron {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+/* ---------------------------------------------------------
+   Empty-state composition. Replaces the entire pane (no
+   header). Centred glyph tile + headline + caption + back/
+   open-folder buttons.
+   --------------------------------------------------------- */
+
+.ow-crashes-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 40px 24px;
+  max-width: 480px;
+}
+
+.ow-crashes-empty__tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.ow-crashes-empty__glyph {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.ow-crashes-empty__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.ow-crashes-empty__caption {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.ow-crashes-empty__caption code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--muted);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.ow-crashes-empty__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------
+   Detail sheet placeholder — TASK-78.4 fleshes out the body.
+   --------------------------------------------------------- */
+
+.ow-crashes__sheet {
+  width: 580px;
+  max-width: 85vw;
+}
+
+.ow-crashes__sheet-error {
+  margin: 0;
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--destructive);
+}
+
+.ow-crashes__sheet-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.ow-crashes__sheet-message {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.ow-crashes__sheet-meta {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}

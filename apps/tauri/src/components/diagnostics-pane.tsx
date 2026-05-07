@@ -1,4 +1,5 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AlertOctagon, ChevronRight } from "lucide-react";
 import {
   RSS_SERIES_LEN,
   externalClaim,
@@ -8,7 +9,13 @@ import {
   type PressureLevel,
   type SystemMemory,
 } from "../lib/use-memory-stats";
+import {
+  formatRelative,
+  useCrashes,
+  type CrashSummary,
+} from "../lib/use-crashes";
 import { Card, CardContent } from "./ui/card";
+import { CrashList } from "./crash-list";
 
 const SPARK_W_VB = 600;
 const SPARK_H_VB = 96;
@@ -33,13 +40,29 @@ export interface DiagnosticsPaneProps {
 }
 
 // Diagnostics — top-level route, sibling to Home and Settings. Today
-// covers Memory only; Performance counters (TASK-78.x) and Crash
-// reports (TASK-78.3) land into the same shell as additional sections
-// when their telemetry exists. Per the design (`backlog/docs/specs/`,
-// chats `chat9.md`), per-model load/release controls live under
-// Settings → Models — the budget bar there is the *decision* surface;
-// this pane is the *debugging* surface.
+// covers Memory + Crashes; per the 2026-05-07 design pivot, Crashes is
+// reached as an entry card on the overview pane (NOT a sub-sidebar)
+// and tapping it swaps the pane content to the full-pane crash list
+// with a `Diagnostics /` breadcrumb. Per-model load/release controls
+// live under Settings → Models — the budget bar there is the
+// *decision* surface; this pane is the *debugging* surface.
+type DiagnosticsView = "overview" | "crashes";
+
 export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
+  const [view, setView] = useState<DiagnosticsView>("overview");
+
+  if (view === "crashes") {
+    return <CrashList onBack={() => setView("overview")} />;
+  }
+
+  return <DiagnosticsOverview onOpenCrashes={() => setView("crashes")} />;
+}
+
+function DiagnosticsOverview({
+  onOpenCrashes,
+}: {
+  onOpenCrashes: () => void;
+}) {
   const {
     stats,
     openWhisperSeries,
@@ -48,6 +71,11 @@ export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
     error,
     lastSampleTimeMs,
   } = useMemoryStats();
+  // Hook polls list + unread at 2 Hz while the overview is mounted.
+  // The card uses the freshest unread count + the latest summary row
+  // to drive the "Last: <relative>" sub-line, per the design.
+  const { list, unreadCount } = useCrashes(true);
+  const latest: CrashSummary | undefined = list[0];
 
   return (
     <div className="ow-diagnostics">
@@ -75,7 +103,92 @@ export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
           lastSampleTimeMs={lastSampleTimeMs}
         />
       </section>
+
+      <section className="ow-diagnostics__section">
+        <div className="ow-diagnostics__section-header">
+          <h2 className="ow-diagnostics__section-title">Crashes</h2>
+          <span className="ow-diagnostics__section-meta">Live · 2 Hz</span>
+        </div>
+        <CrashesEntryCard
+          unreadCount={unreadCount}
+          totalCount={list.length}
+          latest={latest}
+          onOpen={onOpenCrashes}
+        />
+      </section>
     </div>
+  );
+}
+
+interface CrashesEntryCardProps {
+  unreadCount: number;
+  totalCount: number;
+  latest: CrashSummary | undefined;
+  onOpen: () => void;
+}
+
+function CrashesEntryCard({
+  unreadCount,
+  totalCount,
+  latest,
+  onOpen,
+}: CrashesEntryCardProps) {
+  // Quiet branch: no crashes ever recorded. Per the design, the card
+  // is replaced by a one-line muted link rather than hidden — silence
+  // is louder than a missing affordance.
+  if (totalCount === 0) {
+    return (
+      <p
+        className="ow-diagnostics__crashes-quiet"
+        data-testid="diagnostics-crashes-quiet"
+      >
+        No crashes recorded ·{" "}
+        <button
+          type="button"
+          className="ow-diagnostics__crashes-quiet-link"
+          data-testid="diagnostics-crashes-open-folder"
+          onClick={onOpen}
+        >
+          Open Crashes
+        </button>
+      </p>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="ow-crashes-card"
+      data-testid="diagnostics-crashes-entry"
+      onClick={onOpen}
+    >
+      <span className="ow-crashes-card__tile" aria-hidden="true">
+        <AlertOctagon size={16} />
+      </span>
+      <span className="ow-crashes-card__body">
+        <span className="ow-crashes-card__title-row">
+          <span className="ow-crashes-card__title">Crash reports</span>
+          {unreadCount > 0 && (
+            <span
+              className="ow-crashes-card__unread"
+              data-testid="diagnostics-crashes-unread-pill"
+            >
+              {unreadCount} unread
+            </span>
+          )}
+        </span>
+        <span className="ow-crashes-card__sub">
+          {latest
+            ? `Last: ${formatRelative(latest.ts_unix_ms)} · ${latest.app_version} · ${latest.os}`
+            : `Last: —`}
+        </span>
+      </span>
+      <ChevronRight
+        size={16}
+        className="ow-crashes-card__chevron"
+        aria-hidden="true"
+      />
+    </button>
   );
 }
 

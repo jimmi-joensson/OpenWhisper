@@ -287,10 +287,17 @@ body[data-platform="macos"] .ow-titlebar {
    don't shift the centering off-axis. `pointer-events: none` keeps
    it from intercepting drag-region hits on the title text itself,
    while `data-tauri-drag-region` on the element ensures Tauri's
-   drag.js still recognises it as draggable. */
+   drag.js still recognises it as draggable.
+   Left-inset matches the sidebar column width so the title centers
+   over the *content* column, not the full window — without this the
+   title visually drifts left because the sidebar steals real estate
+   on one side only. */
 .ow-titlebar__title {
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: 180px;
+  right: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1907,4 +1914,182 @@ body[data-platform="macos"] .ow-titlebar {
 
 .ow-crashes__sheet-destructive:hover {
   background: color-mix(in oklch, var(--destructive) 12%, transparent);
+}
+
+/* ===========================================================
+   DevTools panel — TanStack-style floating trigger + sheet
+   ----------------------------------------------------------
+   DEV-only (gated at the React call site). Used to override the
+   pill phase, simulate crashes, and host any future "park the
+   app in state X for inspection" affordances. Pattern is the
+   single floating trigger + sheet — every new dev surface goes
+   inside the sheet, never as another floating widget.
+   =========================================================== */
+
+.ow-devtools__trigger {
+  position: fixed;
+  /* Anchored to the bottom of the sidebar column (left rail is
+     180 px wide). The right side of the window hosts the user's
+     content + any Sheet/Dialog overlays, so a right-aligned
+     trigger would float over interactive elements (caught by the
+     crash-inspector Playwright spec on the Delete button). */
+  left: 14px;
+  bottom: 14px;
+  /* Below shadcn Sheet/Dialog overlay (z-50) so an open overlay's
+     backdrop dims the trigger too — defensive against any future
+     surface that touches the bottom-left corner. */
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--recording) 22%, var(--card));
+  border: 1px solid color-mix(in oklch, var(--recording) 45%, transparent);
+  color: var(--recording);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.35);
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.ow-devtools__trigger:hover {
+  background: color-mix(in oklch, var(--recording) 32%, var(--card));
+  transform: translateY(-1px);
+}
+
+.ow-devtools__trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.ow-devtools__trigger-label {
+  line-height: 1;
+}
+
+.ow-devtools__sheet {
+  width: 480px;
+  max-width: 85vw;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+}
+
+.ow-devtools__sheet-header {
+  padding: 16px 22px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ow-devtools__sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.ow-devtools__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ow-devtools__section-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ow-devtools__section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted-foreground);
+}
+
+.ow-devtools__section-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.ow-devtools__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.ow-devtools__row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ow-devtools__row-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ow-devtools__row-hint {
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+}
+
+.ow-devtools__toggle-group {
+  align-self: flex-start;
+}
+
+.ow-devtools__cta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ow-devtools__feedback {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.ow-devtools__feedback--ok {
+  color: var(--foreground);
+  background: var(--surface-sunken);
+}
+
+.ow-devtools__feedback--fail {
+  color: var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 12%, transparent);
+  border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+}
+
+.ow-devtools__code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-sunken);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--foreground);
 }

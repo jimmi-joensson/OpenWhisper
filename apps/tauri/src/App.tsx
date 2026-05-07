@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
 import { HomePane } from "./components/home-pane";
-import { DevPillControls } from "./components/dev-pill-controls";
+import { DevToolsPanel } from "./components/dev-tools-panel";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
@@ -211,45 +211,46 @@ function App() {
               <DiagnosticsPane platform={platform} />
             )}
             {route === "home" && (
-              <>
-                <HomePane
-                  hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
-                  onHotkeyRetry={() => void hotkey.retry()}
-                  micError={
-                    permissions.status && !permissions.status.mic_ok
-                      ? permissions.status.error
-                      : null
-                  }
-                  onMicOpenSettings={() => {
-                    void invoke("open_microphone_settings").catch(() => {});
-                  }}
-                  automationError={
-                    pauseDiagnostic?.reason === "not_authorized"
-                      ? "Automation permission denied — paused music won't resume after dictation."
-                      : null
-                  }
-                  onAutomationOpenSettings={() => {
-                    void invoke("open_automation_settings").catch(() => {});
-                  }}
-                  recognizerError={recognizerError}
-                />
-                {import.meta.env.DEV && (
-                  <DevPillControls
-                    enabled={pillOverride.enabled}
-                    status={pillOverride.status}
-                    onToggle={(enabled) =>
-                      setPillOverride((prev) => ({ ...prev, enabled }))
-                    }
-                    onStatus={(status) =>
-                      setPillOverride((prev) => ({ ...prev, status }))
-                    }
-                  />
-                )}
-              </>
+              <HomePane
+                hotkeyError={hotkey.status && !hotkey.status.ok ? hotkey.status.error : null}
+                onHotkeyRetry={() => void hotkey.retry()}
+                micError={
+                  permissions.status && !permissions.status.mic_ok
+                    ? permissions.status.error
+                    : null
+                }
+                onMicOpenSettings={() => {
+                  void invoke("open_microphone_settings").catch(() => {});
+                }}
+                automationError={
+                  pauseDiagnostic?.reason === "not_authorized"
+                    ? "Automation permission denied — paused music won't resume after dictation."
+                    : null
+                }
+                onAutomationOpenSettings={() => {
+                  void invoke("open_automation_settings").catch(() => {});
+                }}
+                recognizerError={recognizerError}
+              />
             )}
           </main>
         </div>
       </div>
+      {/* Dev tools — persistent floating trigger across every route.
+          DEV-gated at the call site so release builds compile it
+          out entirely. */}
+      {import.meta.env.DEV && (
+        <DevToolsPanel
+          pillEnabled={pillOverride.enabled}
+          pillStatus={pillOverride.status}
+          onPillEnabledChange={(enabled) =>
+            setPillOverride((prev) => ({ ...prev, enabled }))
+          }
+          onPillStatusChange={(status) =>
+            setPillOverride((prev) => ({ ...prev, status }))
+          }
+        />
+      )}
     </div>
     </ThemeProvider>
   );

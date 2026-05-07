@@ -33,4 +33,5 @@ ordinal: 11000
 - `pnpm test:ui` 86/86 green. tsc clean.
 - Awaiting user QA — `pnpm dev:tauri` smoke: open Diagnostics with `recognizer` registered, dictate, observe RSS bump in sparkline + breakdown segment grow on Loaded.
 - Commit: 09714e4.
+- Polish (commit ab82ceb): replaced the per-tick path-redraw with classic Activity-Monitor left-scroll. Samples pinned to fixed viewBox-x positions (latest at right edge); the containing `<g>` translate3ds left by one sample-width over the tick interval, snapping back at swap time. Path-data index shift preserves screen positions across the swap (no jump). Animation state in refs only, transform-only, reduced-motion short-circuits to discrete snap. ResizeObserver converts the per-sample step into CSS-pixel distance so the slide aligns with the visual sample pitch on any container width. Trailing-edge dot dropped — would have popped one sample-width at every swap.
 <!-- SECTION:NOTES:END -->

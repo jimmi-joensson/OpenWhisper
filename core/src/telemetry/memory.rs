@@ -128,10 +128,22 @@ mod tests {
 
         // 64 MB — large enough to force a meaningful RSS bump on every
         // platform (Mac/Win/Linux), small enough to be safe in CI.
-        // `vec![0u8; N]` zero-initializes, which on every platform we
-        // care about touches the pages and forces them resident.
-        let buf: Vec<u8> = vec![0u8; 64 * 1024 * 1024];
-        // black_box prevents the optimizer from eliding the allocation.
+        // `vec![0u8; N]` allocates committed but unfaulted pages on
+        // Windows (VirtualAlloc returns zero pages charged against
+        // commit, not Working Set, until first touch). Touch one byte
+        // per 4 KB page via volatile writes to fault them in so RSS
+        // (Working Set on Win, resident pages on Mac/Linux) actually
+        // grows.
+        let mut buf: Vec<u8> = vec![0u8; 64 * 1024 * 1024];
+        let len = buf.len();
+        let ptr = buf.as_mut_ptr();
+        let mut i = 0;
+        while i < len {
+            // SAFETY: i < len, ptr is valid for `len` bytes, and the
+            // write is to our exclusive &mut Vec storage.
+            unsafe { std::ptr::write_volatile(ptr.add(i), 1) };
+            i += 4096;
+        }
         std::hint::black_box(&buf);
 
         let after = query_process_memory();

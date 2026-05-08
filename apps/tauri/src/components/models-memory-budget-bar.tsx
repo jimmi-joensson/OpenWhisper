@@ -16,9 +16,9 @@
 // All props are pure. Pane state owns the hover; the bar just renders.
 
 export interface BudgetModelRow {
-  /// Stable id (e.g. "parakeet-en"); used for React keys + test selectors.
+  /// Stable id (e.g. "parakeet-multilang"); used for React keys + test selectors.
   id: string;
-  /// Display label (e.g. "Parakeet · English").
+  /// Display label (e.g. "Parakeet · Multilingual").
   label: string;
   /// Projected resident memory in MB.
   ramMb: number;

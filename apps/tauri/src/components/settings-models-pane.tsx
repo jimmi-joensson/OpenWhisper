@@ -50,37 +50,13 @@ interface ModelCatalogEntry {
 
 const MODEL_CATALOG: ModelCatalogEntry[] = [
   {
-    id: "parakeet-en",
-    label: "Parakeet · English",
+    id: "parakeet-multilang",
+    label: "Parakeet · Multilingual",
     ramMb: 612,
     diskMb: 460,
     accent: "var(--recording)",
     enabledByDefault: true,
     locked: true,
-  },
-  {
-    id: "llama-3.2-3b-cleanup",
-    label: "Llama · cleanup",
-    ramMb: 2400,
-    diskMb: 1900,
-    accent: "color-mix(in oklch, oklch(0.75 0.18 70) 100%, transparent)",
-    enabledByDefault: false,
-  },
-  {
-    id: "qwen-2.5-7b",
-    label: "Qwen · summarisation",
-    ramMb: 4800,
-    diskMb: 3700,
-    accent: "color-mix(in oklch, oklch(0.65 0.22 305) 100%, transparent)",
-    enabledByDefault: false,
-  },
-  {
-    id: "whisper-medium-multilang",
-    label: "Whisper · multilang",
-    ramMb: 1500,
-    diskMb: 1200,
-    accent: "color-mix(in oklch, oklch(0.78 0.13 215) 100%, transparent)",
-    enabledByDefault: false,
   },
 ];
 
@@ -168,10 +144,9 @@ export function SettingsModelsPane() {
       <header className="ow-models-pane__header">
         <h2>Models</h2>
         <p>
-          OpenWhisper bundles Parakeet for English dictation. Toggle
-          additional models below to estimate the memory cost before
-          they load — the budget bar projects the new headroom while
-          you hover.
+          OpenWhisper bundles Parakeet for multilingual dictation across
+          25 European languages. The budget bar shows its projected
+          memory cost against this machine's physical RAM.
         </p>
       </header>
 

@@ -2,6 +2,14 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 
 ## What's new
 
+**Home stats strip (TASK-87 / 88 / 89)** — *headline feature*
+- New live KV strip on Home: **Dictations today**, **This week**, **All time**, **Time saved** — at-a-glance signal that the app is actually working for you, no more hunting for "did I dictate today?"
+- Counters update within ~1 s of every completed dictation via a live `stats_changed` event — no manual refresh, no stale numbers
+- **Time saved** is computed from your typing speed: change **Settings → General → Typing speed** and the subcaption updates immediately
+- Active-time bucketed per **local midnight** (not UTC) via the new energy-VAD path, so day rollovers feel right regardless of timezone
+- Persistence is SQLite-backed (`<app-data>/openwhisper.db`, bundled SQLite + idempotent schema migrations) — survives crashes, upgrades, and OS restarts
+- **Settings → General** gains a **Reset stats** action (with confirm) and a Typing-speed input that clamps out-of-range entries
+
 **Crash inspector (TASK-78)**
 - Rust panic hook now writes a redacted JSON crash file to `~/Library/Application Support/OpenWhisper/crashes/` (Mac) or `%APPDATA%\OpenWhisper\crashes\` (Windows) on every panic — runtime homes, paths, and other PII are stripped before the file lands on disk
 - New Diagnostics → Crashes pane shows a card on the Diagnostics overview and a full crash list in its own route, with relative timestamps and unread state
@@ -30,13 +38,6 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 - New General-pane Switch: when ON, models stay resident across idle windows; when OFF, the idle timer auto-releases the recognizer after a configured deadline
 - ModelHandle state machine + idle timer live in `core/`; persisted via `settings_set_keep_models_warm`
 
-**Home stats strip (TASK-87 / 88 / 89)**
-- New live KV strip on Home: Dictations today, This week, All time, Time saved
-- Time-saved subcaption updates immediately when you change Settings → General → Typing speed
-- Energy-VAD active-time bucketed per local midnight (not UTC) so day rollovers feel right
-- SQLite-backed persistence under `<app-data>/openwhisper.db` — bundled SQLite + idempotent schema migrations
-- Settings → General gains a **Reset stats** action (with confirm) and a Typing-speed input that clamps out-of-range entries
-
 **AppleScript Automation TCC surfacing (TASK-82, Mac)**
 - When pause-during-dictation hits an AppleScript Automation denial for Spotify or Apple Music, the app now surfaces the TCC denial in the audio-ducking flow instead of failing silently
 
@@ -51,7 +52,7 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 ## Known limitations
 
 - **Crash inspector**: launch-time toast for unread crashes and bulk-delete are deferred (TASK-78.5 is partial — rail dot shipped). Playwright redaction regression coverage (TASK-78.7) is also outstanding
-- **Mac RSS breakdown**: Parakeet weights live on the Apple Neural Engine and don't show up in host RSS, so the Mac bar drops the Parakeet segment by design — this is not a measurement gap to fix
+- **Mac memory breakdown — ANE granularity**: the Apple Neural Engine doesn't expose per-tensor accounting, so Parakeet's ~461 MB ANE claim renders as a single segment. Splitting it further (encoder / decoder / CTC head) would require model-side changes in NeMo/CoreML conversion, not OpenWhisper
 - **Audio ducking — browser-tab media** (carried from 0.5.0): Safari / Chrome / Firefox tab playback is still not paused on macOS; the per-app AppleScript route covers Spotify + Apple Music only
 
 ## Install

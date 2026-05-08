@@ -1,10 +1,10 @@
 ---
 id: TASK-62
 title: Model memory telemetry + lifecycle foundation
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-04-30 22:16'
-updated_date: '2026-05-08 06:00'
+updated_date: '2026-05-08 07:00'
 labels: []
 dependencies: []
 documentation:
@@ -45,5 +45,6 @@ Late polish on the v0.6.0 release smoke (commit on the 0.6.0 tag):
 - Diagnostics breakdown bar renamed to "OpenWhisper Memory Breakdown"; Parakeet segment now sources from process RSS on Windows and from the ANE/GPU claim on Mac (`Parakeet weights (ANE)` legend label) so the bar total matches the OpenWhisper Memory readout above.
 - Bar's resident readout switched to honest MB / GB units (sub-1 GB renders MB).
 
-Status flipped to In Review pending v0.6.0 publish; flip to Done once the draft release is published with both DMG + MSI attached.
+Shipped publicly with v0.6.0 on 2026-05-08 — Mac DMG + Windows MSI/NSIS exe attached:
+https://github.com/jimmi-joensson/OpenWhisper/releases/tag/v0.6.0
 <!-- SECTION:NOTES:END -->

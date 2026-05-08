@@ -18,7 +18,7 @@ ordinal: 38000
 <!-- AC:BEGIN -->
 - [ ] #1 Settings schema gains last_seen_unread_count: u32 (default 0), persisted across restart
 - [ ] #2 Launch toast fires only when currentUnread > lastSeenUnread; subsequent restarts at same/lower unread show only the rail dot
-- [ ] #3 Rail dot persists until each unread crash is explicitly marked read; never auto-dismissed by route visits, time-out, or toast dismiss
+- [x] #3 Rail dot persists until each unread crash is explicitly marked read; never auto-dismissed by route visits, time-out, or toast dismiss
 - [ ] #4 Toast 'View' button routes to Diagnostics overview (not the inspector) — entering the inspector requires the user's explicit click on the Crashes entry card, which is the read action
 - [ ] #5 Delete-all empties both crash files and state.json entries; confirm dialog uses dynamic count copy
 - [ ] #6 crashes_summary command exists and returns the latest crash's relative-when + module + signal for the entry card's sub-line
@@ -27,5 +27,7 @@ ordinal: 38000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-76206ff shared crashes-store via useSyncExternalStore; sidebar rail dot in lockstep with list. Implements rail-dot AC; launch toast / lastSeenUnreadCount / crashes_summary still pending.
+76206ff shared crashes-store via useSyncExternalStore; sidebar rail dot in lockstep with list. Implements rail-dot AC #3.
+
+AC #3 (rail dot) shipped in v0.6.0. ACs #1, #2, #4, #5, #6 (last_seen_unread_count + delta-driven launch toast + delete-all + crashes_summary command) carry over to a follow-up release; subtask stays In Progress.
 <!-- SECTION:NOTES:END -->

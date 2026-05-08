@@ -1,10 +1,10 @@
 ---
 id: TASK-78
 title: Crash reporting — Rust panic hook + on-disk dump + opt-in upload
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 05:43'
-updated_date: '2026-05-08 06:00'
+updated_date: '2026-05-08 07:00'
 labels: []
 dependencies: []
 milestone: m-1
@@ -47,5 +47,8 @@ Status flipped to In Review with three ACs deferred:
 - AC #7 (bulk "delete all" with confirm — single-delete shipped)
 - AC #10 (Playwright manual-repro regression — TASK-78.7)
 
-Cross-platform (Mac arm64 release DMG smoke + Windows manual repro) verification rolls into the v0.6.0 ship; the deferred slice will land in a follow-up release.
+Cross-platform (Mac arm64 release DMG smoke + Windows manual repro) verification rolled into the v0.6.0 ship — published 2026-05-08:
+https://github.com/jimmi-joensson/OpenWhisper/releases/tag/v0.6.0
+
+Parent flipped to Done for the shipped scope; the three deferred ACs (#2 launch toast, #7 bulk-delete, #10 Playwright redaction regression) remain actionable via the existing TASK-78.5 (still In Progress — only rail dot shipped) and TASK-78.7 (still To Do) subtasks. They'll roll up to a follow-up release rather than re-opening the parent.
 <!-- SECTION:NOTES:END -->

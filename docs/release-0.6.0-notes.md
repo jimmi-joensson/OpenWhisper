@@ -3,7 +3,7 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 ## What's new
 
 **Home stats strip (TASK-87 / 88 / 89)** — *headline feature*
-- New live KV strip on Home: **Dictations today**, **This week**, **All time**, **Time saved** — at-a-glance signal that the app is actually working for you, no more hunting for "did I dictate today?"
+- New live KV strip on Home: **Dictations today**, **This week**, **All time**, **Time saved**
 - Counters update within ~1 s of every completed dictation via a live `stats_changed` event — no manual refresh, no stale numbers
 - **Time saved** is computed from your typing speed: change **Settings → General → Typing speed** and the subcaption updates immediately
 - Active-time bucketed per **local midnight** (not UTC) via the new energy-VAD path, so day rollovers feel right regardless of timezone

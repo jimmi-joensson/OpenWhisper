@@ -53,11 +53,25 @@ pub fn install_ax_watcher(app: AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
+fn fire_mic_prompt(app: &AppHandle) {
+    let app_for_perm = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        crate::permissions::request_microphone(&app_for_perm);
+    });
+}
+
+#[cfg(target_os = "macos")]
 fn ax_watch_loop(app: AppHandle) {
     use std::time::Duration;
-    // Seed the state so we don't fire on the first tick if AX was
-    // already granted at boot.
     let mut last = unsafe { AXIsProcessTrusted() };
+    // Seed the boot path: if AX was already trusted at process start
+    // (existing user, or relaunched after granting), fire the mic
+    // prompt now. Setup deliberately does NOT queue request_microphone
+    // any more — the AX-watcher owns the trigger so the mic dialog can
+    // never race ahead of an in-flight AX grant.
+    if last {
+        fire_mic_prompt(&app);
+    }
     loop {
         std::thread::sleep(Duration::from_millis(1500));
         let now = unsafe { AXIsProcessTrusted() };
@@ -66,13 +80,13 @@ fn ax_watch_loop(app: AppHandle) {
         }
         if now {
             // Edge false → true. The user just granted AX (typically in
-            // System Settings while OW was in the background). Bring main
-            // forward so the Restart banner is visible. We do NOT auto-
-            // restart — TCC's kernel cache requires a relaunch before
-            // CGEventTapCreate succeeds, so the user clicks Restart and
-            // we do `app.restart()` from the hotkey_retry command path.
-            eprintln!("[ax-watcher] AX trust granted — bringing main forward");
+            // System Settings while OW was in the background). Bring
+            // main forward so the Restart banner is visible, then fire
+            // the mic prompt — AVCapture mic permission is independent
+            // of AX, so we don't need to wait for the relaunch.
+            eprintln!("[ax-watcher] AX trust granted — bringing main forward + firing mic prompt");
             bring_main_to_front(&app);
+            fire_mic_prompt(&app);
         } else {
             // Edge true → false (revoked). No focus action — the
             // hotkey watchdog will re-emit an error banner if needed.

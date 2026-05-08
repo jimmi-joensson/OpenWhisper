@@ -8,12 +8,14 @@
 //! completion block re-emits status so the UI banner clears (or
 //! appears, on denial) the moment the user picks an option.
 //!
-//! AX gating is done by the caller via `hotkey::hotkey_status_current()`
-//! rather than `AXIsProcessTrusted`. The TCC flag false-negatives in dev
-//! because ad-hoc cdhash drift invalidates TCC's trusted record on every
-//! rebuild (project_tcc_dev_pain), but a successful CGEventTap install
-//! proves AX is operationally trusted regardless of TCC bookkeeping —
-//! which is the signal that actually matters.
+//! AX gating: in release builds, gate on `AXIsProcessTrusted()` directly
+//! — the OS truth. In dev, also accept `hotkey::hotkey_status_current()`
+//! as a fallback because ad-hoc cdhash drift false-negatives `AXIsProcessTrusted`
+//! on every rebuild (project_tcc_dev_pain), and a successful CGEventTap
+//! install proves AX is operationally trusted there. Release fresh-install
+//! flow MUST never fire the AVCapture mic dialog before the user has
+//! granted Accessibility — both prompts firing near-simultaneously made the
+//! mic dialog steal focus and read as "mic before AX".
 
 use block2::RcBlock;
 use objc2::msg_send;
@@ -21,6 +23,11 @@ use objc2::runtime::{AnyClass, AnyObject, Bool};
 use tauri::AppHandle;
 
 use super::emit_status;
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
 
 // AVAuthorizationStatus values.
 const AV_NOT_DETERMINED: i64 = 0;
@@ -84,13 +91,21 @@ pub fn recheck(app: &AppHandle) {
 }
 
 pub fn request_microphone(app: &AppHandle) {
+    let ax_trusted = unsafe { AXIsProcessTrusted() };
     let hotkey_ok = crate::hotkey::hotkey_status_current()
         .map(|s| s.ok)
         .unwrap_or(false);
-    if !hotkey_ok {
-        // AX not yet operationally trusted — don't probe AVFoundation
-        // (would race the user's first AX grant). UI banner stays clear
-        // until the next boot via the hotkey-watchdog → mic-prompt flow.
+    let proceed = if cfg!(debug_assertions) {
+        ax_trusted || hotkey_ok
+    } else {
+        ax_trusted
+    };
+    if !proceed {
+        // AX not yet OS-trusted — don't probe AVFoundation (would race
+        // the user's AX grant and steal focus from the System Settings
+        // window). The AX-grant watcher in `focus.rs` re-fires this on
+        // the false → true edge, so the mic prompt lands the moment AX
+        // is granted without depending on a relaunch.
         return;
     }
 

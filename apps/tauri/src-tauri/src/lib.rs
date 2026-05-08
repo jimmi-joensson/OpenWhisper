@@ -1287,22 +1287,15 @@ pub fn run() {
             // don't have to manually scrub System Settings to re-grant.
             permissions::reset_if_version_changed(app.handle());
             hotkey::install(app.handle());
-            // Proactively prompt for Mic on macOS once AX is operationally
-            // trusted — mirrors PermissionsCoordinator.swift's "AX before
-            // mic" sequencing. Gate on hotkey install having succeeded
-            // (CGEventTap created), NOT on AXIsProcessTrusted: the TCC
-            // flag false-negatives in dev because ad-hoc cdhash drift
-            // invalidates TCC's trusted record on every rebuild
-            // (project_tcc_dev_pain), but a working tap is proof that AX
-            // is real. Deferred to the next run-loop tick via
-            // run_on_main_thread because AVFoundation's
-            // requestAccessForMediaType: relies on the Cocoa run loop —
-            // setup() runs before NSApp.run() spins it up, so a sync call
-            // here goes nowhere.
-            let app_for_perm = app.handle().clone();
-            let _ = app.handle().run_on_main_thread(move || {
-                permissions::request_microphone(&app_for_perm);
-            });
+            // Mic prompt is owned by the AX-grant watcher (see
+            // `focus::install_ax_watcher`): on its boot tick it fires
+            // request_microphone iff AXIsProcessTrusted() is already
+            // true, and on every false → true edge it fires again. This
+            // guarantees the AVCapture mic dialog can never race ahead
+            // of an in-flight AX grant — earlier code queued
+            // request_microphone here on the next run-loop tick, which
+            // could run while System Settings was still mid-prompt and
+            // read as "mic before AX" to users.
 
             // Fullscreen-aware: when the user enters a fullscreen app, drop
             // the global hotkey so the fullscreen app receives Right Cmd /

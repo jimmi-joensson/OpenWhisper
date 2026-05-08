@@ -764,9 +764,17 @@ function catmullRomToBezier(pts: Array<{ x: number; y: number }>): string {
 
 // Wraps the prop-driven `<RSSBreakdownBar />` with the four
 // canonical segments the design pivot calls for. Source of
-// per-segment values is `breakdownEstimate` — a v1 placeholder
-// until per-component RSS attribution lands. See
+// per-segment values is `breakdownEstimate` (process RSS) plus
+// `externalClaim` (ANE/GPU on Mac) — a v1 placeholder until
+// per-component RSS attribution lands. See
 // `diagnostics-rss-breakdown.tsx` for the presentation layer.
+//
+// Parakeet weights are sourced from process RSS on Windows
+// (recognizer is in-process via ort) and from ANE/GPU on Mac
+// (recognizer lives outside the host RSS via FluidAudio). One
+// `parakeet` segment either way so the bar reads as a single
+// memory total — whichever side carries the weights, the bar
+// matches the "OpenWhisper Memory" readout above.
 function RSSBreakdown({
   rssBytes,
   models,
@@ -776,14 +784,22 @@ function RSSBreakdown({
 }) {
   const rssMb = Math.round(rssBytes / (1024 * 1024));
   const recognizerInProcess = isRecognizerInProcessResident(models);
+  const aneMb = Math.round(externalClaim(models) / (1024 * 1024));
   const est = breakdownEstimate(rssMb, recognizerInProcess);
+  // In-process build keeps Parakeet inside RSS (Windows ort path);
+  // out-of-process build attributes the ANE claim instead (Mac
+  // FluidAudio path). aneMb=0 with no recognizer loaded → segment hides.
+  const parakeetMb = recognizerInProcess ? est.parakeetMb : aneMb;
+  const parakeetLabel = recognizerInProcess
+    ? "Parakeet weights"
+    : "Parakeet weights (ANE)";
   // Order matches the design (largest expected → smallest).
   // Color tokens match doc-43 §"OW RSS Breakdown — segment composition".
   const parts: RSSBreakdownPart[] = [
     {
       kind: "parakeet",
-      label: "Parakeet weights",
-      valueMb: est.parakeetMb,
+      label: parakeetLabel,
+      valueMb: parakeetMb,
       color: "var(--info)",
     },
     {
@@ -805,7 +821,7 @@ function RSSBreakdown({
       color: "color-mix(in oklch, var(--muted-foreground) 60%, transparent)",
     },
   ];
-  return <RSSBreakdownBar parts={parts} totalRssMb={rssMb} />;
+  return <RSSBreakdownBar parts={parts} />;
 }
 
 function formatBytes(bytes: number): { value: string; unit: "B" | "KB" | "MB" | "GB" } {

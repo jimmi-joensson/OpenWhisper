@@ -425,10 +425,13 @@ test.describe("diagnostics pane", () => {
     expect(sum).toBeGreaterThanOrEqual(99);
     expect(sum).toBeLessThanOrEqual(101);
 
-    // Resident readout reads in GB.
+    // Total readout uses honest units — GB at >= 1024 MB, MB below.
+    // Bar covers process RSS + ANE; with the recognizer loaded
+    // in-process at 612 MB inside an 1100 MB RSS the total stays
+    // 1100 MB → 1.07 GB.
     await expect(
       page.getByTestId("diagnostics-rss-breakdown-total"),
-    ).toContainText("GB resident");
+    ).toContainText("GB total");
   });
 
   test("RSS breakdown hides Parakeet segment when recognizer is unloaded", async ({
@@ -457,15 +460,16 @@ test.describe("diagnostics pane", () => {
     ).toBeVisible();
   });
 
-  test("RSS breakdown drops Parakeet segment when recognizer is ANE-resident (Mac)", async ({
+  test("Memory breakdown attributes Parakeet to the ANE claim when recognizer is ANE-resident (Mac)", async ({
     page,
   }) => {
-    // Regression for the Mac inconsistency: with the recognizer loaded
-    // on the ANE, the previous estimator hard-coded 612 MB Parakeet
-    // weights inside a ~110 MB process RSS — segments visibly
-    // contradicted the "0.11 GB resident" readout. Per the design,
-    // RSS breakdown shows what's INSIDE RSS only; ANE weights belong
-    // in the per-model breakdown bar below this one.
+    // The bar represents OW memory as a whole (process RSS + ANE
+    // claim), so on Mac the Parakeet segment is sourced from the
+    // ANE/GPU claim rather than process RSS — matching the
+    // "OpenWhisper Memory" total in the readout above (532 MB =
+    // 72 MB process + 461 MB ANE in the canonical case). Earlier
+    // shape limited the bar to in-process RSS, which read as
+    // inconsistent against the readout total.
     await page.goto("/");
     await setMemoryStats(page, {
       system: NORMAL_SYSTEM,
@@ -489,10 +493,13 @@ test.describe("diagnostics pane", () => {
     await expect(
       page.getByTestId("diagnostics-rss-breakdown"),
     ).toBeVisible();
+    // Parakeet segment now visible — sourced from the ANE claim.
     await expect(
       page.getByTestId("diagnostics-rss-segment-parakeet"),
-    ).toHaveCount(0);
-    // Audio + Shell + Caches still render, summing to RSS.
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("diagnostics-rss-segment-parakeet"),
+    ).toContainText("Parakeet weights (ANE)");
     await expect(
       page.getByTestId("diagnostics-rss-segment-audio"),
     ).toBeVisible();
@@ -503,7 +510,7 @@ test.describe("diagnostics pane", () => {
       page.getByTestId("diagnostics-rss-segment-caches"),
     ).toBeVisible();
     const pctValues = await Promise.all(
-      ["audio", "shell", "caches"].map(async (kind) => {
+      ["parakeet", "audio", "shell", "caches"].map(async (kind) => {
         const txt = await page
           .getByTestId(`diagnostics-rss-segment-${kind}-pct`)
           .innerText();

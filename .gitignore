@@ -141,9 +141,12 @@ core/swift/**/.build/
 core/swift/**/.swiftpm/
 
 # Claude Code project-local state (scheduled task locks, etc.) — but
-# project skills under .claude/skills/ are part of the repo.
+# project skills, project-shared settings.json, and project hooks are
+# part of the repo. settings.local.json stays per-user.
 .claude/*
 !.claude/skills/
+!.claude/hooks/
+!.claude/settings.json
 
 # Misc
 tmp/

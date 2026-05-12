@@ -363,6 +363,14 @@ body[data-platform="macos"] .ow-titlebar {
   min-width: 0;
 }
 
+/* Boot-time crash launch notice. Sits between the right column's top
+   and the route body so it spans the full content width without
+   nudging the sidebar. Compact — 6 px inline margin keeps it visually
+   tied to the body without becoming a blocking band. */
+.ow-crashes-launch-toast {
+  margin: 8px 12px 0;
+}
+
 .ow-sidebar {
   background: rgb(0 0 0 / 0.15);
   border-right: 1px solid var(--border);

@@ -7,6 +7,7 @@
 import {
   expect,
   setCrashes,
+  setCrashesLastSeenUnread,
   setCrashFiles,
   test,
   type MockCrashFile,
@@ -522,5 +523,188 @@ test.describe("crash inspector — detail sheet", () => {
       "data-unread",
       "true",
     );
+  });
+});
+
+// TASK-78.5 — delta-driven launch toast for unread crashes. Fires only
+// when currentUnread > lastSeenUnread; subsequent restarts at the same
+// or lower unread count show only the persistent rail dot.
+test.describe("crash inspector — launch toast (TASK-78.5)", () => {
+  test("toast fires when currentUnread > lastSeenUnread", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owCrashesLastSeenUnread?: number })
+        .__owCrashesLastSeenUnread = 0;
+      (window as unknown as { __owCrashes?: unknown[] }).__owCrashes = [
+        {
+          id: "700",
+          ts_unix_ms: Date.now() - 5000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "delta-driven toast subject",
+          unread: true,
+          uploaded_at: null,
+        },
+        {
+          id: "701",
+          ts_unix_ms: Date.now() - 1000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "second unread crash",
+          unread: true,
+          uploaded_at: null,
+        },
+      ];
+    });
+    await page.goto("/");
+
+    const toast = page.getByTestId("crashes-launch-toast");
+    await expect(toast).toBeVisible({ timeout: 5000 });
+    await expect(toast).toContainText("2 new crash reports");
+  });
+
+  test("toast stays hidden when currentUnread <= lastSeenUnread", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owCrashesLastSeenUnread?: number })
+        .__owCrashesLastSeenUnread = 2;
+      (window as unknown as { __owCrashes?: unknown[] }).__owCrashes = [
+        {
+          id: "800",
+          ts_unix_ms: Date.now() - 5000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "already-seen crash",
+          unread: true,
+          uploaded_at: null,
+        },
+        {
+          id: "801",
+          ts_unix_ms: Date.now() - 1000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "another already-seen crash",
+          unread: true,
+          uploaded_at: null,
+        },
+      ];
+    });
+    await page.goto("/");
+
+    // Rail dot still indicates the unread crashes…
+    await expect(
+      page.getByTestId("sidebar-diagnostics-unread-dot"),
+    ).toBeVisible({ timeout: 5000 });
+    // …but the launch toast doesn't fire.
+    await expect(page.getByTestId("crashes-launch-toast")).toHaveCount(0);
+  });
+
+  test("View button routes to Diagnostics overview and bumps last_seen", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owCrashesLastSeenUnread?: number })
+        .__owCrashesLastSeenUnread = 0;
+      (window as unknown as { __owCrashes?: unknown[] }).__owCrashes = [
+        {
+          id: "900",
+          ts_unix_ms: Date.now() - 1000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "view-button crash",
+          unread: true,
+          uploaded_at: null,
+        },
+      ];
+    });
+    await page.goto("/");
+
+    await page.getByTestId("crashes-launch-toast-view").click();
+
+    // Routes to Diagnostics OVERVIEW — the overview is what renders
+    // the Crashes entry card; the inspector full pane is only
+    // visible after the user clicks the card explicitly.
+    await expect(page.getByTestId("diagnostics-crashes-entry")).toBeVisible({
+      timeout: 3000,
+    });
+    await expect(page.getByTestId("crash-list")).toHaveCount(0);
+
+    // Toast disappears + last_seen bumps. The shim's
+    // crashes_mark_seen records every call so we can assert.
+    await expect(page.getByTestId("crashes-launch-toast")).toHaveCount(0);
+    const calls = await page.evaluate(() =>
+      (window as unknown as { __owCrashesMarkSeenCalls?: number[] })
+        .__owCrashesMarkSeenCalls ?? [],
+    );
+    expect(calls).toContain(1);
+  });
+
+  test("Dismiss button bumps last_seen without navigating", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owCrashesLastSeenUnread?: number })
+        .__owCrashesLastSeenUnread = 0;
+      (window as unknown as { __owCrashes?: unknown[] }).__owCrashes = [
+        {
+          id: "1000",
+          ts_unix_ms: Date.now() - 1000,
+          app_version: "0.6.0",
+          os: "macos (arm64)",
+          message_truncated: "dismiss-button crash",
+          unread: true,
+          uploaded_at: null,
+        },
+      ];
+    });
+    await page.goto("/");
+
+    await page.getByTestId("crashes-launch-toast-dismiss").click();
+
+    // No navigation — Diagnostics entry card not visible (we're
+    // still on Home, where the home-app-icon lives).
+    await expect(page.getByTestId("home-app-icon")).toBeVisible({
+      timeout: 2000,
+    });
+    await expect(page.getByTestId("diagnostics-crashes-entry")).toHaveCount(0);
+    await expect(page.getByTestId("crashes-launch-toast")).toHaveCount(0);
+
+    const calls = await page.evaluate(() =>
+      (window as unknown as { __owCrashesMarkSeenCalls?: number[] })
+        .__owCrashesMarkSeenCalls ?? [],
+    );
+    expect(calls).toContain(1);
+  });
+
+  test("entering the inspector via the entry card also bumps last_seen", async ({
+    page,
+  }) => {
+    // Sentinel-suppressed toast (existing-test default), but the
+    // user enters the inspector. AC #4: entering the inspector IS
+    // the explicit read action — bumps last_seen even without a
+    // toast interaction.
+    await page.goto("/");
+    await setCrashesLastSeenUnread(page, Number.MAX_SAFE_INTEGER);
+    await setCrashes(page, [
+      {
+        id: "1100",
+        ts_unix_ms: Date.now() - 1000,
+        app_version: "0.6.0",
+        os: "macos (arm64)",
+        message_truncated: "inspector-entry crash",
+        unread: true,
+        uploaded_at: null,
+      },
+    ]);
+    await page.getByTestId("sidebar-item-diagnostics").click();
+    await page.getByTestId("diagnostics-crashes-entry").click();
+
+    await expect(page.getByTestId("crash-list")).toBeVisible();
+
+    const calls = await page.evaluate(() =>
+      (window as unknown as { __owCrashesMarkSeenCalls?: number[] })
+        .__owCrashesMarkSeenCalls ?? [],
+    );
+    expect(calls).toContain(1);
   });
 });

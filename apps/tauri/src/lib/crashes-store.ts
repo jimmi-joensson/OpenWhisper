@@ -24,6 +24,12 @@ const POLL_MS = 2000;
 export interface CrashesSnapshot {
   list: CrashSummary[];
   unreadCount: number;
+  /// Persisted unread count from the last user "see" event (entering
+  /// the crash inspector or acknowledging the launch toast). The
+  /// delta-driven launch toast compares this against `unreadCount`:
+  /// strict `unreadCount > lastSeenUnreadCount` fires the toast.
+  /// Initialised from `crashes_get_last_seen_unread` on first refetch.
+  lastSeenUnreadCount: number;
   loading: boolean;
   error: string | null;
 }
@@ -31,6 +37,7 @@ export interface CrashesSnapshot {
 const INITIAL_SNAPSHOT: CrashesSnapshot = {
   list: [],
   unreadCount: 0,
+  lastSeenUnreadCount: 0,
   loading: true,
   error: null,
 };
@@ -60,11 +67,18 @@ function pushSnapshot(next: Partial<CrashesSnapshot>) {
 
 async function refetch() {
   try {
-    const [list, unreadCount] = await Promise.all([
+    const [list, unreadCount, lastSeenUnreadCount] = await Promise.all([
       invoke<CrashSummary[]>("crashes_list"),
       invoke<number>("crashes_unread_count"),
+      invoke<number>("crashes_get_last_seen_unread"),
     ]);
-    pushSnapshot({ list, unreadCount, loading: false, error: null });
+    pushSnapshot({
+      list,
+      unreadCount,
+      lastSeenUnreadCount,
+      loading: false,
+      error: null,
+    });
   } catch (e) {
     pushSnapshot({
       loading: false,
@@ -207,6 +221,29 @@ export async function refetchCrashes(): Promise<void> {
   await refetch();
 }
 
+/// Acknowledge the current unread count — persist it as
+/// `last_seen_unread_count` so subsequent restarts at the same or
+/// lower unread count don't re-fire the launch toast. Called when:
+/// - the user clicks the Diagnostics → Crashes entry card (the
+///   explicit "read" action)
+/// - the user clicks View or Dismiss on the launch toast
+///
+/// Optimistic: update the snapshot first so any open toast hides
+/// without waiting for the round-trip; fall back to refetch on
+/// error so the snapshot self-heals.
+export async function markSeen(): Promise<void> {
+  const prev = store.snapshot;
+  const target = prev.unreadCount;
+  if (prev.lastSeenUnreadCount === target) return;
+  pushSnapshot({ lastSeenUnreadCount: target });
+  try {
+    await invoke("crashes_mark_seen", { count: target });
+  } catch (e) {
+    await refetch();
+    throw e;
+  }
+}
+
 // ---------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------
@@ -217,10 +254,12 @@ export async function refetchCrashes(): Promise<void> {
 export function useCrashes(): {
   list: CrashSummary[];
   unreadCount: number;
+  lastSeenUnreadCount: number;
   loading: boolean;
   error: string | null;
   refetch: () => void;
   markRead: typeof markRead;
+  markSeen: typeof markSeen;
   deleteOne: typeof deleteOne;
   deleteAll: typeof deleteAll;
   read: typeof readCrashFile;
@@ -232,10 +271,12 @@ export function useCrashes(): {
   return {
     list: snapshot.list,
     unreadCount: snapshot.unreadCount,
+    lastSeenUnreadCount: snapshot.lastSeenUnreadCount,
     loading: snapshot.loading,
     error: snapshot.error,
     refetch: refetchCb,
     markRead,
+    markSeen,
     deleteOne,
     deleteAll,
     read: readCrashFile,

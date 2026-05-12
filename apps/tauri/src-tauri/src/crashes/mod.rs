@@ -53,6 +53,15 @@ fn default_true() -> bool {
 pub struct CrashesState {
     #[serde(default)]
     pub entries: BTreeMap<String, CrashStateEntry>,
+    /// Unread count at the moment the user last "saw" the crash inspector
+    /// (entered the inspector, or explicitly acknowledged the launch
+    /// toast). Boot-time toast logic compares the live unread count
+    /// against this value: a strict `current > seen` delta fires the
+    /// toast, equal-or-lower restarts show only the rail dot. Defaults
+    /// to 0 — first ever crash on a fresh install still triggers the
+    /// toast because the delta is 1 > 0.
+    #[serde(default)]
+    pub last_seen_unread_count: u32,
 }
 
 /// Compact view of a crash file used by the list pane. Avoids
@@ -307,6 +316,44 @@ pub fn crashes_unread_count(app: AppHandle) -> u32 {
         }
     }
     count
+}
+
+/// Read the persisted "last seen unread count" — the snapshot of the
+/// unread count at the moment the user last opened the crash inspector
+/// (or explicitly acknowledged the launch toast). Used by the
+/// delta-driven launch toast: a strict `currentUnread > lastSeenUnread`
+/// fires the toast on next boot.
+#[tauri::command]
+pub fn crashes_get_last_seen_unread(app: AppHandle) -> u32 {
+    let Some(dir) = resolve_crashes_dir(&app) else {
+        return 0;
+    };
+    let _g = state_io_lock().lock().ok();
+    let state = load_state(&dir);
+    state.last_seen_unread_count
+}
+
+/// Acknowledge the current unread count. Called when the user enters
+/// the crash inspector (the explicit "read" action) or interacts with
+/// the launch toast (View / Dismiss). Subsequent boots at the same or
+/// lower unread count will show only the rail dot, not the toast.
+///
+/// Idempotent: writing the same value twice is a no-op (we still
+/// serialise state.json once, which is fine — the dance is cheap and
+/// the IO lock guarantees correctness if a second invoke races with a
+/// per-crash mark-read in flight).
+#[tauri::command]
+pub fn crashes_mark_seen(app: AppHandle, count: u32) -> Result<(), String> {
+    let Some(dir) = resolve_crashes_dir(&app) else {
+        return Err("crash dir unresolved".into());
+    };
+    let _g = state_io_lock().lock().ok();
+    let mut state = load_state(&dir);
+    if state.last_seen_unread_count == count {
+        return Ok(());
+    }
+    state.last_seen_unread_count = count;
+    save_state(&dir, &state).map_err(|e| format!("save state.json: {e}"))
 }
 
 /// Reveal the resolved crashes dir in Finder (Mac) / Explorer (Windows).

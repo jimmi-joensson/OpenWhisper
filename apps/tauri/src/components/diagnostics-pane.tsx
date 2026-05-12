@@ -55,12 +55,24 @@ type DiagnosticsView = "overview" | "crashes";
 
 export function DiagnosticsPane(_props: DiagnosticsPaneProps) {
   const [view, setView] = useState<DiagnosticsView>("overview");
+  const { markSeen } = useCrashes();
 
   if (view === "crashes") {
     return <CrashList onBack={() => setView("overview")} />;
   }
 
-  return <DiagnosticsOverview onOpenCrashes={() => setView("crashes")} />;
+  // Entering the crash inspector is the explicit "read" action per
+  // TASK-78.5 AC #4: it acknowledges the current unread count so the
+  // delta-driven launch toast doesn't re-fire on next boot. Fire-and-
+  // forget — failure leaves the snapshot self-healing via the poll.
+  return (
+    <DiagnosticsOverview
+      onOpenCrashes={() => {
+        void markSeen().catch(() => {});
+        setView("crashes");
+      }}
+    />
+  );
 }
 
 function DiagnosticsOverview({

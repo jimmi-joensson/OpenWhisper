@@ -4,6 +4,7 @@ import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
 import { HomePane } from "./components/home-pane";
 import { DevToolsPanel } from "./components/dev-tools-panel";
+import { CrashesLaunchToast } from "./components/crashes-launch-toast";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
@@ -205,6 +206,13 @@ function App() {
           onSettingsPaneSelect={setSettingsPane}
         />
         <div className="ow-app__column">
+          {/* Boot-time launch notice for unread crashes (TASK-78.5).
+              Hidden once the user views or dismisses; suppressed for
+              same-or-lower unread restarts via persisted
+              last_seen_unread_count. View routes to the Diagnostics
+              overview, NOT the inspector — entering the inspector is
+              the explicit per-crash read action. */}
+          <CrashesLaunchToast onView={() => setRoute("diagnostics")} />
           <main className="ow-app__body">
             {route === "settings" && (
               <SettingsShell active={settingsPane} onBack={goBack} />

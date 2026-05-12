@@ -59,10 +59,12 @@ export {
 export interface UseCrashesResult {
   list: CrashSummary[];
   unreadCount: number;
+  lastSeenUnreadCount: number;
   loading: boolean;
   error: string | null;
   refetch: () => void;
   markRead: (id: string) => Promise<void>;
+  markSeen: () => Promise<void>;
   deleteOne: (id: string) => Promise<void>;
   deleteAll: () => Promise<void>;
   read: (id: string) => Promise<CrashFile>;

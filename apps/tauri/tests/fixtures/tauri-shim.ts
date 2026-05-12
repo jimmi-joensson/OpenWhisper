@@ -441,6 +441,31 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           const w = window as unknown as { __owCrashes?: MockCrashSummary[] };
           return (w.__owCrashes ?? []).filter((c) => c.unread).length;
         }
+        if (cmd === "crashes_get_last_seen_unread") {
+          // Default is a high sentinel so the boot-time launch toast
+          // (TASK-78.5) is suppressed for tests that don't explicitly
+          // exercise it — keeps existing crash-inspector specs free
+          // of a constant "dismiss toast" preamble. Tests that DO
+          // exercise the toast set this to 0 via
+          // `setCrashesLastSeenUnread(page, 0)` before seeding crashes.
+          const w = window as unknown as {
+            __owCrashesLastSeenUnread?: number;
+          };
+          return w.__owCrashesLastSeenUnread ?? Number.MAX_SAFE_INTEGER;
+        }
+        if (cmd === "crashes_mark_seen") {
+          const { count } = (args ?? {}) as { count: number };
+          const w = window as unknown as {
+            __owCrashesLastSeenUnread?: number;
+            __owCrashesMarkSeenCalls?: number[];
+          };
+          w.__owCrashesLastSeenUnread = count;
+          w.__owCrashesMarkSeenCalls = [
+            ...(w.__owCrashesMarkSeenCalls ?? []),
+            count,
+          ];
+          return null;
+        }
         if (cmd === "crashes_read") {
           const { id } = (args ?? {}) as { id: string };
           const w = window as unknown as {
@@ -965,6 +990,21 @@ export async function setCrashes(
     (window as unknown as { __owCrashes?: MockCrashSummary[] }).__owCrashes =
       rows;
   }, crashes);
+}
+
+/// Override the `last_seen_unread_count` the shim returns from
+/// `crashes_get_last_seen_unread`. Default is a high sentinel so the
+/// boot-time launch toast is suppressed in tests that don't explicitly
+/// exercise it. Set to 0 (or any value lower than the seeded unread
+/// count) to surface the toast in a test.
+export async function setCrashesLastSeenUnread(
+  page: Page,
+  count: number,
+): Promise<void> {
+  await page.evaluate((value) => {
+    (window as unknown as { __owCrashesLastSeenUnread?: number })
+      .__owCrashesLastSeenUnread = value;
+  }, count);
 }
 
 /// Optionally seed full crash files by id, so `crashes_read` returns a

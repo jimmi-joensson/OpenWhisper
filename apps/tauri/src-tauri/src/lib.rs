@@ -1221,6 +1221,8 @@ pub fn run() {
             crashes::crashes_delete_all,
             crashes::crashes_mark_read,
             crashes::crashes_unread_count,
+            crashes::crashes_get_last_seen_unread,
+            crashes::crashes_mark_seen,
             crashes::crashes_open_folder,
             crashes::crashes_debug_trigger_panic,
         ])

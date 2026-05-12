@@ -13,6 +13,7 @@ use cpal::{DeviceType, FromSample, InterfaceType, Sample, SizedSample};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use serde::Serialize;
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 
@@ -43,7 +44,7 @@ fn level_epoch() -> Instant {
 // device is present we transparently fall back to the host default.
 static SELECTED_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
 pub struct AudioDeviceInfo {
     /// Stable cpal device id (Display form: "host:device_id"). Used for
     /// persistence and lookup.
@@ -52,6 +53,87 @@ pub struct AudioDeviceInfo {
     /// the Windows Sound control panel show — see `device_label`.
     pub label: String,
     pub is_default: bool,
+}
+
+/// Snapshot of input-device enumeration as the React Audio pane consumes
+/// it: the device list plus the "selected" + "default" derivations.
+///
+/// `selected_id` is the user's persisted selection (`None` = host default).
+/// `selected_present` is `true` when that selection currently enumerates
+/// (or when no selection is set — host-default is always "present"); the
+/// React picker uses `false` to render a disconnected marker on the saved
+/// row. `default_label` powers Discord-style "System default (<label>)"
+/// rows so the user can see which device the system default currently
+/// resolves to.
+#[non_exhaustive]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
+pub struct AudioDeviceState {
+    pub devices: Vec<AudioDeviceInfo>,
+    pub selected_id: Option<String>,
+    pub selected_present: bool,
+    pub default_label: Option<String>,
+}
+
+impl AudioDeviceState {
+    pub fn new(
+        devices: Vec<AudioDeviceInfo>,
+        selected_id: Option<String>,
+        selected_present: bool,
+        default_label: Option<String>,
+    ) -> Self {
+        Self {
+            devices,
+            selected_id,
+            selected_present,
+            default_label,
+        }
+    }
+}
+
+/// Compute the React-shaped audio-device state from cpal enumeration plus
+/// the platform's current mic-authorization gate.
+///
+/// `authorized` is the caller's mic-authorization gate (Mac AVCaptureDevice
+/// TCC; trivially `true` on Windows / Linux until they grow one). When the
+/// caller is not authorized we return a safe placeholder — empty device
+/// list, the persisted selection preserved, no disconnected marker — so
+/// the boot-time AX→mic prompt sequence doesn't race cpal's macOS backend
+/// (which touches CoreAudio property queries on enumerate; Sequoia has
+/// fired the mic dialog from those reads when Accessibility was still
+/// mid-prompt).
+///
+/// One cpal enumerate, derive everything (default label, selected_present)
+/// from the result. Three sequential enumerations was the thing making
+/// the pane sluggish on macOS — `default_input_config()` is per-device
+/// CoreAudio I/O and Bluetooth / Continuity Camera devices are
+/// particularly slow to answer.
+pub fn audio_device_state(authorized: bool) -> AudioDeviceState {
+    if !authorized {
+        return AudioDeviceState {
+            devices: Vec::new(),
+            selected_id: audio_get_selected_device_id(),
+            selected_present: true,
+            default_label: None,
+        };
+    }
+    let devices = audio_list_input_devices();
+    let selected_id = audio_get_selected_device_id();
+    let default_label = devices
+        .iter()
+        .find(|d| d.is_default)
+        .map(|d| d.label.clone());
+    let selected_present = match selected_id.as_deref() {
+        Some(id) => devices.iter().any(|d| d.id == id),
+        // No selection = capture uses host default. Treat as "present" so
+        // the UI doesn't render a disconnected marker on the empty option.
+        None => true,
+    };
+    AudioDeviceState {
+        devices,
+        selected_id,
+        selected_present,
+        default_label,
+    }
 }
 
 /// Human-readable display label for a cpal device.

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use openwhisper_core::audio;
+use openwhisper_core::audio::{self, AudioDeviceState};
 use openwhisper_core::dictation::{
     self, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
@@ -369,32 +369,6 @@ fn dictation_cancel() -> bool {
     do_cancel()
 }
 
-#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
-pub struct AudioDevice {
-    /// Stable cpal device id (Display form). Persisted by the picker; survives
-    /// reboots and reconnections, so a saved selection rebinds even if the
-    /// device's friendly name changes (driver reinstall, OS rename).
-    id: String,
-    /// Discord/Windows-Sound-style label. On Windows this is the
-    /// `PKEY_Device_FriendlyName` (e.g. "Microphone (SteelSeries Arctis 5
-    /// Chat)"); on other platforms it's the cpal description name.
-    label: String,
-    is_default: bool,
-}
-
-// Snapshot the React Audio pane subscribes to. `selected_present` lets the
-// UI render the picker as System default when the saved device isn't
-// enumerable, and `default_label` powers the Discord-style
-// "System default (<device label>)" row so the user can see which device
-// the system default currently resolves to.
-#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
-pub struct AudioDeviceState {
-    devices: Vec<AudioDevice>,
-    selected_id: Option<String>,
-    selected_present: bool,
-    default_label: Option<String>,
-}
-
 // Latest computed device-state snapshot. The emitter recomputes every 2 s;
 // the on-demand `audio_get_device_state` command returns this cache so the
 // React Audio pane mount doesn't pay the cpal enumerate cost (which on
@@ -403,49 +377,13 @@ pub struct AudioDeviceState {
 // synchronous compute that seeds the cache.
 static CACHED_AUDIO_DEVICE_STATE: Mutex<Option<AudioDeviceState>> = Mutex::new(None);
 
-// One cpal enumerate, derive everything (default label, selected_present)
-// from the result. Three sequential enumerations was the thing making the
-// pane sluggish on macOS — `default_input_config()` is per-device CoreAudio
-// I/O and Bluetooth/Continuity Camera devices are particularly slow to
-// answer.
-fn compute_audio_device_state() -> AudioDeviceState {
-    // Boot-time gate: cpal's macOS backend touches CoreAudio property
-    // queries on enumerate. Sequoia's TCC has fired the mic dialog from
-    // those reads when Accessibility is still mid-prompt — racing the
-    // boot prompt sequence (AX → mic). While not authorized we return a
-    // safe placeholder: empty device list, saved id preserved, no
-    // disconnected marker. The next emitter tick after authorization
-    // pushes the real state and the UI catches up via its subscription.
-    if !permissions::is_mic_authorized() {
-        return AudioDeviceState {
-            devices: Vec::new(),
-            selected_id: audio::audio_get_selected_device_id(),
-            selected_present: true,
-            default_label: None,
-        };
-    }
-    let devices: Vec<AudioDevice> = audio::audio_list_input_devices()
-        .into_iter()
-        .map(|d| AudioDevice { id: d.id, label: d.label, is_default: d.is_default })
-        .collect();
-    let selected_id = audio::audio_get_selected_device_id();
-    let default_label = devices
-        .iter()
-        .find(|d| d.is_default)
-        .map(|d| d.label.clone());
-    let selected_present = match selected_id.as_deref() {
-        Some(id) => devices.iter().any(|d| d.id == id),
-        // No selection = capture uses host default. Treat as "present" so
-        // the UI doesn't render a disconnected marker on the empty option.
-        None => true,
-    };
-    AudioDeviceState { devices, selected_id, selected_present, default_label }
-}
-
 // Recompute and write through to the cache. Used by the emitter loop;
-// the Tauri command reads the cache without recomputing.
+// the Tauri command reads the cache without recomputing. Shape-derivation
+// (devices → default_label / selected_present) lives in
+// `core::audio::audio_device_state`; the shell owns only the mic-auth
+// gate read and the cache.
 fn refresh_audio_device_state_cache() -> AudioDeviceState {
-    let state = compute_audio_device_state();
+    let state = audio::audio_device_state(permissions::is_mic_authorized());
     if let Ok(mut g) = CACHED_AUDIO_DEVICE_STATE.lock() {
         *g = Some(state.clone());
     }

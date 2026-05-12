@@ -1,10 +1,10 @@
 ---
 id: TASK-81.6
 title: 'Plan Task 6: cli enumerate-devices'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 15:10'
-updated_date: '2026-05-06'
+updated_date: '2026-05-12'
 labels:
   - 81-impl
 dependencies: []

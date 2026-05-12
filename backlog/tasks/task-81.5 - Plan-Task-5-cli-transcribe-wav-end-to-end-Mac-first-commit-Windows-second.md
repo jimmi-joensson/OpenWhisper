@@ -3,10 +3,10 @@ id: TASK-81.5
 title: >-
   Plan Task 5: cli transcribe <wav> end-to-end (Mac first commit, Windows
   second)
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 15:10'
-updated_date: '2026-05-07'
+updated_date: '2026-05-12'
 labels:
   - 81-impl
 milestone: m-1

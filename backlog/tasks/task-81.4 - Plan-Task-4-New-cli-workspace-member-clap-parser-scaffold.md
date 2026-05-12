@@ -1,10 +1,10 @@
 ---
 id: TASK-81.4
 title: 'Plan Task 4: New cli/ workspace member + clap parser scaffold'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 15:10'
-updated_date: '2026-05-06'
+updated_date: '2026-05-12'
 labels:
   - 81-impl
 dependencies: []

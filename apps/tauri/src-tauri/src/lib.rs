@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openwhisper_core::audio;
 use openwhisper_core::dictation::{
-    self, PHASE_RECORDING, PHASE_TRANSCRIBING, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
+    self, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
 };
 use openwhisper_core::media_gate::{self, MediaController, PauseDiagnostic};
 use openwhisper_core::recognizer;
@@ -142,14 +142,6 @@ struct DictationTick {
     level: f32,
     download_bytes_done: u64,
     download_bytes_total: u64,
-}
-
-fn phase_to_status(phase: u32) -> &'static str {
-    match phase {
-        PHASE_RECORDING => "recording",
-        PHASE_TRANSCRIBING => "transcribing",
-        _ => "idle",
-    }
 }
 
 #[tauri::command]
@@ -605,20 +597,13 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                 thread::sleep(Duration::from_millis(TICK_MS));
                 let snap = dictation::dictation_snapshot();
                 let level = audio::audio_current_level();
-                // While recording, snapshot.sample_count is 0 until stop. Show a
-                // running count so the UI counter doesn't sit at 0 throughout.
-                let live_samples = if snap.phase() == PHASE_RECORDING {
-                    snap.elapsed_ms() * SAMPLE_RATE_HZ / 1000
-                } else {
-                    snap.sample_count()
-                };
                 let payload = DictationTick {
                     phase: snap.phase(),
-                    status: phase_to_status(snap.phase()),
+                    status: dictation::phase_status_label(snap.phase()),
                     status_message: snap.status_message(),
                     transcript: snap.transcript(),
                     confidence: snap.confidence(),
-                    sample_count: live_samples,
+                    sample_count: snap.live_samples(SAMPLE_RATE_HZ),
                     elapsed_ms: snap.elapsed_ms(),
                     error_message: snap.error_message(),
                     can_toggle: snap.can_toggle(),
@@ -901,20 +886,23 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
 /// to IDLE without emitting a transcript, matching the spec's "don't
 /// surprise-paste into a fullscreen game" rule).
 fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
-    let suppress = is_fullscreen && !openwhisper_core::settings::show_in_fullscreen();
-    hotkey::set_active(app, !suppress);
-    let was_recording = suppress && dictation::is_recording();
-    if was_recording {
+    let action = dictation::fullscreen_action(
+        is_fullscreen,
+        openwhisper_core::settings::show_in_fullscreen(),
+        dictation::is_recording(),
+    );
+    hotkey::set_active(app, !action.detach_hotkey);
+    if action.cancel_recording {
         let _ = do_cancel();
     }
     let Some(pill) = app.get_webview_window("pill") else {
         return;
     };
-    if !suppress {
+    if !action.hide_pill {
         let _ = pill.show();
         return;
     }
-    if !was_recording {
+    if !action.cancel_recording {
         let _ = pill.hide();
         return;
     }

@@ -140,6 +140,82 @@ impl DictationSnapshot {
     pub fn download_bytes_total(&self) -> u64 {
         self.download_bytes_total
     }
+
+    /// Sample count to surface in the dictation tick payload. While the
+    /// phase is RECORDING, `State::sample_count` is 0 until the capture
+    /// drain happens on stop — so the UI counter would sit at 0 the whole
+    /// recording. Derive a running count from `elapsed_ms` and the
+    /// caller's known capture rate instead. After stop, fall through to
+    /// the real sample count.
+    pub fn live_samples(&self, sample_rate_hz: u64) -> u64 {
+        if self.phase == PHASE_RECORDING {
+            self.elapsed_ms * sample_rate_hz / 1000
+        } else {
+            self.sample_count
+        }
+    }
+}
+
+/// Stable UI status string for a phase value. Three buckets: `"recording"`,
+/// `"transcribing"`, and `"idle"` for everything else (idle / loading /
+/// done / error). The dictation tick payload includes this so the UI
+/// doesn't need to mirror the phase-to-label mapping.
+pub fn phase_status_label(phase: u32) -> &'static str {
+    match phase {
+        PHASE_RECORDING => "recording",
+        PHASE_TRANSCRIBING => "transcribing",
+        _ => "idle",
+    }
+}
+
+/// Decision returned by [`fullscreen_action`] — what the shell should do
+/// when a fullscreen-state transition is detected. Pure data; no Tauri /
+/// AppKit / Win32 types so the same return value is consumed by the
+/// SwiftUI shell, the Tauri shell, and unit tests.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FullscreenAction {
+    /// Pill HUD should hide while fullscreen is active.
+    pub hide_pill: bool,
+    /// Global hotkey should be detached while fullscreen is active.
+    pub detach_hotkey: bool,
+    /// A recording was in flight at the moment fullscreen kicked in; the
+    /// shell should call its cancel path so the transcript doesn't surprise-
+    /// paste into the fullscreen app. Always implies `hide_pill`.
+    pub cancel_recording: bool,
+}
+
+impl FullscreenAction {
+    pub fn new(hide_pill: bool, detach_hotkey: bool, cancel_recording: bool) -> Self {
+        Self {
+            hide_pill,
+            detach_hotkey,
+            cancel_recording,
+        }
+    }
+}
+
+/// Compute the fullscreen-state action without touching any platform API.
+///
+/// Inputs: whether the foreground app is fullscreen now, whether the user
+/// has opted into showing the pill in fullscreen (Settings → Behavior →
+/// "Show pill in fullscreen apps"), and whether the dictation state
+/// machine currently has an active recording.
+///
+/// The decision is the conjunction of "fullscreen detected" and "user has
+/// not opted out". When suppressed, the pill hides, the global hotkey
+/// detaches, and an in-flight recording is silently aborted.
+pub fn fullscreen_action(
+    is_fullscreen: bool,
+    show_in_fullscreen: bool,
+    is_recording: bool,
+) -> FullscreenAction {
+    let suppress = is_fullscreen && !show_in_fullscreen;
+    FullscreenAction {
+        hide_pill: suppress,
+        detach_hotkey: suppress,
+        cancel_recording: suppress && is_recording,
+    }
 }
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();

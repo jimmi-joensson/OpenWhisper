@@ -5,15 +5,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openwhisper_core::audio::{self, AudioDeviceState};
-use openwhisper_core::dictation::{
-    self, TOGGLE_BEGIN_RECORDING, TOGGLE_STOP_RECORDING,
-};
+use openwhisper_core::dictation::{self, DictationEnv};
 use openwhisper_core::media_gate::{self, MediaController, PauseDiagnostic};
-use openwhisper_core::recognizer;
 use openwhisper_core::stats::{self, StatsSummary};
 use openwhisper_core::store::Store;
-use openwhisper_core::transcript;
-use openwhisper_core::verbose_log;
 use serde::Serialize;
 use tauri::{Emitter, Listener, Manager, WindowEvent};
 #[cfg(target_os = "macos")]
@@ -240,69 +235,40 @@ fn models_open_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("spawn reveal {path_str}: {e}"))
 }
 
+/// Adapter that hands the Tauri shell's platform glue (mic-auth probe,
+/// media-gate pause/resume pair, named thread spawn) to the
+/// platform-agnostic orchestration in `core::dictation`.
+struct TauriDictationEnv;
+
+impl DictationEnv for TauriDictationEnv {
+    fn mic_authorized(&self) -> bool {
+        permissions::is_mic_authorized()
+    }
+    fn pause_audio(&self) {
+        pause_audio_for_recording();
+    }
+    fn resume_audio(&self) {
+        resume_audio_after_recording();
+    }
+    fn spawn(&self, name: &'static str, f: Box<dyn FnOnce() + Send + 'static>) {
+        thread::Builder::new()
+            .name(name.into())
+            .spawn(f)
+            .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
+    }
+}
+
 /// Shared toggle path. Used by the `dictation_toggle` Tauri command AND the
-/// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord). Phase
-/// machine in the core decides whether the toggle starts or stops recording.
+/// per-platform hotkey threads (Mac CGEventTap, Win Ctrl+Space chord).
+/// Orchestration lives in [`dictation::run_toggle`]; this wrapper just
+/// passes the shell env.
 pub(crate) fn do_toggle() -> Result<(), String> {
-    // Gate: starting a recording without mic authorization would flip the
-    // phase machine to RECORDING, fail at audio_start_capture, then
-    // bounce back to ERROR — confusing UX. The mic-banner already tells
-    // the user how to fix this; refuse to leave idle until it's
-    // resolved. Only gate on the begin transition; stop / cancel must
-    // always be allowed in case mic is revoked mid-recording.
-    if !dictation::is_recording() && !permissions::is_mic_authorized() {
-        verbose_log!(
-            "[ow.dictation] toggle blocked: mic not authorized; staying idle"
-        );
-        return Ok(());
-    }
-    let action = dictation::dictation_request_toggle();
-    match action {
-        TOGGLE_BEGIN_RECORDING => {
-            // Kick off model load lazily on first record so the UI's
-            // "loading model" phase reflects real work. ensure_loaded is
-            // idempotent — subsequent toggles short-circuit.
-            dictation::dictation_mark_loading_model();
-            thread::Builder::new()
-                .name("openwhisper-recognizer-load".into())
-                .spawn(|| {
-                    if let Err(e) = recognizer::recognizer_ensure_loaded() {
-                        dictation::dictation_deliver_error(&format!(
-                            "recognizer load failed: {e}"
-                        ));
-                    }
-                })
-                .expect("spawn recognizer loader");
-            // Fade out + pause other apps' audio BEFORE opening the
-            // mic. See `pause_audio_for_recording` doc.
-            pause_audio_for_recording();
-            audio::audio_start_capture()?;
-            dictation::dictation_mark_capture_started();
-        }
-        TOGGLE_STOP_RECORDING => {
-            // Stop capture is cheap (cpal stream teardown). The expensive
-            // bit — sinc resampling the buffer to 16 kHz — used to run
-            // here on the hotkey thread, blocking the phase transition
-            // and freezing the UI on "recording" for ~1–2 s on Windows.
-            // Now we flip phase optimistically and let the worker thread
-            // drain + resample as the first step of transcription.
-            audio::audio_stop_capture();
-            dictation::dictation_mark_transcribing_pending();
-            spawn_stop_pipeline();
-            resume_audio_after_recording();
-        }
-        _ => {}
-    }
-    Ok(())
+    dictation::run_toggle(&TauriDictationEnv)
 }
 
 /// Shared cancel path. See [`do_toggle`].
 pub(crate) fn do_cancel() -> bool {
-    audio::audio_stop_capture();
-    let _ = audio::audio_drain_samples();
-    let cancelled = dictation::dictation_request_cancel();
-    resume_audio_after_recording();
-    cancelled
+    dictation::run_cancel(&TauriDictationEnv)
 }
 
 #[tauri::command]
@@ -402,117 +368,24 @@ fn audio_get_device_state() -> AudioDeviceState {
 
 #[tauri::command]
 fn audio_preview_start() -> Result<(), String> {
-    // AC #3: preview is mutually exclusive with an active recording.
-    // The hotkey path can't slip in between this check and start_preview
-    // because audio_start_capture itself stops the preview, but if a
-    // recording IS already in flight we'd otherwise get a confusing
-    // "preview rejected" error from the worker — return the precise
-    // reason here instead.
-    if dictation::is_recording() {
-        return Err("recording in progress".into());
-    }
-    // Same audio-ducking semantics as a real recording: pause other
-    // apps' audio BEFORE opening the mic so BT headphones don't sit
-    // in HFP/mono with music still mid-playback. Gated on the
-    // existing `pause_audio_during_dictation` master toggle.
-    pause_audio_for_recording();
-    audio::audio_preview_start()
+    dictation::run_preview_start(&TauriDictationEnv)
 }
 
 #[tauri::command]
 fn audio_preview_stop() {
-    audio::audio_preview_stop();
-    resume_audio_after_recording();
-}
-
-// Drain the captured buffer (downmix + sinc resample to 16 kHz) and run
-// the recognizer, both on a worker thread. The hotkey thread has already
-// flipped phase to TRANSCRIBING via dictation_mark_transcribing_pending,
-// so the UI redraws *before* this work starts.
-//
-// Mac path = FluidAudio + ANE; Win path = sherpa-onnx + CPU. See
-// core/src/recognizer/mod.rs for the OS-conditional impl.
-fn spawn_stop_pipeline() {
-    thread::Builder::new()
-        .name("openwhisper-stop-pipeline".into())
-        .spawn(move || {
-            let t_drain = std::time::Instant::now();
-            let samples = audio::audio_drain_samples();
-            let count = samples.len() as u64;
-            let drain_ms = t_drain.elapsed().as_millis();
-            // Energy-VAD over the drained samples — the stats writer
-            // reads this off dictation state and uses it as the
-            // recording's effective duration_ms in place of wall-clock,
-            // so silence at the tail doesn't penalize Time Saved.
-            // Sample rate is the constant 16 kHz core resamples to
-            // before exposing samples (audio::TARGET_SAMPLE_RATE).
-            let voiced_ms = audio::estimate_voiced_ms(&samples, 16_000);
-            dictation::dictation_set_voiced_ms(voiced_ms);
-            // Empty mic → mark_capture_stopped flips phase back to DONE
-            // with "no audio captured". Populated → updates sample_count
-            // and reaffirms TRANSCRIBING (no-op vs the optimistic flip).
-            dictation::dictation_mark_capture_stopped(count);
-            if count == 0 {
-                verbose_log!("[ow.dictation] stop empty drain_ms={drain_ms}");
-                return;
-            }
-            // Defensive: recognizer_transcribe requires the engine to be
-            // initialized. Loader was kicked off at recording start, but
-            // a slow first-load might still be in flight — re-call
-            // ensure_loaded so we block until it's ready.
-            let t_load = std::time::Instant::now();
-            if let Err(e) = recognizer::recognizer_ensure_loaded() {
-                dictation::dictation_deliver_error(&format!("recognizer load: {e}"));
-                return;
-            }
-            let load_ms = t_load.elapsed().as_millis();
-            let t_tx = std::time::Instant::now();
-            match recognizer::recognizer_transcribe(&samples) {
-                Ok(res) => {
-                    let transcribe_ms = t_tx.elapsed().as_millis();
-                    let cleaned = transcript::process(&res.text);
-                    verbose_log!(
-                        "[ow.dictation] stop drain_ms={drain_ms} ensure_loaded_ms={load_ms} \
-                         transcribe_ms={transcribe_ms} samples={count} chars={} confidence={:.2}",
-                        cleaned.len(),
-                        res.confidence
-                    );
-                    dictation::dictation_deliver_transcript(&cleaned, res.confidence);
-                }
-                Err(e) => dictation::dictation_deliver_error(&format!("transcribe: {e}")),
-            }
-        })
-        .expect("spawn stop pipeline");
+    dictation::run_preview_stop(&TauriDictationEnv)
 }
 
 // Cold-loading the recognizer takes ~2.5s on Windows (sherpa-onnx + Parakeet
 // int8). Doing it at boot on a background thread means the in-line load
 // inside dictation_toggle becomes a no-op once this completes, so the first
 // Record click decodes at steady-state latency instead of paying the wait.
-// recognizer_ensure_loaded is idempotent, so a slow warmup overlapping a
-// fast first Record still yields the same correct result — spawn_recognizer
-// blocks on it.
-//
-// Phase ownership during warmup: we flip dictation phase to LOADING_MODEL
-// on entry so the UI surfaces the boot-time download (~487 MB on first
-// run). On success we hand control back to IDLE via dictation_mark_loaded
-// — that helper only flips IDLE if phase is still LOADING_MODEL, so a
-// user-driven recording start that overlaps with the warmup completion
-// isn't clobbered. On failure we route through deliver_error so the
-// recognizer banner picks it up.
+// The body lives in core::dictation::run_warmup; the shell owns only the
+// thread spawn.
 fn spawn_recognizer_warmup() {
     thread::Builder::new()
         .name("openwhisper-recognizer-warmup".into())
-        .spawn(|| {
-            dictation::dictation_mark_loading_model();
-            match recognizer::recognizer_ensure_loaded() {
-                Ok(()) => dictation::dictation_mark_loaded(),
-                Err(e) => {
-                    eprintln!("[warmup] recognizer load failed: {e}");
-                    dictation::dictation_deliver_error(&format!("recognizer load: {e}"));
-                }
-            }
-        })
+        .spawn(dictation::run_warmup)
         .expect("spawn recognizer warmup");
 }
 

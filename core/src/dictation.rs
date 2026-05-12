@@ -554,6 +554,217 @@ pub fn dictation_deliver_error(message: &str) {
     );
 }
 
+/// Platform-glue dependencies the dictation orchestration needs from the
+/// shell:
+///
+/// - mic authorization (Mac AVCaptureDevice TCC; trivially true on
+///   Windows / Linux until they grow one)
+/// - the media-gate pause / resume pair (the shell wraps
+///   [`crate::media_gate`] with its registered platform controller)
+/// - a worker-thread spawn shim (the shell owns thread naming + thread
+///   panics, so we hand a named closure across the boundary instead of
+///   pulling `std::thread` into core orchestration paths)
+///
+/// Lives under `feature = "recognizer"` because the run_* fns that consume
+/// this trait call into the recognizer subsystem; the SwiftUI shell drives
+/// its own dictation loop in Swift and never compiles this surface.
+#[cfg(feature = "recognizer")]
+pub trait DictationEnv {
+    fn mic_authorized(&self) -> bool;
+    fn pause_audio(&self);
+    fn resume_audio(&self);
+    /// Spawn `f` on a named worker thread. The shell owns the spawn so it
+    /// can pick its own naming convention + decide how to handle panics
+    /// from the closure (typically: let them propagate to the panic hook
+    /// that writes a crash file).
+    fn spawn(&self, name: &'static str, f: Box<dyn FnOnce() + Send + 'static>);
+}
+
+/// Run a user-initiated dictation toggle. Implements the five-step
+/// orchestration: mic-auth gate, request_toggle, mark_loading_model +
+/// background recognizer load, pause-gate, audio_start_capture,
+/// mark_capture_started; stop branch: stop_capture,
+/// mark_transcribing_pending, spawn stop pipeline, resume-gate.
+///
+/// Returns `Err` only when `audio_start_capture` fails — every other
+/// branch is fire-and-forget (mark_* / deliver_error path).
+#[cfg(feature = "recognizer")]
+pub fn run_toggle<E: DictationEnv>(env: &E) -> Result<(), String> {
+    // Gate: starting a recording without mic authorization would flip the
+    // phase machine to RECORDING, fail at audio_start_capture, then
+    // bounce back to ERROR — confusing UX. The mic-banner already tells
+    // the user how to fix this; refuse to leave idle until it's
+    // resolved. Only gate on the begin transition; stop / cancel must
+    // always be allowed in case mic is revoked mid-recording.
+    if !is_recording() && !env.mic_authorized() {
+        crate::verbose_log!(
+            "[ow.dictation] toggle blocked: mic not authorized; staying idle"
+        );
+        return Ok(());
+    }
+    let action = dictation_request_toggle();
+    match action {
+        TOGGLE_BEGIN_RECORDING => {
+            // Kick off model load lazily on first record so the UI's
+            // "loading model" phase reflects real work. ensure_loaded is
+            // idempotent — subsequent toggles short-circuit.
+            dictation_mark_loading_model();
+            env.spawn(
+                "openwhisper-recognizer-load",
+                Box::new(|| {
+                    if let Err(e) = crate::recognizer::recognizer_ensure_loaded() {
+                        dictation_deliver_error(&format!("recognizer load failed: {e}"));
+                    }
+                }),
+            );
+            // Fade out + pause other apps' audio BEFORE opening the
+            // mic. See `media_gate::pause` doc.
+            env.pause_audio();
+            crate::audio::audio_start_capture()?;
+            dictation_mark_capture_started();
+        }
+        TOGGLE_STOP_RECORDING => {
+            // Stop capture is cheap (cpal stream teardown). The expensive
+            // bit — sinc resampling the buffer to 16 kHz — used to run
+            // here on the hotkey thread, blocking the phase transition
+            // and freezing the UI on "recording" for ~1–2 s on Windows.
+            // Now we flip phase optimistically and let the worker thread
+            // drain + resample as the first step of transcription.
+            crate::audio::audio_stop_capture();
+            dictation_mark_transcribing_pending();
+            env.spawn(
+                "openwhisper-stop-pipeline",
+                Box::new(run_stop_pipeline),
+            );
+            env.resume_audio();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Run a user-initiated cancel. Stops audio capture, drains the buffer
+/// (samples are discarded), flips the phase machine to IDLE without
+/// emitting a transcript, and resumes paused media. Returns `true` if a
+/// recording was actually cancelled.
+#[cfg(feature = "recognizer")]
+pub fn run_cancel<E: DictationEnv>(env: &E) -> bool {
+    crate::audio::audio_stop_capture();
+    let _ = crate::audio::audio_drain_samples();
+    let cancelled = dictation_request_cancel();
+    env.resume_audio();
+    cancelled
+}
+
+/// Begin an audio-preview session (Settings → Audio mic meter). Mutually
+/// exclusive with an active recording — the hotkey path can't slip in
+/// between this check and start_preview because audio_start_capture
+/// itself stops the preview, but if a recording IS already in flight we
+/// return the precise reason here.
+///
+/// Same audio-ducking semantics as a real recording: pause other apps'
+/// audio BEFORE opening the mic so BT headphones don't sit in HFP/mono
+/// with music still mid-playback.
+#[cfg(feature = "recognizer")]
+pub fn run_preview_start<E: DictationEnv>(env: &E) -> Result<(), String> {
+    if is_recording() {
+        return Err("recording in progress".into());
+    }
+    env.pause_audio();
+    crate::audio::audio_preview_start()
+}
+
+/// End the audio-preview session and resume any paused media.
+#[cfg(feature = "recognizer")]
+pub fn run_preview_stop<E: DictationEnv>(env: &E) {
+    crate::audio::audio_preview_stop();
+    env.resume_audio();
+}
+
+/// Drain the captured buffer (downmix + sinc resample to 16 kHz) and run
+/// the recognizer. Designed to run inside a worker thread spawned by the
+/// shell after [`run_toggle`] flips phase to TRANSCRIBING — the hotkey
+/// thread has already redrawn the UI by the time this starts.
+///
+/// Mac path = FluidAudio + ANE; Win path = sherpa-onnx / ort + CPU. See
+/// `recognizer/mod.rs` for the OS-conditional impl.
+#[cfg(feature = "recognizer")]
+pub fn run_stop_pipeline() {
+    let t_drain = std::time::Instant::now();
+    let samples = crate::audio::audio_drain_samples();
+    let count = samples.len() as u64;
+    let drain_ms = t_drain.elapsed().as_millis();
+    // Energy-VAD over the drained samples — the stats writer reads this
+    // off dictation state and uses it as the recording's effective
+    // duration_ms in place of wall-clock, so silence at the tail
+    // doesn't penalize Time Saved. Sample rate is the constant 16 kHz
+    // core resamples to before exposing samples
+    // (audio::TARGET_SAMPLE_RATE).
+    let voiced_ms = crate::audio::estimate_voiced_ms(&samples, 16_000);
+    dictation_set_voiced_ms(voiced_ms);
+    // Empty mic → mark_capture_stopped flips phase back to DONE with
+    // "no audio captured". Populated → updates sample_count and
+    // reaffirms TRANSCRIBING (no-op vs the optimistic flip).
+    dictation_mark_capture_stopped(count);
+    if count == 0 {
+        crate::verbose_log!("[ow.dictation] stop empty drain_ms={drain_ms}");
+        return;
+    }
+    // Defensive: recognizer_transcribe requires the engine to be
+    // initialized. Loader was kicked off at recording start, but a slow
+    // first-load might still be in flight — re-call ensure_loaded so we
+    // block until it's ready.
+    let t_load = std::time::Instant::now();
+    if let Err(e) = crate::recognizer::recognizer_ensure_loaded() {
+        dictation_deliver_error(&format!("recognizer load: {e}"));
+        return;
+    }
+    let load_ms = t_load.elapsed().as_millis();
+    let t_tx = std::time::Instant::now();
+    match crate::recognizer::recognizer_transcribe(&samples) {
+        Ok(res) => {
+            let transcribe_ms = t_tx.elapsed().as_millis();
+            let cleaned = crate::transcript::process(&res.text);
+            crate::verbose_log!(
+                "[ow.dictation] stop drain_ms={drain_ms} ensure_loaded_ms={load_ms} \
+                 transcribe_ms={transcribe_ms} samples={count} chars={} confidence={:.2}",
+                cleaned.len(),
+                res.confidence
+            );
+            dictation_deliver_transcript(&cleaned, res.confidence);
+        }
+        Err(e) => dictation_deliver_error(&format!("transcribe: {e}")),
+    }
+}
+
+/// Background warmup of the recognizer at app boot. Cold-loading on
+/// Windows takes ~2.5 s (sherpa-onnx + Parakeet int8); doing it on a
+/// worker thread at boot means the in-line load inside
+/// [`run_toggle`]'s begin branch becomes a no-op once this completes, so
+/// the first Record click decodes at steady-state latency instead of
+/// paying the wait. `recognizer_ensure_loaded` is idempotent, so a slow
+/// warmup overlapping a fast first Record still yields the correct
+/// result.
+///
+/// Phase ownership during warmup: flips dictation phase to LOADING_MODEL
+/// on entry so the UI surfaces the boot-time download (~487 MB on first
+/// run). On success, hands control back to IDLE via
+/// `dictation_mark_loaded` — that helper only flips IDLE if phase is
+/// still LOADING_MODEL, so a user-driven recording start that overlaps
+/// with the warmup completion isn't clobbered. On failure, routes
+/// through `deliver_error` so the recognizer banner picks it up.
+#[cfg(feature = "recognizer")]
+pub fn run_warmup() {
+    dictation_mark_loading_model();
+    match crate::recognizer::recognizer_ensure_loaded() {
+        Ok(()) => dictation_mark_loaded(),
+        Err(e) => {
+            eprintln!("[warmup] recognizer load failed: {e}");
+            dictation_deliver_error(&format!("recognizer load: {e}"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, MutexGuard};

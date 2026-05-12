@@ -1,7 +1,7 @@
 ---
 id: TASK-81.2
 title: 'Plan Task 2: Extract orchestration from Tauri shell into core/'
-status: In Review
+status: Done
 assignee: []
 created_date: '2026-05-04 15:09'
 updated_date: '2026-05-12'
@@ -57,4 +57,6 @@ Commit C — Orchestration (160b562): `DictationEnv` trait (`mic_authorized()`, 
 Verification at session close: cargo check --workspace clean (default + tauri + macos-shell flavors); cargo test -p openwhisper-core --lib 111/111 passes under both default and --features tauri; pnpm test:ui (Playwright) 117/117 passes.
 
 Now In Review pending the audit doc 2 (doc-38) reviewer pass.
+
+**Done (2026-05-12):** Mac QA in `pnpm dev:tauri` green (dictation toggle / cancel / audio preview / fullscreen suppression / recognizer warmup all exercise the new `DictationEnv`-driven core paths via the `TauriDictationEnv` shell adapter). Windows QA on the user's Win box green — Windows compiles the same `--features tauri` branch and routes through `run_*` fns identically; user-driven dictation flow passed end-to-end.
 <!-- SECTION:NOTES:END -->

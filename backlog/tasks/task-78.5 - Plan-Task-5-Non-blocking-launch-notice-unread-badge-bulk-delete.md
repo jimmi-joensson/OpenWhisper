@@ -1,7 +1,7 @@
 ---
 id: TASK-78.5
 title: 'Plan Task 5: Delta-driven launch toast + persistent rail dot + bulk delete'
-status: In Review
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-05-04 06:16'
@@ -62,5 +62,5 @@ Shim default for `crashes_get_last_seen_unread` is `Number.MAX_SAFE_INTEGER` so 
 
 Verification: pnpm test:ui 122/122 passes (was 117 before — 5 new tests added).
 
-Now In Review.
+**Done (2026-05-12):** Mac QA in `pnpm dev:tauri` green (boot toast fires after triggering a panic; View routes to Diagnostics overview; rail dot persists separately from toast acknowledgement). Windows QA on the user's Win box green; cross-platform behavior confirmed.
 <!-- SECTION:NOTES:END -->

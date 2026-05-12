@@ -1,7 +1,9 @@
 //! Microphone capture for OpenWhisper.
 //!
-//! Owns a dedicated worker thread that holds the cpal stream. Swift drives
-//! it via the pull-based FFI in [`crate::ffi`]: start, talk, stop + drain.
+//! Owns a dedicated worker thread that holds the cpal stream. The shell
+//! drives it via start / talk / stop + drain — on macOS the SwiftUI app
+//! goes through the pull-based swift-bridge FFI exported from
+//! `core/src/lib.rs`; the Tauri shell calls the same fns directly.
 //! Output is always 16 kHz mono f32 so FluidAudio can consume it directly.
 
 use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicU32, AtomicU64, Ordering}, mpsc};
@@ -44,6 +46,7 @@ fn level_epoch() -> Instant {
 // device is present we transparently fall back to the host default.
 static SELECTED_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, PartialEq, Eq, Hash)]
 pub struct AudioDeviceInfo {
     /// Stable cpal device id (Display form: "host:device_id"). Used for
@@ -62,7 +65,7 @@ pub struct AudioDeviceInfo {
 /// `selected_present` is `true` when that selection currently enumerates
 /// (or when no selection is set — host-default is always "present"); the
 /// React picker uses `false` to render a disconnected marker on the saved
-/// row. `default_label` powers Discord-style "System default (<label>)"
+/// row. `default_label` powers Discord-style `System default (<label>)`
 /// rows so the user can see which device the system default currently
 /// resolves to.
 #[non_exhaustive]
@@ -843,7 +846,7 @@ pub fn audio_get_selected_device_id() -> Option<String> {
 
 /// Display label of the host's current default input device, or `None` if
 /// no default is reported. Used by the Settings UI to render the
-/// "System default (<device label>)" option à la Discord. The default can
+/// `System default (<device label>)` option à la Discord. The default can
 /// change while the app is running (user toggles a Bluetooth headset,
 /// AirPods auto-route on connect), so callers that surface this in the UI
 /// should poll and refresh rather than caching the boot-time value.
@@ -852,6 +855,7 @@ pub fn audio_default_input_label() -> Option<String> {
     host.default_input_device().and_then(|d| device_label(&d))
 }
 
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectedDeviceStatus {
     /// Saved id matches a device in the current input list.

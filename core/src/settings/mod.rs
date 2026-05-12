@@ -381,7 +381,7 @@ pub fn set_bt_resume_delay_ms_cache(value: u64) {
 
 /// Lock-free read of `performance.keep_models_warm`. Read by
 /// [`crate::model_lifecycle::apply_keep_warm`] and by
-/// [`ModelHandle::with_idle_timeout`] at construction time so a
+/// `ModelHandle::with_idle_timeout` at construction time so a
 /// fresh handle inherits the persisted preference.
 pub fn keep_models_warm() -> bool {
     KEEP_MODELS_WARM.load(Ordering::Relaxed)
@@ -630,9 +630,9 @@ pub fn current_performance_settings() -> Option<PerformanceSettings> {
 }
 
 /// Load the performance block from disk on the first call, then
-/// cache. Side-effect: hydrates [`KEEP_MODELS_WARM`] so any handle
-/// constructed via `ModelHandle::with_idle_timeout` after this point
-/// sees the persisted value.
+/// cache. Side-effect: hydrates the `KEEP_MODELS_WARM` lock-free
+/// mirror so any handle constructed via `ModelHandle::with_idle_timeout`
+/// after this point sees the persisted value.
 pub fn load_performance_settings(path: &Path) -> PerformanceSettings {
     if let Some(s) = PERFORMANCE_CURRENT.lock().ok().and_then(|g| *g) {
         return s;

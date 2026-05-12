@@ -29,6 +29,7 @@ static ON_INSERT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// are computed against the user's local timezone so a dictation at
 /// 11 PM and another at 1 AM both count to "today" and "yesterday"
 /// respectively, regardless of UTC offset.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct StatsSummary {

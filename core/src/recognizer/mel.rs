@@ -41,6 +41,7 @@ pub const NORM_EPS: f32 = 1.0e-5;
 
 /// Reusable mel preprocessor. Keep one instance across decodes so the
 /// FFT plan + filterbank allocation amortize.
+#[non_exhaustive]
 pub struct MelExtractor {
     fft: Arc<dyn Fft<f32>>,
     /// Hann window of length WIN_LENGTH (zero-padded to N_FFT inside the

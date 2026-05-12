@@ -43,6 +43,7 @@ pub use fluidaudio::FluidAudioBridge;
 pub use ort_parakeet::OrtParakeet;
 
 /// Outcome of a single utterance.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct TranscribeResult {
     pub text: String,

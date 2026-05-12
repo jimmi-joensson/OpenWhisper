@@ -8,7 +8,7 @@
 //! Platform behavior lives in shell-side impls of [`MediaController`]
 //! (AppleScript MediaRemote on macOS, SMTC on Windows). Core owns the
 //! gate state machine and the cross-platform diagnostic shape; the
-//! shell wires a controller via [`OnceLock`]/[`Arc`] and invokes the
+//! shell wires a controller via `OnceLock` / `Arc` and invokes the
 //! gate fns from the dictation lifecycle.
 //!
 //! Diagnostic surface ([`PauseDiagnostic`]) is opt-in per-platform via

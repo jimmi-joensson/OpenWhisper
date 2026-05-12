@@ -17,8 +17,20 @@
 //! - `stats` — read-side aggregator
 //! - `store` — persistence handle
 //!
-//! Recognizer types are gated behind the `recognizer` feature
-//! because consumers without that feature can't construct one.
+//! # Feature gating
+//!
+//! Targets the **default** and **tauri** feature flavors. Both pull in
+//! the full library surface (including the recognizer subsystem under
+//! `--features tauri = ["recognizer"]`). The two `recognizer`-gated
+//! re-exports at the bottom (`Recognizer`, `TranscribeResult`,
+//! `recognizer_info`) compile only when the `recognizer` feature is on.
+//!
+//! The **macos-shell** flavor (shipped SwiftUI app) does NOT consume
+//! this prelude — Swift drives core via per-module `swift-bridge` FFI
+//! signatures declared in `core/src/lib.rs`'s `#[swift_bridge::bridge]`
+//! block, not Rust-side `use` statements. macos-shell builds compile
+//! this prelude module for free (no swift-bridge code generation
+//! against it) but no shell consumer reaches through it.
 
 pub use crate::audio::{AudioDeviceInfo, AudioEngine, SelectedDeviceStatus};
 pub use crate::diagnostics::{

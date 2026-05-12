@@ -4,7 +4,7 @@
 //!   - `pnpm dev:tauri --verbose` (the dev script wires the env var)
 //!   - `OPENWHISPER_VERBOSE=1` set before launching the binary directly
 //!
-//! Use the [`verbose_log!`] macro at any pipeline checkpoint that should
+//! Use the `verbose_log!` macro at any pipeline checkpoint that should
 //! emit timing or state info for the automated-feedback-loop scripts.
 //! Output goes to stderr, prefixed with `[ow.<area>]` so consumers can
 //! grep / parse without sifting through unrelated chatter from cpal,

@@ -4,7 +4,7 @@ title: 'Plan Task 3: Stabilize public API — prelude, doc-comments, non_exhaust
 status: In Progress
 assignee: []
 created_date: '2026-05-04 15:09'
-updated_date: '2026-05-06'
+updated_date: '2026-05-12'
 labels:
   - 81-impl
 milestone: m-1
@@ -23,11 +23,11 @@ Treat the post-extraction public surface as a real API: prelude module, doc-comm
 <!-- AC:BEGIN -->
 - [x] #1 core::prelude module exists and exports the canonical types named in the spec
 - [ ] #2 Every pub item in prelude-exported modules has a doc-comment explaining return type and failure modes
-- [ ] #3 cargo doc --no-deps -p openwhisper-core renders without warnings on prelude items
+- [x] #3 cargo doc --no-deps -p openwhisper-core renders without warnings on prelude items
 - [x] #4 cargo build --workspace clean
-- [ ] #5 Every named pub enum + struct (Phase, Toggle, SelectedDeviceStatus at audio.rs:609, TranscribeResult at recognizer/mod.rs:44, Snapshot, RecognizerInfo, DiagnosticsReadout, CrashDump) is #[non_exhaustive] or has comment citing concrete reason
+- [x] #5 Every named pub enum + struct (Phase, Toggle, SelectedDeviceStatus at audio.rs:609, TranscribeResult at recognizer/mod.rs:44, Snapshot, RecognizerInfo, DiagnosticsReadout, CrashDump) is #[non_exhaustive] or has comment citing concrete reason
 - [x] #6 cargo build -p openwhisper-core --features macos-shell still clean — prelude reshuffle does not break SwiftUI shell
-- [ ] #7 core/src/prelude.rs header comment documents that prelude is for default + tauri features; macos-shell uses per-module FFI signatures
+- [x] #7 core/src/prelude.rs header comment documents that prelude is for default + tauri features; macos-shell uses per-module FFI signatures
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -42,4 +42,14 @@ Deferred for follow-up (AC #2, #3, #5, #7):
 - Sweep the doc-comment punch list from doc-37 — every remaining undocumented `pub fn` / `pub struct` / `pub enum` in prelude-exported modules, plus `#![warn(missing_docs)]` enforcement on `core/src/lib.rs`.
 - `#[non_exhaustive]` on the remaining items in the audit checklist: `audio::AudioDeviceInfo`, `audio::SelectedDeviceStatus`, `dictation::DictationSnapshot`, `transcript::FillerLang`, `recognizer::TranscribeResult`, `recognizer::mel::MelExtractor`, `recognizer::download::ModelPaths`, `stats::StatsSummary`, `store::StoreError`. Add the planned `Phase` / `ToggleAction` enums when extracting from the `pub const u32` constants.
 - `core/src/prelude.rs` header comment about feature-gating (AC #7) — currently the prelude compiles under macos-shell; re-validate intent before committing to the AC's wording.
+
+**Post-cleanup session (2026-05-12) — AC #3 / #5 / #7 ship:**
+
+- AC #3: `cargo doc --no-deps -p openwhisper-core --features tauri` now renders without warnings. The 9 warnings present at the start of the session were all intra-doc-link / HTML-tag-interpretation issues (`[`crate::ffi`]`, `[`OnceLock`]`, `[`Arc`]`, `[`ModelHandle::with_idle_timeout`]`, `[`KEEP_MODELS_WARM`]`, `[`migrations`]`, `[`verbose_log!`]`, two `<label>` / `<device>` HTML tags in inline copy). Each fixed by either replacing the intra-doc-link with backticks (the target lives in another flavor's compilation scope or is private) or escaping the angle-bracketed copy as a code span.
+- AC #5: `#[non_exhaustive]` added to `audio::AudioDeviceInfo`, `audio::SelectedDeviceStatus`, `audio::AudioDeviceState` (during Commit E), `dictation::DictationSnapshot`, `dictation::FullscreenAction` (during Commit C phase 1), `transcript::FillerLang`, `recognizer::TranscribeResult`, `recognizer::mel::MelExtractor`, `recognizer::download::ModelPaths`, `stats::StatsSummary`, `store::StoreError`. The Phase / ToggleAction enum extraction (audit's "Task 3 *will* extract it") stays deferred — it's a bigger u32-to-enum refactor with FFI implications; tracked as follow-up.
+- AC #7: prelude.rs header now documents the default + tauri feature scope and explicitly calls out that macos-shell builds compile this module for free without consuming it (Swift drives core via `#[swift_bridge::bridge]` FFI signatures, not Rust `use` statements).
+
+Remaining: AC #2 — the 161-item `#![warn(missing_docs)]` sweep across prelude-exported modules. This is prose-authoring work, not architectural; planned as a discrete cleanup pass before flipping the task to In Review (subtask-tracked, not bundled with structural refactors).
+
+Verification: cargo check --workspace + --features macos-shell clean; cargo test -p openwhisper-core --lib 111/111 under both default and --features tauri; cargo doc --no-deps -p openwhisper-core --features tauri zero warnings.
 <!-- SECTION:NOTES:END -->

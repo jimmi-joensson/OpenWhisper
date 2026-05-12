@@ -23,6 +23,7 @@ use std::sync::LazyLock;
 
 use regex::{Regex, RegexBuilder};
 
+#[non_exhaustive]
 pub enum FillerLang {
     En,
     Da,

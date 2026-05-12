@@ -18,6 +18,7 @@ const MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download
 /// while still feeling smooth in the UI.
 const DOWNLOAD_CHUNK_BYTES: usize = 1 * 1024 * 1024;
 
+#[non_exhaustive]
 pub struct ModelPaths {
     pub encoder: PathBuf,
     pub decoder: PathBuf,

@@ -92,6 +92,7 @@ impl State {
 /// Snapshot object returned across FFI. Owned by Rust, accessed via
 /// swift-bridge opaque type methods from Swift — avoids field tearing
 /// because the whole struct is captured under one mutex lock.
+#[non_exhaustive]
 pub struct DictationSnapshot {
     phase: u32,
     status_message: String,

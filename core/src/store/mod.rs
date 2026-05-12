@@ -6,9 +6,9 @@
 //! to [`Store::open_or_init`]; core/ owns everything from the connection
 //! down so the same code runs on macOS and Windows.
 //!
-//! Schema migrations live in the (still-empty) [`migrations`] module and
-//! are applied by `to_latest` during `open_or_init`. Migration 1 lands in
-//! TASK-87.2 and creates the `dictations` table.
+//! Schema migrations live in the (crate-private) `migrations` submodule
+//! and are applied by `to_latest` during `open_or_init`. Migration 1
+//! lands in TASK-87.2 and creates the `dictations` table.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -17,6 +17,7 @@ use rusqlite::Connection;
 
 mod migrations;
 
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum StoreError {
     Io(std::io::Error),

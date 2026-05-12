@@ -38,7 +38,7 @@ Local-first hotkey dictation for macOS and Windows. macOS DMG + Windows MSI / NS
 - New General-pane Switch: when ON, models stay resident across idle windows; when OFF, the idle timer auto-releases the recognizer after a configured deadline
 - ModelHandle state machine + idle timer live in `core/`; persisted via `settings_set_keep_models_warm`
 
-**AppleScript Automation TCC surfacing (TASK-82, Mac)**
+**AppleScript Automation TCC surfacing (TASK-90, Mac)**
 - When pause-during-dictation hits an AppleScript Automation denial for Spotify or Apple Music, the app now surfaces the TCC denial in the audio-ducking flow instead of failing silently
 
 **Boot permission flow — AX strictly before mic (Mac)**

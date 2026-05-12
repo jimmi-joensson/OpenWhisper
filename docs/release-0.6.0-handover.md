@@ -21,7 +21,8 @@ new CLI binary under `cli/`. Tasks tracked via Backlog.md CLI
 
 - Last release tag: `v0.5.0` (2026-05-03). Commits between v0.5.0 and the
   v0.6.0 tag span TASK-62 (PRs #18 + #22), TASK-78 (PR #21), TASK-81 (PR #17),
-  TASK-82 (PR #15), TASK-87/88/89 (PR #16), and a few small follow-ups.
+  TASK-90 (PR #15, formerly TASK-82 — renamed to resolve ID collision with the
+  m-1 PR-gate CI task), TASK-87/88/89 (PR #16), and a few small follow-ups.
 - Versions in `apps/tauri/package.json` + `apps/tauri/src-tauri/tauri.conf.json`
   + `apps/tauri/src-tauri/Cargo.toml` + `core/Cargo.toml` all bumped to `0.6.0`
   in the version-bump commit on `main` ahead of tagging. `Cargo.lock` carries
@@ -57,7 +58,7 @@ User-visible changes since v0.5.0, grouped by area:
 - **Home stats strip** (TASK-87/88/89) — Dictations today / week / all time +
   Time saved, with a Reset stats action and a Typing-speed input under
   Settings → General. SQLite-backed.
-- **AppleScript Automation TCC surfacing** (TASK-82, Mac-only — relevant to
+- **AppleScript Automation TCC surfacing** (TASK-90, Mac-only — relevant to
   Win only insofar as it confirms Mac parity).
 - **`openwhisper` CLI** (TASK-81) — cross-platform binary mirroring the
   headless library surface. Built as a sibling target; the MSI does not bundle

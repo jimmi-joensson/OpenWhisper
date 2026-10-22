@@ -15,3 +15,11 @@ This product includes the following third-party components:
   Attribution is required wherever the model is bundled or redistributed.
   In OpenWhisper, this attribution is surfaced in-app (About screen) and
   in this NOTICE file.
+
+  Symphonia (audio/video demuxing and decoding, used by file transcription)
+  Copyright (c) 2019-2026 The Project Symphonia Developers
+  Licensed under the Mozilla Public License 2.0 (MPL-2.0):
+  https://mozilla.org/MPL/2.0/
+  Source: https://github.com/pdeljanov/Symphonia
+  OpenWhisper uses Symphonia unmodified as a library dependency; its
+  source code is available at the URL above.

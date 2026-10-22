@@ -3,6 +3,8 @@ pub mod crashes;
 pub mod diagnostics;
 pub mod dictation;
 mod ffi_c;
+#[cfg(feature = "recognizer")]
+pub mod file_transcription;
 pub mod media_gate;
 pub mod model_lifecycle;
 pub mod prelude;

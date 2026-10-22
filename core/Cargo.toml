@@ -42,6 +42,8 @@ recognizer = [
     "dep:bzip2",
     "dep:dirs",
     "dep:num_cpus",
+    "dep:symphonia",
+    "dep:opus-decoder",
 ]
 recognizer-directml = ["recognizer", "ort?/directml"]
 recognizer-cuda = ["recognizer", "ort?/cuda"]
@@ -95,6 +97,15 @@ dirs = { version = "5", optional = true }
 # num_threads >= num_logical_cpus (SMT oversubscription). Physical-core
 # count is the safer ceiling — see TASK-39 bench notes.
 num_cpus = { version = "1.16", optional = true }
+# File transcription (TASK-91): demux + decode audio/video containers
+# (wav, mp3, m4a/aac, mp4/mov, mkv/webm, ogg, flac, aiff, caf) to PCM
+# without shelling out to ffmpeg. Pure Rust, MPL-2.0 (file-level
+# copyleft, fine as an unmodified dependency of an MIT crate).
+symphonia = { version = "0.6.1", optional = true, features = ["isomp4", "aac", "mp3", "alac", "aiff", "caf"] }
+# Symphonia has no Opus decoder; WhatsApp voice notes are Ogg/Opus.
+# Pure Rust (no libopus C build, which matters on the GNU-toolchain
+# Windows box), RFC 8251 conformant, decodes straight to 16 kHz mono.
+opus-decoder = { version = "0.1.1", optional = true }
 
 # Persistence layer — single SQLite file at <app_data_dir>/openwhisper.db,
 # owned by core/ so the state machine (TASK-87/88) writes from the same

@@ -45,6 +45,7 @@ openwhisper-core = { path = "../../../core", default-features = false, features 
 # (non-text formats lossy across both OSes — same as the WinUI 3 shell
 # shipped behavior).
 arboard = "3"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"

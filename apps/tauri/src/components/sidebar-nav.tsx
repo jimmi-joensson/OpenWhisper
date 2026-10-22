@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import {
   Activity,
   Boxes,
+  FileAudio,
   Home,
   Keyboard,
   Mic,
@@ -19,7 +20,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   shortcuts: Keyboard,
 };
 
-export type Route = "home" | "settings" | "diagnostics";
+export type Route = "home" | "transcribe" | "settings" | "diagnostics";
 
 interface SidebarNavProps {
   route: Route;
@@ -30,6 +31,7 @@ interface SidebarNavProps {
 
 const ROUTE_ITEMS: ReadonlyArray<{ id: Route; label: string; Icon: typeof Home }> = [
   { id: "home", label: "Home", Icon: Home },
+  { id: "transcribe", label: "Transcribe", Icon: FileAudio },
   { id: "settings", label: "Settings", Icon: SettingsIcon },
   { id: "diagnostics", label: "Diagnostics", Icon: Activity },
 ];

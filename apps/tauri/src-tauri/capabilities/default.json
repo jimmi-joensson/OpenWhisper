@@ -23,6 +23,7 @@
     "core:window:allow-close",
     "core:window:allow-is-maximized",
     "opener:default",
+    "dialog:allow-open",
     "autostart:default"
   ]
 }

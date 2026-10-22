@@ -1,134 +1,67 @@
-//! `openwhisper transcribe <wav>` — offline batch transcribe over
+//! `openwhisper transcribe <file>`: offline batch transcribe over
 //! the same recognizer the desktop uses.
 //!
-//! Format gate: WAV must already be 16 kHz mono (i16 or f32 PCM).
-//! Anything else bails with an actionable ffmpeg-resample message.
-//! Live capture in core re-samples cpal output internally, but the
-//! sinc resampler isn't on the public surface — for v1 the CLI
-//! pushes the format burden onto the caller.
+//! Accepts any audio or video file `core::file_transcription` can
+//! decode (wav, mp3, m4a, mp4/mov, ogg/opus, webm/mkv, flac, …) at any
+//! sample rate or channel count. Long recordings are recognized in
+//! silence-aligned chunks; progress goes to stderr.
 
-use std::path::Path;
-use std::time::Instant;
+use std::sync::atomic::AtomicBool;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
-use openwhisper_core::{recognizer, transcript};
+use openwhisper_core::file_transcription::{
+    transcribe_file, FileProgress, FileTranscribeOptions,
+};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// Path to a 16 kHz mono WAV file (i16 or f32 PCM).
-    pub wav: std::path::PathBuf,
+    /// Path to an audio or video file (wav, mp3, m4a, mp4, mov, ogg,
+    /// opus, webm, mkv, flac, aiff, caf).
+    pub file: std::path::PathBuf,
 
     /// Skip the transcript filter pipeline (filler stripping,
     /// substitutions, dedupe, whitespace normalize). Off by
-    /// default — the CLI emits the same text the desktop shell
-    /// would inject.
+    /// default; the CLI emits the same text the desktop shell
+    /// would show.
     #[arg(long)]
     pub raw: bool,
 }
 
 pub fn run(args: Args, json: bool) -> Result<()> {
-    let samples = read_wav_16khz_mono(&args.wav)
-        .with_context(|| format!("read {}", args.wav.display()))?;
-    if samples.is_empty() {
-        bail!("WAV decoded to zero samples — empty file?");
-    }
-    eprintln!(
-        "[cli.transcribe] loaded {} samples (~{:.2}s)",
-        samples.len(),
-        samples.len() as f64 / 16_000.0,
-    );
-
-    let t_load = Instant::now();
-    recognizer::recognizer_ensure_loaded()
-        .map_err(|e| anyhow!(e))
-        .context("recognizer init")?;
-    eprintln!(
-        "[cli.transcribe] recognizer ready in {} ms",
-        t_load.elapsed().as_millis(),
-    );
-
-    let t_tx = Instant::now();
-    let res = recognizer::recognizer_transcribe(&samples)
-        .map_err(|e| anyhow!(e))
-        .context("transcribe")?;
-    let transcribe_ms = t_tx.elapsed().as_millis() as u64;
-    eprintln!(
-        "[cli.transcribe] decoded in {transcribe_ms} ms confidence={:.2}",
-        res.confidence,
-    );
-
-    let text = if args.raw {
-        res.text.trim().to_string()
-    } else {
-        // process() appends a trailing space so consecutive
-        // injections don't fuse into one another. The CLI emits
-        // a single result, so drop it for clean stdout.
-        transcript::process(&res.text).trim().to_string()
+    let opts = FileTranscribeOptions::default().raw(args.raw);
+    let never_cancel = AtomicBool::new(false);
+    let mut on_progress = |p: FileProgress| match p {
+        FileProgress::Decoding => eprintln!("[cli.transcribe] decoding {}", args.file.display()),
+        FileProgress::Decoded { audio_ms } => {
+            eprintln!("[cli.transcribe] decoded ~{:.2}s of audio", audio_ms as f64 / 1000.0)
+        }
+        FileProgress::LoadingModel => eprintln!("[cli.transcribe] loading recognizer"),
+        FileProgress::Transcribing { done, total } if done > 0 => {
+            eprintln!("[cli.transcribe] chunk {done}/{total}")
+        }
+        _ => {}
     };
+
+    let res = transcribe_file(&args.file, &opts, &never_cancel, &mut on_progress)
+        .map_err(|e| anyhow!("transcribe {}: {e}", args.file.display()))?;
+    eprintln!(
+        "[cli.transcribe] decoded in {} ms, recognized in {} ms, confidence={:.2}",
+        res.decode_ms, res.transcribe_ms, res.confidence,
+    );
 
     if json {
         let value = serde_json::json!({
-            "text": text,
+            "text": res.text,
             "confidence": res.confidence,
-            "duration_ms": transcribe_ms,
+            "duration_ms": res.transcribe_ms,
+            "audio_ms": res.audio_ms,
+            "decode_ms": res.decode_ms,
+            "chunks": res.chunks,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        println!("{text}");
+        println!("{}", res.text);
     }
     Ok(())
-}
-
-fn read_wav_16khz_mono(path: &Path) -> Result<Vec<f32>> {
-    let reader = hound::WavReader::open(path)
-        .with_context(|| format!("open WAV: {}", path.display()))?;
-    let spec = reader.spec();
-    if spec.sample_rate != 16_000 {
-        bail!(
-            "WAV must be 16 kHz; got sample_rate={}. Resample with: \
-             `ffmpeg -i <in> -ar 16000 -ac 1 -sample_fmt s16 out.wav`",
-            spec.sample_rate,
-        );
-    }
-    if spec.channels != 1 {
-        bail!(
-            "WAV must be mono; got channels={}. Downmix with: \
-             `ffmpeg -i <in> -ar 16000 -ac 1 -sample_fmt s16 out.wav`",
-            spec.channels,
-        );
-    }
-    decode_samples(reader, spec)
-}
-
-fn decode_samples<R: std::io::Read>(
-    mut reader: hound::WavReader<R>,
-    spec: hound::WavSpec,
-) -> Result<Vec<f32>> {
-    use hound::SampleFormat::{Float, Int};
-    match (spec.sample_format, spec.bits_per_sample) {
-        (Int, 16) => {
-            let max = i16::MAX as f32;
-            reader
-                .samples::<i16>()
-                .map(|r| r.map(|v| v as f32 / max).map_err(|e| anyhow!(e)))
-                .collect()
-        }
-        (Int, 32) => {
-            // 32-bit int PCM is rare for speech but valid; normalize
-            // by max-positive i32.
-            let max = i32::MAX as f32;
-            reader
-                .samples::<i32>()
-                .map(|r| r.map(|v| v as f32 / max).map_err(|e| anyhow!(e)))
-                .collect()
-        }
-        (Float, 32) => reader
-            .samples::<f32>()
-            .map(|r| r.map_err(|e| anyhow!(e)))
-            .collect(),
-        (fmt, bits) => bail!(
-            "unsupported WAV format: {fmt:?} {bits}-bit. Re-encode as 16 kHz mono i16 PCM.",
-        ),
-    }
 }

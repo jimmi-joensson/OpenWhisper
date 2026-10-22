@@ -9,6 +9,7 @@
 //! - `audio` — capture + device enumeration
 //! - `dictation` — phase machine + snapshot
 //! - `diagnostics` — recognizer info + crash-dump trait surface
+//! - `file_transcription`: decode + transcribe audio/video files
 //! - `media_gate` — pause/resume gate trait + diagnostic
 //! - `model_lifecycle` — load/unload state machine for resident models
 //! - `settings` — schema types + cache accessors
@@ -59,3 +60,8 @@ pub use crate::transcript::FillerLang;
 
 #[cfg(feature = "recognizer")]
 pub use crate::recognizer::{Recognizer, TranscribeResult};
+#[cfg(feature = "recognizer")]
+pub use crate::file_transcription::{
+    FileJobSnapshot, FileProgress, FileTranscribeError, FileTranscribeOptions, FileTranscript,
+    transcribe_file,
+};

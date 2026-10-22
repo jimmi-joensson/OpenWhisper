@@ -7,8 +7,9 @@
 //!
 //! Subcommands (v1):
 //!
-//! - `transcribe <wav>` — offline batch transcribe; prints the text
-//!   to stdout (or a JSON record with `--json`).
+//! - `transcribe <file>`: offline batch transcribe of any audio or
+//!   video file; prints the text to stdout (or a JSON record with
+//!   `--json`).
 //! - `enumerate-devices` — list input devices the engine sees, one
 //!   per line (or a JSON array with `--json`). Same filter rules as
 //!   the desktop's Audio settings pane.
@@ -49,7 +50,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Decode a WAV file and print the transcript to stdout.
+    /// Transcribe an audio or video file and print the text to stdout.
     Transcribe(commands::transcribe::Args),
     /// List the input devices the recognizer would consider.
     EnumerateDevices,

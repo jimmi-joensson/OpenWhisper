@@ -573,6 +573,57 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             (w.__owCrashesDebugTriggerCount ?? 0) + 1;
           return null;
         }
+        // TASK-91 file transcription. Tests drive the job by writing
+        // `window.__owFileJob` (a FileJobSnapshot) directly; start /
+        // cancel / dialog calls are recorded for assertions.
+        if (cmd === "file_transcribe_snapshot") {
+          const w = window as unknown as { __owFileJob?: unknown };
+          return w.__owFileJob ?? null;
+        }
+        if (cmd === "file_transcribe_start") {
+          const { path } = (args ?? {}) as { path: string };
+          const w = window as unknown as {
+            __owFileJob?: unknown;
+            __owFileStarts?: string[];
+            __owFileStartError?: string;
+          };
+          if (w.__owFileStartError) throw w.__owFileStartError;
+          w.__owFileStarts = [...(w.__owFileStarts ?? []), path];
+          w.__owFileJob = {
+            phase: 1,
+            busy: true,
+            status: "Reading audio…",
+            path,
+            file_name: path.split("/").pop() ?? path,
+            progress: 0,
+            chunks_done: 0,
+            chunks_total: 0,
+            audio_ms: 0,
+            elapsed_ms: 0,
+            text: "",
+            confidence: 0,
+            error: "",
+            cancelling: false,
+          };
+          return null;
+        }
+        if (cmd === "file_transcribe_cancel") {
+          const w = window as unknown as { __owFileCancelCount?: number };
+          w.__owFileCancelCount = (w.__owFileCancelCount ?? 0) + 1;
+          return true;
+        }
+        if (cmd === "file_transcribe_clear") return null;
+        if (cmd === "file_transcribe_extensions") {
+          return ["wav", "mp3", "m4a", "opus", "mp4"];
+        }
+        if (cmd === "plugin:dialog|open") {
+          const w = window as unknown as {
+            __owDialogPick?: string | null;
+            __owDialogOptions?: unknown;
+          };
+          w.__owDialogOptions = (args as { options?: unknown } | undefined)?.options;
+          return w.__owDialogPick ?? null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = (args ?? {}) as {
             event: string;

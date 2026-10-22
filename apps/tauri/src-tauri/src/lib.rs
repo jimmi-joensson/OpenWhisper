@@ -18,6 +18,7 @@ use tauri::PhysicalPosition;
 
 mod behavior;
 mod crashes;
+mod file_transcribe;
 mod focus;
 mod fullscreen;
 mod hotkey;
@@ -766,6 +767,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // Native open-file picker for the Transcribe route (TASK-91).
+        .plugin(tauri_plugin_dialog::init())
         // Launch at login. Cross-platform autostart registration with no
         // platform-specific code on our side — the plugin handles the
         // divergence:
@@ -1225,6 +1228,11 @@ pub fn run() {
             crashes::crashes_mark_seen,
             crashes::crashes_open_folder,
             crashes::crashes_debug_trigger_panic,
+            file_transcribe::file_transcribe_start,
+            file_transcribe::file_transcribe_cancel,
+            file_transcribe::file_transcribe_snapshot,
+            file_transcribe::file_transcribe_clear,
+            file_transcribe::file_transcribe_extensions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

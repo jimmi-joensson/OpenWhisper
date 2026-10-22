@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
 import { HomePane } from "./components/home-pane";
+import { TranscribePane } from "./components/transcribe-pane";
 import { DevToolsPanel } from "./components/dev-tools-panel";
 import { CrashesLaunchToast } from "./components/crashes-launch-toast";
 import { SidebarNav, type Route } from "./components/sidebar-nav";
@@ -41,6 +42,8 @@ function titlebarTitle(route: Route): string {
       return "OpenWhisper";
     case "settings":
       return "OpenWhisper — Settings";
+    case "transcribe":
+      return "OpenWhisper — Transcribe";
     case "diagnostics":
       return "OpenWhisper — Diagnostics";
   }
@@ -126,6 +129,8 @@ function App() {
         setRoute("home");
       } else if (evt.payload === "diagnostics") {
         setRoute("diagnostics");
+      } else if (evt.payload === "transcribe") {
+        setRoute("transcribe");
       }
     }).then((fn) => {
       unlisten = fn;
@@ -217,6 +222,7 @@ function App() {
             {route === "settings" && (
               <SettingsShell active={settingsPane} onBack={goBack} />
             )}
+            {route === "transcribe" && <TranscribePane />}
             {route === "diagnostics" && (
               <DiagnosticsPane platform={platform} />
             )}

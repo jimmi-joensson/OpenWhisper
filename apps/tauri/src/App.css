@@ -739,6 +739,100 @@ body[data-platform="macos"] .ow-titlebar {
 
 /* Diagnostics route. T3 surface — section reveals only, no idle motion.
    Sparkline + readouts + breakdown bar driven by `useMemoryStats`. */
+/* TASK-91: Transcribe route. Layout mirrors .ow-diagnostics; T3
+   surface per openwhisper-animation-philosophy, so the only motion is
+   the drop zone's colour change on drag-over. */
+.ow-transcribe {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--foreground);
+}
+
+.ow-transcribe__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ow-transcribe__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ow-transcribe__sub,
+.ow-transcribe__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.5;
+}
+
+.ow-transcribe__drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  text-align: center;
+  transition:
+    border-color 120ms cubic-bezier(0.23, 1, 0.32, 1),
+    background-color 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.ow-transcribe__drop--over {
+  border-color: var(--primary);
+  background: color-mix(in oklch, var(--primary) 8%, transparent);
+}
+
+.ow-transcribe__drop[aria-disabled="true"] {
+  opacity: 0.6;
+}
+
+.ow-transcribe__drop-icon {
+  width: 28px;
+  height: 28px;
+  color: var(--muted-foreground);
+}
+
+.ow-transcribe__drop-text {
+  margin: 0;
+  font-size: 13px;
+}
+
+.ow-transcribe__formats {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--muted-foreground);
+}
+
+.ow-transcribe__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+
+.ow-transcribe__text {
+  margin: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .ow-diagnostics {
   width: 100%;
   max-width: 720px;

@@ -38,6 +38,7 @@ recognizer = [
     "dep:rustfft",
     "dep:ndarray",
     "dep:ureq",
+    "dep:sha2",
     "dep:tar",
     "dep:bzip2",
     "dep:dirs",
@@ -89,6 +90,8 @@ ndarray = { version = "0.16", optional = true }
 # Parakeet v3 model archive download + extract (same .tar.bz2 the Windows
 # shell consumes from k2-fsa/sherpa-onnx releases).
 ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
+# SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
+sha2 = { version = "0.10", optional = true }
 tar = { version = "0.4", optional = true }
 bzip2 = { version = "0.4", optional = true }
 dirs = { version = "5", optional = true }

@@ -9,10 +9,17 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::dictation;
 
 const MODEL_NAME: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
 const MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2";
+/// SHA-256 of the archive at `MODEL_URL`, matching the `digest` GitHub
+/// reports for that release asset (487170055 bytes, uploaded 2025-08-16).
+/// Pinned so a tampered or substituted download (e.g. a MITM with a
+/// mis-issued certificate) is rejected before extraction.
+const MODEL_SHA256: &str = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf";
 /// Read buffer for the chunked download. 1 MiB keeps the per-chunk
 /// progress-emit cost trivial (~470 calls for the full ~487 MB archive)
 /// while still feeling smooth in the UI.
@@ -37,7 +44,19 @@ pub fn ensure_model() -> Result<ModelPaths, String> {
         fs::create_dir_all(&cache_root)
             .map_err(|e| format!("create cache dir: {e}"))?;
         let archive = cache_root.join(format!("{MODEL_NAME}.tar.bz2"));
-        if !archive.exists() {
+        if archive.exists() {
+            // Left over from an earlier run (pre-0.6.1 builds never
+            // verified it). Re-download rather than extract unverified bytes.
+            let actual = sha256_file(&archive)?;
+            if actual != MODEL_SHA256 {
+                eprintln!(
+                    "[recognizer] cached archive sha256 mismatch ({actual}), re-downloading"
+                );
+                fs::remove_file(&archive)
+                    .map_err(|e| format!("remove bad archive: {e}"))?;
+                download_to(&archive)?;
+            }
+        } else {
             download_to(&archive)?;
         }
         extract(&archive, &cache_root)?;
@@ -96,6 +115,7 @@ fn download_to(dest: &Path) -> Result<(), String> {
     let mut reader = resp.into_reader();
     let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
     let mut done: u64 = 0;
+    let mut hasher = Sha256::new();
     // Log a stdout line each time we cross a 10 % boundary. Cheap visibility
     // for operators tailing logs (CI, support, dev shell) without flooding
     // — the per-chunk dictation_set_download_progress feeds the UI bar at
@@ -110,6 +130,7 @@ fn download_to(dest: &Path) -> Result<(), String> {
         }
         out.write_all(&buf[..n])
             .map_err(|e| format!("write archive: {e}"))?;
+        hasher.update(&buf[..n]);
         done += n as u64;
         dictation::dictation_set_download_progress(done, total);
         if total > 0 {
@@ -137,6 +158,14 @@ fn download_to(dest: &Path) -> Result<(), String> {
         ));
     }
 
+    let actual = to_hex(&hasher.finalize());
+    if actual != MODEL_SHA256 {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "download integrity check failed: sha256 {actual}, expected {MODEL_SHA256}"
+        ));
+    }
+
     fs::rename(&tmp, dest).map_err(|e| format!("rename tmp: {e}"))?;
     eprintln!(
         "[recognizer] saved archive {} ({} bytes)",
@@ -144,6 +173,24 @@ fn download_to(dest: &Path) -> Result<(), String> {
         fs::metadata(dest).map(|m| m.len()).unwrap_or(0)
     );
     Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut f = fs::File::open(path).map_err(|e| format!("open archive: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("read archive: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn extract(archive: &Path, into: &Path) -> Result<(), String> {
@@ -199,5 +246,28 @@ impl<R: Read> Read for ProgressReader<R> {
             }
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_file_matches_known_vector() {
+        let path = std::env::temp_dir().join(format!("ow-sha256-{}", std::process::id()));
+        fs::write(&path, b"abc").unwrap();
+        let got = sha256_file(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(
+            got.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn model_sha256_is_lowercase_hex() {
+        assert_eq!(MODEL_SHA256.len(), 64);
+        assert!(MODEL_SHA256.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
     }
 }

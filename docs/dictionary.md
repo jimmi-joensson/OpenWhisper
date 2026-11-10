@@ -19,6 +19,17 @@ outside the app. Core stats it before every dictation and re-reads it
 when its modification time or size changed, so an edit applies without a
 restart. A file that fails to parse keeps the last good dictionary.
 
+To let the dev build use the release build's dictionary, link its file:
+
+```sh
+cd "$HOME/Library/Application Support"
+ln -sfn "$PWD/com.openwhisper.app/dictionary.json" com.openwhisper.app.dev/dictionary.json
+```
+
+Saves write through the link (`save` resolves it) and the reload stats
+the target, so both apps see every change. Remove the link to test a
+format change in the dev build on its own file.
+
 `AGENTS.md` is `core/assets/dictionary-agents.md`, compiled in with
 `include_str!` and rewritten whenever the installed text differs, so the
 instructions always match the installed format. Edit the asset, never

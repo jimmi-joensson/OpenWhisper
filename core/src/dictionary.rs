@@ -338,8 +338,14 @@ pub fn load(path: &Path) -> Result<Dictionary, String> {
 
 /// Write the dictionary (trimmed, empty entries dropped, sorted by
 /// term) via a temp file + rename so a reader never sees half a file.
+///
+/// When `path` is a symlink (e.g. the dev build's file linked to the
+/// release build's, so both apps share one dictionary), the write goes
+/// to the link's target and the link stays in place.
 pub fn save(path: &Path, dict: &Dictionary) -> Result<Dictionary, String> {
     let clean = clean(dict);
+    let target = resolve_link(path);
+    let path = target.as_path();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|e| format!("create config dir: {e}"))?;
@@ -351,6 +357,19 @@ pub fn save(path: &Path, dict: &Dictionary) -> Result<Dictionary, String> {
     fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
     Ok(clean)
+}
+
+/// Follow symlinks so a rename replaces the target, not the link. A
+/// dangling link resolves to its target path (created on write).
+fn resolve_link(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    match fs::read_link(path) {
+        Ok(target) if target.is_absolute() => target,
+        Ok(target) => path.parent().map_or(target.clone(), |p| p.join(&target)),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn clean(dict: &Dictionary) -> Dictionary {
@@ -505,6 +524,26 @@ mod tests {
             ])
         );
         assert_eq!(load(&path).unwrap(), saved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_a_symlink_keeps_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("release").join(FILE_NAME);
+        let dev_dir = dir.path().join("dev");
+        fs::create_dir_all(&dev_dir).unwrap();
+        let link = dev_dir.join(FILE_NAME);
+        // Dangling at first: the release file doesn't exist yet.
+        std::os::unix::fs::symlink(&shared, &link).unwrap();
+
+        save(&link, &dict(&[("Jeppe", &["hipp"])])).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(load(&shared).unwrap(), dict(&[("Jeppe", &["hipp"])]));
+
+        save(&link, &dict(&[("Emanoil", &[])])).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(load(&shared).unwrap(), dict(&[("Emanoil", &[])]));
     }
 
     #[test]

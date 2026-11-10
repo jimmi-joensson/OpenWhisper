@@ -936,6 +936,25 @@ body[data-platform="macos"] .ow-titlebar {
   color: var(--muted-foreground);
 }
 
+.ow-history-pane__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-history-pane__folder span {
+  min-width: 0;
+  word-break: break-all;
+}
+
 .ow-history-pane__search {
   width: 240px;
   max-width: 50%;

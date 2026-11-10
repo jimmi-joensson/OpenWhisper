@@ -30,7 +30,7 @@ export function useHistorySettings() {
 
   const save = useMutation({
     mutationFn: (settings: HistorySettings) =>
-      invoke<HistorySettings>("history_set", { settings }),
+      invoke<HistoryState>("history_set", { settings }),
     onMutate: async (settings) => {
       await client.cancelQueries({ queryKey: SETTINGS_KEY });
       const previous = client.getQueryData<HistoryState>(SETTINGS_KEY);
@@ -43,10 +43,9 @@ export function useHistorySettings() {
       if (context?.previous) client.setQueryData(SETTINGS_KEY, context.previous);
     },
     onSuccess: (saved) => {
-      client.setQueryData<HistoryState>(SETTINGS_KEY, (state) =>
-        state ? { ...state, settings: saved } : state,
-      );
-      // A shorter retention removes stored text.
+      client.setQueryData<HistoryState>(SETTINGS_KEY, saved);
+      // A shorter retention removes stored text, and another folder
+      // holds other entries.
       void client.invalidateQueries({ queryKey: LISTS_KEY });
     },
   });
@@ -63,7 +62,8 @@ export function useHistorySettings() {
   const failure = query.error ?? save.error;
   return {
     settings: query.data?.settings ?? null,
-    database: query.data?.database ?? "",
+    folder: query.data?.folder ?? "",
+    defaultFolder: query.data?.default_folder ?? "",
     error: failure ? String(failure) : null,
     update,
   };
@@ -96,7 +96,7 @@ export function useHistoryActions() {
   const client = useQueryClient();
   const refresh = () => client.invalidateQueries({ queryKey: LISTS_KEY });
   const remove = useMutation({
-    mutationFn: (id: number) => invoke<boolean>("history_delete", { id }),
+    mutationFn: (id: string) => invoke<boolean>("history_delete", { id }),
     onSettled: refresh,
   });
   const clear = useMutation({

@@ -78,10 +78,6 @@ impl Store {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = Connection::open(path)?;
-        // Overwrite removed content instead of leaving it in free
-        // pages: deleting a transcript from history must take the text
-        // out of the file, not only out of the table.
-        conn.pragma_update(None, "secure_delete", "ON")?;
         migrations::apply_pending(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -133,7 +129,7 @@ mod tests {
         // Bumps as new migrations append: 1 (dictations table) +
         // 2 (wall_clock_ms column) + 3 (refine_runs table) +
         // 4 (refine_runs usage columns).
-        assert_eq!(user_version(&store), 5, "all migrations should be applied");
+        assert_eq!(user_version(&store), 4, "all migrations should be applied");
     }
 
     #[test]
@@ -171,10 +167,8 @@ mod tests {
                 "app_bundle_id",
                 "created_at",
                 "wall_clock_ms",
-                "raw_transcript",
-                "app_name",
             ],
-            "dictations columns (migration 2 appends wall_clock_ms, 5 the history columns)",
+            "dictations columns (migration 2 appends wall_clock_ms)",
         );
 
         let index_exists: i64 = store
@@ -196,10 +190,10 @@ mod tests {
         let path = dir.path().join("openwhisper.db");
         {
             let store = Store::open_or_init(&path).expect("first open");
-            assert_eq!(user_version(&store), 5);
+            assert_eq!(user_version(&store), 4);
         }
         let store = Store::open_or_init(&path).expect("second open");
-        assert_eq!(user_version(&store), 5, "second open is no-op");
+        assert_eq!(user_version(&store), 4, "second open is no-op");
     }
 
     #[test]

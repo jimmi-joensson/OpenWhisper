@@ -64,23 +64,12 @@ ALTER TABLE refine_runs ADD COLUMN window_5h_resets_at INTEGER;
 ALTER TABLE refine_runs ADD COLUMN window_7d_used REAL;
 ALTER TABLE refine_runs ADD COLUMN window_7d_resets_at INTEGER;";
 
-/// Transcript history (TASK-95). The `transcript` and `app_bundle_id`
-/// columns from migration 1 finally get written when the user switches
-/// history on; these two hold the text before Refine changed it and
-/// the app's display name. All four are NULL for a dictation recorded
-/// with history off, and are set back to NULL when its text is
-/// deleted or ages out. See `core::history`.
-const MIGRATION_5_HISTORY: &str = "\
-ALTER TABLE dictations ADD COLUMN raw_transcript TEXT;
-ALTER TABLE dictations ADD COLUMN app_name TEXT;";
-
 fn specs() -> Vec<M<'static>> {
     vec![
         M::up(MIGRATION_1_DICTATIONS),
         M::up(MIGRATION_2_WALL_CLOCK),
         M::up(MIGRATION_3_REFINE_RUNS),
         M::up(MIGRATION_4_REFINE_USAGE),
-        M::up(MIGRATION_5_HISTORY),
     ]
 }
 

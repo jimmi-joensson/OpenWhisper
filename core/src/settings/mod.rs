@@ -30,8 +30,10 @@
 //!   ([`RefineSettings`], TASK-93). Kept as raw JSON in the envelope
 //!   so a malformed block falls back to defaults without taking the
 //!   sibling blocks down with it. The API key is not stored here.
-//! - `history`: whether dictated text is kept on disk and for how
-//!   long ([`HistorySettings`], TASK-95). Off by default. Raw JSON in
+//! - `history`: whether dictated text is kept on disk, for how long
+//!   and in which folder ([`HistorySettings`], TASK-95). Off by
+//!   default. The text itself lives in Markdown files, see
+//!   [`crate::history`]. Raw JSON in
 //!   the envelope for the same reason as `refine`.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
@@ -782,7 +784,7 @@ pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<Ref
 /// defaults (history off) when nothing was loaded yet. Read by the
 /// dictation pipeline on every delivered transcript.
 pub fn current_history_settings() -> HistorySettings {
-    HISTORY_CURRENT.lock().ok().and_then(|g| *g).unwrap_or_default()
+    HISTORY_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
 }
 
 /// Seed the history cache without touching disk. For shells that
@@ -794,7 +796,7 @@ pub fn set_history_settings_cache(settings: HistorySettings) {
 }
 
 fn current_history_json() -> Option<serde_json::Value> {
-    let current = HISTORY_CURRENT.lock().ok().and_then(|g| *g)?;
+    let current = HISTORY_CURRENT.lock().ok().and_then(|g| g.clone())?;
     serde_json::to_value(current).ok()
 }
 
@@ -810,7 +812,7 @@ pub fn load_history_settings(path: &Path) -> HistorySettings {
         .unwrap_or_default()
         .cleaned();
     if let Ok(mut g) = HISTORY_CURRENT.lock() {
-        *g = Some(settings);
+        *g = Some(settings.clone());
     }
     settings
 }
@@ -835,11 +837,11 @@ pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<H
         stats,
         performance,
         refine: file.refine.or_else(current_refine_json),
-        history: Some(serde_json::to_value(settings).map_err(|e| format!("serialize: {e}"))?),
+        history: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = HISTORY_CURRENT.lock() {
-        *g = Some(settings);
+        *g = Some(settings.clone());
     }
     Ok(settings)
 }

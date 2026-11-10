@@ -4,7 +4,7 @@ title: Transcript history - opt-in, local, searchable on Home
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T15:07:00Z'
+updated_date: '2026-11-10T15:28:00Z'
 labels:
   - history
   - core
@@ -47,5 +47,10 @@ Stats must keep working with history off: the row is still written, only the tex
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-See doc-48 and the subtask notes. Changes to the description's decisions, made with the user on 2026-11-10 while testing: no separate pause (the one switch stops saving and keeps what is stored); Home shows the newest 5 and a History screen has the full list with search and pages; clear all is on the History screen. Windows: compiles, not run.
+See doc-48 and the subtask notes. Changes to the description's decisions, made with the user on 2026-11-10 while testing:
+- The text is stored as Markdown files, one per day, in a folder (default history/ next to dictionary.json, movable), not in SQLite. The files are the only copy; the store keeps counters only.
+- No separate pause: the one switch stops saving and keeps what is stored.
+- Home shows the newest 5; a History screen has the full list with search and pages; clear all is there.
+- Reset stats does not touch history.
+Windows: compiles, not run. Idea noted while testing: a dictation into a password manager was stored like any other; a list of apps whose dictations are never stored would fit with the never-capture list in TASK-98.
 <!-- SECTION:NOTES:END -->

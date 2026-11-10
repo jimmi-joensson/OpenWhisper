@@ -1,3 +1,7 @@
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
   Field,
@@ -17,10 +21,25 @@ import { RETENTION_OPTIONS, retentionLabel } from "@/lib/history";
 import { useHistorySettings } from "@/lib/use-history";
 
 // Settings → General → History (TASK-95): the switch, how long text
-// is kept, and a plain statement of what is stored and where. The
-// list itself, with delete and clear, lives on Home.
+// is kept, and a plain statement of what is stored and where, with
+// the folder one click away. The list itself, with delete and clear,
+// lives on Home and the History screen.
 export function HistorySettingsSection() {
-  const { settings, database, error, update } = useHistorySettings();
+  const { settings, folder, error, update } = useHistorySettings();
+  const custom = Boolean(settings?.folder);
+
+  const chooseFolder = async () => {
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Folder for your dictation history",
+      });
+      if (typeof picked === "string" && picked) update({ folder: picked });
+    } catch {
+      // Picker unavailable or dismissed: nothing changes.
+    }
+  };
   const days = settings?.retention_days ?? 30;
   // A retention set from the CLI may not be one of the four choices.
   const items = RETENTION_OPTIONS.some((o) => o.value === String(days))
@@ -34,9 +53,10 @@ export function HistorySettingsSection() {
           <FieldLabel htmlFor="history-enabled">Keep transcript history</FieldLabel>
           <FieldDescription>
             Saves the text of each dictation, the text before Refine changed
-            it, and which app it went into. It stays on this computer and is
-            shown on Home. Off by default; switching it off stops saving and
-            leaves what is already stored.
+            it, and which app it went into, as plain Markdown files, one per
+            day. They stay on this computer, and other programs (a coding
+            agent, a notes app) can read them. Off by default; switching it
+            off stops saving and leaves what is already stored.
           </FieldDescription>
         </FieldContent>
         <Switch
@@ -87,12 +107,54 @@ export function HistorySettingsSection() {
         </Select>
       </Field>
 
-      {database && (
-        <p className="text-xs text-muted-foreground" data-testid="history-location">
-          Stored in{" "}
-          <span className="ow-selectable font-mono break-all">{database}</span>
-        </p>
-      )}
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel>Folder</FieldLabel>
+          <FieldDescription>
+            <span className="ow-selectable font-mono break-all" data-testid="history-location">
+              {folder}
+            </span>
+            {custom && (
+              <span className="mt-1 block" data-testid="history-folder-note">
+                If this folder is synced (iCloud, Dropbox, a notes app), your
+                dictations are synced with it. Files already written are not
+                moved.
+              </span>
+            )}
+          </FieldDescription>
+        </FieldContent>
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="history-reveal"
+            disabled={!folder}
+            onClick={() => void invoke("history_reveal").catch(() => {})}
+          >
+            Open
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="history-choose-folder"
+            disabled={settings === null}
+            onClick={() => void chooseFolder()}
+          >
+            Change…
+          </Button>
+          {custom && (
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="history-default-folder"
+              onClick={() => update({ folder: null })}
+            >
+              Use default
+            </Button>
+          )}
+        </div>
+      </Field>
+
       {error && (
         <p className="text-xs text-destructive" role="alert">
           Could not save the history setting: {error}

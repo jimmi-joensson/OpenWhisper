@@ -440,12 +440,17 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
         }
         // Transcript history (TASK-95). `__owHistorySettings` seeds the
         // settings block and `__owHistoryEntries` the stored dictations
-        // (newest first). Saves, deletes and clears are recorded for
-        // assertions. Search, paging and removal mimic core::history.
+        // (newest first). Saves, deletes, clears and reveals are
+        // recorded for assertions. Search, paging and removal mimic
+        // core::history. The folder picker answers with `__owDialogPick`.
         if (cmd.startsWith("history_")) {
-          type HistorySettings = { enabled: boolean; retention_days: number };
+          type HistorySettings = {
+            enabled: boolean;
+            retention_days: number;
+            folder: string | null;
+          };
           type HistoryEntry = {
-            id: number;
+            id: string;
             at_ms: number;
             duration_ms: number;
             word_count: number;
@@ -459,32 +464,43 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             __owHistoryStored?: HistorySettings;
             __owHistorySaves?: HistorySettings[];
             __owHistoryEntries?: HistoryEntry[];
-            __owHistoryDeleted?: number[];
+            __owHistoryDeleted?: string[];
             __owHistoryClearCount?: number;
+            __owHistoryRevealCount?: number;
           };
           if (!w.__owHistoryStored) {
             w.__owHistoryStored = {
               enabled: false,
               retention_days: 30,
+              folder: null,
               ...(w.__owHistorySettings ?? {}),
             };
           }
           const entries = w.__owHistoryEntries ?? [];
+          const defaultFolder =
+            "/Users/test/Library/Application Support/com.openwhisper.app/history";
+          const state = () => ({
+            settings: w.__owHistoryStored,
+            folder: w.__owHistoryStored?.folder ?? defaultFolder,
+            default_folder: defaultFolder,
+          });
           if (cmd === "history_get") {
-            return {
-              settings: w.__owHistoryStored,
-              database: "/Users/test/Library/Application Support/com.openwhisper.app/openwhisper.db",
-            };
+            return state();
           }
           if (cmd === "history_set") {
             const { settings } = (args ?? {}) as { settings: HistorySettings };
             const saved = {
               ...settings,
               retention_days: Math.min(settings.retention_days, 3650),
+              folder: settings.folder?.trim() || null,
             };
             w.__owHistoryStored = saved;
             w.__owHistorySaves = [...(w.__owHistorySaves ?? []), saved];
-            return saved;
+            return state();
+          }
+          if (cmd === "history_reveal") {
+            w.__owHistoryRevealCount = (w.__owHistoryRevealCount ?? 0) + 1;
+            return null;
           }
           if (cmd === "history_list") {
             const { search, limit, offset } = (args ?? {}) as {
@@ -508,7 +524,7 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             };
           }
           if (cmd === "history_delete") {
-            const { id } = (args ?? {}) as { id: number };
+            const { id } = (args ?? {}) as { id: string };
             w.__owHistoryDeleted = [...(w.__owHistoryDeleted ?? []), id];
             const before = entries.length;
             w.__owHistoryEntries = entries.filter((e) => e.id !== id);

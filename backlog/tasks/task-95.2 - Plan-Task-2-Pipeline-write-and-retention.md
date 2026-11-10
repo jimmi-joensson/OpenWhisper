@@ -4,7 +4,7 @@ title: 'Plan Task 2: Pipeline write and retention'
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:40:00Z'
-updated_date: '2026-11-10T15:07:00Z'
+updated_date: '2026-11-10T15:28:00Z'
 labels:
   - 95-impl
 dependencies: []
@@ -22,5 +22,5 @@ ordinal: 87000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-stats::record with DictationRecord and HistoryFields; dictation_deliver_transcript reads the focus context after the injector call and only with history on; prune after every write and at app start.
+dictation_deliver_transcript appends the entry to its day file (history on), prunes, then writes the stats row as before (counters only). The frontmost app is read after the injector call and only with history on. AC 1 and 2 now read 'day file' for 'row'.
 <!-- SECTION:NOTES:END -->

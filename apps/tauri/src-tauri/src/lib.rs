@@ -1019,9 +1019,9 @@ pub fn run() {
             // Hydrate the Refine switch (off unless the user turned
             // it on) before the first recording warms a backend.
             refine::init(app.handle());
-            // Hydrate the transcript-history switch (off unless the
-            // user turned it on) and drop text that aged out while
-            // the app was closed. After the store is registered above.
+            // Tell core where the transcript history lives, hydrate
+            // its switch (off unless the user turned it on) and drop
+            // text that aged out while the app was closed.
             history::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
@@ -1239,6 +1239,7 @@ pub fn run() {
             history::history_list,
             history::history_delete,
             history::history_clear,
+            history::history_reveal,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

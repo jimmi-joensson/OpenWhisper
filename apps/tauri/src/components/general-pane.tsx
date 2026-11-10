@@ -273,8 +273,7 @@ export function GeneralPane() {
         <FieldContent>
           <FieldLabel>Reset all stats</FieldLabel>
           <FieldDescription>
-            Permanently clears word counts, Time Saved and any saved
-            transcript history. Cannot be undone.
+            Permanently clears word counts and Time Saved. Cannot be undone.
           </FieldDescription>
         </FieldContent>
         <AlertDialog open={resetOpen} onOpenChange={setResetOpen}>
@@ -294,10 +293,10 @@ export function GeneralPane() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Reset all stats?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  This permanently deletes every recorded dictation row,
-                  including any saved transcript history. Your Today /
-                  Week / All-time counters and Time Saved total all
-                  return to zero. This cannot be undone.
+                  This permanently deletes every recorded dictation row.
+                  Your Today / Week / All-time counters and Time Saved
+                  total all return to zero. Saved transcript history is
+                  not touched. This cannot be undone.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

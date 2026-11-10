@@ -6,7 +6,7 @@ title: >-
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:40:00Z'
-updated_date: '2026-11-10T15:07:00Z'
+updated_date: '2026-11-10T15:28:00Z'
 labels:
   - 95-impl
 dependencies: []
@@ -24,5 +24,7 @@ ordinal: 86000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Migration 5 (raw_transcript, app_name), PRAGMA secure_delete, core/src/history, core/src/settings/history.rs. A test reads the database file after a clear and fails without secure_delete (checked by switching it off once). A real v4 database from the production app upgraded in place with its 1,015 rows and word total unchanged.
+Second version (2026-11-10): the store is a folder of Markdown day files, not SQLite. The user asked for it so other programs, a coding agent above all, can read the history. core/src/history/{mod,tests}.rs: append, list, get, delete, clear, prune; format documented at the top of the module. settings: history block with enabled, retention_days, folder. No schema change in the store (the migration and secure_delete from the first version were removed before any release).
+24 unit tests on the format and the rules: exact file output, round trip, escaping of text that looks like structure, hand edits kept, text OpenWhisper did not write never deleted, other file names ignored, Windows line endings, cache invalidation.
+AC 1 no longer applies (no migration). AC 3 holds for the functions; 'not left readable in the file' is no longer promised: removed text is cut from a plain file and may survive in backups or sync.
 <!-- SECTION:NOTES:END -->

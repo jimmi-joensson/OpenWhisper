@@ -84,80 +84,30 @@ fn fire_stats_changed() {
     }
 }
 
-/// Tell the shell that stored dictation data changed. Also used by
-/// [`crate::history`] when text is removed, so the webview needs one
-/// signal for "re-read the store".
-pub(crate) fn notify_changed() {
-    fire_stats_changed();
-}
-
-/// What a finished dictation leaves in the store.
-pub struct DictationRecord<'a> {
-    /// Wall-clock start of the recording, Unix epoch milliseconds.
-    pub started_at_ms: i64,
-    /// Voiced duration (falls back to wall clock, see the dictation
-    /// pipeline).
-    pub duration_ms: i64,
-    pub wall_clock_ms: i64,
-    /// The text that was inserted.
-    pub text: &'a str,
-    /// `Some` only while the user has transcript history switched on
-    /// (TASK-95). `None` keeps the text out of the store.
-    pub history: Option<HistoryFields<'a>>,
-}
-
-/// The extra columns written when transcript history is on.
-pub struct HistoryFields<'a> {
-    /// The transcript before Refine. Stored only when it differs from
-    /// the final text.
-    pub original: Option<&'a str>,
-    /// App the text went into; empty when unknown.
-    pub app_id: &'a str,
-    pub app_name: &'a str,
-}
-
-/// Record one successful dictation. Empty / whitespace-only text
-/// returns without inserting (mirrors the dictation flow's
-/// empty-sample drain). Word count is whitespace-split on the trimmed
-/// text.
-///
-/// The text itself is stored only when `record.history` is set; with
-/// it unset the row holds counters and timing and nothing else.
-pub fn record(store: &Store, record: &DictationRecord<'_>) {
-    let trimmed = record.text.trim();
+/// Record one successful dictation. Empty / whitespace-only text returns
+/// without inserting (mirrors the dictation flow's empty-sample drain).
+/// Word count is whitespace-split on the trimmed text. The transcript
+/// itself is never persisted here: `transcript` stays NULL and only
+/// counters and timing are kept. The opt-in transcript history lives
+/// in Markdown files, see [`crate::history`].
+pub fn record_dictation(
+    store: &Store,
+    started_at_ms: i64,
+    duration_ms: i64,
+    wall_clock_ms: i64,
+    text: &str,
+) {
+    let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
     }
     let word_count = trimmed.split_whitespace().count() as i64;
-    let non_empty = |s: &str| {
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.to_string())
-    };
-    let (transcript, original, app_id, app_name) = match &record.history {
-        Some(h) => (
-            Some(trimmed.to_string()),
-            h.original.and_then(non_empty).filter(|o| o != trimmed),
-            non_empty(h.app_id),
-            non_empty(h.app_name),
-        ),
-        None => (None, None, None, None),
-    };
     let result = store.with_conn(|c| {
         c.execute(
             "INSERT INTO dictations \
-             (started_at, duration_ms, word_count, transcript, raw_transcript, confidence, \
-              app_bundle_id, app_name, wall_clock_ms) \
-             VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
-            params![
-                record.started_at_ms,
-                record.duration_ms,
-                word_count,
-                transcript,
-                original,
-                app_id,
-                app_name,
-                record.wall_clock_ms
-            ],
+             (started_at, duration_ms, word_count, transcript, confidence, app_bundle_id, wall_clock_ms) \
+             VALUES (?, ?, ?, NULL, NULL, NULL, ?)",
+            params![started_at_ms, duration_ms, word_count, wall_clock_ms],
         )
         .map(|_| ())
         .map_err(StoreError::from)
@@ -166,26 +116,6 @@ pub fn record(store: &Store, record: &DictationRecord<'_>) {
         Ok(()) => fire_stats_changed(),
         Err(e) => eprintln!("[stats] record_dictation failed: {e}"),
     }
-}
-
-/// [`record`] without transcript history: counters and timing only.
-pub fn record_dictation(
-    store: &Store,
-    started_at_ms: i64,
-    duration_ms: i64,
-    wall_clock_ms: i64,
-    text: &str,
-) {
-    record(
-        store,
-        &DictationRecord {
-            started_at_ms,
-            duration_ms,
-            wall_clock_ms,
-            text,
-            history: None,
-        },
-    );
 }
 
 /// Local-time start-of-day for the given epoch ms, returned as epoch ms.
@@ -250,9 +180,7 @@ pub fn get_summary(store: &Store, now_ms: i64) -> Result<StatsSummary, StoreErro
     })
 }
 
-/// Wipe all rows, and with them any stored transcript history (the
-/// text lives on the same rows). Fires the stats_changed callback on
-/// success.
+/// Wipe all rows. Fires the stats_changed callback on success.
 pub fn reset(store: &Store) -> Result<(), StoreError> {
     store.with_conn(|c| {
         c.execute("DELETE FROM dictations", [])

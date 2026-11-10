@@ -8,7 +8,7 @@ import {
 type Page = import("@playwright/test").Page;
 
 interface Entry {
-  id: number;
+  id: string;
   at_ms: number;
   duration_ms: number;
   word_count: number;
@@ -19,7 +19,7 @@ interface Entry {
 }
 
 interface Seed {
-  settings?: { enabled?: boolean; retention_days?: number };
+  settings?: { enabled?: boolean; retention_days?: number; folder?: string | null };
   // Built in the page so "today" and "yesterday" follow its clock.
   entries?: (Omit<Entry, "at_ms" | "duration_ms" | "word_count"> & { hoursAgo: number })[];
 }
@@ -51,16 +51,16 @@ function recorded<T>(page: Page, key: string): Promise<T | undefined> {
 }
 
 const THREE = [
-  { id: 3, hoursAgo: 1, text: "Vi ses på Ærø i morgen", original: null, app_id: "com.example.chat", app_name: "Chatter" },
+  { id: "e3", hoursAgo: 1, text: "Vi ses på Ærø i morgen", original: null, app_id: "com.example.chat", app_name: "Chatter" },
   {
-    id: 2,
+    id: "e2",
     hoursAgo: 2,
     text: "Send the report to the team before Friday.",
     original: "send the reaport to the team before friday",
     app_id: null,
     app_name: null,
   },
-  { id: 1, hoursAgo: 26, text: "Remember to book the meeting room.", original: null, app_id: "com.example.mail", app_name: "Mailbox" },
+  { id: "e1", hoursAgo: 26, text: "Remember to book the meeting room.", original: null, app_id: "com.example.mail", app_name: "Mailbox" },
 ];
 
 async function openGeneral(page: Page) {
@@ -71,7 +71,7 @@ async function openGeneral(page: Page) {
 
 function many(count: number) {
   return Array.from({ length: count }, (_, i) => ({
-    id: 1000 - i,
+    id: `e${1000 - i}`,
     hoursAgo: i,
     text: `Dictation number ${i + 1}`,
     original: null,
@@ -142,7 +142,7 @@ test.describe("home: history", () => {
 
     await expect(page.getByTestId("history-row")).toHaveCount(2);
     await expect(page.getByTestId("home-history")).not.toContainText("Send the report");
-    expect(await recorded<number[]>(page, "__owHistoryDeleted")).toEqual([2]);
+    expect(await recorded<string[]>(page, "__owHistoryDeleted")).toEqual(["e2"]);
   });
 
   test("with history off, stored text stays visible with a note", async ({ page }) => {
@@ -246,6 +246,23 @@ test.describe("history screen", () => {
     await expect(page.getByTestId("history-count")).toHaveText("3 saved");
     // One page: no pager.
     await expect(page.getByTestId("history-next")).toHaveCount(0);
+  });
+
+  test("shows where the files are and opens the folder", async ({ page }) => {
+    await page.goto("/");
+    await openHistory(page);
+    await expect(page.getByTestId("history-pane-folder")).toHaveText(
+      "/Users/test/Library/Application Support/com.openwhisper.app/history",
+    );
+    await page.getByTestId("history-pane-reveal").click();
+    await expect.poll(() => recorded<number>(page, "__owHistoryRevealCount")).toBe(1);
+  });
+
+  test("shows the folder the user chose", async ({ page }) => {
+    await seed(page, { settings: { enabled: true, folder: "/Users/test/Notes/Dictations" } });
+    await page.goto("/");
+    await openHistory(page);
+    await expect(page.getByTestId("history-pane-folder")).toHaveText("/Users/test/Notes/Dictations");
   });
 
   test("search narrows the list and says when nothing matches", async ({ page }) => {
@@ -368,7 +385,7 @@ test.describe("history screen", () => {
     const long = `${"This sentence makes the entry long. ".repeat(12)}The end.`;
     await seed(page, {
       settings: { enabled: true },
-      entries: [{ id: 1, hoursAgo: 1, text: long, original: null, app_id: null, app_name: null }],
+      entries: [{ id: "e1", hoursAgo: 1, text: long, original: null, app_id: null, app_name: null }],
     });
     await page.goto("/");
     await openHistory(page);
@@ -455,7 +472,12 @@ test.describe("settings: history section", () => {
     await openGeneral(page);
     await expect(page.getByTestId("history-enabled-switch")).not.toBeChecked();
     await expect(page.getByTestId("history-retention")).toContainText("30 days");
-    await expect(page.getByTestId("history-location")).toContainText("openwhisper.db");
+    await expect(page.getByTestId("history-location")).toHaveText(
+      "/Users/test/Library/Application Support/com.openwhisper.app/history",
+    );
+    // The default folder needs no sync warning and no way back.
+    await expect(page.getByTestId("history-folder-note")).toHaveCount(0);
+    await expect(page.getByTestId("history-default-folder")).toHaveCount(0);
   });
 
   test("the switch and the retention save", async ({ page }) => {
@@ -471,7 +493,44 @@ test.describe("settings: history section", () => {
 
     await expect
       .poll(async () => (await recorded<unknown[]>(page, "__owHistorySaves"))?.at(-1))
-      .toEqual({ enabled: true, retention_days: 90 });
+      .toEqual({ enabled: true, retention_days: 90, folder: null });
+  });
+
+  test("the folder can be changed, opened and put back", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owDialogPick: string }).__owDialogPick = "/Users/test/Notes/Dictations";
+    });
+    await page.goto("/");
+    await openGeneral(page);
+
+    await page.getByTestId("history-choose-folder").click();
+    await expect(page.getByTestId("history-location")).toHaveText("/Users/test/Notes/Dictations");
+    await expect(page.getByTestId("history-folder-note")).toContainText("synced");
+    await expect(page.getByTestId("history-folder-note")).toContainText("not moved");
+    await expect
+      .poll(async () => (await recorded<{ folder: string | null }[]>(page, "__owHistorySaves"))?.at(-1)?.folder)
+      .toBe("/Users/test/Notes/Dictations");
+    // The picker was asked for a folder, not a file.
+    expect(await recorded<{ directory?: boolean }>(page, "__owDialogOptions")).toMatchObject({
+      directory: true,
+    });
+
+    await page.getByTestId("history-reveal").click();
+    await expect.poll(() => recorded<number>(page, "__owHistoryRevealCount")).toBe(1);
+
+    await page.getByTestId("history-default-folder").click();
+    await expect(page.getByTestId("history-location")).toHaveText(
+      "/Users/test/Library/Application Support/com.openwhisper.app/history",
+    );
+    await expect(page.getByTestId("history-folder-note")).toHaveCount(0);
+  });
+
+  test("a dismissed folder picker changes nothing", async ({ page }) => {
+    await page.goto("/");
+    await openGeneral(page);
+    await page.getByTestId("history-choose-folder").click();
+    await expect(page.getByTestId("history-location")).toContainText("com.openwhisper.app/history");
+    expect(await recorded<unknown[]>(page, "__owHistorySaves")).toBeUndefined();
   });
 
   test("Home shows what Settings saved", async ({ page }) => {
@@ -491,10 +550,10 @@ test.describe("settings: history section", () => {
     await expect(page.getByTestId("history-retention")).toContainText("14 days");
   });
 
-  test("resetting stats warns that the history goes too", async ({ page }) => {
+  test("resetting stats says the history is not touched", async ({ page }) => {
     await page.goto("/");
     await openGeneral(page);
     await page.getByTestId("stats-reset-trigger").click();
-    await expect(page.getByRole("alertdialog")).toContainText("including any saved transcript history");
+    await expect(page.getByRole("alertdialog")).toContainText("Saved transcript history is not touched");
   });
 });

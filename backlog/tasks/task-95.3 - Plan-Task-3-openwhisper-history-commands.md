@@ -4,7 +4,7 @@ title: 'Plan Task 3: openwhisper history commands'
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:40:00Z'
-updated_date: '2026-11-10T15:07:00Z'
+updated_date: '2026-11-10T15:28:00Z'
 labels:
   - 95-impl
 dependencies: []
@@ -21,5 +21,5 @@ ordinal: 88000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-openwhisper history list|search|show|delete|clear --yes|config. Run end to end against a scratch copy of the real database: list, Danish case-insensitive search, search in the pre-Refine text, show, retention change pruning one entry, delete, clear; no text left in the file afterwards.
+openwhisper history list|search|show|delete|clear --yes|config (--enabled, --retention-days, --folder, --default-folder). Ids are text (20261110T140212). Run against the Dev app's folder with 23 real entries: list, search, config; rg over the folder finds text directly.
 <!-- SECTION:NOTES:END -->

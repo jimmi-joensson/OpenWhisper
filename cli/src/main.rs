@@ -25,9 +25,10 @@
 //! - `refine`: the optional language-model cleanup step (TASK-93).
 //!   Run text through it, check and test the backend, edit its
 //!   settings, store the API key, run the live eval set.
-//! - `history`: the opt-in transcript history (TASK-95). List,
-//!   search, show, delete and clear stored dictations; switch it on
-//!   or off and set the retention.
+//! - `history`: the opt-in transcript history (TASK-95), a folder of
+//!   Markdown day files. List, search, show, delete and clear stored
+//!   dictations; switch it on or off, set the retention and the
+//!   folder.
 //! - `focus`: print which app is frontmost and its window title
 //!   (TASK-94).
 //!

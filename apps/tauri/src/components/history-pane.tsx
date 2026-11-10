@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { ChevronLeft, ChevronRight, FolderOpen } from "lucide-react";
 
 import {
   AlertDialog,
@@ -39,7 +40,7 @@ interface HistoryPaneProps {
 // grouped by day, with search, pages, copy, delete, show original and
 // clear all.
 export function HistoryPane({ onOpenSettings }: HistoryPaneProps) {
-  const { settings } = useHistorySettings();
+  const { settings, folder } = useHistorySettings();
   const [search, setSearch] = useState("");
   const query = useDebounced(search.trim(), SEARCH_DEBOUNCE_MS);
   const [pageIndex, setPageIndex] = useState(0);
@@ -70,7 +71,8 @@ export function HistoryPane({ onOpenSettings }: HistoryPaneProps) {
         <div>
           <h1 className="ow-history-pane__title">History</h1>
           <p className="ow-history-pane__sub">
-            The text of your dictations, kept on this computer only.
+            The text of your dictations, kept on this computer as Markdown
+            files, one per day.
           </p>
         </div>
         {page && page.stored > 0 && (
@@ -85,6 +87,23 @@ export function HistoryPane({ onOpenSettings }: HistoryPaneProps) {
           />
         )}
       </header>
+
+      {folder && (
+        <div className="ow-history-pane__folder">
+          <span className="ow-selectable" data-testid="history-pane-folder">
+            {folder}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="history-pane-reveal"
+            onClick={() => void invoke("history_reveal").catch(() => {})}
+          >
+            <FolderOpen data-icon="inline-start" />
+            Open folder
+          </Button>
+        </div>
+      )}
 
       {settings && !enabled && (
         <p className="ow-history__note" data-testid="history-off-note">

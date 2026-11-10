@@ -623,41 +623,47 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     if let Some(inj) = INJECTOR.get() {
         inj.inject(text);
     }
+    // Transcript history (TASK-95) is opt-in: with it off nothing is
+    // written and the frontmost app is not even read. It runs after
+    // the injector was called: that pastes from its own thread and a
+    // paste does not move focus, so the read below names the app that
+    // receives the text without holding the paste up. It runs before
+    // the stats write, whose "changed" signal then also covers it.
+    let history = crate::settings::current_history_settings();
+    if let Some(dir) = crate::history::current_dir() {
+        if history.enabled {
+            let original = with_state(|s| s.refine.raw_transcript.clone());
+            let (app_id, app_name) = delivered_to_app();
+            let at_ms = if started_at_ms > 0 { started_at_ms } else { crate::history::now_ms() };
+            let entry = crate::history::NewEntry {
+                at_ms,
+                duration_ms,
+                text,
+                original: Some(original.as_str()),
+                app_id: &app_id,
+                app_name: &app_name,
+            };
+            if let Err(e) = crate::history::append(&dir, &entry) {
+                eprintln!("[history] could not save the dictation: {e}");
+            }
+        }
+        // Retention applies with history on or off.
+        if let Err(e) = crate::history::prune(&dir, &history, crate::history::now_ms()) {
+            eprintln!("[history] prune failed: {e}");
+        }
+    }
     // Stats write happens after inject so a failing DB doesn't delay the
     // paste. Stats writer no-ops on empty text and never panics or
     // mutates dictation phase, so a failure here cannot stall the
     // state machine in PHASE_TRANSCRIBING / push it to PHASE_ERROR.
     if let Some(store) = crate::stats::store() {
-        // Transcript history (TASK-95) is opt-in: with it off the row
-        // carries counters only and the frontmost app is not even read.
-        let history = crate::settings::current_history_settings();
-        let original = if history.enabled {
-            with_state(|s| s.refine.raw_transcript.clone())
-        } else {
-            String::new()
-        };
-        // Read after the injector was called: it pastes from its own
-        // thread and a paste does not move focus, so this names the
-        // app that receives the text without holding the paste up.
-        let (app_id, app_name) = if history.enabled { delivered_to_app() } else { Default::default() };
-        crate::stats::record(
+        crate::stats::record_dictation(
             store,
-            &crate::stats::DictationRecord {
-                started_at_ms,
-                duration_ms,
-                wall_clock_ms,
-                text,
-                history: history.enabled.then(|| crate::stats::HistoryFields {
-                    original: Some(original.as_str()),
-                    app_id: &app_id,
-                    app_name: &app_name,
-                }),
-            },
+            started_at_ms,
+            duration_ms,
+            wall_clock_ms,
+            text,
         );
-        // Retention applies with history on or off.
-        if let Err(e) = crate::history::prune(store, &history, crate::history::now_ms()) {
-            eprintln!("[history] prune failed: {e}");
-        }
     }
 }
 

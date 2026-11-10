@@ -13,7 +13,7 @@ const FOLD_AT_CHARS = 280;
 // also shows the dictionary fixes and what Refine did, which are only
 // known for this one.
 export interface LatestNotes {
-  id: number;
+  id: string;
   replacements: DictionaryReplacement[];
   refine: RefineInfo;
 }
@@ -22,7 +22,7 @@ interface HistoryDaysProps {
   // Newest first.
   entries: HistoryEntry[];
   latest?: LatestNotes | null;
-  onDelete: (id: number) => void;
+  onDelete: (id: string) => void;
 }
 
 // Stored dictations grouped by the day they were made. Shared by the

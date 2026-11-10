@@ -4,7 +4,7 @@ title: 'Plan Task 4: Tauri commands'
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:40:00Z'
-updated_date: '2026-11-10T15:07:00Z'
+updated_date: '2026-11-10T15:28:00Z'
 labels:
   - 95-impl
 dependencies: []
@@ -21,5 +21,5 @@ ordinal: 89000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-apps/tauri/src-tauri/src/history.rs: history_get, history_set, history_list, history_delete, history_clear; history::init hydrates the switch and applies retention at boot. The existing stats_changed event is the change signal.
+history_get, history_set, history_list (off the UI thread), history_delete, history_clear, history_reveal. history::init registers the default folder, hydrates the switch and applies retention at boot.
 <!-- SECTION:NOTES:END -->

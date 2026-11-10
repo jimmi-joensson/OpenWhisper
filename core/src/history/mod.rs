@@ -2,33 +2,97 @@
 //! this machine only, and only after the user switches it on
 //! ([`crate::settings::HistorySettings`]).
 //!
-//! History is not a table of its own. Every dictation already gets a
-//! row in `dictations` for the stats; with history on, that row also
-//! holds the final text, the text before Refine changed it, and the
-//! app the text went into (see [`crate::stats::record`]). With history
-//! off those columns stay NULL, exactly as before this feature.
+//! The store is a folder of Markdown files, one per day, so a person
+//! or another program (a coding agent, a notes app) can read and
+//! search it without OpenWhisper:
 //!
-//! Removing text (one entry, all of it, or by age) sets those columns
-//! back to NULL and keeps the row, so word counts and Time Saved do
-//! not change. The store opens SQLite with `secure_delete`, so the
-//! removed text is overwritten in the file.
+//! ```text
+//! history/
+//!   2026/
+//!     2026-11-10.md
+//!     2026-11-11.md
+//! ```
 //!
-//! The same functions back the desktop app's Home list and
-//! `openwhisper history`.
+//! ```markdown
+//! ---
+//! date: 2026-11-10
+//! entries: 2
+//! words: 21
+//! apps: [Slack, iTerm2]
+//! ---
+//!
+//! ## 14:02:12 · Slack
+//! <!-- id: 20261110T140212 app: com.tinyspeck.slackmacgap words: 9 seconds: 4.2 -->
+//!
+//! Send the report to the team before Friday.
+//!
+//! > Before Refine: send the reaport to the team before friday
+//! ```
+//!
+//! One `##` heading per dictation (time, then the app it went into),
+//! a comment line with the machine fields, the text, and the text
+//! before Refine as a quote when Refine changed it. The frontmatter
+//! sums up the day.
+//!
+//! The files are the only copy of the text. The SQLite store keeps
+//! counters for the stats and never any text. Nothing here is an
+//! index: three years of dictation is a few megabytes, which is
+//! scanned in milliseconds, and parsed files are cached by their
+//! modification time.
+//!
+//! Rules this module keeps, because the files may be edited by hand
+//! or live in a folder the user also uses for other notes:
+//! - Existing content is never re-rendered. Adding an entry appends
+//!   one block; removing entries cuts their blocks out. Everything
+//!   else in the file stays byte for byte.
+//! - Text OpenWhisper did not write (anything before the first
+//!   entry) is kept, and a file that still has such text is never
+//!   deleted.
+//! - Only files named `YYYY/YYYY-MM-DD.md` are read or touched.
+//!
+//! The same functions back the desktop app and `openwhisper history`.
 
-use rusqlite::{Row, params};
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::time::SystemTime;
+
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, NaiveTime, TimeZone};
+use regex::Regex;
 use serde::Serialize;
 
 use crate::settings::HistorySettings;
-use crate::store::{Store, StoreError};
 
 /// Most entries one [`list`] call returns.
 pub const MAX_PAGE: u32 = 500;
 
+/// Name of the history folder inside the app's config folder, when
+/// the user has not chosen another place.
+pub const DEFAULT_FOLDER_NAME: &str = "history";
+
+/// Label of the quote that holds the text before Refine.
+const BEFORE_REFINE: &str = "> Before Refine:";
+
+static HEADING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^## (\d{2}):(\d{2}):(\d{2})(?: · (.*))?$").unwrap());
+static META: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^<!-- id: (\S+)(?: app: (.*?))? words: (\d+) seconds: (\d+(?:\.\d+)?) -->$").unwrap()
+});
+static DAY_FILE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
+static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
+static ENTRY_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{4})(\d{2})(\d{2})T\d{6}(?:-\d+)?$").unwrap());
+
 /// One stored dictation.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct HistoryEntry {
-    pub id: i64,
+    /// `YYYYMMDDTHHMMSS` of the recording's start in local time, with
+    /// `-2`, `-3` appended if two share a second. Names the day file
+    /// the entry is in.
+    pub id: String,
     /// When the recording started, Unix epoch milliseconds.
     pub at_ms: i64,
     /// Voiced duration of the recording.
@@ -45,6 +109,18 @@ pub struct HistoryEntry {
     pub app_name: Option<String>,
 }
 
+/// A dictation to add.
+pub struct NewEntry<'a> {
+    pub at_ms: i64,
+    pub duration_ms: i64,
+    pub text: &'a str,
+    /// Stored only when it differs from `text`.
+    pub original: Option<&'a str>,
+    /// Empty when unknown.
+    pub app_id: &'a str,
+    pub app_name: &'a str,
+}
+
 /// A slice of the history, newest first.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct HistoryPage {
@@ -56,20 +132,469 @@ pub struct HistoryPage {
     pub stored: i64,
 }
 
-const COLUMNS: &str =
-    "id, started_at, duration_ms, word_count, transcript, raw_transcript, app_bundle_id, app_name";
+// ---------------------------------------------------------------
+// Where the files live
+// ---------------------------------------------------------------
 
-fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
-    Ok(HistoryEntry {
-        id: r.get(0)?,
-        at_ms: r.get(1)?,
-        duration_ms: r.get(2)?,
-        word_count: r.get(3)?,
-        text: r.get(4)?,
-        original: r.get(5)?,
-        app_id: r.get(6)?,
-        app_name: r.get(7)?,
+static DEFAULT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the folder used when the user has not chosen one: the
+/// shell passes `<config dir>/history`. First call wins.
+pub fn set_default_dir(dir: PathBuf) {
+    let _ = DEFAULT_DIR.set(dir);
+}
+
+/// The folder for `settings`: the user's own choice, else `default`.
+/// A leading `~/` is expanded.
+pub fn resolve_dir(settings: &HistorySettings, default: &Path) -> PathBuf {
+    match settings.folder.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        Some(folder) => expand_home(folder),
+        None => default.to_path_buf(),
+    }
+}
+
+/// The folder the running app writes to: the registered default with
+/// the current settings applied. `None` before [`set_default_dir`]
+/// and with no folder chosen.
+pub fn current_dir() -> Option<PathBuf> {
+    let settings = crate::settings::current_history_settings();
+    match DEFAULT_DIR.get() {
+        Some(default) => Some(resolve_dir(&settings, default)),
+        None => settings
+            .folder
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(expand_home),
+    }
+}
+
+fn expand_home(folder: &str) -> PathBuf {
+    let rest = folder.strip_prefix("~/").or_else(|| folder.strip_prefix("~\\"));
+    if let Some(rest) = rest {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        if let Some(home) = home {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(folder)
+}
+
+fn day_path(dir: &Path, date: NaiveDate) -> PathBuf {
+    dir.join(date.format("%Y").to_string())
+        .join(format!("{}.md", date.format("%Y-%m-%d")))
+}
+
+/// Every day file under `dir`, newest day first.
+fn day_files(dir: &Path) -> Vec<(NaiveDate, PathBuf)> {
+    let mut files = Vec::new();
+    let Ok(years) = fs::read_dir(dir) else {
+        return files;
+    };
+    for year in years.flatten() {
+        let name = year.file_name();
+        if !YEAR_DIR.is_match(&name.to_string_lossy()) {
+            continue;
+        }
+        let Ok(days) = fs::read_dir(year.path()) else {
+            continue;
+        };
+        for day in days.flatten() {
+            let name = day.file_name();
+            let name = name.to_string_lossy();
+            if let Some(date) = date_from_file_name(&name) {
+                files.push((date, day.path()));
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+}
+
+fn date_from_file_name(name: &str) -> Option<NaiveDate> {
+    let c = DAY_FILE.captures(name)?;
+    NaiveDate::from_ymd_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?)
+}
+
+fn date_from_id(id: &str) -> Option<NaiveDate> {
+    let c = ENTRY_ID.captures(id)?;
+    NaiveDate::from_ymd_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?)
+}
+
+fn local_ms(date: NaiveDate, time: NaiveTime) -> i64 {
+    date.and_time(time)
+        .and_local_timezone(Local)
+        .earliest()
+        .map(|t| t.timestamp_millis())
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------
+// The file format
+// ---------------------------------------------------------------
+
+/// One entry as found in a day file, with the exact text it occupies.
+struct Block {
+    entry: HistoryEntry,
+    source: String,
+}
+
+/// A day file taken apart. `prefix` + every `source` is the file's
+/// body, byte for byte.
+struct Day {
+    /// Frontmatter lines between the `---` fences, without them.
+    front: Vec<String>,
+    /// Whatever precedes the first entry: text OpenWhisper did not
+    /// write.
+    prefix: String,
+    blocks: Vec<Block>,
+}
+
+fn bare(line: &str) -> &str {
+    line.trim_end_matches(['\n', '\r'])
+}
+
+fn parse_day(text: &str, date: NaiveDate) -> Day {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut front = Vec::new();
+    let mut body_start = 0;
+    if lines.first().is_some_and(|l| bare(l) == "---")
+        && let Some(end) = lines.iter().skip(1).position(|l| bare(l) == "---")
+    {
+        front = lines[1..=end].iter().map(|l| bare(l).to_string()).collect();
+        body_start = end + 2;
+    }
+    let body = &lines[body_start..];
+
+    // An entry starts at a time heading whose next non-blank line is
+    // the comment with the machine fields. A heading without it is
+    // ordinary text.
+    let starts: Vec<usize> = (0..body.len())
+        .filter(|&i| {
+            HEADING.is_match(bare(body[i]))
+                && body[i + 1..]
+                    .iter()
+                    .map(|l| bare(l))
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| META.is_match(l))
+        })
+        .collect();
+
+    let prefix: String = body[..starts.first().copied().unwrap_or(body.len())].concat();
+    let mut blocks = Vec::new();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(body.len());
+        let chunk = &body[start..end];
+        if let Some(entry) = parse_block(chunk, date) {
+            blocks.push(Block { entry, source: chunk.concat() });
+        }
+    }
+    Day { front, prefix, blocks }
+}
+
+fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
+    let heading = HEADING.captures(bare(chunk[0]))?;
+    let time = NaiveTime::from_hms_opt(
+        heading[1].parse().ok()?,
+        heading[2].parse().ok()?,
+        heading[3].parse().ok()?,
+    )?;
+    let app_name = heading.get(4).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+
+    let meta_at = chunk.iter().skip(1).position(|l| !bare(l).trim().is_empty())? + 1;
+    let meta = META.captures(bare(chunk[meta_at]))?;
+    let id = meta[1].to_string();
+    let app_id = meta.get(2).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+    let seconds: f64 = meta[4].parse().unwrap_or(0.0);
+
+    let mut text_lines: Vec<String> = Vec::new();
+    let mut original_lines: Vec<String> = Vec::new();
+    let mut in_quote = false;
+    let mut had_quote = false;
+    for line in &chunk[meta_at + 1..] {
+        let line = bare(line);
+        if !had_quote && let Some(first) = line.strip_prefix(BEFORE_REFINE) {
+            in_quote = true;
+            had_quote = true;
+            original_lines.push(first.trim().to_string());
+        } else if in_quote && line.starts_with('>') {
+            let rest = line.strip_prefix("> ").unwrap_or(&line[1..]);
+            original_lines.push(rest.to_string());
+        } else {
+            in_quote = false;
+            text_lines.push(unescape_line(line).to_string());
+        }
+    }
+    let text = text_lines.join("\n").trim().to_string();
+    let original = Some(original_lines.join("\n").trim().to_string()).filter(|o| !o.is_empty());
+    // The count in the comment is what was written; if the text was
+    // edited by hand since, the text wins.
+    let word_count = text.split_whitespace().count() as i64;
+
+    Some(HistoryEntry {
+        id,
+        at_ms: local_ms(date, time),
+        duration_ms: (seconds * 1000.0).round() as i64,
+        word_count,
+        text,
+        original,
+        app_id,
+        app_name,
     })
+}
+
+/// A text line that would read as structure (an entry heading, a
+/// quote, an escape) gets a backslash in front.
+fn escape_line(line: &str) -> String {
+    if line.starts_with("## ") || line.starts_with('>') || line.starts_with('\\') || line.starts_with("<!--") {
+        format!("\\{line}")
+    } else {
+        line.to_string()
+    }
+}
+
+fn unescape_line(line: &str) -> &str {
+    line.strip_prefix('\\').unwrap_or(line)
+}
+
+/// One line, no line breaks, and nothing that would end the comment.
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").replace("-->", "")
+}
+
+fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
+    let mut out = format!("## {}", time.format("%H:%M:%S"));
+    let label = entry.app_name.as_deref().or(entry.app_id.as_deref()).map(one_line);
+    if let Some(label) = label.filter(|l| !l.is_empty()) {
+        out.push_str(" · ");
+        out.push_str(&label);
+    }
+    out.push_str(&format!("\n<!-- id: {}", entry.id));
+    if let Some(app) = entry.app_id.as_deref().map(one_line).filter(|a| !a.is_empty()) {
+        out.push_str(&format!(" app: {app}"));
+    }
+    out.push_str(&format!(
+        " words: {} seconds: {:.1} -->\n\n",
+        entry.word_count,
+        entry.duration_ms.max(0) as f64 / 1000.0
+    ));
+    for line in entry.text.lines() {
+        out.push_str(&escape_line(line));
+        out.push('\n');
+    }
+    if let Some(original) = &entry.original {
+        out.push('\n');
+        for (n, line) in original.lines().enumerate() {
+            match (n, line.is_empty()) {
+                (0, _) => out.push_str(&format!("{BEFORE_REFINE} {line}\n")),
+                (_, true) => out.push_str(">\n"),
+                (_, false) => out.push_str(&format!("> {line}\n")),
+            }
+        }
+    }
+    out
+}
+
+/// Frontmatter keys this module owns.
+const OWN_KEYS: [&str; 4] = ["date:", "entries:", "words:", "apps:"];
+
+fn yaml_scalar(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '_' | '+' | '-'))
+        && !s.starts_with([' ', '-'])
+        && !s.ends_with(' ');
+    if plain {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// The frontmatter for a day: our four keys, then any other keys the
+/// file already had. Empty when there is nothing to say (no entries
+/// and no other keys).
+fn render_front(existing: &[String], date: NaiveDate, entries: &[&HistoryEntry]) -> String {
+    let others: Vec<&String> = existing
+        .iter()
+        .filter(|l| !OWN_KEYS.iter().any(|k| l.starts_with(k)))
+        .collect();
+    if entries.is_empty() && others.iter().all(|l| l.trim().is_empty()) {
+        return String::new();
+    }
+    let mut out = String::from("---\n");
+    if !entries.is_empty() {
+        let words: i64 = entries.iter().map(|e| e.word_count).sum();
+        let mut apps: Vec<String> = Vec::new();
+        for e in entries {
+            if let Some(app) = e.app_name.as_deref().or(e.app_id.as_deref())
+                && !apps.iter().any(|a| a == app)
+            {
+                apps.push(app.to_string());
+            }
+        }
+        let apps: Vec<String> = apps.iter().map(|a| yaml_scalar(a)).collect();
+        out.push_str(&format!("date: {}\n", date.format("%Y-%m-%d")));
+        out.push_str(&format!("entries: {}\n", entries.len()));
+        out.push_str(&format!("words: {words}\n"));
+        out.push_str(&format!("apps: [{}]\n", apps.join(", ")));
+    }
+    for line in others {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("---\n\n");
+    out
+}
+
+// ---------------------------------------------------------------
+// Reading and writing files
+// ---------------------------------------------------------------
+
+/// Serializes writers inside this process (the dictation thread and
+/// a delete from the UI).
+static WRITE: Mutex<()> = Mutex::new(());
+
+fn read_day(path: &Path, date: NaiveDate) -> io::Result<Day> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(parse_day(&text, date)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(parse_day("", date)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Replace `path` with `content` in one step, so a reader never sees
+/// half a file.
+fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{name}.tmp"));
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)
+}
+
+/// Write the day back: frontmatter for `kept`, then `body`. Removes
+/// the file (and an emptied year folder) when nothing is left.
+fn store_day(path: &Path, date: NaiveDate, front: &[String], kept: &[&HistoryEntry], body: &str) -> io::Result<()> {
+    let front = render_front(front, date, kept);
+    let body = body.trim_start_matches(['\n', '\r']);
+    if front.is_empty() && body.trim().is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        if let Some(year) = path.parent() {
+            // Fails, as intended, while the folder still has files.
+            let _ = fs::remove_dir(year);
+        }
+        return Ok(());
+    }
+    let mut content = format!("{front}{}", body.trim_end());
+    content.push('\n');
+    write_atomic(path, &content)
+}
+
+/// Add a dictation to its day's file. Text that is empty after
+/// trimming is not stored (`Ok(None)`).
+pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>> {
+    let text = new.text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let Some(at) = Local.timestamp_millis_opt(new.at_ms).single() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "history: bad timestamp"));
+    };
+    // Whole seconds, like the heading that stores the time.
+    let time = chrono::Timelike::with_nanosecond(&at.time(), 0).unwrap_or(at.time());
+    let date = at.date_naive();
+    let non_empty = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let path = day_path(dir, date);
+    let day = read_day(&path, date)?;
+
+    let base = at.format("%Y%m%dT%H%M%S").to_string();
+    let taken = |id: &str| day.blocks.iter().any(|b| b.entry.id == id);
+    let mut id = base.clone();
+    let mut n = 2;
+    while taken(&id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+
+    let entry = HistoryEntry {
+        id,
+        at_ms: local_ms(date, time),
+        duration_ms: (new.duration_ms.max(0) as f64 / 100.0).round() as i64 * 100,
+        word_count: text.split_whitespace().count() as i64,
+        text: text.to_string(),
+        original: new.original.and_then(non_empty).filter(|o| o != text),
+        app_id: non_empty(new.app_id),
+        app_name: non_empty(new.app_name),
+    };
+
+    let mut body = day.prefix.clone();
+    for block in &day.blocks {
+        body.push_str(&block.source);
+    }
+    let block = render_block(&entry, time);
+    let body = if body.trim().is_empty() {
+        block
+    } else {
+        format!("{}\n\n{block}", body.trim_end())
+    };
+    let mut kept: Vec<&HistoryEntry> = day.blocks.iter().map(|b| &b.entry).collect();
+    kept.push(&entry);
+    store_day(&path, date, &day.front, &kept, &body)?;
+    Ok(Some(entry))
+}
+
+/// Cut the entries matching `remove` out of one day file. Returns how
+/// many were removed.
+fn remove_from_day(path: &Path, date: NaiveDate, remove: impl Fn(&HistoryEntry) -> bool) -> io::Result<usize> {
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let day = read_day(path, date)?;
+    let removed = day.blocks.iter().filter(|b| remove(&b.entry)).count();
+    if removed == 0 {
+        return Ok(0);
+    }
+    let mut body = day.prefix.clone();
+    let mut kept = Vec::new();
+    for block in day.blocks.iter().filter(|b| !remove(&b.entry)) {
+        body.push_str(&block.source);
+        kept.push(&block.entry);
+    }
+    store_day(path, date, &day.front, &kept, &body)?;
+    Ok(removed)
+}
+
+type Cached = (SystemTime, u64, Arc<Vec<HistoryEntry>>);
+static CACHE: LazyLock<Mutex<HashMap<PathBuf, Cached>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The entries of one day file, newest first. Parsed once per version
+/// of the file (modification time and size).
+fn day_entries(path: &Path, date: NaiveDate) -> Arc<Vec<HistoryEntry>> {
+    let stamp = fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+    if let Some((modified, len)) = stamp
+        && let Ok(cache) = CACHE.lock()
+        && let Some((m, l, entries)) = cache.get(path)
+        && *m == modified
+        && *l == len
+    {
+        return entries.clone();
+    }
+    let mut entries: Vec<HistoryEntry> = read_day(path, date)
+        .map(|day| day.blocks.into_iter().map(|b| b.entry).collect())
+        .unwrap_or_default();
+    entries.sort_by(|a, b| b.at_ms.cmp(&a.at_ms).then_with(|| b.id.cmp(&a.id)));
+    let entries = Arc::new(entries);
+    if let Some((modified, len)) = stamp
+        && let Ok(mut cache) = CACHE.lock()
+    {
+        cache.insert(path.to_path_buf(), (modified, len, entries.clone()));
+    }
+    entries
 }
 
 fn matches(entry: &HistoryEntry, needle: &str) -> bool {
@@ -79,343 +604,90 @@ fn matches(entry: &HistoryEntry, needle: &str) -> bool {
         || entry.app_name.as_deref().is_some_and(has)
 }
 
+// ---------------------------------------------------------------
+// The API
+// ---------------------------------------------------------------
+
 /// Stored entries, newest first. `search` is matched without regard
-/// to case against the text, the original text and the app name; an
-/// empty search returns everything. `limit` is capped at [`MAX_PAGE`].
-///
-/// The search runs here and not in SQL because SQLite's `LIKE` only
-/// folds ASCII case, which is wrong for Danish text.
-pub fn list(store: &Store, search: &str, limit: u32, offset: u32) -> Result<HistoryPage, StoreError> {
+/// to case (Danish letters included) against the text, the original
+/// text and the app name; an empty search returns everything. `limit`
+/// is capped at [`MAX_PAGE`].
+pub fn list(dir: &Path, search: &str, limit: u32, offset: u32) -> HistoryPage {
     let needle = search.trim().to_lowercase();
-    let limit = limit.clamp(1, MAX_PAGE);
-    store.with_conn(|c| {
-        let stored: i64 = c.query_row(
-            "SELECT COUNT(*) FROM dictations WHERE transcript IS NOT NULL",
-            [],
-            |r| r.get(0),
-        )?;
-        if needle.is_empty() {
-            let mut stmt = c.prepare(&format!(
-                "SELECT {COLUMNS} FROM dictations WHERE transcript IS NOT NULL \
-                 ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"
-            ))?;
-            let entries = stmt
-                .query_map(params![limit, offset], entry_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            return Ok(HistoryPage { entries, matched: stored, stored });
+    let limit = limit.clamp(1, MAX_PAGE) as usize;
+    let offset = offset as usize;
+    let mut stored = 0usize;
+    let mut matched = 0usize;
+    let mut entries = Vec::new();
+    for (date, path) in day_files(dir) {
+        let day = day_entries(&path, date);
+        stored += day.len();
+        for entry in day.iter() {
+            if !needle.is_empty() && !matches(entry, &needle) {
+                continue;
+            }
+            if matched >= offset && entries.len() < limit {
+                entries.push(entry.clone());
+            }
+            matched += 1;
         }
-        let mut stmt = c.prepare(&format!(
-            "SELECT {COLUMNS} FROM dictations WHERE transcript IS NOT NULL \
-             ORDER BY started_at DESC, id DESC"
-        ))?;
-        let hits: Vec<HistoryEntry> = stmt
-            .query_map([], entry_from_row)?
-            .filter(|row| row.as_ref().map_or(true, |e| matches(e, &needle)))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let matched = hits.len() as i64;
-        let entries = hits
-            .into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
-            .collect();
-        Ok(HistoryPage { entries, matched, stored })
-    })
-}
-
-/// One stored entry. `None` when there is no such dictation or its
-/// text is not stored.
-pub fn get(store: &Store, id: i64) -> Result<Option<HistoryEntry>, StoreError> {
-    store.with_conn(|c| {
-        let mut stmt = c.prepare(&format!(
-            "SELECT {COLUMNS} FROM dictations WHERE id = ? AND transcript IS NOT NULL"
-        ))?;
-        let mut rows = stmt.query_map(params![id], entry_from_row)?;
-        Ok(rows.next().transpose()?)
-    })
-}
-
-const FORGET: &str = "UPDATE dictations \
-     SET transcript = NULL, raw_transcript = NULL, app_bundle_id = NULL, app_name = NULL";
-
-/// Remove one entry's text. The stats row stays. `false` when there
-/// was nothing to remove.
-pub fn delete(store: &Store, id: i64) -> Result<bool, StoreError> {
-    let changed = store.with_conn(|c| {
-        Ok(c.execute(
-            &format!("{FORGET} WHERE id = ? AND transcript IS NOT NULL"),
-            params![id],
-        )?)
-    })?;
-    if changed > 0 {
-        crate::stats::notify_changed();
     }
-    Ok(changed > 0)
+    HistoryPage { entries, matched: matched as i64, stored: stored as i64 }
 }
 
-/// Remove all stored text. The stats rows stay. Returns how many
-/// entries were removed.
-pub fn clear(store: &Store) -> Result<usize, StoreError> {
-    let changed = store.with_conn(|c| {
-        Ok(c.execute(&format!("{FORGET} WHERE transcript IS NOT NULL"), [])?)
-    })?;
-    if changed > 0 {
-        crate::stats::notify_changed();
+/// One stored entry, by id.
+pub fn get(dir: &Path, id: &str) -> Option<HistoryEntry> {
+    let date = date_from_id(id)?;
+    day_entries(&day_path(dir, date), date).iter().find(|e| e.id == id).cloned()
+}
+
+/// Remove one entry. `false` when there is no such entry.
+pub fn delete(dir: &Path, id: &str) -> io::Result<bool> {
+    let Some(date) = date_from_id(id) else {
+        return Ok(false);
+    };
+    Ok(remove_from_day(&day_path(dir, date), date, |e| e.id == id)? > 0)
+}
+
+/// Remove every entry. Files that held nothing else are deleted.
+/// Returns how many entries were removed.
+pub fn clear(dir: &Path) -> io::Result<usize> {
+    let mut removed = 0;
+    for (date, path) in day_files(dir) {
+        removed += remove_from_day(&path, date, |_| true)?;
     }
-    Ok(changed)
+    Ok(removed)
 }
 
-/// Remove text older than the retention in `settings`. Applies
-/// whether history is on or off: switching history off must not
-/// freeze old text in place. Returns how many entries were removed.
-pub fn prune(store: &Store, settings: &HistorySettings, now_ms: i64) -> Result<usize, StoreError> {
-    let Some(cutoff) = settings.cutoff_ms(now_ms) else {
+/// Remove the entries of days that are older than the retention in
+/// `settings`. Whole days: with 30 days, a dictation is kept through
+/// the 30th day after the one it was made on. Applies whether history
+/// is on or off: switching history off must not freeze old text in
+/// place. Returns how many entries were removed.
+pub fn prune(dir: &Path, settings: &HistorySettings, now_ms: i64) -> io::Result<usize> {
+    if settings.retention_days == 0 {
+        return Ok(0);
+    }
+    let Some(now) = Local.timestamp_millis_opt(now_ms).single() else {
         return Ok(0);
     };
-    let changed = store.with_conn(|c| {
-        Ok(c.execute(
-            &format!("{FORGET} WHERE started_at < ? AND transcript IS NOT NULL"),
-            params![cutoff],
-        )?)
-    })?;
-    if changed > 0 {
-        crate::stats::notify_changed();
+    let oldest_kept = now.date_naive() - ChronoDuration::days(i64::from(settings.retention_days));
+    let mut removed = 0;
+    for (date, path) in day_files(dir) {
+        if date < oldest_kept {
+            removed += remove_from_day(&path, date, |_| true)?;
+        }
     }
-    Ok(changed)
+    Ok(removed)
 }
 
 /// Unix epoch milliseconds now.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::stats::{DictationRecord, HistoryFields, record};
-    use tempfile::tempdir;
-
-    const DAY: i64 = 24 * 60 * 60 * 1000;
-
-    fn fresh_store() -> (tempfile::TempDir, Store) {
-        let dir = tempdir().expect("tempdir");
-        let store = Store::open_or_init(&dir.path().join("openwhisper.db")).expect("open");
-        (dir, store)
-    }
-
-    fn add(store: &Store, at_ms: i64, text: &str, original: Option<&str>, app: (&str, &str)) {
-        record(
-            store,
-            &DictationRecord {
-                started_at_ms: at_ms,
-                duration_ms: 1000,
-                wall_clock_ms: 1200,
-                text,
-                history: Some(HistoryFields { original, app_id: app.0, app_name: app.1 }),
-            },
-        );
-    }
-
-    fn add_without_history(store: &Store, at_ms: i64, text: &str) {
-        record(
-            store,
-            &DictationRecord {
-                started_at_ms: at_ms,
-                duration_ms: 1000,
-                wall_clock_ms: 1200,
-                text,
-                history: None,
-            },
-        );
-    }
-
-    fn words_all_time(store: &Store) -> i64 {
-        crate::stats::get_summary(store, 100 * DAY).unwrap().words_all_time
-    }
-
-    #[test]
-    fn lists_newest_first_and_skips_rows_without_text() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "first one ", None, ("com.example.notes", "Notes"));
-        add_without_history(&store, 2000, "not stored at all");
-        add(&store, 3000, "third one ", Some("third won "), ("", ""));
-
-        let page = list(&store, "", 50, 0).unwrap();
-        assert_eq!(page.stored, 2);
-        assert_eq!(page.matched, 2);
-        let texts: Vec<&str> = page.entries.iter().map(|e| e.text.as_str()).collect();
-        assert_eq!(texts, ["third one", "first one"]);
-
-        let newest = &page.entries[0];
-        assert_eq!(newest.original.as_deref(), Some("third won"));
-        assert_eq!(newest.app_id, None);
-        assert_eq!(newest.app_name, None);
-        assert_eq!(newest.word_count, 2);
-
-        let oldest = &page.entries[1];
-        assert_eq!(oldest.original, None);
-        assert_eq!(oldest.app_id.as_deref(), Some("com.example.notes"));
-        assert_eq!(oldest.app_name.as_deref(), Some("Notes"));
-    }
-
-    #[test]
-    fn original_is_kept_only_when_it_differs() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "same text ", Some(" same text"), ("", ""));
-        let page = list(&store, "", 50, 0).unwrap();
-        assert_eq!(page.entries[0].original, None);
-    }
-
-    #[test]
-    fn pages_with_limit_and_offset() {
-        let (_d, store) = fresh_store();
-        for i in 0..5 {
-            add(&store, 1000 + i, &format!("entry {i}"), None, ("", ""));
-        }
-        let page = list(&store, "", 2, 1).unwrap();
-        assert_eq!(page.matched, 5);
-        let texts: Vec<&str> = page.entries.iter().map(|e| e.text.as_str()).collect();
-        assert_eq!(texts, ["entry 3", "entry 2"]);
-    }
-
-    #[test]
-    fn search_ignores_case_including_danish_letters() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "Vi ses på Ærø i morgen", None, ("", ""));
-        add(&store, 2000, "Send the report", Some("send the reaport"), ("", ""));
-        add(&store, 3000, "Nothing to see", None, ("com.example.chat", "Chatter"));
-
-        let hit = |q: &str| -> Vec<String> {
-            list(&store, q, 50, 0).unwrap().entries.into_iter().map(|e| e.text).collect()
-        };
-        assert_eq!(hit("ærø"), ["Vi ses på Ærø i morgen"]);
-        assert_eq!(hit("  REPORT "), ["Send the report"]);
-        // The original text and the app name are searched too.
-        assert_eq!(hit("reaport"), ["Send the report"]);
-        assert_eq!(hit("chatter"), ["Nothing to see"]);
-        assert!(hit("no such words").is_empty());
-
-        let page = list(&store, "the", 50, 0).unwrap();
-        assert_eq!(page.matched, 1);
-        assert_eq!(page.stored, 3);
-    }
-
-    #[test]
-    fn search_pages_over_the_matches() {
-        let (_d, store) = fresh_store();
-        for i in 0..4 {
-            add(&store, 1000 + i, &format!("match {i}"), None, ("", ""));
-            add(&store, 2000 + i, &format!("other {i}"), None, ("", ""));
-        }
-        let page = list(&store, "match", 2, 2).unwrap();
-        assert_eq!(page.matched, 4);
-        let texts: Vec<&str> = page.entries.iter().map(|e| e.text.as_str()).collect();
-        assert_eq!(texts, ["match 1", "match 0"]);
-    }
-
-    #[test]
-    fn get_returns_only_stored_text() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "kept ", None, ("", ""));
-        add_without_history(&store, 2000, "never stored");
-        let id = list(&store, "", 1, 0).unwrap().entries[0].id;
-        assert_eq!(get(&store, id).unwrap().unwrap().text, "kept");
-        assert_eq!(get(&store, id + 1).unwrap(), None);
-        assert_eq!(get(&store, 9999).unwrap(), None);
-    }
-
-    #[test]
-    fn delete_removes_text_and_keeps_the_stats_row() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "one two three ", Some("won two three"), ("a.b", "AB"));
-        add(&store, 2000, "four five ", None, ("", ""));
-        let before = words_all_time(&store);
-        let id = list(&store, "one", 1, 0).unwrap().entries[0].id;
-
-        assert!(delete(&store, id).unwrap());
-        assert!(!delete(&store, id).unwrap(), "second delete finds nothing");
-
-        let page = list(&store, "", 50, 0).unwrap();
-        assert_eq!(page.stored, 1);
-        assert_eq!(page.entries[0].text, "four five");
-        assert_eq!(words_all_time(&store), before);
-
-        // Every history column of the removed entry is empty.
-        let leftovers: i64 = store
-            .with_conn(|c| {
-                Ok(c.query_row(
-                    "SELECT COUNT(*) FROM dictations WHERE id = ? AND (transcript IS NOT NULL \
-                     OR raw_transcript IS NOT NULL OR app_bundle_id IS NOT NULL OR app_name IS NOT NULL)",
-                    params![id],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
-        assert_eq!(leftovers, 0);
-    }
-
-    #[test]
-    fn clear_removes_all_text_and_keeps_stats() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "one two ", None, ("", ""));
-        add(&store, 2000, "three ", None, ("", ""));
-        add_without_history(&store, 3000, "four five six");
-        let before = words_all_time(&store);
-
-        assert_eq!(clear(&store).unwrap(), 2);
-        assert_eq!(clear(&store).unwrap(), 0);
-        assert_eq!(list(&store, "", 50, 0).unwrap().stored, 0);
-        assert_eq!(words_all_time(&store), before);
-    }
-
-    #[test]
-    fn prune_removes_text_older_than_retention() {
-        let (_d, store) = fresh_store();
-        let now = 100 * DAY;
-        add(&store, now - 40 * DAY, "old ", None, ("", ""));
-        add(&store, now - 8 * DAY, "middle ", None, ("", ""));
-        add(&store, now - DAY, "new ", None, ("", ""));
-        let before = words_all_time(&store);
-
-        let thirty = HistorySettings { enabled: true, retention_days: 30 };
-        assert_eq!(prune(&store, &thirty, now).unwrap(), 1);
-        assert_eq!(list(&store, "", 50, 0).unwrap().stored, 2);
-
-        // Retention still applies while history is switched off.
-        let seven_off = HistorySettings { enabled: false, retention_days: 7 };
-        assert_eq!(prune(&store, &seven_off, now).unwrap(), 1);
-        let left: Vec<String> =
-            list(&store, "", 50, 0).unwrap().entries.into_iter().map(|e| e.text).collect();
-        assert_eq!(left, ["new"]);
-        assert_eq!(words_all_time(&store), before);
-    }
-
-    #[test]
-    fn prune_keeps_everything_when_retention_is_forever() {
-        let (_d, store) = fresh_store();
-        add(&store, 1000, "ancient ", None, ("", ""));
-        let forever = HistorySettings { enabled: true, retention_days: 0 };
-        assert_eq!(prune(&store, &forever, 1000 * DAY).unwrap(), 0);
-        assert_eq!(list(&store, "", 50, 0).unwrap().stored, 1);
-    }
-
-    #[test]
-    fn removed_text_is_not_left_in_the_file() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("openwhisper.db");
-        let marker = "zebra-quartz-marker";
-        {
-            let store = Store::open_or_init(&path).expect("open");
-            // Enough text to fill several pages, so removal frees some.
-            for i in 0..200 {
-                add(&store, 1000 + i, &format!("{marker} entry {i} {}", "word ".repeat(40)), None, ("", ""));
-            }
-            assert_eq!(clear(&store).unwrap(), 200);
-        }
-        let bytes = std::fs::read(&path).expect("read db file");
-        let found = bytes.windows(marker.len()).any(|w| w == marker.as_bytes());
-        assert!(!found, "cleared transcript text is still readable in the database file");
-    }
-}
+mod tests;

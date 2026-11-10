@@ -1,22 +1,28 @@
 // Types and helpers for transcript history (TASK-95). Mirror
 // core/src/settings/history.rs, core/src/history/mod.rs and
-// src-tauri/src/history.rs.
+// src-tauri/src/history.rs. The text lives in Markdown files, one
+// per day, in a folder the user can open and other programs can read.
 
 export interface HistorySettings {
   // Off by default: no dictated text is stored until the user asks.
   enabled: boolean;
   // Stored text older than this many days is removed. 0 = keep.
   retention_days: number;
+  // Folder the day files are written to; null = the default folder.
+  folder: string | null;
 }
 
 export interface HistoryState {
   settings: HistorySettings;
-  // Path of the file the text is stored in, shown as-is.
-  database: string;
+  // The folder in use, shown as-is.
+  folder: string;
+  // The folder used when none is chosen.
+  default_folder: string;
 }
 
 export interface HistoryEntry {
-  id: number;
+  // `YYYYMMDDTHHMMSS` of the recording's start; names its day file.
+  id: string;
   // When the recording started, Unix epoch milliseconds.
   at_ms: number;
   duration_ms: number;

@@ -84,10 +84,21 @@ fn read_platform() -> FocusContext {
 /// Tidy what the platform returned and mark our own process.
 fn finish(mut ctx: FocusContext, own_pid: u32) -> FocusContext {
     ctx.app_id = ctx.app_id.trim().to_string();
-    ctx.app_name = ctx.app_name.trim().to_string();
+    ctx.app_name = tidy_name(&ctx.app_name);
     ctx.window_title = ctx.window_title.trim().chars().take(MAX_TITLE_CHARS).collect();
     ctx.is_self = ctx.pid != 0 && ctx.pid == own_pid;
     ctx
+}
+
+/// Some apps ship a display name wrapped in invisible direction marks
+/// (WhatsApp's starts with U+200E). They are noise in a file name, a
+/// search or a list, so they go, together with outer whitespace.
+fn tidy_name(name: &str) -> String {
+    let invisible = |c: char| {
+        c.is_whitespace()
+            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    };
+    name.trim_matches(invisible).to_string()
 }
 
 /// `C:\Users\me\AppData\Local\slack\app-4.1\Slack.exe` -> `slack.exe`.
@@ -143,6 +154,14 @@ mod tests {
         assert_eq!(ctx.app_name, "Example");
         assert_eq!(ctx.window_title.chars().count(), MAX_TITLE_CHARS);
         assert!(!ctx.is_self);
+    }
+
+    #[test]
+    fn app_names_lose_invisible_marks() {
+        assert_eq!(tidy_name("\u{200E}WhatsApp"), "WhatsApp");
+        assert_eq!(tidy_name(" \u{FEFF}Notes\u{200F} "), "Notes");
+        // Marks inside a name are left alone.
+        assert_eq!(tidy_name("A\u{200D}B"), "A\u{200D}B");
     }
 
     #[test]

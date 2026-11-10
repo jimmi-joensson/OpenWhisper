@@ -25,6 +25,11 @@
 //! - `refine`: the optional language-model cleanup step (TASK-93).
 //!   Run text through it, check and test the backend, edit its
 //!   settings, store the API key, run the live eval set.
+//! - `history`: the opt-in transcript history (TASK-95). List,
+//!   search, show, delete and clear stored dictations; switch it on
+//!   or off and set the retention.
+//! - `focus`: print which app is frontmost and its window title
+//!   (TASK-94).
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -67,6 +72,10 @@ enum Command {
     CrashDump(commands::crash_dump::Args),
     /// Refine: clean up a transcript with a language model.
     Refine(commands::refine::RefineArgs),
+    /// Transcript history: list, search, delete, switch on or off.
+    History(commands::history::HistoryArgs),
+    /// Print which app is frontmost right now.
+    Focus(commands::focus::FocusArgs),
 }
 
 fn main() -> Result<()> {
@@ -79,5 +88,7 @@ fn main() -> Result<()> {
         Command::Settings(args) => commands::settings::run(args, cli.json),
         Command::CrashDump(args) => commands::crash_dump::run(args, cli.json),
         Command::Refine(args) => commands::refine::run(args, cli.json),
+        Command::History(args) => commands::history::run(args, cli.json),
+        Command::Focus(args) => commands::focus::run(args, cli.json),
     }
 }

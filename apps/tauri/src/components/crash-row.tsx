@@ -50,7 +50,7 @@ export function CrashRow({
   return (
     <TooltipProvider delay={300}>
       <div
-        className="ow-crashes__row"
+        className="ow-crashes__row ow-hover-host"
         data-testid={`crash-row-${crash.id}`}
         data-unread={crash.unread || undefined}
         data-first={first || undefined}
@@ -103,13 +103,13 @@ export function CrashRow({
         </div>
         <div className="ow-crashes__row-actions">
           {/* Resting state: design caret. Hover state: action buttons.
-              CSS handles the visibility swap via :hover so the buttons
-              are always queryable from Playwright (they're just opacity-
-              0 on rest, opacity-1 on hover). */}
-          <div className="ow-crashes__row-actions-rest" aria-hidden="true">
+              The shared hover-reveal classes swap them (App.css,
+              `.ow-hover-host`). The buttons stay in the DOM while
+              hidden; Playwright hovers the row before clicking. */}
+          <div className="ow-crashes__row-actions-rest ow-hover-rest" aria-hidden="true">
             <CaretRight />
           </div>
-          <div className="ow-crashes__row-actions-hover">
+          <div className="ow-crashes__row-actions-hover ow-hover-reveal">
             {crash.unread && (
               <button
                 type="button"

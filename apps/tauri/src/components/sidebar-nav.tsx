@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   type LucideIcon,
+  History as HistoryIcon,
 } from "lucide-react";
 import { SETTINGS_PANES, type SettingsPaneId } from "../lib/settings-panes";
 import { useCrashesUnreadCount } from "../lib/use-crashes";
@@ -24,7 +25,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   refine: Sparkles,
 };
 
-export type Route = "home" | "transcribe" | "settings" | "diagnostics";
+export type Route = "home" | "history" | "transcribe" | "settings" | "diagnostics";
 
 interface SidebarNavProps {
   route: Route;
@@ -35,6 +36,7 @@ interface SidebarNavProps {
 
 const ROUTE_ITEMS: ReadonlyArray<{ id: Route; label: string; Icon: typeof Home }> = [
   { id: "home", label: "Home", Icon: Home },
+  { id: "history", label: "History", Icon: HistoryIcon },
   { id: "transcribe", label: "Transcribe", Icon: FileAudio },
   { id: "settings", label: "Settings", Icon: SettingsIcon },
   { id: "diagnostics", label: "Diagnostics", Icon: Activity },

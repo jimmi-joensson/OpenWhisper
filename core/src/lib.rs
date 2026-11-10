@@ -6,6 +6,9 @@ pub mod dictation;
 mod ffi_c;
 #[cfg(feature = "recognizer")]
 pub mod file_transcription;
+#[cfg(feature = "focus")]
+pub mod focus;
+pub mod history;
 pub mod media_gate;
 pub mod model_lifecycle;
 pub mod prelude;

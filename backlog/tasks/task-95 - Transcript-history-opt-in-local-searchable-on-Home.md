@@ -1,9 +1,10 @@
 ---
 id: TASK-95
 title: Transcript history - opt-in, local, searchable on Home
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T15:07:00Z'
 labels:
   - history
   - core
@@ -42,3 +43,9 @@ Stats must keep working with history off: the row is still written, only the tex
 - [ ] #7 Settings say plainly what is stored and where the file lives
 - [ ] #8 Tests cover the store functions, retention, search and the Home list (Playwright)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+See doc-48 and the subtask notes. Changes to the description's decisions, made with the user on 2026-11-10 while testing: no separate pause (the one switch stops saving and keeps what is stored); Home shows the newest 5 and a History screen has the full list with search and pages; clear all is on the History screen. Windows: compiles, not run.
+<!-- SECTION:NOTES:END -->

@@ -1,5 +1,7 @@
 pub mod crash_dump;
 pub mod enumerate_devices;
+pub mod focus;
+pub mod history;
 pub mod memory;
 pub mod recognizer_info;
 pub mod refine;

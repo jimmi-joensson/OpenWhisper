@@ -1,9 +1,10 @@
 ---
 id: TASK-94
 title: Focus context - know which app receives the text
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T15:07:00Z'
 labels:
   - focus
   - core

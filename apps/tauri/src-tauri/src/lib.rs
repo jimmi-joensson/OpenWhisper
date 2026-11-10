@@ -21,6 +21,7 @@ mod crashes;
 mod file_transcribe;
 mod focus;
 mod fullscreen;
+mod history;
 mod hotkey;
 mod injection;
 mod media_control;
@@ -1018,6 +1019,10 @@ pub fn run() {
             // Hydrate the Refine switch (off unless the user turned
             // it on) before the first recording warms a backend.
             refine::init(app.handle());
+            // Hydrate the transcript-history switch (off unless the
+            // user turned it on) and drop text that aged out while
+            // the app was closed. After the store is registered above.
+            history::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1229,6 +1234,11 @@ pub fn run() {
             refine::refine_set_api_key,
             refine::refine_history,
             refine::refine_history_clear,
+            history::history_get,
+            history::history_set,
+            history::history_list,
+            history::history_delete,
+            history::history_clear,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

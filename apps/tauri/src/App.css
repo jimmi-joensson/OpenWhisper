@@ -589,6 +589,37 @@ body[data-platform="macos"] .ow-titlebar {
   margin-top: 2px;
 }
 
+/* Hover reveal: the one pattern for "show these controls while the
+   row is hovered". Put `ow-hover-host` on the row and
+   `ow-hover-reveal` on what should appear; `ow-hover-rest` marks
+   something that steps aside while they show.
+
+   Shown for the pointer (row hovered) and for the keyboard (the row
+   or something inside the revealed part has visible focus). It uses
+   `visibility` with no fade on purpose:
+   - an opacity transition was seen leaving controls painted after
+     the pointer had left the row in the macOS webview;
+   - `:focus-within` kept them up after a mouse click in Chromium
+     (the Windows webview), because a clicked button keeps focus.
+   `:focus-visible` only matches keyboard focus, so neither happens.
+   Hidden controls stay in the DOM; tests hover the row first. */
+.ow-hover-host .ow-hover-reveal {
+  visibility: hidden;
+}
+
+.ow-hover-host:hover .ow-hover-reveal,
+.ow-hover-host:focus-visible .ow-hover-reveal,
+.ow-hover-host .ow-hover-reveal:focus-visible,
+.ow-hover-host:has(.ow-hover-reveal :focus-visible) .ow-hover-reveal {
+  visibility: visible;
+}
+
+.ow-hover-host:hover .ow-hover-rest,
+.ow-hover-host:focus-visible .ow-hover-rest,
+.ow-hover-host:has(.ow-hover-reveal :focus-visible) .ow-hover-rest {
+  visibility: hidden;
+}
+
 .ow-transcript-row {
   position: relative;
   display: flex;
@@ -706,18 +737,217 @@ body[data-platform="macos"] .ow-titlebar {
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, background-color 120ms ease;
-}
-
-.ow-transcript-row:hover .ow-transcript-row__copy,
-.ow-transcript-row__copy:focus-visible {
-  opacity: 1;
+  transition: background-color 120ms ease;
 }
 
 .ow-transcript-row__copy:hover {
   background: color-mix(in oklch, var(--foreground) 8%, transparent);
   color: var(--foreground);
+}
+
+/* Quick switches on Home (TASK-100): Refine and History side by
+   side, stacking when the column gets narrow. */
+.ow-home-switches {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+.ow-home-switch {
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Transcript history on Home (TASK-95). */
+.ow-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ow-history__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.ow-history__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ow-history__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.ow-history__day {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ow-history__day-label {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.ow-history__rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.ow-history-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+.ow-history-row + .ow-history-row {
+  border-top: 1px solid var(--border);
+}
+
+.ow-history-row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ow-history-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-history-row__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--foreground);
+  word-break: break-word;
+}
+
+.ow-history-row__text[data-folded="true"] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.ow-history-row__links {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-history-row__actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+}
+
+.ow-history-row__action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.ow-history-row__action:hover {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.ow-history-row__action:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.ow-history__foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ow-history__count {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+/* The History screen: same column as Home, with a page header. */
+.ow-history-pane {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--foreground);
+}
+
+.ow-history-pane__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ow-history-pane__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ow-history-pane__sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.ow-history-pane__search {
+  width: 240px;
+  max-width: 50%;
+  flex-shrink: 0;
+}
+
+.ow-history__pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
 }
 
 /* Webview scrollbar — Tauri's default is invisible on Mac. Slim, theme-aware. */
@@ -1808,28 +2038,15 @@ body[data-platform="macos"] .ow-titlebar {
 .ow-crashes__row-actions-rest {
   color: var(--muted-foreground);
   display: inline-flex;
-  transition: opacity 120ms ease;
 }
 
+/* Swapped with the resting caret by the shared hover-reveal classes
+   on the row (see `.ow-hover-host`). */
 .ow-crashes__row-actions-hover {
   position: absolute;
   right: 0;
   display: inline-flex;
   gap: 6px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-
-.ow-crashes__row:hover .ow-crashes__row-actions-rest,
-.ow-crashes__row:focus-within .ow-crashes__row-actions-rest {
-  opacity: 0;
-}
-
-.ow-crashes__row:hover .ow-crashes__row-actions-hover,
-.ow-crashes__row:focus-within .ow-crashes__row-actions-hover {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 .ow-crashes__row-action {

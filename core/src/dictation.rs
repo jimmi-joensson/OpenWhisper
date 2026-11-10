@@ -628,14 +628,55 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     // mutates dictation phase, so a failure here cannot stall the
     // state machine in PHASE_TRANSCRIBING / push it to PHASE_ERROR.
     if let Some(store) = crate::stats::store() {
-        crate::stats::record_dictation(
+        // Transcript history (TASK-95) is opt-in: with it off the row
+        // carries counters only and the frontmost app is not even read.
+        let history = crate::settings::current_history_settings();
+        let original = if history.enabled {
+            with_state(|s| s.refine.raw_transcript.clone())
+        } else {
+            String::new()
+        };
+        // Read after the injector was called: it pastes from its own
+        // thread and a paste does not move focus, so this names the
+        // app that receives the text without holding the paste up.
+        let (app_id, app_name) = if history.enabled { delivered_to_app() } else { Default::default() };
+        crate::stats::record(
             store,
-            started_at_ms,
-            duration_ms,
-            wall_clock_ms,
-            text,
+            &crate::stats::DictationRecord {
+                started_at_ms,
+                duration_ms,
+                wall_clock_ms,
+                text,
+                history: history.enabled.then(|| crate::stats::HistoryFields {
+                    original: Some(original.as_str()),
+                    app_id: &app_id,
+                    app_name: &app_name,
+                }),
+            },
         );
+        // Retention applies with history on or off.
+        if let Err(e) = crate::history::prune(store, &history, crate::history::now_ms()) {
+            eprintln!("[history] prune failed: {e}");
+        }
     }
+}
+
+/// Id and name of the app the transcript was just delivered to, for
+/// the history entry. Empty when it is not known, or when one of
+/// OpenWhisper's own windows has focus (then the text only went to
+/// the clipboard).
+#[cfg(feature = "focus")]
+fn delivered_to_app() -> (String, String) {
+    let focus = crate::focus::current();
+    if focus.is_self {
+        return Default::default();
+    }
+    (focus.app_id, focus.app_name)
+}
+
+#[cfg(not(feature = "focus"))]
+fn delivered_to_app() -> (String, String) {
+    Default::default()
 }
 
 /// Implemented by the shell (Tauri's `TauriInjector`) and registered once

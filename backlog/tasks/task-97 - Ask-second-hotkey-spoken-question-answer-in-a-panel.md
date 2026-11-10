@@ -1,10 +1,10 @@
 ---
 id: TASK-97
 title: Ask - second hotkey, spoken question, answer in a panel
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T16:41:00Z'
+updated_date: '2026-11-10T17:38:00Z'
 labels:
   - ask
   - core
@@ -12,6 +12,8 @@ labels:
   - tauri
 dependencies:
   - TASK-93
+documentation:
+  - backlog/docs/plans/doc-50 - Ask-implementation-plan.md
 priority: medium
 ordinal: 79000
 ---
@@ -46,4 +48,6 @@ Feasibility (2026-11-10, Claude Code 2.1.322, Sonnet low, run by a subagent and 
 - Web search: --tools WebSearch --allowedTools WebSearch with the other lean flags. A question that searches took 16 to 20 s and the text arrives in one burst; one that does not, 0.9 s. This machine's CLI default permission mode is auto, so the Ask path pins --permission-mode default.
 - One warm process can take the question later and a second user turn after the first result (context kept).
 - OpenAI-compatible: streaming over the existing ureq client works against a fake SSE server (BufReader over the body); no real endpoint was available.
+
+2026-11-10: plan doc-50, subtasks 97.1 to 97.6. Branch task-97-ask, stacked on task-96-modes.
 <!-- SECTION:NOTES:END -->

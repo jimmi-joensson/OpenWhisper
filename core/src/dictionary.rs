@@ -86,6 +86,11 @@ const BUILTIN_TERMS: &[&str] = &["OpenWhisper"];
 pub struct Matcher {
     re: Option<Regex>,
     replacements: HashMap<String, String>,
+    /// Canonical spellings (built-in and user terms), in file order.
+    terms: Vec<String>,
+    /// The same terms as the Refine prompt lists them: with what the
+    /// recognizer wrote instead, e.g. `Jeppe [misheard as: yeb, Jebbe]`.
+    prompt_terms: Vec<String>,
 }
 
 impl Matcher {
@@ -93,6 +98,8 @@ impl Matcher {
         let mut replacements: HashMap<String, String> = HashMap::new();
         // Spaced, normalized patterns for the regex ("pay proof").
         let mut patterns: Vec<String> = Vec::new();
+        let mut terms: Vec<String> = Vec::new();
+        let mut prompt_terms: Vec<String> = Vec::new();
         let mut add = |pattern: &str, term: &str| {
             let spaced = normalize(pattern);
             if spaced.is_empty() {
@@ -114,6 +121,20 @@ impl Matcher {
             if term.is_empty() {
                 continue;
             }
+            if !terms.iter().any(|t| t == term) {
+                terms.push(term.to_string());
+                let heard: Vec<&str> = entry
+                    .heard_as
+                    .iter()
+                    .map(|h| h.trim())
+                    .filter(|h| !h.is_empty())
+                    .collect();
+                prompt_terms.push(if heard.is_empty() {
+                    term.to_string()
+                } else {
+                    format!("{term} [misheard as: {}]", heard.join(", "))
+                });
+            }
             add(term, term);
             let split = split_camel(term);
             if split != term {
@@ -125,7 +146,12 @@ impl Matcher {
         }
 
         if patterns.is_empty() {
-            return Self { re: None, replacements };
+            return Self {
+                re: None,
+                replacements,
+                terms,
+                prompt_terms,
+            };
         }
 
         // Longest first so "pay proff app" beats "pay proff".
@@ -135,7 +161,28 @@ impl Matcher {
             .case_insensitive(true)
             .build()
             .ok();
-        Self { re, replacements }
+        Self {
+            re,
+            replacements,
+            terms,
+            prompt_terms,
+        }
+    }
+
+    /// [`Matcher::terms`] with each term's known mis-hearings, for the
+    /// Refine prompt. The rule pass only fixes the exact mis-hearings
+    /// listed in the dictionary; shown these examples, the model can
+    /// also catch a new one that sounds alike ("Yebbe" when "yeb" and
+    /// "Jebbe" are listed for Jeppe).
+    pub fn prompt_terms(&self) -> &[String] {
+        &self.prompt_terms
+    }
+
+    /// The spellings this dictionary enforces ("PayProff", "Emanoil"),
+    /// built-ins included. The Refine prompt lists them so a language
+    /// model does not "correct" them back (see [`crate::refine`]).
+    pub fn terms(&self) -> &[String] {
+        &self.terms
     }
 
     pub fn apply(&self, text: &str) -> String {
@@ -421,6 +468,20 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn prompt_terms_carry_the_known_mishearings() {
+        let m = Matcher::new(&dict(&[
+            ("Jeppe", &["yeb", "Jebbe"]),
+            ("HeroDesk", &[]),
+        ]));
+        // Built-in first, then the user's, each once.
+        assert_eq!(m.terms(), ["OpenWhisper", "Jeppe", "HeroDesk"]);
+        assert_eq!(
+            m.prompt_terms(),
+            ["OpenWhisper", "Jeppe [misheard as: yeb, Jebbe]", "HeroDesk"]
+        );
     }
 
     #[test]

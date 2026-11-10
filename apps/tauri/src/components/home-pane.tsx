@@ -98,6 +98,7 @@ export function HomePane({
             text={latest.text}
             timestamp={latest.timestamp}
             replacements={latest.replacements}
+            refine={latest.refine}
           />
         )}
       </div>

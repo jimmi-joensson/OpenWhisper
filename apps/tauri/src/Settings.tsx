@@ -35,6 +35,7 @@ import { useBtResumeDelay } from "./lib/use-bt-resume-delay";
 import { useDictation } from "./lib/use-dictation";
 import { usePauseAudio } from "./lib/use-pause-audio";
 import { DictionaryPane } from "./components/dictionary-pane";
+import { RefinePane } from "./components/refine-pane";
 import { GeneralPane } from "./components/general-pane";
 import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
@@ -90,6 +91,7 @@ export function SettingsShell({ active, onBack }: SettingsShellProps) {
         {active === "models" && <SettingsModelsPane />}
         {active === "shortcuts" && <ShortcutsPane />}
         {active === "dictionary" && <DictionaryPane />}
+        {active === "refine" && <RefinePane />}
       </div>
     </div>
   );

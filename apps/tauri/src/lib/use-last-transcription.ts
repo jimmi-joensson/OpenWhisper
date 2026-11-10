@@ -8,10 +8,12 @@ import {
   type DictationTick,
   type DictionaryReplacement,
 } from "./dictation";
+import { NO_REFINE, type RefineInfo } from "./refine";
 
 export interface LatestTranscription {
   text: string;
   replacements: DictionaryReplacement[];
+  refine: RefineInfo;
   timestamp: number;
   confidence: number;
 }
@@ -31,6 +33,7 @@ export function useLastTranscription(): LatestTranscription | null {
         setLatest({
           text: t.transcript,
           replacements: t.replacements ?? [],
+          refine: t.refine ?? NO_REFINE,
           timestamp: Date.now(),
           confidence: t.confidence,
         });

@@ -22,7 +22,7 @@ pub use core::{
     default_toggle_hotkey, follow_active_screen,
 };
 
-fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_config_dir()

@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { ArrowRight, BookA, Check, Copy } from "lucide-react";
+import { ArrowRight, BookA, Check, Copy, Sparkles, TriangleAlert } from "lucide-react";
 
 import type { DictionaryReplacement } from "../lib/dictation";
+import { NO_REFINE, refineFellBack, type RefineInfo } from "../lib/refine";
 
 interface TranscriptRowProps {
   text: string;
@@ -9,10 +10,23 @@ interface TranscriptRowProps {
   // Dictionary fixes in `text`, shown under it so the user sees what
   // the dictionary changed (and can spot a wrong entry).
   replacements?: DictionaryReplacement[];
+  // What the Refine step did. When it refined, `text` is the refined
+  // text and the unrefined transcript stays one click away; when it
+  // fell back, the row says why.
+  refine?: RefineInfo;
 }
 
-export function TranscriptRow({ text, timestamp, replacements = [] }: TranscriptRowProps) {
+export function TranscriptRow({
+  text,
+  timestamp,
+  replacements = [],
+  refine = NO_REFINE,
+}: TranscriptRowProps) {
   const [copied, setCopied] = useState(false);
+  const [showOriginal, setShowOriginal] = useState(false);
+  const refined = refine.status === "refined";
+  const original = refine.raw_transcript.trim();
+  const changed = refined && original !== text.trim();
 
   const onCopy = async () => {
     try {
@@ -40,6 +54,49 @@ export function TranscriptRow({ text, timestamp, replacements = [] }: Transcript
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+        {refined && (
+          <div className="ow-transcript-row__refine" data-testid="home-latest-refine">
+            <Sparkles size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+            <span>
+              {refine.instruction
+                ? `Refined, as you asked: “${refine.instruction}”`
+                : changed
+                  ? "Refined"
+                  : "Refined, nothing to change"}
+            </span>
+            {changed && (
+              <button
+                type="button"
+                className="ow-transcript-row__refine-toggle"
+                aria-expanded={showOriginal}
+                onClick={() => setShowOriginal((v) => !v)}
+              >
+                {showOriginal ? "Hide original" : "Show original"}
+              </button>
+            )}
+          </div>
+        )}
+        {changed && showOriginal && (
+          <p
+            className="ow-transcript-row__original ow-selectable"
+            data-testid="home-latest-original"
+          >
+            {original}
+          </p>
+        )}
+        {refineFellBack(refine) && (
+          <div
+            className="ow-transcript-row__refine"
+            data-testid="home-latest-refine"
+            data-fallback="true"
+          >
+            <TriangleAlert size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+            <span>
+              Not refined, typed as transcribed
+              {refine.detail ? `: ${refine.detail}` : "."}
+            </span>
           </div>
         )}
         <span className="ow-transcript-row__time">{formatRelativeTime(timestamp)}</span>

@@ -4,6 +4,8 @@ export interface DictionaryReplacement {
   to: string;
 }
 
+import type { RefineInfo } from "./refine";
+
 // Mirrors `DictationTick` in src-tauri/src/lib.rs.
 export interface DictationTick {
   phase: number;
@@ -12,6 +14,8 @@ export interface DictationTick {
   transcript: string;
   // Dictionary fixes in `transcript`: what the recognizer wrote → the term.
   replacements: DictionaryReplacement[];
+  // What the Refine step did to `transcript`, with the unrefined text.
+  refine: RefineInfo;
   confidence: number;
   sample_count: number;
   elapsed_ms: number;

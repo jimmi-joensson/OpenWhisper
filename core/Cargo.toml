@@ -24,7 +24,12 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer"]
+tauri = ["recognizer", "refine"]
+# Refine (TASK-93): optional language-model cleanup after transcription,
+# through the user's Claude Code CLI or an OpenAI-compatible endpoint.
+# Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
+# client or a keychain binding it never calls.
+refine = ["dep:ureq", "dep:keyring"]
 # In-core ASR. On macOS the shipped SwiftUI app uses FluidAudio via the
 # Swift bridge — this feature is for the cross-platform Tauri shell and
 # bench harness on Windows/Linux, where we drive Parakeet-TDT-v3 ONNX
@@ -88,7 +93,8 @@ rustfft = { version = "6.2", optional = true }
 # stable.
 ndarray = { version = "0.16", optional = true }
 # Parakeet v3 model archive download + extract (same .tar.bz2 the Windows
-# shell consumes from k2-fsa/sherpa-onnx releases).
+# shell consumes from k2-fsa/sherpa-onnx releases). Also the HTTP client
+# of Refine's OpenAI-compatible backend (feature `refine`).
 ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
 # SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
 sha2 = { version = "0.10", optional = true }
@@ -140,6 +146,12 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # to a direct dep on Mac doesn't grow the lockfile.
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-rs = { version = "0.14", default-features = false, features = ["core_audio"] }
+# Refine API key storage: macOS Keychain. Never a config file.
+keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
+
+# Refine API key storage: Windows Credential Manager.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
 
 [dev-dependencies]
 # Portable WAV reader for the recognizer smoke example (cross-platform —

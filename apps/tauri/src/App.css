@@ -653,6 +653,42 @@ body[data-platform="macos"] .ow-titlebar {
   font-weight: 500;
 }
 
+.ow-transcript-row__refine {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-transcript-row__refine-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.ow-transcript-row__refine-toggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.ow-transcript-row__original {
+  margin: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+  word-break: break-word;
+}
+
 .ow-transcript-row__time {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1154,6 +1190,140 @@ body[data-platform="macos"] .ow-titlebar {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--destructive);
+}
+
+/* ===========================================================
+   Diagnostics: Refine section (TASK-93)
+   =========================================================== */
+.ow-diag-refine {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ow-diag-refine__connection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.ow-diag-refine__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ow-diag-refine__state[data-ready="false"] {
+  color: var(--destructive);
+}
+
+.ow-diag-refine__message {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.ow-diag-refine__actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.ow-diag-refine__note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.ow-diag-refine__note[data-ok="false"] {
+  color: var(--destructive);
+}
+
+.ow-diag-refine__readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px 24px;
+}
+
+.ow-diag-refine__usage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.ow-diag-refine__stat-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--foreground);
+  margin: 2px 0;
+}
+
+.ow-diag-refine__stat[data-warn="true"] .ow-diag-refine__stat-value {
+  color: var(--destructive);
+}
+
+.ow-diag-refine__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.ow-diag-refine__table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-foreground);
+  padding: 0 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ow-diag-refine__table td {
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+  vertical-align: top;
+}
+
+.ow-diag-refine__table tr:last-child td {
+  border-bottom: 0;
+}
+
+.ow-diag-refine__table td:last-child {
+  color: var(--muted-foreground);
+  padding-right: 0;
+}
+
+.ow-diag-refine__table .ow-diag-refine__num {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ow-diag-refine__table tr[data-status="timeout"] td:nth-child(2),
+.ow-diag-refine__table tr[data-status="unavailable"] td:nth-child(2),
+.ow-diag-refine__table tr[data-status="failed"] td:nth-child(2),
+.ow-diag-refine__table tr[data-status="rejected"] td:nth-child(2) {
+  color: var(--destructive);
+}
+
+.ow-diag-refine__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 /* ===========================================================

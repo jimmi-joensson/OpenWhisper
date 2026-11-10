@@ -26,6 +26,7 @@ mod injection;
 mod media_control;
 mod permissions;
 mod pill_hover;
+mod refine;
 mod settings;
 mod tray;
 
@@ -132,6 +133,9 @@ struct DictationTick {
     transcript: String,
     /// Dictionary fixes in `transcript` (`{ from, to }` pairs).
     replacements: Vec<openwhisper_core::dictionary::Replacement>,
+    /// What the Refine step did to `transcript`, with the unrefined
+    /// text. `status` is empty when Refine did not run.
+    refine: openwhisper_core::dictation::RefineInfo,
     confidence: f32,
     sample_count: u64,
     elapsed_ms: u64,
@@ -418,6 +422,7 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                     status_message: snap.status_message(),
                     transcript: snap.transcript(),
                     replacements: snap.replacements(),
+                    refine: snap.refine(),
                     confidence: snap.confidence(),
                     sample_count: snap.live_samples(SAMPLE_RATE_HZ),
                     elapsed_ms: snap.elapsed_ms(),
@@ -1010,6 +1015,9 @@ pub fn run() {
             // Point the transcript post-pass at the user's
             // dictionary.json before the first dictation runs.
             settings::init_dictionary(app.handle());
+            // Hydrate the Refine switch (off unless the user turned
+            // it on) before the first recording warms a backend.
+            refine::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1214,6 +1222,13 @@ pub fn run() {
             settings::dictionary_get,
             settings::dictionary_save,
             settings::dictionary_reveal,
+            refine::refine_get,
+            refine::refine_set,
+            refine::refine_status,
+            refine::refine_test,
+            refine::refine_set_api_key,
+            refine::refine_history,
+            refine::refine_history_clear,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

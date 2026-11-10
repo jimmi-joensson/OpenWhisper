@@ -522,6 +522,11 @@ async function installTauriShim(
             window.__owEmit("ask_tick", structuredClone(next));
           };
           if (cmd === "ask_get") {
+            // `AskPlan::with_terms` in core: the OpenAI-compatible
+            // backend (set with `__owAskBackend`) answers with
+            // Refine's model and has no web search.
+            const openai = w.__owAskBackend?.backend === "openai-compatible";
+            const webSearch = stored.web_search && !openai;
             return structuredClone({
               settings: stored,
               backend: {
@@ -538,11 +543,14 @@ async function installTauriShim(
                 has_api_key: false,
                 ...(w.__owAskBackend ?? {}),
               },
-              model: stored.model ?? "sonnet",
-              effort: stored.effort ?? "low",
-              web_search: stored.web_search,
-              timeout_ms: stored.web_search ? stored.timeout_ms * 2 : stored.timeout_ms,
-              notice: "",
+              model: openai ? "small-model" : (stored.model ?? "sonnet"),
+              effort: openai ? "" : (stored.effort ?? "low"),
+              web_search: webSearch,
+              timeout_ms: webSearch ? stored.timeout_ms * 2 : stored.timeout_ms,
+              notice:
+                stored.web_search && openai
+                  ? "Web search is only available with the Claude backend. This answer comes from the model alone."
+                  : "",
               limits: {
                 timeout_min_ms: 5000,
                 timeout_max_ms: 300000,
@@ -1750,24 +1758,26 @@ export async function waitForAskTickListener(page: Page) {
 }
 
 // Push `ask_changed` as Rust does after the Ask settings were saved
-// (the Ask pane, or the block edited by the headless CLI).
+// (the Ask pane, or the block edited by the headless CLI). The block
+// is stored first, as in Rust, so an `ask_get` that follows the
+// event answers with it.
 export async function emitAskChanged(
   page: Page,
   settings: Partial<MockAskSettings>,
 ): Promise<number> {
-  return page.evaluate(
-    (value) =>
-      window.__owEmit("ask_changed", {
-        enabled: false,
-        web_search: false,
-        instructions: "",
-        model: null,
-        effort: null,
-        timeout_ms: 60000,
-        ...value,
-      }),
-    settings,
-  );
+  return page.evaluate((value) => {
+    const next = {
+      enabled: false,
+      web_search: false,
+      instructions: "",
+      model: null,
+      effort: null,
+      timeout_ms: 60000,
+      ...value,
+    };
+    (window as unknown as { __owAskStored?: unknown }).__owAskStored = next;
+    return window.__owEmit("ask_changed", structuredClone(next));
+  }, settings);
 }
 
 // Wait for useHotkeyStatus's listener to attach. Probe by emitting an ok=true

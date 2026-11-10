@@ -16,10 +16,18 @@ const STATUS_LABEL: Record<string, string> = {
   unavailable: "Unavailable",
   failed: "Failed",
   rejected: "Rejected",
+  // Asks (TASK-97): rows of the same table with the source "ask".
+  answered: "Answered",
+  cancelled: "Cancelled",
 };
 
 // Diagnostics → Refine: is the model reachable, how fast does it
 // answer, and what happened on recent dictations.
+//
+// Asks go through the same backend and draw on the same plan, so
+// they are rows here too, marked "Ask". They stay out of the Refine
+// numbers (an ask that timed out is not a dictation that was typed
+// as transcribed) and get a line of their own.
 //
 // Three questions, top to bottom: (1) can Refine run right now
 // (connection row), (2) how is it performing (numbers over the last
@@ -41,6 +49,9 @@ export function DiagnosticsRefineSection() {
 
   const summary = history?.summary;
   const runs = history?.runs ?? [];
+  // Older history answers have no ask counters.
+  const asks = summary?.asks ?? 0;
+  const refineRuns = summary ? summary.total - asks : 0;
 
   return (
     <section className="ow-diagnostics__section" data-testid="diagnostics-refine">
@@ -115,8 +126,9 @@ export function DiagnosticsRefineSection() {
 
           {summary && summary.total > 0 ? (
             <>
-              <SummaryReadouts summary={summary} />
-              <StartLine summary={summary} />
+              {refineRuns > 0 && <SummaryReadouts summary={summary} />}
+              {refineRuns > 0 && <StartLine summary={summary} />}
+              {asks > 0 && <AskLine summary={summary} />}
               <UsageBlock summary={summary} />
               {summary.last_problem && (
                 <p className="ow-diag-refine__note" data-testid="diagnostics-refine-last-problem">
@@ -156,7 +168,9 @@ export function DiagnosticsRefineSection() {
 }
 
 function SummaryReadouts({ summary }: { summary: RefineSummary }) {
-  const asked = summary.total - summary.skipped;
+  // Dictations a backend was asked about: not the ones too short to
+  // send, and not the asks, which are counted on their own.
+  const asked = summary.total - (summary.asks ?? 0) - summary.skipped;
   return (
     <div className="ow-diag-refine__readouts">
       <Stat
@@ -226,6 +240,24 @@ function StartLine({ summary }: { summary: RefineSummary }) {
       {summary.median_warm_ms !== null && `, median ${formatMs(summary.median_warm_ms)}`}
       {" · "}started only when the text was ready: {runs(summary.cold_runs)}
       {summary.median_cold_ms !== null && `, median ${formatMs(summary.median_cold_ms)}`}
+    </p>
+  );
+}
+
+// The asks among the runs: how many got an answer and how long the
+// answered ones took, to the first text and to the end.
+function AskLine({ summary }: { summary: RefineSummary }) {
+  const times: string[] = [];
+  if (summary.ask_median_first_text_ms !== null) {
+    times.push(`first text after ${formatMs(summary.ask_median_first_text_ms)}`);
+  }
+  if (summary.ask_median_ms !== null) {
+    times.push(`whole answer after ${formatMs(summary.ask_median_ms)}`);
+  }
+  return (
+    <p className="ow-diag-refine__note" data-testid="diagnostics-refine-asks">
+      Asks: {summary.asks_answered} of {summary.asks} answered
+      {times.length > 0 && `. Median: ${times.join(", ")}`}
     </p>
   );
 }
@@ -339,7 +371,7 @@ function RunsTable({ runs }: { runs: RefineRun[] }) {
       </thead>
       <tbody>
         {runs.map((run, i) => (
-          <tr key={`${run.at_ms}-${i}`} data-status={run.status}>
+          <tr key={`${run.at_ms}-${i}`} data-status={run.status} data-source={run.source}>
             <td>{formatAgo(run.at_ms)}</td>
             <td>{STATUS_LABEL[run.status] ?? run.status}</td>
             <td className="ow-diag-refine__num">
@@ -371,6 +403,14 @@ function RunsTable({ runs }: { runs: RefineRun[] }) {
 
 function runNote(run: RefineRun): string {
   const parts: string[] = [];
+  // An ask, not a Refine run, with how long the first text took.
+  if (run.source === "ask") {
+    parts.push("Ask");
+    // Rows from before asks existed have no such field.
+    if (run.first_text_ms != null) {
+      parts.push(`first text after ${formatMs(run.first_text_ms)}`);
+    }
+  }
   // Set when the run was made in one of the user's own modes.
   if (run.mode) parts.push(`Mode: ${run.mode}`);
   if (run.detail) {

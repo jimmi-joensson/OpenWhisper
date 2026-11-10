@@ -14,6 +14,7 @@ import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
 import { useHistorySync } from "./lib/use-history";
 import { useModesSync } from "./lib/use-modes";
+import { useAskSync } from "./lib/use-ask";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
@@ -149,6 +150,8 @@ function App() {
   useHistorySync();
   // Same for the modes: the hotkey and the tray menu change them too.
   useModesSync();
+  // And the Ask settings, which the headless CLI can change as well.
+  useAskSync();
 
   const goBack = useCallback(() => setRoute("home"), []);
 

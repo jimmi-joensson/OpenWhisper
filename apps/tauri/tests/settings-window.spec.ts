@@ -477,12 +477,17 @@ test.describe("settings view", () => {
       "true",
     );
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("tab", { name: "Ask", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.keyboard.press("ArrowDown");
     await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
     await page.keyboard.press("ArrowUp");
-    await expect(page.getByRole("tab", { name: "Modes" })).toHaveAttribute(
+    await expect(page.getByRole("tab", { name: "Ask", exact: true })).toHaveAttribute(
       "aria-selected",
       "true",
     );

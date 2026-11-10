@@ -131,6 +131,11 @@ async (page) => {
             window.__owEmit("ask_tick", structuredClone(next));
           };
           if (cmd === "ask_get") {
+            // `AskPlan::with_terms` in core: the OpenAI-compatible
+            // backend (set with `__owAskBackend`) answers with
+            // Refine's model and has no web search.
+            const openai = w.__owAskBackend?.backend === "openai-compatible";
+            const webSearch = stored.web_search && !openai;
             return structuredClone({
               settings: stored,
               backend: {
@@ -147,11 +152,14 @@ async (page) => {
                 has_api_key: false,
                 ...(w.__owAskBackend ?? {}),
               },
-              model: stored.model ?? "sonnet",
-              effort: stored.effort ?? "low",
-              web_search: stored.web_search,
-              timeout_ms: stored.web_search ? stored.timeout_ms * 2 : stored.timeout_ms,
-              notice: "",
+              model: openai ? "small-model" : (stored.model ?? "sonnet"),
+              effort: openai ? "" : (stored.effort ?? "low"),
+              web_search: webSearch,
+              timeout_ms: webSearch ? stored.timeout_ms * 2 : stored.timeout_ms,
+              notice:
+                stored.web_search && openai
+                  ? "Web search is only available with the Claude backend. This answer comes from the model alone."
+                  : "",
               limits: {
                 timeout_min_ms: 5000,
                 timeout_max_ms: 300000,

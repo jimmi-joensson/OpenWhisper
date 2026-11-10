@@ -44,6 +44,7 @@ import { usePauseAudio } from "./lib/use-pause-audio";
 import { DictionaryPane } from "./components/dictionary-pane";
 import { RefinePane } from "./components/refine-pane";
 import { ModesPane } from "./components/modes-pane";
+import { AskPane } from "./components/ask-pane";
 import { GeneralPane } from "./components/general-pane";
 import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
@@ -75,7 +76,8 @@ const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 interface SettingsShellProps {
   active: SettingsPaneId;
   onBack: () => void;
-  // Lets a pane send the user to another pane (Modes to Refine).
+  // Lets a pane send the user to another pane (Modes to Refine, Ask
+  // to Refine and Shortcuts).
   onSelectPane?: (pane: SettingsPaneId) => void;
 }
 
@@ -103,6 +105,7 @@ export function SettingsShell({ active, onBack, onSelectPane }: SettingsShellPro
         {active === "dictionary" && <DictionaryPane />}
         {active === "refine" && <RefinePane />}
         {active === "modes" && <ModesPane onOpenPane={onSelectPane} />}
+        {active === "ask" && <AskPane onOpenPane={onSelectPane} />}
       </div>
     </div>
   );

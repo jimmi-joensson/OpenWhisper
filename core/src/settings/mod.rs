@@ -9,7 +9,9 @@
 //! Five schema blocks live in one envelope:
 //!
 //! - `hotkeys` — toggle + cancel slots, each `ModifierTap` (Mac
-//!   default Right ⌘) or `Chord` (Win default Ctrl+Space).
+//!   default Right ⌘) or `Chord` (Win default Ctrl+Space). One
+//!   optional slot, `cycle_mode`, switches to the next mode
+//!   (TASK-96); it is unbound until the user sets it.
 //! - `audio` — selected input device id (cpal `DeviceId` Display
 //!   form). `None` = use host default.
 //! - `behavior` — `show_in_fullscreen`,
@@ -34,6 +36,10 @@
 //!   and in which folder ([`HistorySettings`], TASK-95). Off by
 //!   default. The text itself lives in Markdown files, see
 //!   [`crate::history`]. Raw JSON in
+//!   the envelope for the same reason as `refine`.
+//! - `modes`: the user's own modes for the Refine step, which one is
+//!   selected and which apps have a default mode ([`ModesSettings`],
+//!   TASK-96). The built-in Dictation mode is not stored. Raw JSON in
 //!   the envelope for the same reason as `refine`.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
@@ -63,6 +69,12 @@ use serde::{Deserialize, Serialize};
 
 mod history;
 pub use history::{HISTORY_RETENTION_DEFAULT_DAYS, HISTORY_RETENTION_MAX_DAYS, HistorySettings};
+
+mod modes;
+pub use modes::{
+    AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODE_INSTRUCTIONS_MAX_CHARS, MODE_NAME_MAX_CHARS,
+    MODES_MAX, Mode, ModesSettings, mode_slug,
+};
 
 mod refine;
 pub use refine::{
@@ -115,6 +127,13 @@ impl HotkeyConfig {
 pub struct HotkeySettings {
     pub toggle: HotkeyConfig,
     pub cancel: HotkeyConfig,
+    /// Switch to the next mode (TASK-96). Unbound by default: with
+    /// only the built-in mode there is nothing to cycle, and a default
+    /// chord would take a key combination away from other apps for
+    /// nothing. Left out of the file while unbound, so a file written
+    /// by this version still reads in an older one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_mode: Option<HotkeyConfig>,
 }
 
 /// Slot identifier — used by the shell's `settings_set_hotkey` Tauri
@@ -125,6 +144,8 @@ pub struct HotkeySettings {
 pub enum HotkeyTarget {
     Toggle,
     Cancel,
+    /// The optional "switch to the next mode" slot.
+    CycleMode,
 }
 
 impl HotkeyTarget {
@@ -132,7 +153,15 @@ impl HotkeyTarget {
         match self {
             HotkeyTarget::Toggle => "toggle",
             HotkeyTarget::Cancel => "cancel",
+            HotkeyTarget::CycleMode => "cycle-mode",
         }
+    }
+
+    /// The slot may be left unbound (see [`clear_hotkey_slot`]).
+    /// Dictation needs its toggle and cancel keys; they can be
+    /// changed, never removed.
+    pub fn is_optional(self) -> bool {
+        matches!(self, HotkeyTarget::CycleMode)
     }
 }
 
@@ -155,6 +184,7 @@ pub fn default_settings() -> HotkeySettings {
     HotkeySettings {
         toggle: default_toggle_hotkey(),
         cancel: default_cancel_hotkey(),
+        cycle_mode: None,
     }
 }
 
@@ -183,6 +213,8 @@ struct SettingsFile {
     refine: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     history: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modes: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +369,7 @@ static STATS_CURRENT: Mutex<Option<StatsSettings>> = Mutex::new(None);
 static PERFORMANCE_CURRENT: Mutex<Option<PerformanceSettings>> = Mutex::new(None);
 static REFINE_CURRENT: Mutex<Option<RefineSettings>> = Mutex::new(None);
 static HISTORY_CURRENT: Mutex<Option<HistorySettings>> = Mutex::new(None);
+static MODES_CURRENT: Mutex<Option<ModesSettings>> = Mutex::new(None);
 
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
@@ -452,6 +485,7 @@ fn merge_loaded(file: SettingsFile) -> HotkeySettings {
     HotkeySettings {
         toggle: file.hotkey.unwrap_or_else(default_toggle_hotkey),
         cancel: default_cancel_hotkey(),
+        cycle_mode: None,
     }
 }
 
@@ -498,6 +532,7 @@ pub fn save_settings(path: &Path, settings: HotkeySettings) -> Result<(), String
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -540,6 +575,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = STATS_CURRENT.lock() {
@@ -584,6 +620,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -628,6 +665,7 @@ pub fn save_behavior_settings(
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -653,6 +691,7 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
@@ -700,6 +739,7 @@ pub fn save_performance_settings(
         performance: Some(settings),
         refine: file.refine.or_else(current_refine_json),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
@@ -772,6 +812,7 @@ pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<Ref
         performance,
         refine: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
         history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = REFINE_CURRENT.lock() {
@@ -838,6 +879,7 @@ pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<H
         performance,
         refine: file.refine.or_else(current_refine_json),
         history: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+        modes: file.modes.or_else(current_modes_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = HISTORY_CURRENT.lock() {
@@ -846,9 +888,76 @@ pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<H
     Ok(settings)
 }
 
-/// Mutate one slot of the hotkey block (toggle or cancel) and
-/// persist. Used by the shell's `settings_set_hotkey` /
-/// `settings_reset_hotkey` commands.
+/// The modes block as last loaded or saved in this process; defaults
+/// (only the built-in mode) when nothing was loaded yet. Read by the
+/// dictation pipeline once per recording, so the shell loads it at
+/// boot and again after every change, whoever made it.
+pub fn current_modes_settings() -> ModesSettings {
+    MODES_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+}
+
+/// Seed the modes cache without touching disk. For shells that
+/// resolve settings some other way, and for tests.
+pub fn set_modes_settings_cache(settings: ModesSettings) {
+    if let Ok(mut g) = MODES_CURRENT.lock() {
+        *g = Some(settings.cleaned());
+    }
+}
+
+fn current_modes_json() -> Option<serde_json::Value> {
+    let current = MODES_CURRENT.lock().ok().and_then(|g| g.clone())?;
+    serde_json::to_value(current).ok()
+}
+
+/// Read the modes block from disk and cache it. Always re-reads, like
+/// [`load_refine_settings`]: the headless CLI (`openwhisper modes`)
+/// edits the same block. A missing or malformed block yields the
+/// defaults (only the built-in mode, selected).
+pub fn load_modes_settings(path: &Path) -> ModesSettings {
+    let file = read_file(path);
+    let settings = file
+        .modes
+        .and_then(|v| serde_json::from_value::<ModesSettings>(v).ok())
+        .unwrap_or_default()
+        .cleaned();
+    if let Ok(mut g) = MODES_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+/// Persist the modes block (cleaned, see [`ModesSettings::cleaned`])
+/// and update the cache. Returns what was written.
+pub fn save_modes_settings(path: &Path, settings: ModesSettings) -> Result<ModesSettings, String> {
+    let settings = settings.cleaned();
+    let file = read_file(path);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill,
+        stats,
+        performance,
+        refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
+        modes: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+    };
+    write_file(path, &merged)?;
+    if let Ok(mut g) = MODES_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    Ok(settings)
+}
+
+/// Mutate one slot of the hotkey block and persist. Used by the
+/// shell's `settings_set_hotkey` / `settings_reset_hotkey` commands.
 pub fn update_hotkey_slot(
     path: &Path,
     target: HotkeyTarget,
@@ -858,9 +967,32 @@ pub fn update_hotkey_slot(
     match target {
         HotkeyTarget::Toggle => current.toggle = config,
         HotkeyTarget::Cancel => current.cancel = config,
+        HotkeyTarget::CycleMode => current.cycle_mode = Some(config),
     }
     save_settings(path, current)
 }
+
+/// Unbind an optional hotkey slot and persist. The toggle and cancel
+/// slots cannot be unbound: without them dictation cannot be started
+/// or stopped from the keyboard.
+pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String> {
+    let mut current = current_settings().unwrap_or_else(default_settings);
+    match target {
+        HotkeyTarget::CycleMode => current.cycle_mode = None,
+        HotkeyTarget::Toggle | HotkeyTarget::Cancel => {
+            return Err(format!(
+                "The {} shortcut cannot be removed, only changed.",
+                target.as_str()
+            ));
+        }
+    }
+    save_settings(path, current)
+}
+
+/// Serializes the tests, in any module, that set the process-wide
+/// Refine or modes cache and then rely on what is in it.
+#[cfg(test)]
+pub(crate) static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -977,5 +1109,130 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let parsed: SettingsFile = serde_json::from_slice(&bytes).unwrap();
         assert!(parsed.performance.unwrap().keep_models_warm);
+    }
+
+    /// Serializes the tests that touch the process-wide hotkey cache.
+    static HOTKEY_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn hotkeys_written_before_the_cycle_slot_read_with_it_unbound() {
+        let old = r#"{"toggle":{"kind":"chord","code":"Space","mods":["Ctrl"]},"cancel":{"kind":"chord","code":"Escape","mods":[]}}"#;
+        let parsed: HotkeySettings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.cycle_mode, None);
+        // Unbound, the slot is not written at all: the file keeps the
+        // shape an older app reads.
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(!json.contains("cycle_mode"), "{json}");
+        assert_eq!(default_settings().cycle_mode, None);
+
+        let bound = HotkeySettings { cycle_mode: Some(HotkeyConfig::chord("KeyM", &["Ctrl", "Alt"])), ..parsed };
+        let json = serde_json::to_string(&bound).unwrap();
+        assert_eq!(serde_json::from_str::<HotkeySettings>(&json).unwrap(), bound);
+    }
+
+    #[test]
+    fn legacy_single_hotkey_still_migrates() {
+        let legacy = r#"{"hotkey":{"kind":"chord","code":"F5","mods":[]}}"#;
+        let file: SettingsFile = serde_json::from_str(legacy).unwrap();
+        let merged = merge_loaded(file);
+        assert_eq!(merged.toggle, HotkeyConfig::chord("F5", &[]));
+        assert_eq!(merged.cancel, default_cancel_hotkey());
+        assert_eq!(merged.cycle_mode, None);
+    }
+
+    #[test]
+    fn hotkey_target_ids_match_the_serialized_form() {
+        for t in [HotkeyTarget::Toggle, HotkeyTarget::Cancel, HotkeyTarget::CycleMode] {
+            assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{}\"", t.as_str()));
+        }
+        assert_eq!(HotkeyTarget::CycleMode.as_str(), "cycle-mode");
+        assert!(HotkeyTarget::CycleMode.is_optional());
+        assert!(!HotkeyTarget::Toggle.is_optional());
+    }
+
+    #[test]
+    fn the_cycle_slot_can_be_set_and_cleared_and_the_others_cannot_be_cleared() {
+        let _lock = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+
+        let chord = HotkeyConfig::chord("KeyM", &["Ctrl", "Alt"]);
+        update_hotkey_slot(&path, HotkeyTarget::CycleMode, chord.clone()).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let hotkeys = on_disk.hotkeys.unwrap();
+        assert_eq!(hotkeys.cycle_mode, Some(chord));
+        assert_eq!(hotkeys.toggle, default_toggle_hotkey());
+
+        clear_hotkey_slot(&path, HotkeyTarget::CycleMode).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.hotkeys.unwrap().cycle_mode, None);
+        assert_eq!(current_settings().unwrap().cycle_mode, None);
+
+        let err = clear_hotkey_slot(&path, HotkeyTarget::Toggle).unwrap_err();
+        assert!(err.contains("toggle"), "{err}");
+        assert!(clear_hotkey_slot(&path, HotkeyTarget::Cancel).is_err());
+        assert_eq!(current_settings().unwrap().toggle, default_toggle_hotkey());
+
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+    }
+
+    #[test]
+    fn modes_block_saves_loads_and_rides_through_other_saves() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let modes = ModesSettings {
+            active: "formal".into(),
+            custom: vec![Mode {
+                name: "Formal".into(),
+                instructions: "Rewrite it in a formal tone.".into(),
+                ..Mode::default()
+            }],
+            app_defaults: vec![AppDefault {
+                app_id: "com.example.mail".into(),
+                app_name: "Mail".into(),
+                mode: "formal".into(),
+            }],
+        };
+        let written = save_modes_settings(&path, modes).unwrap();
+        assert_eq!(written.custom[0].id, "formal");
+        assert_eq!(written.active, "formal");
+        assert_eq!(current_modes_settings(), written);
+        assert_eq!(load_modes_settings(&path), written);
+
+        // Other blocks are saved by call sites that know nothing about
+        // modes: the modes block must still be in the file after.
+        save_stats_settings(&path, StatsSettings { user_wpm: 55 }).unwrap();
+        save_audio_settings(&path, AudioSettings::default()).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let kept: ModesSettings = serde_json::from_value(on_disk.modes.unwrap()).unwrap();
+        assert_eq!(kept, written);
+
+        // And saving modes keeps the other blocks.
+        save_modes_settings(&path, ModesSettings::default()).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.stats.unwrap().user_wpm, 55);
+        assert_eq!(load_modes_settings(&path), ModesSettings::default());
+    }
+
+    #[test]
+    fn a_malformed_modes_block_reads_as_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"modes":{"custom":"not a list"},"stats":{"user_wpm":70}}"#).unwrap();
+        let file = read_file(&path);
+        // The sibling block survives the bad one.
+        assert_eq!(file.stats.unwrap().user_wpm, 70);
+        let modes = file
+            .modes
+            .and_then(|v| serde_json::from_value::<ModesSettings>(v).ok())
+            .unwrap_or_default()
+            .cleaned();
+        assert_eq!(modes, ModesSettings::default());
     }
 }

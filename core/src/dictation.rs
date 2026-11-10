@@ -91,6 +91,15 @@ pub struct RefineInfo {
     pub backend: String,
     /// Time spent waiting for the backend.
     pub elapsed_ms: u64,
+    /// Name of the mode the dictation ran in (TASK-96). Empty for the
+    /// built-in Dictation mode and when Refine did not run.
+    pub mode: String,
+    /// Why that mode ran: `selected` or `app-default`. Empty when
+    /// Refine did not run.
+    pub mode_reason: String,
+    /// The app whose default mode it was; empty unless `mode_reason`
+    /// is `app-default`.
+    pub mode_app: String,
 }
 
 impl State {
@@ -565,6 +574,9 @@ fn refine_stage(cleaned: &str) -> String {
         instruction: outcome.instruction,
         backend: outcome.backend,
         elapsed_ms: outcome.elapsed_ms,
+        mode: if outcome.mode.is_builtin() { String::new() } else { outcome.mode.name },
+        mode_reason: outcome.mode.reason,
+        mode_app: outcome.mode.app_name,
     });
     outcome.text
 }
@@ -632,7 +644,12 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     let history = crate::settings::current_history_settings();
     if let Some(dir) = crate::history::current_dir() {
         if history.enabled {
-            let original = with_state(|s| s.refine.raw_transcript.clone());
+            // The mode is part of the entry only when it shaped the
+            // text: a custom mode whose answer was used.
+            let (original, mode) = with_state(|s| {
+                let mode = if s.refine.status == "refined" { s.refine.mode.clone() } else { String::new() };
+                (s.refine.raw_transcript.clone(), mode)
+            });
             let (app_id, app_name) = delivered_to_app();
             let at_ms = if started_at_ms > 0 { started_at_ms } else { crate::history::now_ms() };
             let entry = crate::history::NewEntry {
@@ -642,6 +659,7 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
                 original: Some(original.as_str()),
                 app_id: &app_id,
                 app_name: &app_name,
+                mode: &mode,
             };
             if let Err(e) = crate::history::append(&dir, &entry) {
                 eprintln!("[history] could not save the dictation: {e}");
@@ -1130,6 +1148,9 @@ mod tests {
             instruction: String::new(),
             backend: "claude-cli".into(),
             elapsed_ms: 740,
+            mode: "Formal".into(),
+            mode_reason: "app-default".into(),
+            mode_app: "Mail".into(),
         });
         dictation_deliver_transcript("Hello, world. ", 0.9);
         let snap = dictation_snapshot();
@@ -1137,9 +1158,73 @@ mod tests {
         assert_eq!(snap.refine().raw_transcript, "hello world ");
         assert_eq!(snap.refine().status, "refined");
         assert_eq!(snap.refine().elapsed_ms, 740);
+        assert_eq!(snap.refine().mode, "Formal");
+        assert_eq!(snap.refine().mode_reason, "app-default");
+        assert_eq!(snap.refine().mode_app, "Mail");
         // Next recording starts clean.
         let _ = dictation_request_toggle();
         assert_eq!(dictation_snapshot().refine(), RefineInfo::default());
+    }
+
+    /// Deliver one dictation with history on, writing to `dir`, and
+    /// return the stored entry. `refine` is what the Refine stage
+    /// reported, if it ran.
+    fn deliver_with_history(dir: &std::path::Path, refine: Option<RefineInfo>) -> crate::history::HistoryEntry {
+        crate::settings::set_history_settings_cache(crate::settings::HistorySettings {
+            enabled: true,
+            retention_days: 0,
+            folder: Some(dir.to_string_lossy().into_owned()),
+        });
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        dictation_mark_capture_stopped(16000);
+        if let Some(info) = refine {
+            dictation_set_refine_result(info);
+        }
+        dictation_deliver_transcript("Could you please send the price list? ", 0.9);
+        crate::settings::set_history_settings_cache(crate::settings::HistorySettings::default());
+        let page = crate::history::list(dir, "", 10, 0);
+        page.entries.into_iter().next().expect("the dictation was stored")
+    }
+
+    fn refined_in(mode: &str, status: &str) -> RefineInfo {
+        RefineInfo {
+            raw_transcript: "hey mikael send me the price list ".into(),
+            status: status.into(),
+            backend: "claude-cli".into(),
+            mode: mode.into(),
+            mode_reason: "selected".into(),
+            ..RefineInfo::default()
+        }
+    }
+
+    #[test]
+    fn history_entry_names_the_custom_mode_that_rewrote_the_text() {
+        let _lock = start();
+        let dir = tempfile::tempdir().unwrap();
+        let entry = deliver_with_history(dir.path(), Some(refined_in("Formal", "refined")));
+        assert_eq!(entry.mode.as_deref(), Some("Formal"));
+        assert_eq!(entry.text, "Could you please send the price list?");
+        assert_eq!(entry.original.as_deref(), Some("hey mikael send me the price list"));
+    }
+
+    #[test]
+    fn history_entry_has_no_mode_for_dictation_or_when_refine_did_not_change_the_text() {
+        let _lock = start();
+        // The built-in mode: `mode` is empty on the snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(deliver_with_history(dir.path(), Some(refined_in("", "refined"))).mode, None);
+        // A custom mode whose answer was not used: the text is what
+        // was said, so the mode did not shape it.
+        for status in ["timeout", "rejected", "unavailable", "failed", "skipped-short"] {
+            let dir = tempfile::tempdir().unwrap();
+            with_state(|s| *s = State::new());
+            assert_eq!(deliver_with_history(dir.path(), Some(refined_in("Formal", status))).mode, None, "{status}");
+        }
+        // Refine off: nothing ran.
+        let dir = tempfile::tempdir().unwrap();
+        with_state(|s| *s = State::new());
+        assert_eq!(deliver_with_history(dir.path(), None).mode, None);
     }
 
     #[test]

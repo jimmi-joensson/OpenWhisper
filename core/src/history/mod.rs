@@ -17,22 +17,44 @@
 //! ---
 //! date: 2026-11-10
 //! entries: 2
-//! words: 21
+//! words: 19
 //! apps: [Slack, iTerm2]
 //! ---
 //!
 //! ## 14:02:12 · Slack
-//! <!-- id: 20261110T140212 app: com.tinyspeck.slackmacgap words: 9 seconds: 4.2 -->
+//! <!-- id: 20261110T140212 app: com.tinyspeck.slackmacgap words: 8 seconds: 4.2 -->
 //!
 //! Send the report to the team before Friday.
 //!
 //! > Before Refine: send the reaport to the team before friday
+//!
+//! ## 14:07:40 · iTerm2
+//! <!-- id: 20261110T140740 app: com.googlecode.iterm2 words: 11 seconds: 6.0 -->
+//! <!-- extra: mode=Prompt for a coding agent -->
+//!
+//! Rewrite the retry logic so it backs off after three failures.
+//!
+//! > Before Refine: so the retry logic it should back off after three failures
 //! ```
 //!
 //! One `##` heading per dictation (time, then the app it went into),
 //! a comment line with the machine fields, the text, and the text
 //! before Refine as a quote when Refine changed it. The frontmatter
 //! sums up the day.
+//!
+//! Anything else worth keeping about a dictation goes on a second
+//! comment line directly under the first: `<!-- extra: key=value;
+//! key=value -->`. Today that is `mode`, the name of the mode the
+//! text was rewritten in (TASK-96), written only for a mode the user
+//! made. The line is left out when there is nothing to say, so a
+//! plain dictation looks exactly as it did before modes existed.
+//!
+//! The first comment line is never given new fields. An entry is
+//! recognised by that line matching exactly, also by versions of the
+//! app that are already out: a field they do not know would make them
+//! stop seeing the entry and glue its text to the one above. A second
+//! line they do not know is only shown as text. Keys this version
+//! does not know are ignored and kept.
 //!
 //! The files are the only copy of the text. The SQLite store keeps
 //! counters for the stats and never any text. Nothing here is an
@@ -80,6 +102,10 @@ static HEADING: LazyLock<Regex> =
 static META: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^<!-- id: (\S+)(?: app: (.*?))? words: (\d+) seconds: (\d+(?:\.\d+)?) -->$").unwrap()
 });
+/// The optional second comment line of an entry. See the module docs.
+static EXTRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<!-- extra:(.*)-->$").unwrap());
+/// Key of the mode name on the extra line.
+const EXTRA_MODE: &str = "mode";
 static DAY_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
 static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
@@ -107,6 +133,11 @@ pub struct HistoryEntry {
     /// app was not known (or the text only went to the clipboard).
     pub app_id: Option<String>,
     pub app_name: Option<String>,
+    /// Name of the mode the text was rewritten in, when that was a
+    /// mode the user made. `None` for the built-in Dictation mode,
+    /// for dictations Refine did not change, and for entries written
+    /// before modes existed.
+    pub mode: Option<String>,
 }
 
 /// A dictation to add.
@@ -119,6 +150,8 @@ pub struct NewEntry<'a> {
     /// Empty when unknown.
     pub app_id: &'a str,
     pub app_name: &'a str,
+    /// Name of the custom mode that rewrote the text. Empty for none.
+    pub mode: &'a str,
 }
 
 /// A slice of the history, newest first.
@@ -307,11 +340,26 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     let app_id = meta.get(2).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
     let seconds: f64 = meta[4].parse().unwrap_or(0.0);
 
+    // The extra line counts only directly under the first comment
+    // line. Anywhere else, a line that looks like it is text.
+    let mut text_from = meta_at + 1;
+    let mut mode = None;
+    if let Some(extra) = chunk.get(text_from).and_then(|l| EXTRA.captures(bare(l))) {
+        for pair in extra[1].split(';') {
+            if let Some((key, value)) = pair.split_once('=')
+                && key.trim() == EXTRA_MODE
+            {
+                mode = Some(value.trim().to_string()).filter(|m| !m.is_empty());
+            }
+        }
+        text_from += 1;
+    }
+
     let mut text_lines: Vec<String> = Vec::new();
     let mut original_lines: Vec<String> = Vec::new();
     let mut in_quote = false;
     let mut had_quote = false;
-    for line in &chunk[meta_at + 1..] {
+    for line in &chunk[text_from..] {
         let line = bare(line);
         if !had_quote && let Some(first) = line.strip_prefix(BEFORE_REFINE) {
             in_quote = true;
@@ -340,6 +388,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
         original,
         app_id,
         app_name,
+        mode,
     })
 }
 
@@ -362,6 +411,22 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").replace("-->", "")
 }
 
+/// A value on the extra line: one line, without `;` (it separates
+/// the pairs) and without anything that would end the comment.
+fn extra_value(s: &str) -> String {
+    one_line(&s.replace(';', " ").replace("-->", " "))
+}
+
+/// The `key=value` pairs of the extra line, empty when the entry has
+/// nothing beyond the fields of the first comment line.
+fn extra_pairs(entry: &HistoryEntry) -> Vec<String> {
+    let mut pairs = Vec::new();
+    if let Some(mode) = entry.mode.as_deref().map(extra_value).filter(|m| !m.is_empty()) {
+        pairs.push(format!("{EXTRA_MODE}={mode}"));
+    }
+    pairs
+}
+
 fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
     let mut out = format!("## {}", time.format("%H:%M:%S"));
     let label = entry.app_name.as_deref().or(entry.app_id.as_deref()).map(one_line);
@@ -374,10 +439,15 @@ fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
         out.push_str(&format!(" app: {app}"));
     }
     out.push_str(&format!(
-        " words: {} seconds: {:.1} -->\n\n",
+        " words: {} seconds: {:.1} -->\n",
         entry.word_count,
         entry.duration_ms.max(0) as f64 / 1000.0
     ));
+    let extra = extra_pairs(entry);
+    if !extra.is_empty() {
+        out.push_str(&format!("<!-- extra: {} -->\n", extra.join("; ")));
+    }
+    out.push('\n');
     for line in entry.text.lines() {
         out.push_str(&escape_line(line));
         out.push('\n');
@@ -532,6 +602,8 @@ pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>
         original: new.original.and_then(non_empty).filter(|o| o != text),
         app_id: non_empty(new.app_id),
         app_name: non_empty(new.app_name),
+        // Stored the way it will read back.
+        mode: Some(extra_value(new.mode)).filter(|m| !m.is_empty()),
     };
 
     let mut body = day.prefix.clone();
@@ -633,6 +705,27 @@ pub fn list(dir: &Path, search: &str, limit: u32, offset: u32) -> HistoryPage {
         }
     }
     HistoryPage { entries, matched: matched as i64, stored: stored as i64 }
+}
+
+/// The apps dictations went into, most recently used first, as
+/// (app id, app name). The name is the id when none was stored. This
+/// is what the settings offer when the user gives an app a default
+/// mode: apps they actually dictate into.
+pub fn apps(dir: &Path) -> Vec<(String, String)> {
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for (date, path) in day_files(dir) {
+        for entry in day_entries(&path, date).iter() {
+            let Some(id) = entry.app_id.as_deref() else {
+                continue;
+            };
+            if seen.iter().any(|(known, _)| known == id) {
+                continue;
+            }
+            let name = entry.app_name.clone().unwrap_or_else(|| id.to_string());
+            seen.push((id.to_string(), name));
+        }
+    }
+    seen
 }
 
 /// One stored entry, by id.

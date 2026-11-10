@@ -64,12 +64,19 @@ ALTER TABLE refine_runs ADD COLUMN window_5h_resets_at INTEGER;
 ALTER TABLE refine_runs ADD COLUMN window_7d_used REAL;
 ALTER TABLE refine_runs ADD COLUMN window_7d_resets_at INTEGER;";
 
+/// The mode a Refine run was made in (TASK-96): the name of a mode
+/// the user made. NULL for the built-in Dictation mode and on rows
+/// written before this migration.
+const MIGRATION_5_REFINE_MODE: &str = "\
+ALTER TABLE refine_runs ADD COLUMN mode TEXT;";
+
 fn specs() -> Vec<M<'static>> {
     vec![
         M::up(MIGRATION_1_DICTATIONS),
         M::up(MIGRATION_2_WALL_CLOCK),
         M::up(MIGRATION_3_REFINE_RUNS),
         M::up(MIGRATION_4_REFINE_USAGE),
+        M::up(MIGRATION_5_REFINE_MODE),
     ]
 }
 

@@ -616,6 +616,43 @@ body[data-platform="macos"] .ow-titlebar {
   word-break: break-word;
 }
 
+.ow-transcript-row__fixes {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+
+.ow-transcript-row__fix-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.ow-transcript-row__fixes-icon {
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.ow-transcript-row__fix {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ow-transcript-row__fix-from {
+  text-decoration: line-through;
+}
+
+.ow-transcript-row__fix-to {
+  color: var(--foreground);
+  font-weight: 500;
+}
+
 .ow-transcript-row__time {
   font-family: var(--font-mono);
   font-size: 11px;

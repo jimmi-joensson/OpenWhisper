@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
 import {
   Activity,
+  BookA,
   Boxes,
   FileAudio,
   Home,
@@ -18,6 +19,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   audio: Mic,
   models: Boxes,
   shortcuts: Keyboard,
+  dictionary: BookA,
 };
 
 export type Route = "home" | "transcribe" | "settings" | "diagnostics";

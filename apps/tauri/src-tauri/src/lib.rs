@@ -129,6 +129,8 @@ struct DictationTick {
     status: &'static str,
     status_message: String,
     transcript: String,
+    /// Dictionary fixes in `transcript` (`{ from, to }` pairs).
+    replacements: Vec<openwhisper_core::dictionary::Replacement>,
     confidence: f32,
     sample_count: u64,
     elapsed_ms: u64,
@@ -414,6 +416,7 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
                     status: dictation::phase_status_label(snap.phase()),
                     status_message: snap.status_message(),
                     transcript: snap.transcript(),
+                    replacements: snap.replacements(),
                     confidence: snap.confidence(),
                     sample_count: snap.live_samples(SAMPLE_RATE_HZ),
                     elapsed_ms: snap.elapsed_ms(),
@@ -1003,6 +1006,9 @@ pub fn run() {
             // written on explicit save.
             let _ = settings::load_settings(app.handle());
             let _ = settings::load_stats_settings(app.handle());
+            // Point the transcript post-pass at the user's
+            // dictionary.json before the first dictation runs.
+            settings::init_dictionary(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1200,6 +1206,9 @@ pub fn run() {
             settings::settings_set_user_wpm,
             settings::settings_get_performance,
             settings::settings_set_keep_models_warm,
+            settings::dictionary_get,
+            settings::dictionary_save,
+            settings::dictionary_reveal,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

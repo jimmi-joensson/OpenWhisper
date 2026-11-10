@@ -1,12 +1,17 @@
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { ArrowRight, BookA, Check, Copy } from "lucide-react";
+
+import type { DictionaryReplacement } from "../lib/dictation";
 
 interface TranscriptRowProps {
   text: string;
   timestamp: number;
+  // Dictionary fixes in `text`, shown under it so the user sees what
+  // the dictionary changed (and can spot a wrong entry).
+  replacements?: DictionaryReplacement[];
 }
 
-export function TranscriptRow({ text, timestamp }: TranscriptRowProps) {
+export function TranscriptRow({ text, timestamp, replacements = [] }: TranscriptRowProps) {
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
@@ -23,6 +28,20 @@ export function TranscriptRow({ text, timestamp }: TranscriptRowProps) {
     <div className="ow-transcript-row" data-testid="home-latest-row">
       <div className="ow-transcript-row__body">
         <p className="ow-transcript-row__text ow-selectable">{text}</p>
+        {replacements.length > 0 && (
+          <div className="ow-transcript-row__fixes" data-testid="home-latest-fixes">
+            <BookA size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+            <ul className="ow-transcript-row__fix-list" aria-label="Dictionary fixes">
+              {replacements.map((r) => (
+                <li key={`${r.from}->${r.to}`} className="ow-transcript-row__fix">
+                  <span className="ow-transcript-row__fix-from">{r.from}</span>
+                  <ArrowRight size={10} aria-label="replaced with" />
+                  <span className="ow-transcript-row__fix-to">{r.to}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <span className="ow-transcript-row__time">{formatRelativeTime(timestamp)}</span>
       </div>
       <button

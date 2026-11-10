@@ -2,7 +2,8 @@
 //!
 //! Four passes:
 //!   1. Strip filler words (um/uh/øh/…) using a per-language register.
-//!   2. Apply user substitutions ("open whisper" → "OpenWhisper").
+//!   2. Apply the dictionary ("open whisper" → "OpenWhisper", plus the
+//!      user's terms from `dictionary.json`, see [`crate::dictionary`]).
 //!   3. Collapse adjacent duplicate words ("let's let's" → "let's").
 //!      Punctuation between words protects intentional repetition
 //!      ("really, really nice" stays; "no. No problem" stays).
@@ -50,31 +51,11 @@ const DA_FILLERS: &[&str] = &[
     "øh", "øhm",
 ];
 
-const SUBSTITUTIONS: &[(&str, &str)] = &[
-    ("open whisper", "OpenWhisper"),
-];
-
 static EN_FILLER_RE: LazyLock<Regex> = LazyLock::new(|| build_filler_regex(EN_FILLERS));
 static DA_FILLER_RE: LazyLock<Regex> = LazyLock::new(|| build_filler_regex(DA_FILLERS));
 static MULTI_SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
 static SPACE_BEFORE_PUNCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" ([,.!?;:])").unwrap());
 static REPEATED_COMMAS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(,\s*){2,}").unwrap());
-static SUB_REGEXES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    let mut ordered: Vec<(&str, &str)> = SUBSTITUTIONS.to_vec();
-    ordered.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    ordered
-        .into_iter()
-        .map(|(key, value)| {
-            let pat = format!(r"\b{}\b", regex::escape(key));
-            let re = RegexBuilder::new(&pat)
-                .case_insensitive(true)
-                .build()
-                .expect("valid substitution regex");
-            (re, value)
-        })
-        .collect()
-});
-
 fn build_filler_regex(words: &[&str]) -> Regex {
     let mut sorted: Vec<&str> = words.to_vec();
     sorted.sort_by(|a, b| b.len().cmp(&a.len()));
@@ -96,15 +77,21 @@ pub fn detect_lang(text: &str) -> FillerLang {
 }
 
 pub fn process(text: &str) -> String {
+    process_tracked(text).0
+}
+
+/// [`process`], plus the dictionary fixes it made (for the UI to show
+/// what was replaced).
+pub fn process_tracked(text: &str) -> (String, Vec<crate::dictionary::Replacement>) {
     let lang = detect_lang(text);
     let out = strip_fillers(text, &lang);
-    let out = apply_subs(&out);
+    let (out, fixes) = crate::dictionary::current_matcher().apply_tracked(&out);
     let out = dedupe_repeats(&out);
     let out = normalize_whitespace(&out);
     if out.is_empty() {
-        out
+        (out, fixes)
     } else {
-        format!("{out} ")
+        (format!("{out} "), fixes)
     }
 }
 
@@ -114,14 +101,6 @@ fn strip_fillers(text: &str, lang: &FillerLang) -> String {
         FillerLang::Da => &*DA_FILLER_RE,
     };
     re.replace_all(text, "").into_owned()
-}
-
-fn apply_subs(text: &str) -> String {
-    let mut out = text.to_string();
-    for (re, value) in SUB_REGEXES.iter() {
-        out = re.replace_all(&out, *value).into_owned();
-    }
-    out
 }
 
 // Collapse runs of the same word separated by whitespace only. Punctuation
@@ -175,6 +154,15 @@ mod tests {
     fn substitutes_open_whisper() {
         assert_eq!(process("open whisper rocks"), "OpenWhisper rocks ");
         assert_eq!(process("Open Whisper rocks"), "OpenWhisper rocks ");
+    }
+
+    #[test]
+    fn reports_dictionary_fixes() {
+        let (out, fixes) = process_tracked("um open whisper rocks");
+        assert_eq!(out, "OpenWhisper rocks ");
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].from, "open whisper");
+        assert_eq!(fixes[0].to, "OpenWhisper");
     }
 
     #[test]

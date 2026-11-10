@@ -26,13 +26,14 @@ async function openSettings(page: import("@playwright/test").Page) {
 }
 
 test.describe("settings view", () => {
-  test("renders sidebar with all four panes", async ({ page }) => {
+  test("renders sidebar with all five panes", async ({ page }) => {
     await page.goto("/");
     await openSettings(page);
     await expect(page.getByRole("tab", { name: "General" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Audio" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Models" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Shortcuts" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Dictionary" })).toBeVisible();
   });
 
   test("General is the landing pane", async ({ page }) => {
@@ -458,12 +459,17 @@ test.describe("settings view", () => {
       "true",
     );
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("tab", { name: "Dictionary" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.keyboard.press("ArrowDown");
     await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
     await page.keyboard.press("ArrowUp");
-    await expect(page.getByRole("tab", { name: "Shortcuts" })).toHaveAttribute(
+    await expect(page.getByRole("tab", { name: "Dictionary" })).toHaveAttribute(
       "aria-selected",
       "true",
     );

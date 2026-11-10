@@ -2,21 +2,30 @@
 //!
 //! Idle = template-tinted mono mic. Recording = orange (#E07000). Tooltip
 //! reflects current phase. Right-click context menu offers Open / Toggle /
-//! Quit. Double-click (Win) or left-click (Mac is its own dance — left-click
-//! opens menu by default) brings the main window forward.
+//! Mode / Preferences / Quit. Double-click (Win) or left-click (Mac is its
+//! own dance: left-click opens menu by default) brings the main window
+//! forward.
+//!
+//! The Mode submenu (TASK-96) lists the modes with the selected one
+//! checked; choosing one selects it. The menu is rebuilt when the phase
+//! changes and when the modes change ([`refresh`]).
 //!
 //! Glyph is rasterized once at startup from the same 26-rect list as
 //! `apps/macos/App/OpenWhisperApp.swift:242-269` and
 //! `apps/windows/OpenWhisper/Tray/StatusIconRenderer.cs`. One source of
 //! truth means a glyph change is a one-line edit per shell.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use openwhisper_core::dictation::{self, PHASE_RECORDING};
 use tauri::image::Image;
-use tauri::menu::{MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder};
+use tauri::menu::{
+    CheckMenuItemBuilder, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, Submenu,
+    SubmenuBuilder,
+};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
@@ -200,6 +209,62 @@ impl Phase {
     }
 }
 
+/// Id of the tray icon, for looking it up after [`install`].
+const TRAY_ID: &str = "ow.tray";
+
+/// Menu ids of the Mode submenu's items are this prefix plus the
+/// mode's id (`ow.mode.dictation`, `ow.mode.formal`).
+const MODE_ID_PREFIX: &str = "ow.mode.";
+
+/// The "Mode" submenu: every mode, the built-in Dictation mode first,
+/// the selected one checked. With only the built-in mode it is one
+/// checked item. Read from core's cache, which holds the saved block
+/// after every change (see `crate::modes`).
+fn build_mode_submenu(app: &AppHandle) -> tauri::Result<Submenu<Wry>> {
+    let settings = openwhisper_core::settings::current_modes_settings();
+    let refine = openwhisper_core::settings::current_refine_settings();
+    let mut submenu = SubmenuBuilder::new(app, "Mode");
+    for mode in openwhisper_core::modes::list(&settings, &refine) {
+        let item = CheckMenuItemBuilder::with_id(format!("{MODE_ID_PREFIX}{}", mode.id), &mode.name)
+            .checked(mode.id == settings.active)
+            .build(app)?;
+        submenu = submenu.item(&item);
+    }
+    submenu.build()
+}
+
+/// A mode was chosen in the tray menu. Saving is file IO, so it runs
+/// on its own thread, like the switch-mode hotkey.
+fn select_mode(app: &AppHandle, mode_id: &str) {
+    let app = app.clone();
+    let mode_id = mode_id.to_string();
+    thread::spawn(move || {
+        if let Err(e) = crate::modes::select(&app, &mode_id) {
+            eprintln!("tray mode select failed: {e}");
+            // The OS already flipped the check mark on the clicked
+            // item; put the menu back to what is saved.
+            refresh();
+        }
+    });
+}
+
+/// Set when the modes changed and the tray menu has to be rebuilt.
+/// The watcher thread in [`install`] picks it up on its next pass
+/// (within [`TICK_MS`]).
+///
+/// The menu is only ever built on that one thread. Building a menu
+/// waits for the main thread, so a rebuild started from a command
+/// running on the main thread, while the watcher was in the middle of
+/// its own, could leave each waiting for the other.
+static MENU_STALE: AtomicBool = AtomicBool::new(false);
+
+/// Rebuild the tray menu after the modes changed (one added, renamed,
+/// deleted or selected), whoever changed them. Returns at once; the
+/// menu follows within a few tens of milliseconds.
+pub(crate) fn refresh() {
+    MENU_STALE.store(true, Ordering::Relaxed);
+}
+
 /// IDs returned by [`build_menu`] so the menu-event handler can tell which
 /// item fired without string-matching scattered constants.
 struct MenuIds {
@@ -210,8 +275,9 @@ struct MenuIds {
 }
 
 /// Build the right-click context menu. Rebuilt on every phase change so the
-/// "Start / Stop / Loading…" label + enabled state stay current. Cheap
-/// enough — menu has 4 items + separators.
+/// "Start / Stop / Loading…" label + enabled state stay current, and on
+/// every modes change so the Mode submenu does. Cheap enough: the menu
+/// has 4 items, the Mode submenu and separators.
 fn build_menu(
     app: &AppHandle,
     phase: Phase,
@@ -235,11 +301,13 @@ fn build_menu(
     let quit_item: MenuItem<Wry> = MenuItemBuilder::with_id(&ids.quit, format!("Quit {app_name}"))
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
+    let mode_submenu = build_mode_submenu(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&open_item)
         .separator()
         .item(&toggle_item)
+        .item(&mode_submenu)
         .separator()
         .item(&prefs_item)
         .separator()
@@ -265,7 +333,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     // Tray is owned by tauri's runtime via the registered id; we look it up
     // later via `app.tray_by_id("ow.tray")` rather than holding the builder
     // return value.
-    let _tray = TrayIconBuilder::with_id("ow.tray")
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(idle_icon())
         .icon_as_template(true) // Mac: tint to match menu bar
         .tooltip(initial_phase.tooltip(&app_name))
@@ -287,6 +355,8 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 open_settings(app);
             } else if id == ids.quit {
                 quit(app);
+            } else if let Some(mode_id) = id.strip_prefix(MODE_ID_PREFIX) {
+                select_mode(app, mode_id);
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -313,20 +383,24 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 thread::sleep(Duration::from_millis(TICK_MS));
                 let snap = dictation::dictation_snapshot();
                 let now = Phase::from_core(snap.phase());
-                if now == last {
+                let phase_changed = now != last;
+                let modes_changed = MENU_STALE.swap(false, Ordering::Relaxed);
+                if !phase_changed && !modes_changed {
                     continue;
                 }
                 last = now;
 
-                if let Some(tray) = app_handle.tray_by_id("ow.tray") {
-                    let icon = if snap.phase() == PHASE_RECORDING {
-                        (*icon_rec).clone()
-                    } else {
-                        (*icon_idle).clone()
-                    };
-                    let _ = tray.set_icon(Some(icon));
-                    let _ = tray.set_icon_as_template(snap.phase() != PHASE_RECORDING);
-                    let _ = tray.set_tooltip(Some(now.tooltip(&app_name_for_thread)));
+                if let Some(tray) = app_handle.tray_by_id(TRAY_ID) {
+                    if phase_changed {
+                        let icon = if snap.phase() == PHASE_RECORDING {
+                            (*icon_rec).clone()
+                        } else {
+                            (*icon_idle).clone()
+                        };
+                        let _ = tray.set_icon(Some(icon));
+                        let _ = tray.set_icon_as_template(snap.phase() != PHASE_RECORDING);
+                        let _ = tray.set_tooltip(Some(now.tooltip(&app_name_for_thread)));
+                    }
 
                     if let Ok((menu, _)) = build_menu(&app_handle, now, &app_name_for_thread) {
                         let _ = tray.set_menu(Some(menu));

@@ -24,6 +24,15 @@
 //! those out; questions and tasks meant for someone else stay text.
 //! See [`prompt`] for where that line is drawn.
 //!
+//! What Refine does with the text is the *mode* ([`crate::modes`],
+//! TASK-96). The built-in Dictation mode is the cleanup described
+//! above, held to the strict guard. A mode the user made ("Formal",
+//! "Write in English") sends its own instructions, and optionally its
+//! own model and effort, and rewrites on purpose: its answer only has
+//! to be text of a sane length. [`apply_mode`] turns a mode into the
+//! settings and the prompt of one run; every outcome says which mode
+//! it ran in ([`RefineOutcome::mode`]).
+//!
 //! The rule that shapes everything here: **Refine may never cost the
 //! user their dictation.** A slow, failing, missing or misbehaving
 //! backend yields the unrefined transcript ([`RefineOutcome::text`]
@@ -33,11 +42,12 @@
 //! Entry points:
 //!
 //! - the dictation pipeline calls [`warm_for_recording`] when capture
-//!   starts, [`run_for_dictation`] when the transcript is ready, and
-//!   [`discard_warm`] when a recording is cancelled or empty;
+//!   starts, [`run_for_dictation_announced`] when the transcript is
+//!   ready, and [`discard_warm`] when a recording is cancelled or
+//!   empty;
 //! - the CLI and the settings pane call [`refine_text`],
-//!   [`backend_status`] and [`test_connection`] with explicit
-//!   settings.
+//!   [`refine_text_in_mode`], [`backend_status`] and
+//!   [`test_connection`] with explicit settings.
 
 use std::fmt;
 use std::sync::Mutex;
@@ -46,7 +56,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::settings::{RefineBackendKind, RefineSettings};
+use crate::modes::{ModeChoice, ModeReason};
+use crate::settings::{
+    BUILTIN_MODE_ID, BUILTIN_MODE_NAME, RefineBackendKind, RefineEffort, RefineSettings,
+};
 
 pub mod claude_cli;
 pub mod eval;
@@ -197,6 +210,50 @@ impl RefineStatus {
     }
 }
 
+/// The mode a Refine run was made in, as it is recorded with the
+/// outcome. The default is the built-in mode, selected.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ModeUse {
+    /// Mode id; [`BUILTIN_MODE_ID`] for the built-in mode.
+    pub id: String,
+    /// Mode name, as shown to a person.
+    pub name: String,
+    /// Why this mode ran: `selected` or `app-default`
+    /// ([`ModeReason`]).
+    pub reason: String,
+    /// The app whose default mode this is; empty when the mode is
+    /// simply the selected one.
+    pub app_name: String,
+}
+
+impl Default for ModeUse {
+    fn default() -> Self {
+        Self {
+            id: BUILTIN_MODE_ID.to_string(),
+            name: BUILTIN_MODE_NAME.to_string(),
+            reason: ModeReason::Selected.as_str().to_string(),
+            app_name: String::new(),
+        }
+    }
+}
+
+impl ModeUse {
+    /// What to record for a resolved mode.
+    pub fn from_choice(choice: &ModeChoice) -> Self {
+        Self {
+            id: choice.mode.id.clone(),
+            name: choice.mode.name.clone(),
+            reason: choice.reason.as_str().to_string(),
+            app_name: choice.app_name.clone(),
+        }
+    }
+
+    /// The built-in Dictation mode.
+    pub fn is_builtin(&self) -> bool {
+        self.id == BUILTIN_MODE_ID
+    }
+}
+
 /// Result of one Refine run.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RefineOutcome {
@@ -226,6 +283,10 @@ pub struct RefineOutcome {
     /// Tokens, list-price cost and plan windows of the call, when the
     /// backend answered and reported them.
     pub usage: Option<CallUsage>,
+    /// The mode the run was made in. [`refine_with`] knows only the
+    /// prompt, so it leaves the built-in mode here; the callers that
+    /// resolved a mode ([`ModeRun::refine`]) fill it in.
+    pub mode: ModeUse,
 }
 
 impl RefineOutcome {
@@ -242,6 +303,7 @@ impl RefineOutcome {
             elapsed_ms: 0,
             warm_lead_ms: None,
             usage: None,
+            mode: ModeUse::default(),
         }
     }
 
@@ -282,6 +344,15 @@ pub fn compose_prompt(settings: &RefineSettings) -> Prompt {
 /// short-utterance skip, the timeout, the output guard, the fallback
 /// to the unrefined text. Never fails; read the outcome's status.
 ///
+/// A rewrite prompt ([`Prompt::is_rewrite`], a custom mode) changes
+/// two of the nets. The short-utterance skip does not apply: two
+/// words still have to be translated by a "write in English" mode.
+/// And the answer is held to a length rule only
+/// ([`guard::check_rewrite`]), since the strict guard would reject
+/// any rewrite. That rule leaves little room when only a few words
+/// were said: that is where a model is most likely to return a
+/// sentence of its own instead of a rewrite.
+///
 /// Ignores `settings.enabled`: callers that got here decided to
 /// refine (the pipeline checks the switch, the CLI and the connection
 /// test run on demand).
@@ -293,16 +364,18 @@ pub fn refine_with(
 ) -> RefineOutcome {
     let input = text.trim();
     let words = guard::word_count(input);
-    if words < settings.min_words as usize || input.is_empty() {
-        return RefineOutcome::passthrough(
-            text,
-            RefineStatus::SkippedShort,
+    let rewrite = prompt.is_rewrite();
+    if input.is_empty() || (!rewrite && words < settings.min_words as usize) {
+        let detail = if rewrite {
+            "no text: not sent".to_string()
+        } else {
             format!(
                 "{words} word{}, fewer than {}: not sent",
                 if words == 1 { "" } else { "s" },
                 settings.min_words
-            ),
-        );
+            )
+        };
+        return RefineOutcome::passthrough(text, RefineStatus::SkippedShort, detail);
     }
 
     let started = Instant::now();
@@ -328,18 +401,23 @@ pub fn refine_with(
         elapsed_ms,
         warm_lead_ms,
         usage: usage.clone(),
+        mode: ModeUse::default(),
     };
 
     let outcome = match result {
         Ok(answer) => {
-            // A rewrite is only accepted when the model names the
-            // spoken instruction that asked for it. Without one, the
-            // text must still be what was said (strict guard).
+            // In the cleanup prompt a rewrite is only accepted when
+            // the model names the spoken instruction that asked for
+            // it. Without one, the text must still be what was said
+            // (strict guard). A rewrite prompt asked for a rewrite.
             let (instruction, body) = prompt::split_instruction(&answer);
             let cleaned = prompt::clean_model_output(body, input);
-            let verdict = match &instruction {
-                Some(_) => guard::check_instructed(input, &cleaned),
-                None => guard::check(input, &cleaned, settings.drift_guard),
+            let verdict = if rewrite {
+                guard::check_rewrite(input, &cleaned)
+            } else if instruction.is_some() {
+                guard::check_instructed(input, &cleaned)
+            } else {
+                guard::check(input, &cleaned, settings.drift_guard)
             };
             match verdict {
                 Ok(()) => RefineOutcome {
@@ -354,6 +432,7 @@ pub fn refine_with(
                     elapsed_ms,
                     warm_lead_ms,
                     usage: usage.clone(),
+                    mode: ModeUse::default(),
                 },
                 Err(reason) => fallback(RefineStatus::Rejected, reason),
             }
@@ -382,21 +461,166 @@ pub fn refine_with(
     outcome
 }
 
-/// Refine `text` with a fresh backend built from `settings`. For the
-/// CLI and one-off calls; the dictation pipeline uses
-/// [`run_for_dictation`], which can reuse a warmed backend.
+/// Refine `text` with a fresh backend built from `settings`, in the
+/// built-in Dictation mode. For the connection test and one-off
+/// calls; the dictation pipeline uses [`run_for_dictation`], which
+/// resolves the mode and can reuse a warmed backend.
 pub fn refine_text(settings: &RefineSettings, text: &str) -> RefineOutcome {
     let prompt = compose_prompt(settings);
     let mut backend = backend_for(settings);
     refine_with(backend.as_mut(), &prompt, settings, text)
 }
 
+// --- modes ----------------------------------------------------------
+
+/// One Refine run in a mode, ready to go: the settings with the mode
+/// applied, the prompt, and what to record. Made by [`apply_mode`].
+///
+/// The pipeline and the CLI go through the same type, so `openwhisper
+/// refine run --mode` does exactly what a dictation in that mode does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModeRun {
+    /// The Refine settings with the mode's instructions, model and
+    /// effort in place. Build the backend from these.
+    pub settings: RefineSettings,
+    /// The cleanup prompt for the built-in mode (and for a custom
+    /// mode without instructions), the mode prompt otherwise.
+    pub prompt: Prompt,
+    /// Recorded on the outcome.
+    pub mode: ModeUse,
+}
+
+impl ModeRun {
+    /// Like [`apply_mode`], with the dictionary terms given instead
+    /// of read from the user's dictionary. For the eval set and tests.
+    pub fn with_terms(settings: &RefineSettings, choice: &ModeChoice, terms: &[String]) -> Self {
+        let mode = &choice.mode;
+        let mut settings = settings.clone();
+        // A mode's own model and effort belong to the backend they
+        // were chosen for. With another backend in use they would be
+        // a model name that server has never heard of, and every
+        // dictation in the mode would fail; the mode then runs with
+        // the Refine settings, like a mode without its own.
+        if !mode.builtin && mode.overrides_apply(settings.backend) {
+            if let Some(model) = mode.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+                match settings.backend {
+                    RefineBackendKind::OpenaiCompatible => settings.openai.model = model.to_string(),
+                    _ => settings.claude_cli.model = model.to_string(),
+                }
+            }
+            if let Some(effort) = mode.effort {
+                match settings.backend {
+                    RefineBackendKind::OpenaiCompatible => settings.openai.effort = Some(effort),
+                    // The Claude CLI has no "minimal" level.
+                    _ if effort == RefineEffort::Minimal => settings.claude_cli.effort = RefineEffort::Low,
+                    _ => settings.claude_cli.effort = effort,
+                }
+            }
+        }
+        let prompt = if mode.rewrites() {
+            settings.instructions = mode.instructions.trim().to_string();
+            Prompt::compose_mode(&mode.name, &mode.instructions, terms)
+        } else {
+            Prompt::compose(&settings.instructions, terms)
+        };
+        Self {
+            settings,
+            prompt,
+            mode: ModeUse::from_choice(choice),
+        }
+    }
+
+    /// This run sends `text` to the backend: it has enough words for
+    /// the cleanup prompt ([`RefineSettings::min_words`]), or any
+    /// words at all for a mode that rewrites. The same test
+    /// [`refine_with`] makes before it calls the backend.
+    pub fn sends(&self, text: &str) -> bool {
+        let input = text.trim();
+        !input.is_empty()
+            && (self.prompt.is_rewrite() || guard::word_count(input) >= self.settings.min_words as usize)
+    }
+
+    /// Run `text` through `backend` in this mode. Same safety nets as
+    /// [`refine_with`]; the outcome names the mode.
+    pub fn refine(&self, backend: &mut dyn Refiner, text: &str) -> RefineOutcome {
+        let mut outcome = refine_with(backend, &self.prompt, &self.settings, text);
+        outcome.mode = self.mode.clone();
+        outcome
+    }
+}
+
+/// Apply a resolved mode ([`crate::modes::resolve`]) to the Refine
+/// settings and compose its prompt, with the current dictionary terms.
+///
+/// - The built-in mode changes nothing: the Refine instructions, the
+///   cleanup prompt, the strict guard.
+/// - A custom mode sends the mode prompt with its instructions.
+///   Without instructions it keeps the cleanup prompt.
+/// - Its own model and effort (when it has them) replace the Refine
+///   ones while the backend they were chosen for is the one in use
+///   ([`crate::modes::ModeView::overrides_apply`]). With the other
+///   backend in use the mode runs with the Refine model and effort.
+pub fn apply_mode(settings: &RefineSettings, choice: &ModeChoice) -> ModeRun {
+    let matcher = crate::dictionary::current_matcher();
+    ModeRun::with_terms(settings, choice, matcher.prompt_terms())
+}
+
+/// Refine `text` in a mode with a fresh backend built from `settings`.
+/// What `openwhisper refine run --mode` calls, and what the dictation
+/// pipeline calls when no backend was warmed.
+pub fn refine_text_in_mode(settings: &RefineSettings, choice: &ModeChoice, text: &str) -> RefineOutcome {
+    let run = apply_mode(settings, choice);
+    let mut backend = backend_for(&run.settings);
+    run.refine(backend.as_mut(), text)
+}
+
+/// Id and name of the frontmost app, for the per-app default mode.
+/// `None` when it is not known or is OpenWhisper itself: its own
+/// windows never match an app default.
+#[cfg(all(feature = "focus", not(test)))]
+fn frontmost_app() -> Option<(String, String)> {
+    // Without the window title: this runs between the transcript and
+    // the paste, and the title is the one slow part of a focus read.
+    let focus = crate::focus::current_app();
+    if focus.is_self || focus.app_id.is_empty() {
+        return None;
+    }
+    Some((focus.app_id, focus.app_name))
+}
+
+#[cfg(all(not(feature = "focus"), not(test)))]
+fn frontmost_app() -> Option<(String, String)> {
+    None
+}
+
+/// Unit tests never ask the OS which app is in front: the answer
+/// would be whatever the developer has open.
+#[cfg(test)]
+fn frontmost_app() -> Option<(String, String)> {
+    test_support::frontmost_app()
+}
+
+/// The mode for the dictation in flight: the frontmost app's default
+/// when it has one, else the selected mode. The app is only read when
+/// at least one app default exists, so users without any pay nothing.
+fn resolve_for_dictation(settings: &RefineSettings) -> ModeChoice {
+    let modes = crate::settings::current_modes_settings();
+    let app = if modes.app_defaults.is_empty() { None } else { frontmost_app() };
+    crate::modes::resolve(
+        &modes,
+        settings,
+        app.as_ref().map(|(id, name)| (id.as_str(), name.as_str())),
+    )
+}
+
 // --- dictation pipeline hooks -------------------------------------
 
 struct WarmSlot {
     backend: Box<dyn Refiner>,
-    prompt: Prompt,
-    settings: RefineSettings,
+    /// Settings, prompt and mode as they were when the recording
+    /// started. The backend was warmed with this prompt; it is only
+    /// used when the transcript's run turns out to be the same one.
+    run: ModeRun,
 }
 
 /// The backend warmed for the recording in flight, if any. One slot:
@@ -416,38 +640,53 @@ fn take_warm() -> Option<WarmSlot> {
     slot.take()
 }
 
-/// Called when capture starts. With Refine on, builds the backend
-/// and lets it start up while the user talks (the Claude CLI takes
-/// over a second to boot; warmed, the answer comes back in well under
-/// one). With Refine off this does nothing at all.
-///
-/// Reads the cached settings ([`crate::settings::current_refine_settings`]).
-/// May block briefly (dictionary read, keychain read, process spawn),
-/// so call it off the hotkey thread.
-pub fn warm_for_recording() {
+/// What a dictation runs as right now: the cached Refine settings,
+/// the mode resolved for the app in front, and its prompt. `None`
+/// with Refine off; then nothing is resolved at all.
+fn current_run() -> Option<ModeRun> {
     let settings = crate::settings::current_refine_settings();
+    if !settings.enabled {
+        return None;
+    }
+    let choice = resolve_for_dictation(&settings);
+    Some(apply_mode(&settings, &choice))
+}
+
+/// Called when capture starts. With Refine on, works out the mode,
+/// builds the backend and lets it start up while the user talks (the
+/// Claude CLI takes over a second to boot; warmed, the answer comes
+/// back in well under one). With Refine off this does nothing at all:
+/// the switch is checked before the mode is even resolved.
+///
+/// Reads the cached settings ([`crate::settings::current_refine_settings`],
+/// [`crate::settings::current_modes_settings`]) and, when an app has a
+/// default mode, the frontmost app. May block briefly (dictionary
+/// read, keychain read, process spawn), so call it off the hotkey
+/// thread.
+///
+/// The mode warmed here is a guess at the mode of the dictation: the
+/// user can still switch mode, or app, before they stop talking.
+/// [`run_for_dictation_announced`] checks.
+pub fn warm_for_recording() {
     // Whatever was left from an earlier recording goes first.
     drop(take_warm());
-    if !settings.enabled {
-        return;
-    }
     let epoch = EPOCH.load(Ordering::SeqCst);
     let started = Instant::now();
-    let prompt = compose_prompt(&settings);
-    let mut backend = backend_for(&settings);
-    backend.warm(&prompt);
+    let Some(run) = current_run() else {
+        return;
+    };
+    let mut backend = backend_for(&run.settings);
+    backend.warm(&run.prompt);
     crate::verbose_log!(
-        "[ow.refine] warm backend={} setup_ms={} (own thread, recording already running)",
+        "[ow.refine] warm backend={} setup_ms={} custom_mode={} reason={} (own thread, recording already running)",
         backend.id(),
-        started.elapsed().as_millis()
+        started.elapsed().as_millis(),
+        !run.mode.is_builtin(),
+        run.mode.reason
     );
     if let Ok(mut slot) = WARM.lock() {
         if EPOCH.load(Ordering::SeqCst) == epoch {
-            *slot = Some(WarmSlot {
-                backend,
-                prompt,
-                settings,
-            });
+            *slot = Some(WarmSlot { backend, run });
         }
         // Otherwise the recording already ended: `backend` drops here.
     }
@@ -459,37 +698,62 @@ pub fn discard_warm() {
     drop(take_warm());
 }
 
-/// Refine the transcript of the dictation that just finished. Uses
-/// the backend warmed by [`warm_for_recording`] when there is one,
-/// with the settings that were current at that moment; otherwise
-/// builds a cold backend from the current settings.
+/// Refine the transcript of the dictation that just finished, in the
+/// mode that applies *now*: the settings and the selected mode are
+/// read again, and so is the app in front when an app has a default.
+/// The mode shown on the pill when the user stops talking is the mode
+/// the text comes out in, also when they switched during the
+/// recording.
+///
+/// The backend warmed by [`warm_for_recording`] is used when it was
+/// warmed for exactly this run (same settings, same prompt, same
+/// mode), which is every dictation where nothing changed meanwhile.
+/// Otherwise it is dropped and a cold backend is built for the run:
+/// about a second slower, in the right mode.
+///
+/// `before_call` runs once, just before the backend is asked, and
+/// not at all when it will not be (Refine off, too few words). The
+/// pipeline shows its "refining" status from it.
 ///
 /// With Refine off, returns [`RefineOutcome::disabled`] and starts
-/// nothing.
-pub fn run_for_dictation(text: &str) -> RefineOutcome {
-    let outcome = match take_warm() {
-        Some(mut slot) => refine_with(slot.backend.as_mut(), &slot.prompt, &slot.settings, text),
-        None => {
-            let settings = crate::settings::current_refine_settings();
-            if !settings.enabled {
-                return RefineOutcome::disabled(text);
+/// nothing, whatever mode is selected.
+pub fn run_for_dictation_announced(text: &str, before_call: impl FnOnce()) -> RefineOutcome {
+    let warm = take_warm();
+    let Some(run) = current_run() else {
+        // Off, or switched off during the recording: `warm` drops.
+        return RefineOutcome::disabled(text);
+    };
+    if run.sends(text) {
+        before_call();
+    }
+    let outcome = match warm {
+        Some(mut slot) if slot.run == run => run.refine(slot.backend.as_mut(), text),
+        stale => {
+            if stale.is_some() {
+                crate::verbose_log!(
+                    "[ow.refine] mode or settings changed during the recording: warmed backend dropped, running cold"
+                );
             }
-            refine_text(&settings, text)
+            drop(stale);
+            let mut backend = backend_for(&run.settings);
+            run.refine(backend.as_mut(), text)
         }
     };
     history::record_outcome(history::SOURCE_DICTATION, &outcome);
     outcome
 }
 
-/// True when the pipeline should show a "refining" status for this
-/// transcript: Refine is on and the text is long enough to be sent.
+/// [`run_for_dictation_announced`] without the announcement.
+pub fn run_for_dictation(text: &str) -> RefineOutcome {
+    run_for_dictation_announced(text, || {})
+}
+
+/// True when a dictation of `text` right now would be sent to the
+/// backend: Refine is on and the text has enough words. In the
+/// built-in mode that takes [`RefineSettings::min_words`] words; a
+/// mode that rewrites sends any text.
 pub fn will_call_backend(text: &str) -> bool {
-    let settings = match WARM.lock() {
-        Ok(g) => g.as_ref().map(|s| s.settings.clone()),
-        Err(_) => None,
-    }
-    .unwrap_or_else(crate::settings::current_refine_settings);
-    settings.enabled && guard::word_count(text) >= settings.min_words as usize
+    current_run().is_some_and(|run| run.sends(text))
 }
 
 // --- status and connection test -----------------------------------
@@ -607,9 +871,19 @@ pub(crate) mod test_support {
     type Factory = Arc<dyn Fn(&RefineSettings) -> Box<dyn Refiner> + Send + Sync>;
 
     static FACTORY: Mutex<Option<Factory>> = Mutex::new(None);
-    /// Serializes tests that touch the process-wide warm slot, the
-    /// settings cache or the factory override.
-    static LOCK: Mutex<()> = Mutex::new(());
+    /// What tests pretend the frontmost app is (id, name).
+    static FRONTMOST: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+    pub(crate) fn frontmost_app() -> Option<(String, String)> {
+        FRONTMOST.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Pretend this app is in front, until the [`Scope`] ends.
+    pub(crate) fn set_frontmost_app(app: Option<(&str, &str)>) {
+        if let Ok(mut g) = FRONTMOST.lock() {
+            *g = app.map(|(id, name)| (id.to_string(), name.to_string()));
+        }
+    }
 
     pub(crate) fn factory() -> Option<Factory> {
         FACTORY.lock().ok().and_then(|g| g.clone())
@@ -626,22 +900,31 @@ pub(crate) mod test_support {
             if let Ok(mut g) = FACTORY.lock() {
                 *g = None;
             }
+            set_frontmost_app(None);
             crate::settings::set_refine_settings_cache(RefineSettings::default());
+            crate::settings::set_modes_settings_cache(crate::settings::ModesSettings::default());
         }
     }
 
     /// Install `make` as the backend factory and `settings` as the
-    /// current settings for the lifetime of the returned scope.
+    /// current settings for the lifetime of the returned scope. Modes
+    /// start at the defaults (only the built-in mode) and no app is
+    /// in front.
+    ///
+    /// Holds the lock that serializes tests touching the process-wide
+    /// warm slot, the settings caches or the factory override.
     pub(crate) fn scope(
         settings: RefineSettings,
         make: impl Fn(&RefineSettings) -> Box<dyn Refiner> + Send + Sync + 'static,
     ) -> Scope {
-        let guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::discard_warm();
         if let Ok(mut g) = FACTORY.lock() {
             *g = Some(Arc::new(make));
         }
+        set_frontmost_app(None);
         crate::settings::set_refine_settings_cache(settings);
+        crate::settings::set_modes_settings_cache(crate::settings::ModesSettings::default());
         Scope { _guard: guard }
     }
 
@@ -992,6 +1275,544 @@ Friday because there's a release on Thursday."
         let out = run_for_dictation(SAID);
         assert_eq!(out.status, RefineStatus::Refined);
         assert_eq!(calls.lock().unwrap().warmed, 0);
+    }
+
+    // --- modes ------------------------------------------------------
+
+    const DANISH: &str = "hej anna jeg når ikke mødet i morgen kan vi rykke det til torsdag ";
+    const ENGLISH: &str = "Hi Anna, I can't make the meeting tomorrow. Can we move it to Thursday?";
+
+    /// Dictation plus "Formal" and "Write in English" (own model and
+    /// effort), with `active` selected.
+    fn modes_with(active: &str) -> crate::settings::ModesSettings {
+        use crate::modes;
+        let m = modes::add(
+            &crate::settings::ModesSettings::default(),
+            "Formal",
+            "Rewrite what I say in a formal, polite tone.",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let m = modes::add(
+            &m,
+            "Write in English",
+            "Write what I say in English.",
+            Some("opus"),
+            Some(RefineEffort::High),
+            Some(RefineBackendKind::ClaudeCli),
+        )
+        .unwrap();
+        modes::select(&m, active).unwrap()
+    }
+
+    fn choice(modes: &crate::settings::ModesSettings, settings: &RefineSettings) -> ModeChoice {
+        crate::modes::resolve(modes, settings, None)
+    }
+
+    #[test]
+    fn the_built_in_mode_changes_nothing() {
+        let settings = RefineSettings {
+            instructions: "Use British spelling.".into(),
+            ..on()
+        };
+        let run = ModeRun::with_terms(&settings, &choice(&modes_with("dictation"), &settings), &[]);
+        assert_eq!(run.settings, settings);
+        assert_eq!(run.prompt, Prompt::compose("Use British spelling.", &[]));
+        assert!(!run.prompt.is_rewrite());
+        assert_eq!(run.mode, ModeUse::default());
+        assert!(run.mode.is_builtin());
+    }
+
+    #[test]
+    fn a_custom_mode_brings_its_prompt_model_and_effort() {
+        let settings = on();
+        let run = ModeRun::with_terms(
+            &settings,
+            &choice(&modes_with("write-in-english"), &settings),
+            &["Anna".to_string()],
+        );
+        assert!(run.prompt.is_rewrite());
+        assert!(run.prompt.system().contains("Write what I say in English."));
+        assert!(run.prompt.system().contains("means one of them: Anna."));
+        assert_eq!(run.settings.claude_cli.model, "opus");
+        assert_eq!(run.settings.claude_cli.effort, RefineEffort::High);
+        assert_eq!(run.settings.active_model(), "opus");
+        assert_eq!(run.mode.name, "Write in English");
+        assert_eq!(run.mode.reason, "selected");
+
+        // A mode without a model or effort of its own keeps Refine's.
+        let run = ModeRun::with_terms(&settings, &choice(&modes_with("formal"), &settings), &[]);
+        assert_eq!(run.settings.claude_cli, settings.claude_cli);
+        assert!(run.prompt.is_rewrite());
+
+        // The Claude CLI never gets "minimal".
+        let minimal = crate::modes::edit(
+            &modes_with("formal"),
+            "formal",
+            &crate::modes::ModeEdit {
+                effort: Some(Some(RefineEffort::Minimal)),
+                backend: Some(RefineBackendKind::ClaudeCli),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let run = ModeRun::with_terms(&settings, &choice(&minimal, &settings), &[]);
+        assert_eq!(run.settings.claude_cli.effort, RefineEffort::Low);
+    }
+
+    #[test]
+    fn a_modes_model_and_effort_apply_only_on_the_backend_they_were_chosen_for() {
+        let claude = on();
+        let openai = RefineSettings {
+            backend: RefineBackendKind::OpenaiCompatible,
+            openai: crate::settings::OpenAiSettings {
+                model: "server-default".into(),
+                ..on().openai
+            },
+            ..on()
+        };
+
+        // "Write in English" was made with a Claude model. With the
+        // OpenAI-compatible backend in use, that model name must not
+        // reach the server: the mode runs with the Refine model and
+        // effort, and still with its own prompt.
+        let modes = modes_with("write-in-english");
+        let run = ModeRun::with_terms(&openai, &choice(&modes, &openai), &[]);
+        assert_eq!(run.settings.openai, openai.openai);
+        assert_eq!(run.settings.claude_cli, openai.claude_cli);
+        assert_eq!(run.settings.active_model(), "server-default");
+        assert!(run.prompt.system().contains("Write what I say in English."));
+
+        // A block written before modes stored a backend: Claude only.
+        let mut old = modes.clone();
+        old.custom[1].backend = None;
+        let run = ModeRun::with_terms(&openai, &choice(&old, &openai), &[]);
+        assert_eq!(run.settings.active_model(), "server-default");
+        let run = ModeRun::with_terms(&claude, &choice(&old, &claude), &[]);
+        assert_eq!(run.settings.active_model(), "opus");
+        assert_eq!(run.settings.claude_cli.effort, RefineEffort::High);
+
+        // And the other way round: a mode made for the
+        // OpenAI-compatible backend applies there and not on Claude.
+        let modes = crate::modes::add(
+            &crate::settings::ModesSettings::default(),
+            "Small",
+            "Write it shorter.",
+            Some("small-model"),
+            Some(RefineEffort::Minimal),
+            Some(RefineBackendKind::OpenaiCompatible),
+        )
+        .unwrap();
+        let modes = crate::modes::select(&modes, "small").unwrap();
+        let run = ModeRun::with_terms(&openai, &choice(&modes, &openai), &[]);
+        assert_eq!(run.settings.openai.model, "small-model");
+        assert_eq!(run.settings.openai.effort, Some(RefineEffort::Minimal));
+        assert_eq!(run.settings.claude_cli, openai.claude_cli);
+        let run = ModeRun::with_terms(&claude, &choice(&modes, &claude), &[]);
+        assert_eq!(run.settings.claude_cli, claude.claude_cli);
+        assert_eq!(run.settings.openai, claude.openai);
+        assert!(run.prompt.system().contains("Write it shorter."));
+    }
+
+    #[test]
+    fn a_mode_for_the_other_backend_does_not_fail_the_dictation() {
+        // The whole path: a mode with a Claude model, the user then
+        // switches Refine to the OpenAI-compatible backend. A backend
+        // that only knows its own model stands in for the server.
+        let openai = RefineSettings {
+            backend: RefineBackendKind::OpenaiCompatible,
+            openai: crate::settings::OpenAiSettings {
+                model: "server-default".into(),
+                ..on().openai
+            },
+            ..on()
+        };
+        let _scope = scope(openai, move |settings| {
+            let model = settings.active_model().to_string();
+            Box::new(Stub::new(Arc::new(Mutex::new(Calls::default())), move |_| {
+                if model == "server-default" {
+                    Ok(ENGLISH.into())
+                } else {
+                    Err(RefineError::Backend(format!("the model `{model}` does not exist")))
+                }
+            }))
+        });
+        crate::settings::set_modes_settings_cache(modes_with("write-in-english"));
+        warm_for_recording();
+        let warm = run_for_dictation(DANISH);
+        let cold = run_for_dictation(DANISH);
+        for out in [&warm, &cold] {
+            assert_eq!(out.status, RefineStatus::Refined, "{}", out.detail);
+            assert_eq!(out.mode.name, "Write in English");
+            assert_eq!(out.model, "server-default");
+        }
+    }
+
+    #[test]
+    fn a_custom_mode_without_instructions_cleans_up_with_its_own_model() {
+        let settings = on();
+        let modes = crate::modes::add(
+            &crate::settings::ModesSettings::default(),
+            "Careful",
+            "",
+            Some("opus"),
+            None,
+            Some(RefineBackendKind::ClaudeCli),
+        )
+        .unwrap();
+        let modes = crate::modes::select(&modes, "careful").unwrap();
+        let run = ModeRun::with_terms(&settings, &choice(&modes, &settings), &[]);
+        assert!(!run.prompt.is_rewrite());
+        assert_eq!(run.prompt, Prompt::compose("", &[]));
+        assert_eq!(run.settings.claude_cli.model, "opus");
+        assert_eq!(run.mode.name, "Careful");
+    }
+
+    #[test]
+    fn a_rewrite_passes_the_lenient_guard_where_the_strict_one_rejects_it() {
+        // The same answer, once under the cleanup prompt and once
+        // under a mode prompt.
+        let (_, mut stub) = stub_with(|_| Ok(ENGLISH.into()));
+        let strict = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), DANISH);
+        assert_eq!(strict.status, RefineStatus::Rejected);
+        assert_eq!(strict.text, DANISH);
+
+        let (calls, mut stub) = stub_with(|_| Ok(ENGLISH.into()));
+        let prompt = Prompt::compose_mode("Write in English", "Write what I say in English.", &[]);
+        let out = refine_with(&mut stub, &prompt, &on(), DANISH);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, format!("{ENGLISH} "));
+        assert_eq!(out.raw, DANISH);
+        // No spoken instruction was involved: the mode asked for it.
+        assert!(out.instruction.is_empty());
+        let c = calls.lock().unwrap();
+        assert!(c.last_system.contains("Write what I say in English."));
+        assert_eq!(c.last_user, format!("<transcript>\n{}\n</transcript>", DANISH.trim()));
+    }
+
+    #[test]
+    fn a_rewrite_still_needs_text_and_a_sane_length() {
+        let prompt = Prompt::compose_mode("Formal", "Rewrite it in a formal tone.", &[]);
+        let (_, mut stub) = stub_with(|_| Ok("  ".into()));
+        let out = refine_with(&mut stub, &prompt, &on(), DANISH);
+        assert_eq!(out.status, RefineStatus::Rejected);
+        assert_eq!(out.text, DANISH);
+
+        let (_, mut stub) = stub_with(|_| Ok("We regret to inform you of the delay. ".repeat(30)));
+        let out = refine_with(&mut stub, &prompt, &on(), DANISH);
+        assert_eq!(out.status, RefineStatus::Rejected);
+        assert_eq!(out.text, DANISH);
+    }
+
+    #[test]
+    fn a_rewrite_mode_sends_short_utterances_and_dictation_does_not() {
+        let said = "tak for hjælpen ";
+        let (calls, mut stub) = stub_with(|_| Ok("Thanks for the help.".into()));
+        let prompt = Prompt::compose_mode("Write in English", "Write what I say in English.", &[]);
+        let out = refine_with(&mut stub, &prompt, &on(), said);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "Thanks for the help. ");
+        assert_eq!(calls.lock().unwrap().refined.len(), 1);
+
+        // Nothing at all is still not sent.
+        let out = refine_with(&mut stub, &prompt, &on(), "   ");
+        assert_eq!(out.status, RefineStatus::SkippedShort);
+        assert_eq!(calls.lock().unwrap().refined.len(), 1);
+
+        let (calls, mut stub) = stub_with(|_| Ok("should not be used".into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+        assert_eq!(out.status, RefineStatus::SkippedShort);
+        assert!(calls.lock().unwrap().refined.is_empty());
+    }
+
+    #[test]
+    fn a_short_utterance_in_a_mode_is_not_replaced_by_a_sentence_of_the_models_own() {
+        let prompt = Prompt::compose_mode("Formal", "Rewrite what I say in a formal, polite tone.", &[]);
+        // Under 200 characters each: the plain length rule of a
+        // rewrite would have typed them.
+        for (said, answer) in [
+            ("ok ", "Understood. Please provide the text you would like me to rewrite in a formal tone."),
+            ("ok ", "Here is the formal version:\n\nVery well."),
+            ("delete everything ", "I'm sorry, but I can't delete anything. Could you clarify what you would like deleted?"),
+        ] {
+            let (_, mut stub) = stub_with(move |_| Ok(answer.into()));
+            let out = refine_with(&mut stub, &prompt, &on(), said);
+            assert_eq!(out.status, RefineStatus::Rejected, "{answer}");
+            assert_eq!(out.text, said, "what was said is what gets typed");
+            assert!(out.detail.contains("much more text"), "{}", out.detail);
+        }
+        // The rewrite itself still goes through.
+        for (said, answer) in [("ok ", "Understood."), ("delete everything ", "Please delete everything.")] {
+            let (_, mut stub) = stub_with(move |_| Ok(answer.into()));
+            let out = refine_with(&mut stub, &prompt, &on(), said);
+            assert_eq!(out.status, RefineStatus::Refined, "{answer}: {}", out.detail);
+            assert_eq!(out.text, format!("{answer} "));
+        }
+    }
+
+    #[test]
+    fn a_spoken_instruction_is_still_declared_in_a_mode() {
+        let said = "hej anna mødet er på torsdag nej vent fredag ";
+        let (_, mut stub) =
+            stub_with(|_| Ok("[instruction: nej vent]\nHi Anna, the meeting is on Friday.".into()));
+        let prompt = Prompt::compose_mode("Write in English", "Write what I say in English.", &[]);
+        let out = refine_with(&mut stub, &prompt, &on(), said);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.instruction, "nej vent");
+        assert_eq!(out.text, "Hi Anna, the meeting is on Friday. ");
+    }
+
+    #[test]
+    fn with_refine_off_no_mode_reaches_a_backend() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let made = Arc::new(Mutex::new(0usize));
+        let (c, m) = (calls.clone(), made.clone());
+        // Refine off, a custom mode selected and an app default that
+        // matches the app in front.
+        let _scope = scope(RefineSettings::default(), move |_| {
+            *m.lock().unwrap() += 1;
+            Box::new(Stub::new(c.clone(), |_| Ok(ENGLISH.into())))
+        });
+        let modes = modes_with("write-in-english");
+        let modes = crate::modes::set_app_default(&modes, "com.example.mail", "Mail", "formal").unwrap();
+        crate::settings::set_modes_settings_cache(modes);
+        test_support::set_frontmost_app(Some(("com.example.mail", "Mail")));
+
+        warm_for_recording();
+        assert!(!will_call_backend(DANISH));
+        let out = run_for_dictation(DANISH);
+        assert_eq!(out.status, RefineStatus::Disabled);
+        assert_eq!(out.text, DANISH);
+        assert_eq!(*made.lock().unwrap(), 0, "no backend may be built when off");
+        let c = calls.lock().unwrap();
+        assert_eq!((c.warmed, c.refined.len()), (0, 0));
+    }
+
+    #[test]
+    fn the_pipeline_runs_the_selected_mode_warm_and_cold() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let built: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let (c, b) = (calls.clone(), built.clone());
+        let _scope = scope(on(), move |settings| {
+            b.lock()
+                .unwrap()
+                .push((settings.active_model().to_string(), settings.active_effort().to_string()));
+            Box::new(Stub::new(c.clone(), |_| Ok(ENGLISH.into())))
+        });
+        crate::settings::set_modes_settings_cache(modes_with("write-in-english"));
+
+        // Warmed at record start.
+        warm_for_recording();
+        assert!(will_call_backend("tak "), "a rewrite mode sends short text too");
+        let warm = run_for_dictation(DANISH);
+        // No warm backend: resolved when the transcript is ready.
+        let cold = run_for_dictation(DANISH);
+
+        for out in [&warm, &cold] {
+            assert_eq!(out.status, RefineStatus::Refined);
+            assert_eq!(out.text, format!("{ENGLISH} "));
+            assert_eq!(out.mode.id, "write-in-english");
+            assert_eq!(out.mode.name, "Write in English");
+            assert_eq!(out.mode.reason, "selected");
+            assert_eq!(out.mode.app_name, "");
+            // The mode's own model and effort were used and reported.
+            assert_eq!((out.model.as_str(), out.effort.as_str()), ("opus", "high"));
+        }
+        assert_eq!(
+            *built.lock().unwrap(),
+            vec![("opus".to_string(), "high".to_string()); 2],
+            "both backends were built with the mode's model and effort"
+        );
+        let c = calls.lock().unwrap();
+        assert_eq!(c.warmed, 1);
+        assert!(c.last_system.contains("Write what I say in English."));
+        assert!(c.last_system.contains("writing mode called \"Write in English\""));
+    }
+
+    /// A stub factory that records the model each backend was built
+    /// with, plus the shared call log.
+    fn recording_scope(
+        settings: RefineSettings,
+    ) -> (test_support::Scope, Arc<Mutex<Calls>>, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let built: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (c, b) = (calls.clone(), built.clone());
+        let scope = scope(settings, move |settings| {
+            b.lock().unwrap().push(settings.active_model().to_string());
+            Box::new(Stub::new(c.clone(), |_| Ok(ENGLISH.into())))
+        });
+        (scope, calls, built)
+    }
+
+    #[test]
+    fn a_mode_switched_during_the_recording_is_the_mode_the_text_comes_out_in() {
+        let (_scope, calls, built) = recording_scope(on());
+        // Recording starts in Formal: that is what gets warmed.
+        crate::settings::set_modes_settings_cache(modes_with("formal"));
+        warm_for_recording();
+        assert_eq!(calls.lock().unwrap().warmed, 1);
+
+        // The user cycles to "Write in English" while talking (the
+        // pill shows it), then stops.
+        let switched = crate::modes::cycle(&crate::settings::current_modes_settings());
+        assert_eq!(switched.active, "write-in-english");
+        crate::settings::set_modes_settings_cache(switched);
+        let mut announced = 0;
+        let out = run_for_dictation_announced(DANISH, || announced += 1);
+
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.mode.id, "write-in-english");
+        assert_eq!(out.mode.name, "Write in English");
+        assert_eq!((out.model.as_str(), out.effort.as_str()), ("opus", "high"));
+        assert_eq!(announced, 1);
+        let c = calls.lock().unwrap();
+        assert!(c.last_system.contains("Write what I say in English."));
+        assert!(!c.last_system.contains("formal, polite tone"));
+        // The backend warmed for Formal was dropped without being
+        // asked, and a second one was built for the new mode.
+        assert_eq!(c.refined.len(), 1);
+        assert_eq!(c.warmed, 1);
+        assert_eq!(c.dropped, 2);
+        assert_eq!(*built.lock().unwrap(), [crate::settings::DEFAULT_CLAUDE_MODEL, "opus"]);
+        assert!(WARM.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_warmed_backend_is_used_when_nothing_changed_during_the_recording() {
+        let (_scope, calls, built) = recording_scope(on());
+        crate::settings::set_modes_settings_cache(modes_with("write-in-english"));
+        warm_for_recording();
+        // The same block saved again (a no-op change) is not a change.
+        crate::settings::set_modes_settings_cache(crate::settings::current_modes_settings());
+        let out = run_for_dictation(DANISH);
+        assert_eq!(out.mode.id, "write-in-english");
+        assert_eq!(built.lock().unwrap().len(), 1, "no second backend");
+        let c = calls.lock().unwrap();
+        assert_eq!((c.warmed, c.refined.len(), c.dropped), (1, 1, 1));
+    }
+
+    #[test]
+    fn the_app_in_front_when_the_transcript_is_ready_decides_the_app_default() {
+        let (_scope, calls, built) = recording_scope(on());
+        let modes = modes_with("formal");
+        let modes =
+            crate::modes::set_app_default(&modes, "com.example.mail", "Mail", "write-in-english").unwrap();
+        crate::settings::set_modes_settings_cache(modes);
+
+        // Warmed in an app without a default (the selected mode), and
+        // the user moved to Mail before they stopped talking.
+        test_support::set_frontmost_app(Some(("com.example.notes", "Notes")));
+        warm_for_recording();
+        test_support::set_frontmost_app(Some(("com.example.Mail", "Mail")));
+        let out = run_for_dictation(DANISH);
+        assert_eq!((out.mode.name.as_str(), out.mode.reason.as_str()), ("Write in English", "app-default"));
+        assert_eq!(out.mode.app_name, "Mail");
+        assert_eq!(built.lock().unwrap().len(), 2);
+        assert!(calls.lock().unwrap().last_system.contains("Write what I say in English."));
+
+        // Same app at both ends: the warmed backend is the one used.
+        warm_for_recording();
+        let out = run_for_dictation(DANISH);
+        assert_eq!(out.mode.reason, "app-default");
+        assert_eq!(built.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn refine_switched_off_during_the_recording_sends_nothing() {
+        let (_scope, calls, _built) = recording_scope(on());
+        warm_for_recording();
+        crate::settings::set_refine_settings_cache(RefineSettings::default());
+        let mut announced = 0;
+        let out = run_for_dictation_announced(SAID, || announced += 1);
+        assert_eq!(out.status, RefineStatus::Disabled);
+        assert_eq!(out.text, SAID);
+        assert_eq!(announced, 0);
+        let c = calls.lock().unwrap();
+        assert!(c.refined.is_empty());
+        assert_eq!(c.dropped, 1, "the warmed backend was released");
+    }
+
+    #[test]
+    fn the_announcement_comes_only_when_the_backend_is_asked() {
+        let (_scope, _calls, _built) = recording_scope(on());
+        let mut announced = 0;
+        // Dictation mode, two words: skipped, so nothing is announced.
+        let out = run_for_dictation_announced("okay thanks ", || announced += 1);
+        assert_eq!(out.status, RefineStatus::SkippedShort);
+        assert_eq!(announced, 0);
+        assert!(!will_call_backend("okay thanks "));
+        let _ = run_for_dictation_announced(SAID, || announced += 1);
+        assert_eq!(announced, 1);
+        // A mode that rewrites sends two words too.
+        crate::settings::set_modes_settings_cache(modes_with("formal"));
+        assert!(will_call_backend("okay thanks "));
+        assert!(!will_call_backend("   "));
+        let _ = run_for_dictation_announced("okay thanks ", || announced += 1);
+        assert_eq!(announced, 2);
+    }
+
+    #[test]
+    fn the_app_default_wins_over_the_selected_mode_and_is_recorded() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let c = calls.clone();
+        let _scope = scope(on(), move |_| Box::new(Stub::new(c.clone(), |_| Ok(ENGLISH.into()))));
+        let modes = modes_with("formal");
+        let modes =
+            crate::modes::set_app_default(&modes, "com.example.mail", "Mail", "write-in-english").unwrap();
+        crate::settings::set_modes_settings_cache(modes);
+
+        // Dictating into the app with a default, warm and cold.
+        test_support::set_frontmost_app(Some(("com.example.mail", "Mail")));
+        warm_for_recording();
+        let warm = run_for_dictation(DANISH);
+        let cold = run_for_dictation(DANISH);
+        for out in [&warm, &cold] {
+            assert_eq!(out.status, RefineStatus::Refined);
+            assert_eq!(out.mode.name, "Write in English");
+            assert_eq!(out.mode.reason, "app-default");
+            assert_eq!(out.mode.app_name, "Mail");
+        }
+
+        // Another app: the selected mode.
+        test_support::set_frontmost_app(Some(("com.example.notes", "Notes")));
+        warm_for_recording();
+        let out = run_for_dictation(DANISH);
+        assert_eq!((out.mode.name.as_str(), out.mode.reason.as_str()), ("Formal", "selected"));
+        assert!(calls.lock().unwrap().last_system.contains("formal, polite tone"));
+
+        // The app is not known (or is OpenWhisper itself): selected.
+        test_support::set_frontmost_app(None);
+        let out = run_for_dictation(DANISH);
+        assert_eq!((out.mode.name.as_str(), out.mode.reason.as_str()), ("Formal", "selected"));
+    }
+
+    #[test]
+    fn refine_text_in_mode_is_what_the_cli_runs() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let c = calls.clone();
+        let _scope = scope(RefineSettings::default(), move |_| {
+            Box::new(Stub::new(c.clone(), |_| Ok(ENGLISH.into())))
+        });
+        // On demand: works with Refine off, like `refine_text`.
+        let settings = RefineSettings::default();
+        let modes = modes_with("dictation");
+        let pick = crate::modes::resolve(
+            &crate::modes::set_app_default(&modes, "mail.exe", "", "write-in-english").unwrap(),
+            &settings,
+            Some(("mail.exe", "")),
+        );
+        let out = refine_text_in_mode(&settings, &pick, DANISH);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.mode.reason, "app-default");
+        assert_eq!(out.mode.app_name, "mail.exe");
+        assert!(calls.lock().unwrap().last_system.contains("Write what I say in English."));
+
+        // The built-in mode through the same door is plain Refine.
+        let out = refine_text_in_mode(&settings, &choice(&modes, &settings), DANISH);
+        assert_eq!(out.status, RefineStatus::Rejected, "a translation is drift in Dictation");
+        assert_eq!(out.mode, ModeUse::default());
     }
 
     #[test]

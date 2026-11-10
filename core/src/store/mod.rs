@@ -128,8 +128,8 @@ mod tests {
         assert!(path.exists(), "db file should exist after open_or_init");
         // Bumps as new migrations append: 1 (dictations table) +
         // 2 (wall_clock_ms column) + 3 (refine_runs table) +
-        // 4 (refine_runs usage columns).
-        assert_eq!(user_version(&store), 4, "all migrations should be applied");
+        // 4 (refine_runs usage columns) + 5 (refine_runs mode column).
+        assert_eq!(user_version(&store), 5, "all migrations should be applied");
     }
 
     #[test]
@@ -190,10 +190,10 @@ mod tests {
         let path = dir.path().join("openwhisper.db");
         {
             let store = Store::open_or_init(&path).expect("first open");
-            assert_eq!(user_version(&store), 4);
+            assert_eq!(user_version(&store), 5);
         }
         let store = Store::open_or_init(&path).expect("second open");
-        assert_eq!(user_version(&store), 4, "second open is no-op");
+        assert_eq!(user_version(&store), 5, "second open is no-op");
     }
 
     #[test]

@@ -9,8 +9,9 @@
 // This hook installs a window-level capture-phase keydown listener.
 // Capture-phase + window-level (not document, not React synthetic) so we
 // see the event before any <input>/<button> can stopPropagation. The
-// handler matches the configured toggle/cancel chords against the event
-// and invokes the matching dictation command, calling preventDefault +
+// handler matches the configured chords (toggle, cancel, and the
+// optional cycle-mode slot when it is set) against the event and
+// invokes the matching command, calling preventDefault +
 // stopImmediatePropagation so Chromium's built-in shortcuts (Ctrl+J →
 // downloads, Ctrl+P → print, Ctrl+F → find, Ctrl+R → reload) don't fire
 // when the user binds to those.
@@ -39,11 +40,58 @@ export interface HotkeyConfig {
 export interface HotkeySettings {
   toggle: HotkeyConfig;
   cancel: HotkeyConfig;
+  /** Optional slot: left out (or null) until the user records a key. */
+  cycle_mode?: HotkeyConfig | null;
 }
-export type HotkeyTarget = "toggle" | "cancel";
+export type HotkeyTarget = "toggle" | "cancel" | "cycle-mode";
 export interface HotkeyCapturedPayload {
   target: HotkeyTarget;
   config: HotkeyConfig;
+}
+
+/** The binding of one slot, null when an optional slot is not set. */
+export function hotkeyFor(
+  settings: HotkeySettings,
+  target: HotkeyTarget,
+): HotkeyConfig | null {
+  switch (target) {
+    case "toggle":
+      return settings.toggle;
+    case "cancel":
+      return settings.cancel;
+    case "cycle-mode":
+      return settings.cycle_mode ?? null;
+  }
+}
+
+/** A copy of `settings` with one slot replaced. `null` unsets an
+ *  optional slot; toggle and cancel always keep a binding, so `null`
+ *  leaves them as they are. */
+export function withHotkey(
+  settings: HotkeySettings,
+  target: HotkeyTarget,
+  config: HotkeyConfig | null,
+): HotkeySettings {
+  switch (target) {
+    case "toggle":
+      return config ? { ...settings, toggle: config } : settings;
+    case "cancel":
+      return config ? { ...settings, cancel: config } : settings;
+    case "cycle-mode":
+      return { ...settings, cycle_mode: config };
+  }
+}
+
+// ---- bindings mirrored for the in-window fallback ----
+//
+// Module scope, like the capture state below: the keydown listener
+// reads it on every press. Loaded once by the hook; the Shortcuts pane
+// pushes every change (set, reset, clear) through
+// `syncFallbackBindings`, so a cleared slot stops matching at once.
+let fallbackBindings: HotkeySettings | null = null;
+
+export function syncFallbackBindings(settings: HotkeySettings) {
+  fallbackBindings = settings;
 }
 
 // ---- module-level capture state ----
@@ -74,7 +122,6 @@ interface UseGlobalHotkeyOpts {
 }
 
 export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
-  const bindingsRef = useRef<HotkeySettings | null>(null);
   const isRecordingRef = useRef(isRecording);
   isRecordingRef.current = isRecording;
 
@@ -89,17 +136,17 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
     if (!isWindows) return;
     let alive = true;
     void invoke<HotkeySettings>("settings_get_hotkeys").then((s) => {
-      if (alive) bindingsRef.current = s;
+      if (alive) fallbackBindings = s;
     });
 
     let unlisten: UnlistenFn | undefined;
     void listen<HotkeyCapturedPayload>("hotkey_captured", (evt) => {
-      const cur = bindingsRef.current;
-      if (cur) {
-        bindingsRef.current = {
-          ...cur,
-          [evt.payload.target]: evt.payload.config,
-        };
+      if (fallbackBindings) {
+        fallbackBindings = withHotkey(
+          fallbackBindings,
+          evt.payload.target,
+          evt.payload.config,
+        );
       }
     }).then((fn) => {
       unlisten = fn;
@@ -129,7 +176,7 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
         return;
       }
 
-      const bindings = bindingsRef.current;
+      const bindings = fallbackBindings;
       if (!bindings) return;
 
       if (chordMatches(bindings.toggle, e)) {
@@ -146,6 +193,16 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
         e.preventDefault();
         e.stopImmediatePropagation();
         void invoke("dictation_cancel");
+        return;
+      }
+      // Optional slot: nothing to match until the user sets it. One
+      // press, one step, so a held key (auto-repeat) is swallowed
+      // without cycling again, like the Rust hook.
+      const cycle = bindings.cycle_mode;
+      if (cycle && chordMatches(cycle, e)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) void invoke("modes_cycle");
       }
     }
 

@@ -35,6 +35,7 @@ test.describe("settings view", () => {
     await expect(page.getByRole("tab", { name: "Shortcuts" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Dictionary" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Refine" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Modes" })).toBeVisible();
   });
 
   test("General is the landing pane", async ({ page }) => {
@@ -470,12 +471,17 @@ test.describe("settings view", () => {
       "true",
     );
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("tab", { name: "Modes" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.keyboard.press("ArrowDown");
     await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
     await page.keyboard.press("ArrowUp");
-    await expect(page.getByRole("tab", { name: "Refine" })).toHaveAttribute(
+    await expect(page.getByRole("tab", { name: "Modes" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
@@ -542,16 +548,32 @@ test.describe("settings — keep models warm", () => {
 });
 
 test.describe("settings — shortcuts pane", () => {
-  test("renders both rebindable rows", async ({ page }) => {
+  test("renders the three rows, Switch mode not set", async ({ page }) => {
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(page.locator(".ow-shortcuts__row")).toHaveCount(3);
     await expect(
       page.getByRole("button", { name: "Rebind Toggle dictation" }),
     ).toContainText("Right ⌘");
     await expect(
       page.getByRole("button", { name: "Rebind Cancel while recording" }),
     ).toContainText("Esc");
+
+    // The optional slot has no default: it says so, and there is
+    // nothing to clear yet.
+    const modeRow = page
+      .locator(".ow-shortcuts__row")
+      .filter({ hasText: "Switch mode" });
+    await expect(modeRow).toContainText("Cycles through your Refine modes");
+    await expect(modeRow).toContainText("Not set until you record a key");
+    await expect(
+      page.getByRole("button", { name: "Rebind Switch mode" }),
+    ).toHaveText("Not set");
+    await expect(modeRow.getByRole("button", { name: "Clear" })).toBeDisabled();
+    await expect(
+      modeRow.getByRole("button", { name: "Reset to default" }),
+    ).toHaveCount(0);
   });
 
   test("clicking the toggle chip starts capture for the toggle slot", async ({
@@ -672,7 +694,9 @@ test.describe("settings — shortcuts pane", () => {
       .toBe("cancel");
   });
 
-  test("starting one capture disables the other row", async ({ page }) => {
+  test("starting a capture on one row disables the others", async ({
+    page,
+  }) => {
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Shortcuts" }).click();
@@ -682,9 +706,235 @@ test.describe("settings — shortcuts pane", () => {
     const cancelChip = page.getByRole("button", {
       name: "Rebind Cancel while recording",
     });
+    const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
+
     await toggleChip.click();
     await expect(toggleChip).toHaveText("press keys…");
     await expect(cancelChip).toBeDisabled();
+    await expect(modeChip).toBeDisabled();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+
+    // And from the optional row: the two dictation rows lock, chips
+    // and reset controls alike.
+    await modeChip.click();
+    await expect(modeChip).toHaveText("press keys…");
+    await expect(toggleChip).toBeDisabled();
+    await expect(cancelChip).toBeDisabled();
+    for (const reset of await page
+      .getByRole("button", { name: "Reset to default" })
+      .all()) {
+      await expect(reset).toBeDisabled();
+    }
+  });
+
+  test("recording a key for Switch mode saves it to the cycle-mode slot", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
+    await modeChip.click();
+    await expect(modeChip).toHaveText("press keys…");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owCaptureLastTarget?: string })
+              .__owCaptureLastTarget,
+        ),
+      )
+      .toBe("cycle-mode");
+
+    // Real keys: the in-window capture path picks them up.
+    await page.keyboard.press("Control+Alt+KeyM");
+
+    await expect(modeChip).toContainText("Ctrl");
+    await expect(modeChip).toContainText("Alt");
+    await expect(modeChip).toContainText("M");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __owHotkeyLastTarget?: string;
+            __owHotkeyLastConfig?: unknown;
+          };
+          return { target: w.__owHotkeyLastTarget, config: w.__owHotkeyLastConfig };
+        }),
+      )
+      .toEqual({
+        target: "cycle-mode",
+        config: { kind: "chord", code: "M", mods: ["Ctrl", "Alt"] },
+      });
+
+    // The dictation rows keep their bindings, and the new one can be
+    // cleared now.
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toContainText("Right ⌘");
+    await expect(
+      page.getByRole("button", { name: "Rebind Cancel while recording" }),
+    ).toContainText("Esc");
+    await expect(page.getByRole("button", { name: "Clear" })).toBeEnabled();
+  });
+
+  test("a key captured outside the window lands on the Switch mode row", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
+    await modeChip.click();
+    await expect(modeChip).toHaveText("press keys…");
+
+    // The backend hook reports the slot by its kebab-case target.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_captured", {
+        target: "cycle-mode",
+        config: { kind: "modifier-tap", code: "RightOption", mods: [] },
+      }),
+    );
+
+    await expect(modeChip).toContainText("Right ⌥");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owHotkeyLastTarget?: string })
+              .__owHotkeyLastTarget,
+        ),
+      )
+      .toBe("cycle-mode");
+  });
+
+  test("Clear unsets the Switch mode shortcut", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owHotkeys?: unknown }).__owHotkeys = {
+        toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+        cancel: { kind: "chord", code: "Escape", mods: [] },
+        cycle_mode: { kind: "chord", code: "M", mods: ["Ctrl", "Alt"] },
+      };
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
+    await expect(modeChip).toContainText("M");
+
+    const clear = page.getByRole("button", { name: "Clear" });
+    await clear.click();
+
+    await expect(modeChip).toHaveText("Not set");
+    await expect(clear).toBeDisabled();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __owHotkeyResetCount?: number;
+            __owHotkeyLastTarget?: string;
+            __owHotkeys?: Record<string, unknown>;
+          };
+          return {
+            resets: w.__owHotkeyResetCount ?? 0,
+            target: w.__owHotkeyLastTarget,
+            stillSet: "cycle_mode" in (w.__owHotkeys ?? {}),
+          };
+        }),
+      )
+      .toEqual({ resets: 1, target: "cycle-mode", stillSet: false });
+    // Clearing the optional slot leaves the dictation keys alone.
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toContainText("Right ⌘");
+  });
+
+  // Playwright's Desktop Chrome reports navigator.platform = "Win32",
+  // so the in-window keyboard fallback (Windows only) is live here.
+  test("in-window fallback: the Switch mode key cycles once per press, and not after Clear", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owHotkeys?: unknown }).__owHotkeys = {
+        toggle: { kind: "chord", code: "Space", mods: ["Ctrl"] },
+        cancel: { kind: "chord", code: "Escape", mods: [] },
+        cycle_mode: { kind: "chord", code: "M", mods: ["Ctrl", "Alt"] },
+      };
+    });
+    const cycles = () =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __owModesCycleCount?: number })
+            .__owModesCycleCount ?? 0,
+      );
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
+    await expect(modeChip).toContainText("M");
+
+    await page.keyboard.press("Control+Alt+KeyM");
+    await expect.poll(cycles).toBe(1);
+    // Other modifiers are another chord.
+    await page.keyboard.press("Control+Shift+KeyM");
+    await page.keyboard.press("Control+Alt+KeyM");
+    await expect.poll(cycles).toBe(2);
+
+    await page.getByRole("button", { name: "Clear" }).click();
+    await expect(modeChip).toHaveText("Not set");
+    // Move focus off the now-disabled Clear button, so the press is
+    // sure to reach the window listener and find nothing bound.
+    await page.getByRole("heading", { name: "Shortcuts" }).click();
+    await page.keyboard.press("Control+Alt+KeyM");
+    // Let a stray invoke land before reading the count.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 50)));
+    expect(await cycles()).toBe(2);
+  });
+
+  test("a Switch mode key the backend could not install is reported on the pane", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owHotkeys?: unknown }).__owHotkeys = {
+        toggle: { kind: "chord", code: "Space", mods: ["Ctrl"] },
+        cancel: { kind: "chord", code: "Escape", mods: [] },
+        cycle_mode: { kind: "chord", code: "Space", mods: ["Ctrl"] },
+      };
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(
+      page.getByRole("button", { name: "Rebind Switch mode" }),
+    ).toContainText("Space");
+    await expect(page.locator(".ow-shortcuts__error")).toHaveCount(0);
+
+    // `ok` stays true: dictation works, only the optional slot is out.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__owEmit("hotkey_status", {
+            ok: true,
+            error: "",
+            skipped: [
+              {
+                target: "cycle-mode",
+                reason: "It uses the same keys as the toggle shortcut.",
+              },
+            ],
+          }),
+        ),
+      )
+      .toBeGreaterThan(0);
+    await expect(page.locator(".ow-shortcuts__error")).toHaveText(
+      "Switch mode is not active. It uses the same keys as the toggle shortcut.",
+    );
+
+    // The next install without a skipped slot takes the note away.
+    await page.evaluate(() =>
+      window.__owEmit("hotkey_status", { ok: true, error: "" }),
+    );
+    await expect(page.locator(".ow-shortcuts__error")).toHaveCount(0);
   });
 });
 

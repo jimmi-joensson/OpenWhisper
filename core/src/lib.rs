@@ -11,6 +11,7 @@ pub mod focus;
 pub mod history;
 pub mod media_gate;
 pub mod model_lifecycle;
+pub mod modes;
 pub mod prelude;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;

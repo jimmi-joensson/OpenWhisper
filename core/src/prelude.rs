@@ -14,6 +14,8 @@
 //! - `refine`: optional language-model cleanup after transcription
 //!   (feature `refine`)
 //! - `model_lifecycle` — load/unload state machine for resident models
+//! - `modes`: the modes of the Refine step, which one runs and why
+//!   (no feature needed; applying a mode is under `refine`)
 //! - `settings` — schema types + cache accessors
 //! - `telemetry` — process memory readout
 //! - `transcript` — filter pipeline
@@ -47,15 +49,18 @@ pub use crate::model_lifecycle::{
     LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
     registry_snapshot,
 };
+pub use crate::modes::{ModeApp, ModeChoice, ModeEdit, ModeReason, ModeView};
 pub use crate::settings::{
-    AudioSettings, BehaviorSettings, ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings,
-    HotkeyTarget, OpenAiSettings, PerformanceSettings, PillSettings, RefineBackendKind,
-    RefineEffort, RefineSettings, StatsSettings, keep_models_warm,
+    AppDefault, AudioSettings, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, BehaviorSettings,
+    ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, Mode, ModesSettings,
+    OpenAiSettings, PerformanceSettings, PillSettings, RefineBackendKind, RefineEffort,
+    RefineSettings, StatsSettings, keep_models_warm,
 };
 #[cfg(feature = "refine")]
 pub use crate::refine::{
-    BackendState, BackendStatus, ConnectionTest, Prompt, RefineError, RefineOutcome, RefineStatus,
-    Refiner, backend_status, refine_text, test_connection,
+    BackendState, BackendStatus, ConnectionTest, ModeRun, ModeUse, Prompt, RefineError,
+    RefineOutcome, RefineStatus, Refiner, apply_mode, backend_status, refine_text,
+    refine_text_in_mode, test_connection,
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};

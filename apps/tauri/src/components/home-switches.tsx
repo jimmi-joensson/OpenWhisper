@@ -8,16 +8,26 @@ import {
   FieldDescription,
   FieldLabel,
 } from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { HistorySettings } from "@/lib/history";
+import { BUILTIN_MODE_ID } from "@/lib/modes";
+import { useModes } from "@/lib/use-modes";
 import { useRefineEnabled } from "@/lib/use-refine-enabled";
 
 interface HomeSwitchesProps {
   // Owned by HomePane, which also feeds the history list from it.
   history: HistorySettings | null;
   onHistoryChange: (enabled: boolean) => void;
-  // Jump to the settings behind a card: the Refine pane, or the
-  // History section of General.
-  onOpenSettings?: (target: "refine" | "history") => void;
+  // Jump to the settings behind a card: the Refine pane, the History
+  // section of General, or the Modes pane.
+  onOpenSettings?: (target: "refine" | "history" | "modes") => void;
 }
 
 // Quick switches on Home (TASK-100): turn Refine and History on and
@@ -25,8 +35,16 @@ interface HomeSwitchesProps {
 // as their Settings panes, and each card has a shortcut to those
 // settings. Each description says where the text goes, because
 // flipping either one changes that.
+//
+// The Mode card (TASK-96) picks what Refine does with a dictation. A
+// select, not a toggle group: the list is the user's own and can
+// grow. It is disabled while Refine is off, since no mode applies
+// then, and says so.
 export function HomeSwitches({ history, onHistoryChange, onOpenSettings }: HomeSwitchesProps) {
   const refine = useRefineEnabled();
+  const modes = useModes();
+  const refineOn = refine.enabled === true;
+  const modeItems = (modes.state?.modes ?? []).map((m) => ({ value: m.id, label: m.name }));
 
   return (
     <div className="ow-home-switches" data-testid="home-switches">
@@ -82,6 +100,52 @@ export function HomeSwitches({ history, onHistoryChange, onOpenSettings }: HomeS
           disabled={history === null}
           onCheckedChange={onHistoryChange}
         />
+      </Field>
+      <Field
+        orientation="horizontal"
+        className="ow-home-switch ow-home-switch--wide"
+        data-disabled={refineOn ? undefined : "true"}
+      >
+        <FieldContent>
+          <FieldLabel>Mode</FieldLabel>
+          <FieldDescription data-testid="home-mode-note">
+            {refineOn
+              ? "What Refine does with each dictation."
+              : "Modes apply when Refine is on."}
+          </FieldDescription>
+        </FieldContent>
+        {onOpenSettings && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Mode settings"
+            data-testid="home-mode-settings"
+            onClick={() => onOpenSettings("modes")}
+          >
+            <Settings2 />
+          </Button>
+        )}
+        <Select
+          items={modeItems}
+          value={modes.state?.settings.active ?? BUILTIN_MODE_ID}
+          disabled={!refineOn || !modes.state}
+          onValueChange={(v) => {
+            if (typeof v === "string" && v) modes.select(v);
+          }}
+        >
+          <SelectTrigger className="w-[180px]" aria-label="Mode" data-testid="home-mode-select">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent alignItemWithTrigger={false} align="end">
+            <SelectGroup>
+              {modeItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </Field>
     </div>
   );

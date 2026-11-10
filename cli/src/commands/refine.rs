@@ -4,12 +4,17 @@
 //!
 //! Subcommands:
 //! - `run [TEXT]`: refine an argument or stdin, print the result.
+//!   `--mode <id>` runs it in one of the modes (TASK-96), `--app
+//!   <app-id>` in the mode a dictation into that app would get, and
+//!   `--current-mode` in the mode a dictation would run in right now
+//!   (the selected mode). Without any of them: the built-in mode.
 //! - `status`: settings + whether the selected backend can run.
 //! - `test`: the connection test from the settings pane.
 //! - `config`: print the settings block, or change it with flags.
 //! - `set-key` / `clear-key`: the API key in the OS keychain.
 //! - `eval`: run the built-in eval set against the real backend.
-//! - `prompt`: print the exact prompt that is sent.
+//! - `prompt`: print the exact prompt that is sent, for the built-in
+//!   mode or with `--mode <id>` for another.
 //! - `history`: what Refine did on recent dictations in the desktop
 //!   app (status, response time, warm or cold, reason for a fallback).
 //!   The same data as the app's Diagnostics pane; no dictated text.
@@ -25,6 +30,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
+use openwhisper_core::modes::{self, ModeChoice, ModeReason, ModeView};
 use openwhisper_core::refine::{self, RefineStatus, eval, history, secrets};
 use openwhisper_core::settings::{self, RefineBackendKind, RefineEffort, RefineSettings};
 use openwhisper_core::store::Store;
@@ -57,7 +63,7 @@ pub enum RefineCommand {
     History(HistoryArgs),
     /// Print the exact prompt Refine sends (rules, your instructions,
     /// your dictionary words). No model call.
-    Prompt(Overrides),
+    Prompt(PromptArgs),
 }
 
 /// Per-invocation overrides of the saved settings. Nothing here is
@@ -101,6 +107,31 @@ pub struct RunArgs {
     /// a recording of that length, to measure the warmed latency.
     #[arg(long, value_name = "MS")]
     warm_ms: Option<u64>,
+    /// Run the text in this mode (an id from `openwhisper modes
+    /// list`). Without --mode, --app and --current-mode: the built-in
+    /// Dictation mode.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["app", "current_mode"])]
+    mode: Option<String>,
+    /// Run the text the way a dictation would run right now: in the
+    /// selected mode, or with --app in that app's default mode when
+    /// it has one.
+    #[arg(long)]
+    current_mode: bool,
+    /// Run the text in the mode a dictation into this app would get:
+    /// the app's default mode, else the selected mode. Takes an app
+    /// id as `openwhisper focus` prints it.
+    #[arg(long, value_name = "APP_ID")]
+    app: Option<String>,
+    #[command(flatten)]
+    overrides: Overrides,
+}
+
+#[derive(Args, Debug)]
+pub struct PromptArgs {
+    /// Print the prompt of this mode (an id from `openwhisper modes
+    /// list`) instead of the built-in Dictation mode.
+    #[arg(long, value_name = "ID")]
+    mode: Option<String>,
     #[command(flatten)]
     overrides: Overrides,
 }
@@ -163,7 +194,7 @@ pub fn run(args: RefineArgs, json: bool) -> Result<()> {
         RefineCommand::ClearKey => clear_key(json),
         RefineCommand::Eval(a) => run_eval(a, json),
         RefineCommand::History(a) => show_history(a, json),
-        RefineCommand::Prompt(o) => show_prompt(&o, json),
+        RefineCommand::Prompt(a) => show_prompt(&a, json),
     }
 }
 
@@ -222,6 +253,46 @@ fn apply(mut s: RefineSettings, o: &Overrides) -> Result<RefineSettings> {
     Ok(s.cleaned())
 }
 
+/// The mode a run is made in. `--mode` names one; `--app` asks for
+/// what a dictation into that app would get (its default mode, else
+/// the selected one); `--current-mode` (`current`) for what a
+/// dictation would get right now, which without an app is the
+/// selected mode. None of them means the built-in Dictation mode, so
+/// plain `refine run` does what it always did.
+fn pick_mode(
+    settings: &RefineSettings,
+    mode: Option<&str>,
+    app: Option<&str>,
+    current: bool,
+) -> Result<ModeChoice> {
+    let saved = settings::load_modes_settings(&settings_path()?);
+    choose_mode(&saved, settings, mode, app, current)
+}
+
+fn choose_mode(
+    saved: &settings::ModesSettings,
+    settings: &RefineSettings,
+    mode: Option<&str>,
+    app: Option<&str>,
+    current: bool,
+) -> Result<ModeChoice> {
+    let selected = |mode: ModeView| ModeChoice {
+        mode,
+        reason: ModeReason::Selected,
+        app_id: String::new(),
+        app_name: String::new(),
+    };
+    match (mode, app) {
+        (Some(id), _) => modes::get(saved, settings, id).map(selected).ok_or_else(|| {
+            anyhow!("There is no mode with the id \"{id}\"; see `openwhisper modes list`.")
+        }),
+        (None, Some(app)) => Ok(modes::resolve(saved, settings, Some((app, "")))),
+        // The same call the dictation pipeline makes, with no app known.
+        (None, None) if current => Ok(modes::resolve(saved, settings, None)),
+        (None, None) => Ok(selected(ModeView::builtin(settings))),
+    }
+}
+
 /// Point core at the user's dictionary so its terms reach the prompt,
 /// like in the app.
 fn use_dictionary() {
@@ -253,13 +324,19 @@ fn run_text(args: RunArgs, json: bool) -> Result<()> {
         transcript::process(&text)
     };
 
-    let prompt = refine::compose_prompt(&settings);
-    let mut backend = refine::backend_for(&settings);
-    if let Some(ms) = args.warm_ms {
-        backend.warm(&prompt);
-        thread::sleep(Duration::from_millis(ms));
-    }
-    let outcome = refine::refine_with(backend.as_mut(), &prompt, &settings, &input);
+    let choice = pick_mode(&settings, args.mode.as_deref(), args.app.as_deref(), args.current_mode)?;
+    // The same two doors the dictation pipeline uses: a backend
+    // warmed ahead of the text, or a cold one.
+    let outcome = match args.warm_ms {
+        Some(ms) => {
+            let run = refine::apply_mode(&settings, &choice);
+            let mut backend = refine::backend_for(&run.settings);
+            backend.warm(&run.prompt);
+            thread::sleep(Duration::from_millis(ms));
+            run.refine(backend.as_mut(), &input)
+        }
+        None => refine::refine_text_in_mode(&settings, &choice, &input),
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -287,6 +364,9 @@ fn run_text(args: RunArgs, json: bool) -> Result<()> {
                 status.as_str(),
                 if outcome.detail.is_empty() { "-" } else { &outcome.detail }
             ),
+        }
+        if !outcome.mode.is_builtin() || outcome.mode.reason != ModeReason::Selected.as_str() {
+            eprintln!("mode: {}", mode_label(&outcome.mode));
         }
     }
     Ok(())
@@ -456,13 +536,31 @@ fn clear_key(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn show_prompt(overrides: &Overrides, json: bool) -> Result<()> {
-    let settings = load(overrides)?;
+/// "Formal (selected)" or "Formal (default for Mail)".
+fn mode_label(mode: &refine::ModeUse) -> String {
+    if mode.reason == ModeReason::AppDefault.as_str() {
+        format!("{} (default for {})", mode.name, mode.app_name)
+    } else {
+        format!("{} (selected)", mode.name)
+    }
+}
+
+fn show_prompt(args: &PromptArgs, json: bool) -> Result<()> {
+    let settings = load(&args.overrides)?;
     use_dictionary();
-    let prompt = refine::compose_prompt(&settings);
+    let choice = pick_mode(&settings, args.mode.as_deref(), None, false)?;
+    let run = refine::apply_mode(&settings, &choice);
+    let prompt = &run.prompt;
     let example = prompt.user_message("what was said goes here");
     if json {
-        let value = serde_json::json!({ "system": prompt.system(), "user_example": example });
+        let value = serde_json::json!({
+            "system": prompt.system(),
+            "user_example": example,
+            "mode": run.mode,
+            "rewrite": prompt.is_rewrite(),
+            "model": run.settings.active_model(),
+            "effort": run.settings.active_effort(),
+        });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("{}", prompt.system());
@@ -596,25 +694,29 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
     if !status.ready {
         bail!("backend {} is not ready: {}", status.backend, status.message);
     }
-    let prompt = eval::prompt(&settings);
     let mut results = Vec::new();
     for case in eval::cases() {
         if args.only.as_deref().is_some_and(|f| !case.name.contains(f)) {
             continue;
         }
-        // A fresh backend per case, like a fresh dictation.
-        let mut backend = refine::backend_for(&settings);
+        // Each case in its own mode, put together like a dictation in
+        // that mode, and a fresh backend per case, like a fresh
+        // dictation.
+        let run = eval::mode_run(&case, &settings);
+        let mut backend = refine::backend_for(&run.settings);
         if let Some(ms) = args.warm_ms {
-            if openwhisper_core::refine::guard::word_count(case.input) >= settings.min_words as usize {
-                backend.warm(&prompt);
+            let sent = run.prompt.is_rewrite()
+                || openwhisper_core::refine::guard::word_count(case.input) >= settings.min_words as usize;
+            if sent {
+                backend.warm(&run.prompt);
                 thread::sleep(Duration::from_millis(ms));
             }
         }
-        let outcome = refine::refine_with(backend.as_mut(), &prompt, &settings, case.input);
+        let outcome = run.refine(backend.as_mut(), case.input);
         let result = eval::judge(&case, outcome);
         if !json {
             println!(
-                "{}  {:<24} {:>5} ms  {}",
+                "{}  {:<26} {:>5} ms  {}",
                 if result.passed {
                     "PASS"
                 } else if result.safe {
@@ -628,6 +730,9 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
             );
             if !result.passed {
                 println!("      said:    {}", result.input);
+                if !result.mode.is_empty() {
+                    println!("      mode:    {}", result.mode);
+                }
                 println!("      problem: {}", result.problem);
             }
         }
@@ -636,26 +741,31 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
 
     let passed = results.iter().filter(|r| r.passed).count();
     let safe = results.iter().filter(|r| r.safe).count();
-    let mut times: Vec<u64> = results
-        .iter()
-        .filter(|r| r.elapsed_ms > 0)
-        .map(|r| r.elapsed_ms)
-        .collect();
-    times.sort_unstable();
-    let median = times.get(times.len() / 2).copied().unwrap_or(0);
-    let (min, max) = (
-        times.first().copied().unwrap_or(0),
-        times.last().copied().unwrap_or(0),
-    );
+    let all = latency(results.iter());
+    // A mode prompt is another prompt and another kind of answer, so
+    // its response time is reported next to the built-in mode's.
+    let builtin = latency(results.iter().filter(|r| r.mode.is_empty()));
+    let custom = latency(results.iter().filter(|r| !r.mode.is_empty()));
+    let custom_passed = results.iter().filter(|r| !r.mode.is_empty() && r.passed).count();
+    let custom_total = results.iter().filter(|r| !r.mode.is_empty()).count();
 
     if json {
         let value = serde_json::json!({
             "backend": settings.backend.as_str(),
+            "model": settings.active_model(),
+            "effort": settings.active_effort(),
             "warm_ms": args.warm_ms,
             "passed": passed,
             "safe": safe,
             "total": results.len(),
-            "latency_ms": { "min": min, "median": median, "max": max },
+            "custom_modes": { "passed": custom_passed, "total": custom_total },
+            "latency_ms": {
+                "min": all.min,
+                "median": all.median,
+                "max": all.max,
+                "builtin": builtin.to_json(),
+                "custom_modes": custom.to_json(),
+            },
             "results": results,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
@@ -667,18 +777,157 @@ but the unrefined text was inserted; FAIL = wrong text would have been inserted)
             results.len(),
             results.len()
         );
+        if custom_total > 0 {
+            println!("custom modes: {custom_passed}/{custom_total} passed");
+        }
         println!(
-            "latency ({}, {}): min {min} ms, median {median} ms, max {max} ms",
+            "latency ({}, {}, {}): min {} ms, median {} ms, max {} ms",
             settings.backend.as_str(),
+            settings.active_model(),
             match args.warm_ms {
                 Some(ms) => format!("warmed {ms} ms before sending"),
                 None => "cold".to_string(),
-            }
+            },
+            all.min,
+            all.median,
+            all.max
         );
+        for (label, l) in [("built-in mode", &builtin), ("custom modes", &custom)] {
+            if l.calls > 0 {
+                println!(
+                    "  {label:<14} {} calls: min {} ms, median {} ms, max {} ms",
+                    l.calls, l.min, l.median, l.max
+                );
+            }
+        }
     }
     if safe == results.len() {
         Ok(())
     } else {
         std::process::exit(1);
+    }
+}
+
+/// Response times over the cases that made a model call.
+#[derive(Debug, PartialEq, Eq)]
+struct Latency {
+    calls: usize,
+    min: u64,
+    median: u64,
+    max: u64,
+}
+
+impl Latency {
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "calls": self.calls, "min": self.min, "median": self.median, "max": self.max })
+    }
+}
+
+fn latency<'a>(results: impl Iterator<Item = &'a eval::EvalResult>) -> Latency {
+    let mut times: Vec<u64> = results.filter(|r| r.elapsed_ms > 0).map(|r| r.elapsed_ms).collect();
+    times.sort_unstable();
+    Latency {
+        calls: times.len(),
+        min: times.first().copied().unwrap_or(0),
+        median: times.get(times.len() / 2).copied().unwrap_or(0),
+        max: times.last().copied().unwrap_or(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openwhisper_core::settings::ModesSettings;
+
+    fn saved() -> ModesSettings {
+        let m = modes::add(&ModesSettings::default(), "Formal", "Rewrite it in a formal tone.", None, None, None)
+            .unwrap();
+        let m = modes::add(&m, "Write in English", "Write it in English.", None, None, None).unwrap();
+        let m = modes::select(&m, "formal").unwrap();
+        modes::set_app_default(&m, "com.example.mail", "Mail", "write-in-english").unwrap()
+    }
+
+    #[test]
+    fn plain_run_stays_in_the_built_in_mode_whatever_is_selected() {
+        let settings = RefineSettings::default();
+        let choice = choose_mode(&saved(), &settings, None, None, false).unwrap();
+        assert!(choice.mode.builtin);
+        assert_eq!(choice.reason, ModeReason::Selected);
+    }
+
+    #[test]
+    fn current_mode_runs_what_a_dictation_would_run_right_now() {
+        let settings = RefineSettings::default();
+        // No app known: the selected mode.
+        let choice = choose_mode(&saved(), &settings, None, None, true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
+        // With an app: its default when it has one, else the selected mode.
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.Mail"), true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("write-in-english", ModeReason::AppDefault));
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.notes"), true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
+        // Nothing selected yet: Dictation, like a fresh install.
+        let choice = choose_mode(&ModesSettings::default(), &settings, None, None, true).unwrap();
+        assert!(choice.mode.builtin);
+    }
+
+    #[test]
+    fn mode_flag_names_a_mode_and_an_unknown_id_is_an_error() {
+        let settings = RefineSettings::default();
+        let choice = choose_mode(&saved(), &settings, Some("write-in-english"), None, false).unwrap();
+        assert_eq!(choice.mode.name, "Write in English");
+        assert_eq!(choice.reason, ModeReason::Selected);
+        let choice = choose_mode(&saved(), &settings, Some("dictation"), None, false).unwrap();
+        assert!(choice.mode.builtin);
+        let err = choose_mode(&saved(), &settings, Some("nope"), None, false).unwrap_err().to_string();
+        assert!(err.contains("nope") && err.contains("modes list"), "{err}");
+    }
+
+    #[test]
+    fn app_flag_resolves_like_a_dictation_into_that_app() {
+        let settings = RefineSettings::default();
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.mail"), false).unwrap();
+        assert_eq!(choice.mode.id, "write-in-english");
+        assert_eq!(choice.reason, ModeReason::AppDefault);
+        assert_eq!(choice.app_name, "Mail");
+        // An app without a default gets the selected mode.
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.notes"), false).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
+    }
+
+    #[test]
+    fn mode_labels_say_why_the_mode_ran() {
+        let mut mode = refine::ModeUse::default();
+        assert_eq!(mode_label(&mode), "Dictation (selected)");
+        mode.name = "Formal".into();
+        mode.reason = "app-default".into();
+        mode.app_name = "Mail".into();
+        assert_eq!(mode_label(&mode), "Formal (default for Mail)");
+    }
+
+    #[test]
+    fn overrides_change_the_selected_backend_only() {
+        let o = Overrides { model: Some("haiku".into()), effort: Some("medium".into()), ..Overrides::default() };
+        let s = apply(RefineSettings::default(), &o).unwrap();
+        assert_eq!(s.claude_cli.model, "haiku");
+        assert_eq!(s.claude_cli.effort, RefineEffort::Medium);
+        assert_eq!(s.openai, RefineSettings::default().openai);
+        let bad = Overrides { effort: Some("turbo".into()), ..Overrides::default() };
+        assert!(apply(RefineSettings::default(), &bad).is_err());
+    }
+
+    #[test]
+    fn latency_counts_only_cases_that_made_a_call() {
+        let results: Vec<eval::EvalResult> = [0u64, 900, 1500, 1200]
+            .iter()
+            .map(|ms| {
+                let case = &eval::cases()[0];
+                let mut outcome = refine::RefineOutcome::disabled(case.input);
+                outcome.elapsed_ms = *ms;
+                eval::judge(case, outcome)
+            })
+            .collect();
+        assert_eq!(latency(results.iter()), Latency { calls: 3, min: 900, median: 1200, max: 1500 });
+        assert_eq!(latency([].iter()), Latency { calls: 0, min: 0, median: 0, max: 0 });
     }
 }

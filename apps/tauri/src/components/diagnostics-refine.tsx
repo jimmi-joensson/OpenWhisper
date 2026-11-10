@@ -370,10 +370,15 @@ function RunsTable({ runs }: { runs: RefineRun[] }) {
 }
 
 function runNote(run: RefineRun): string {
-  if (run.detail) return run.detail;
   const parts: string[] = [];
-  if (run.source === "test") parts.push("connection test");
-  if (run.instruction) parts.push("followed a spoken instruction");
+  // Set when the run was made in one of the user's own modes.
+  if (run.mode) parts.push(`Mode: ${run.mode}`);
+  if (run.detail) {
+    parts.push(run.detail);
+  } else {
+    if (run.source === "test") parts.push("connection test");
+    if (run.instruction) parts.push("followed a spoken instruction");
+  }
   return parts.join(" · ");
 }
 

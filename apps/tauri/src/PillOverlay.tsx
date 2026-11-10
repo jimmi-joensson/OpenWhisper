@@ -7,7 +7,12 @@ import {
   type PillState,
   type PillStatus,
 } from "./lib/pill-state";
+import { MODES_CHANGED_EVENT, type ModesChanged } from "./lib/modes";
 import "./PillOverlay.css";
+
+// How long the name of the mode stays up after the user switches mode
+// (the hotkey, the tray menu, the select on Home). Then it fades out.
+const MODE_LABEL_MS = 1500;
 
 // Outer capsule width per state. Height (22) and radius (11) stay fixed.
 // Inner SVG canvas is fixed at PILL_INNER_W × PILL_INNER_H; the capsule has
@@ -174,6 +179,8 @@ export function PillOverlay() {
   });
 
   const capsuleRef = useRef<HTMLDivElement>(null);
+  const modeLabelRef = useRef<HTMLDivElement>(null);
+  const modeLabelTimerRef = useRef<number | undefined>(undefined);
   const rectRefs = useRef<(SVGRectElement | null)[]>(
     Array.from({ length: PARTICLE_COUNT }, () => null),
   );
@@ -208,6 +215,30 @@ export function PillOverlay() {
       }
     });
     return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Mode switched: show the new mode's name above the capsule for a
+  // moment. The label is written straight to the DOM (text + a data
+  // attribute the CSS fades on) and timed from a ref, so it causes no
+  // React render and touches neither the capsule nor its state machine.
+  useEffect(() => {
+    const unlisten = listen<ModesChanged>(MODES_CHANGED_EVENT, (event) => {
+      const name = event.payload.switched_to;
+      const label = modeLabelRef.current;
+      // Other changes to the modes (one added, edited, deleted) are
+      // not a switch and show nothing.
+      if (!name || !label) return;
+      label.textContent = name;
+      label.dataset.visible = "true";
+      window.clearTimeout(modeLabelTimerRef.current);
+      modeLabelTimerRef.current = window.setTimeout(() => {
+        label.dataset.visible = "false";
+      }, MODE_LABEL_MS);
+    });
+    return () => {
+      window.clearTimeout(modeLabelTimerRef.current);
       unlisten.then((fn) => fn());
     };
   }, []);
@@ -504,6 +535,13 @@ export function PillOverlay() {
 
   return (
     <div className="pill-root">
+      <div
+        ref={modeLabelRef}
+        className="pill-mode-label"
+        data-testid="pill-mode-label"
+        data-visible="false"
+        role="status"
+      />
       <div
         ref={capsuleRef}
         className="pill-capsule"

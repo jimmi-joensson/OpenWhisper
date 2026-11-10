@@ -6,6 +6,7 @@ import {
   FileAudio,
   Home,
   Keyboard,
+  Layers,
   Mic,
   Settings as SettingsIcon,
   SlidersHorizontal,
@@ -23,6 +24,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   shortcuts: Keyboard,
   dictionary: BookA,
   refine: Sparkles,
+  modes: Layers,
 };
 
 export type Route = "home" | "history" | "transcribe" | "settings" | "diagnostics";

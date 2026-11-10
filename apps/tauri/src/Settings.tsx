@@ -4,13 +4,17 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArrowLeft } from "lucide-react";
 import {
   cancelJsCapture,
+  hotkeyFor,
   startJsCapture,
+  syncFallbackBindings,
+  withHotkey,
   type HotkeyCapturedPayload,
   type HotkeyConfig,
   type HotkeySettings,
   type HotkeyTarget,
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
+import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { LevelMeter } from "./components/level-meter";
 import {
@@ -36,6 +40,7 @@ import { useDictation } from "./lib/use-dictation";
 import { usePauseAudio } from "./lib/use-pause-audio";
 import { DictionaryPane } from "./components/dictionary-pane";
 import { RefinePane } from "./components/refine-pane";
+import { ModesPane } from "./components/modes-pane";
 import { GeneralPane } from "./components/general-pane";
 import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
@@ -67,9 +72,11 @@ const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 interface SettingsShellProps {
   active: SettingsPaneId;
   onBack: () => void;
+  // Lets a pane send the user to another pane (Modes to Refine).
+  onSelectPane?: (pane: SettingsPaneId) => void;
 }
 
-export function SettingsShell({ active, onBack }: SettingsShellProps) {
+export function SettingsShell({ active, onBack, onSelectPane }: SettingsShellProps) {
   return (
     <div className="ow-settings">
       <button
@@ -92,6 +99,7 @@ export function SettingsShell({ active, onBack }: SettingsShellProps) {
         {active === "shortcuts" && <ShortcutsPane />}
         {active === "dictionary" && <DictionaryPane />}
         {active === "refine" && <RefinePane />}
+        {active === "modes" && <ModesPane onOpenPane={onSelectPane} />}
       </div>
     </div>
   );
@@ -613,12 +621,44 @@ function formatDelayShort(ms: number): string {
   return `${seconds.toFixed(1)}s`;
 }
 
-// Shortcuts pane — capture-on-click rebind for both toggle and cancel
-// hotkeys. Each row is independent: clicking one chip starts a capture
-// targeted at that slot; the backend tags the captured event with the
-// active target and the UI saves to the matching slot.
+// One row per hotkey slot, in the order of the Rust slot table
+// (`hotkey/mod.rs`). An optional slot starts out not set, and its
+// reset control clears it instead of restoring a default.
+interface ShortcutRowDef {
+  target: HotkeyTarget;
+  title: string;
+  hint: string;
+  optional?: boolean;
+}
+
+const SHORTCUT_ROWS: ShortcutRowDef[] = [
+  {
+    target: "toggle",
+    title: "Toggle dictation",
+    hint: "Press anywhere to start. Press again to stop and transcribe.",
+  },
+  {
+    target: "cancel",
+    title: "Cancel while recording",
+    hint: "Discards audio without transcribing. Only fires while a recording is active.",
+  },
+  {
+    target: "cycle-mode",
+    title: "Switch mode",
+    hint: "Cycles through your Refine modes. Not set until you record a key.",
+    optional: true,
+  },
+];
+
+// Shortcuts pane: capture-on-click rebind for every hotkey slot. Each
+// row is independent: clicking one chip starts a capture targeted at
+// that slot; the backend tags the captured event with the active
+// target and the UI saves to the matching slot.
 function ShortcutsPane() {
   const [settings, setSettings] = useState<HotkeySettings | null>(null);
+  // An optional slot the backend could not install is reported here,
+  // with `ok` still true (dictation itself is fine).
+  const skipped = useHotkeyStatus().status?.skipped ?? [];
   const [recordingTarget, setRecordingTarget] = useState<HotkeyTarget | null>(
     null,
   );
@@ -638,6 +678,12 @@ function ShortcutsPane() {
     };
   }, []);
 
+  // Keep the Windows in-window fallback on the bindings shown here, so
+  // a changed or cleared slot takes effect there too.
+  useEffect(() => {
+    if (settings) syncFallbackBindings(settings);
+  }, [settings]);
+
   // Apply a captured chord to the configured slot. Both capture paths
   // (Rust LL hook, JS keydown fallback) funnel through this so the UI
   // updates identically regardless of which fired first.
@@ -649,7 +695,7 @@ function ShortcutsPane() {
     void invoke("settings_capture_hotkey_cancel").catch(() => {});
     void invoke("settings_set_hotkey", { target, config })
       .then(() => {
-        setSettings((prev) => (prev ? { ...prev, [target]: config } : prev));
+        setSettings((prev) => (prev ? withHotkey(prev, target, config) : prev));
         setRecordingTarget(null);
         setError(null);
       })
@@ -710,13 +756,15 @@ function ShortcutsPane() {
     }
   }, []);
 
+  // Back to the slot's default: the platform binding for toggle and
+  // cancel, "not set" (null) for an optional slot.
   const resetTarget = useCallback(async (target: HotkeyTarget) => {
     setError(null);
     try {
-      const cfg = await invoke<HotkeyConfig>("settings_reset_hotkey", {
+      const cfg = await invoke<HotkeyConfig | null>("settings_reset_hotkey", {
         target,
       });
-      setSettings((prev) => (prev ? { ...prev, [target]: cfg } : prev));
+      setSettings((prev) => (prev ? withHotkey(prev, target, cfg) : prev));
     } catch (e) {
       setError(String(e));
     }
@@ -728,36 +776,37 @@ function ShortcutsPane() {
         <h2>Shortcuts</h2>
         <p>
           Captured as raw keycodes — survives layout changes (US ↔ Dvorak)
-          and language switches. Both bindings are fully customizable.
+          and language switches. Every binding can be changed.
         </p>
       </header>
 
-      <ShortcutRow
-        title="Toggle dictation"
-        hint="Press anywhere to start. Press again to stop and transcribe."
-        target="toggle"
-        config={settings?.toggle ?? null}
-        recordingTarget={recordingTarget}
-        onStart={startCapture}
-        onCancel={cancelCapture}
-        onReset={resetTarget}
-      />
-
-      <ShortcutRow
-        title="Cancel while recording"
-        hint="Discards audio without transcribing. Only fires while a recording is active."
-        target="cancel"
-        config={settings?.cancel ?? null}
-        recordingTarget={recordingTarget}
-        onStart={startCapture}
-        onCancel={cancelCapture}
-        onReset={resetTarget}
-      />
+      {SHORTCUT_ROWS.map((row) => (
+        <ShortcutRow
+          key={row.target}
+          title={row.title}
+          hint={row.hint}
+          target={row.target}
+          optional={row.optional}
+          config={settings ? hotkeyFor(settings, row.target) : null}
+          recordingTarget={recordingTarget}
+          onStart={startCapture}
+          onCancel={cancelCapture}
+          onReset={resetTarget}
+        />
+      ))}
 
       <div className="ow-shortcuts__note">
         Hotkeys are captured at the OS level. Click a chip and press the
         key combination you want to bind.
       </div>
+
+      {skipped.map((slot) => (
+        <div key={slot.target} className="ow-shortcuts__error">
+          {SHORTCUT_ROWS.find((row) => row.target === slot.target)?.title ??
+            slot.target}{" "}
+          is not active. {slot.reason}
+        </div>
+      ))}
 
       {error && <div className="ow-shortcuts__error">{error}</div>}
     </div>
@@ -768,6 +817,8 @@ interface ShortcutRowProps {
   title: string;
   hint: string;
   target: HotkeyTarget;
+  /** The slot may be unset: shows "Not set", and reset clears it. */
+  optional?: boolean;
   config: HotkeyConfig | null;
   recordingTarget: HotkeyTarget | null;
   onStart: (target: HotkeyTarget) => void;
@@ -779,6 +830,7 @@ function ShortcutRow({
   title,
   hint,
   target,
+  optional = false,
   config,
   recordingTarget,
   onStart,
@@ -810,7 +862,10 @@ function ShortcutRow({
           {recording ? (
             <span className="ow-shortcuts__chip-recording">press keys…</span>
           ) : (
-            <HotkeyChip keys={configToChipKeys(config)} />
+            <HotkeyChip
+              keys={configToChipKeys(config)}
+              emptyLabel={optional ? "Not set" : "none"}
+            />
           )}
         </button>
         {recording ? (
@@ -826,9 +881,9 @@ function ShortcutRow({
             type="button"
             className="ow-shortcuts__reset"
             onClick={() => void onReset(target)}
-            disabled={otherRecording}
+            disabled={otherRecording || (optional && config === null)}
           >
-            Reset to default
+            {optional ? "Clear" : "Reset to default"}
           </button>
         )}
       </div>
@@ -836,10 +891,18 @@ function ShortcutRow({
   );
 }
 
-function HotkeyChip({ keys }: { keys: string[] }) {
+function HotkeyChip({
+  keys,
+  emptyLabel,
+}: {
+  keys: string[];
+  emptyLabel: string;
+}) {
   if (keys.length === 0) {
     return (
-      <span className="ow-shortcuts__chip ow-shortcuts__chip--empty">none</span>
+      <span className="ow-shortcuts__chip ow-shortcuts__chip--empty">
+        {emptyLabel}
+      </span>
     );
   }
   return (

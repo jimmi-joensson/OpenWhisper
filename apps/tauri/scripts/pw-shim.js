@@ -31,6 +31,275 @@ async (page) => {
           window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
+        // optional `cycle_mode` slot is absent until set; its command
+        // target is "cycle-mode".
+        if (
+          cmd === "settings_get_hotkeys" ||
+          cmd === "settings_set_hotkey" ||
+          cmd === "settings_reset_hotkey"
+        ) {
+          window.__owHotkeys = window.__owHotkeys ?? {
+            toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+            cancel: { kind: "chord", code: "Escape", mods: [] },
+          };
+          // A copy, as over real IPC.
+          if (cmd === "settings_get_hotkeys") return structuredClone(window.__owHotkeys);
+
+          const { target, config } = args ?? {};
+          const key = target === "cycle-mode" ? "cycle_mode" : target;
+          window.__owHotkeyLastTarget = target;
+          if (cmd === "settings_set_hotkey") {
+            window.__owHotkeys[key] = config;
+            window.__owHotkeySetCount = (window.__owHotkeySetCount ?? 0) + 1;
+            window.__owHotkeyLastConfig = config;
+            return null;
+          }
+          window.__owHotkeyResetCount = (window.__owHotkeyResetCount ?? 0) + 1;
+          if (target === "cycle-mode") {
+            delete window.__owHotkeys[key];
+            return null;
+          }
+          const def =
+            target === "toggle"
+              ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
+              : { kind: "chord", code: "Escape", mods: [] };
+          window.__owHotkeys[key] = def;
+          return def;
+        }
+        if (cmd === "settings_capture_hotkey_start") {
+          window.__owCaptureStartCount = (window.__owCaptureStartCount ?? 0) + 1;
+          window.__owCaptureLastTarget = (args ?? {}).target;
+          return null;
+        }
+        if (cmd === "settings_capture_hotkey_cancel") {
+          window.__owCaptureCancelCount = (window.__owCaptureCancelCount ?? 0) + 1;
+          return null;
+        }
+        // Modes (TASK-96), mirroring tests/fixtures/tauri-shim.ts: an
+        // in-memory modes block that behaves like core. Ids are slugs
+        // made from the name, names are unique ignoring case, app ids
+        // are kept in lower case, the built-in Dictation mode is
+        // listed first, deleting a mode drops the app defaults that
+        // used it and moves the selection back to Dictation, and a
+        // mode's own model and effort belong to the Refine backend
+        // they were picked for. Seed the block with
+        // `__owModesSettings`. The apps offered for a default are the
+        // apps that have one, then the apps of `__owHistoryEntries`,
+        // then the open apps in `__owRunningApps`. Every change is
+        // recorded in `__owModesCalls` and emits `modes_changed`, as
+        // Rust does.
+        if (cmd.startsWith("modes_")) {
+          const w = window;
+          const BUILTIN = "dictation";
+          const BUILTIN_NAME = "Dictation";
+          // `mode_slug` in core: lower case, letters and digits kept,
+          // every run of anything else one hyphen.
+          const slug = (text) =>
+            text
+              .trim()
+              .toLowerCase()
+              .replace(/[^\p{L}\p{N}]+/gu, "-")
+              .replace(/^-+|-+$/g, "");
+          // `app_key` and `mode_name_key` in core: how app ids and mode
+          // names are compared (and app ids stored).
+          const key = (text) => text.trim().toLowerCase();
+          // `Mode::override_backend` in core: the backend a mode's own
+          // model and effort are for. A block from before modes stored
+          // one means the Claude CLI.
+          const overrideBackend = (m) =>
+            m.model || m.effort ? (m.backend ?? "claude-cli") : null;
+          // The backend Refine uses: the one a model picked in the
+          // dialog is for.
+          const activeBackend = () =>
+            w.__owRefineStored?.backend ?? w.__owRefineSettings?.backend ?? "claude-cli";
+          // `ModesSettings::cleaned` in core.
+          const cleaned = (raw) => {
+            const custom = [];
+            const exists = (id) => id === BUILTIN || custom.some((m) => m.id === id);
+            const nameTaken = (name) =>
+              key(name) === key(BUILTIN_NAME) || custom.some((m) => key(m.name) === key(name));
+            for (const mode of raw.custom) {
+              const given = mode.name.trim().slice(0, 40).trimEnd();
+              if (!given) continue;
+              const base = slug(mode.id) || slug(given) || "mode";
+              let id = base;
+              for (let n = 2; exists(id); n++) id = `${base}-${n}`;
+              // A name edited into a duplicate gets a number.
+              let name = given;
+              for (let n = 2; nameTaken(name); n++) {
+                const suffix = ` ${n}`;
+                name = `${given.slice(0, 40 - suffix.length).trimEnd()}${suffix}`;
+              }
+              const model = mode.model?.trim() || null;
+              const effort = mode.effort ?? null;
+              custom.push({
+                id,
+                name,
+                instructions: mode.instructions.trim(),
+                model,
+                effort,
+                backend: model || effort ? (mode.backend ?? null) : null,
+              });
+            }
+            const active = exists(slug(raw.active)) ? slug(raw.active) : BUILTIN;
+            const app_defaults = [];
+            for (const d of raw.app_defaults) {
+              const entry = { app_id: key(d.app_id), app_name: d.app_name.trim(), mode: slug(d.mode) };
+              if (!entry.app_id || !exists(entry.mode)) continue;
+              const at = app_defaults.findIndex((x) => x.app_id === entry.app_id);
+              if (at >= 0) app_defaults[at] = entry;
+              else app_defaults.push(entry);
+            }
+            return { active, custom, app_defaults };
+          };
+          if (!w.__owModesStored) {
+            w.__owModesStored = cleaned({
+              active: BUILTIN,
+              custom: [],
+              app_defaults: [],
+              ...(w.__owModesSettings ?? {}),
+            });
+          }
+          const stored = w.__owModesStored;
+          // `modes::list` in core (the built-in mode, put together from
+          // the Refine instructions, then the user's own), each with
+          // what its own model and effort mean for the backend in use,
+          // as `ModeRow` in src-tauri/src/modes.rs adds.
+          const list = (settings) =>
+            [
+              {
+                id: BUILTIN,
+                name: BUILTIN_NAME,
+                instructions:
+                  w.__owRefineStored?.instructions ?? w.__owRefineSettings?.instructions ?? "",
+                model: null,
+                effort: null,
+                backend: null,
+                builtin: true,
+              },
+              ...settings.custom.map((m) => ({ ...m, builtin: false })),
+            ].map((m) => ({
+              ...m,
+              override_backend: overrideBackend(m),
+              overrides_apply: overrideBackend(m) === activeBackend(),
+            }));
+          // A copy, as over real IPC.
+          const now = (settings) =>
+            structuredClone({ settings, modes: list(settings) });
+          if (cmd === "modes_get") {
+            // `modes::apps_for_defaults` in core: the apps with a
+            // default, then the apps in the history, then the apps
+            // that are open, each once whatever the case of its id.
+            const apps = [];
+            const offer = (id, name) => {
+              const appId = key(id ?? "");
+              const appName = (name ?? "").trim();
+              if (!appId) return;
+              const known = apps.find((x) => x.id === appId);
+              if (!known) apps.push({ id: appId, name: appName || appId });
+              else if (known.name === known.id && appName) known.name = appName;
+            };
+            for (const d of stored.app_defaults) offer(d.app_id, d.app_name);
+            for (const e of w.__owHistoryEntries ?? []) offer(e.app_id, e.app_name);
+            for (const r of w.__owRunningApps ?? []) offer(r.id, r.name);
+            return { ...now(stored), apps };
+          }
+          const a = (args ?? {});
+          const unknown = (id) => `There is no mode with the id "${String(id)}".`;
+          const has = (id) =>
+            id === BUILTIN || stored.custom.some((m) => m.id === id);
+          // `check_name_free` in core: a name another mode has, ignoring
+          // case and outer space, is refused.
+          const nameHolder = (name, except) =>
+            key(name) === key(BUILTIN_NAME)
+              ? BUILTIN_NAME
+              : stored.custom.find((m) => m.id !== except && key(m.name) === key(name))?.name;
+          const taken = (holder) =>
+            `There is already a mode called "${holder}". Give this one another name.`;
+          let next = structuredClone(stored);
+          // The user switching mode, as opposed to editing the modes.
+          let switched = false;
+          if (cmd === "modes_select") {
+            if (!has(a.id)) throw unknown(a.id);
+            next.active = a.id;
+            switched = true;
+          } else if (cmd === "modes_cycle") {
+            w.__owModesCycleCount = (w.__owModesCycleCount ?? 0) + 1;
+            const ids = [BUILTIN, ...next.custom.map((m) => m.id)];
+            next.active = ids[(ids.indexOf(next.active) + 1) % ids.length];
+            switched = true;
+          } else if (cmd === "modes_add") {
+            const name = String(a.name ?? "");
+            if (!name.trim()) throw "A mode needs a name.";
+            const holder = nameHolder(name, null);
+            if (holder) throw taken(holder);
+            next.custom.push({
+              id: "",
+              name,
+              instructions: (a.instructions) ?? "",
+              model: (a.model) ?? null,
+              effort: (a.effort) ?? null,
+              backend: activeBackend(),
+            });
+          } else if (cmd === "modes_edit") {
+            if (a.id === BUILTIN) {
+              throw "The Dictation mode is built in. It cannot be renamed, and its instructions are the Refine instructions.";
+            }
+            const mode = next.custom.find((m) => m.id === a.id);
+            if (!mode) throw unknown(a.id);
+            const name = String(a.name ?? "");
+            if (!name.trim()) throw "A mode needs a name.";
+            const holder = nameHolder(name, mode.id);
+            if (holder) throw taken(holder);
+            mode.name = name;
+            mode.instructions = (a.instructions) ?? "";
+            // `ModeEdit::backend` in core: a model and effort kept for
+            // the other backend are left alone by an edit that names
+            // neither, and replaced together by one that names either.
+            const model = (a.model) ?? null;
+            const effort = (a.effort) ?? null;
+            const storedFor = overrideBackend(mode);
+            if (storedFor === null || storedFor === activeBackend() || model || effort) {
+              mode.model = model;
+              mode.effort = effort;
+              if (model || effort) mode.backend = activeBackend();
+            }
+          } else if (cmd === "modes_delete") {
+            if (a.id === BUILTIN) throw "The Dictation mode is built in and cannot be deleted.";
+            if (!has(a.id)) throw unknown(a.id);
+            // `cleaned` drops its app defaults and the selection.
+            next.custom = next.custom.filter((m) => m.id !== a.id);
+          } else if (cmd === "modes_set_app_default") {
+            const appId = key(String(a.appId ?? ""));
+            if (!appId) throw "An app default needs the id of the app.";
+            if (!has(a.modeId)) throw unknown(a.modeId);
+            const known = next.app_defaults.find((d) => d.app_id === appId)?.app_name ?? "";
+            next.app_defaults.push({
+              app_id: appId,
+              app_name: String(a.appName ?? "").trim() || known,
+              mode: a.modeId,
+            });
+          } else if (cmd === "modes_clear_app_default") {
+            const appId = key(String(a.appId ?? ""));
+            if (!next.app_defaults.some((d) => d.app_id === appId)) {
+              throw `The app "${String(a.appId).trim()}" has no default mode.`;
+            }
+            next.app_defaults = next.app_defaults.filter((d) => d.app_id !== appId);
+          } else {
+            return null;
+          }
+          const saved = cleaned(next);
+          w.__owModesStored = saved;
+          w.__owModesCalls = [...(w.__owModesCalls ?? []), { cmd, args: a }];
+          const result = now(saved);
+          const selected = result.modes.find((m) => m.id === saved.active);
+          window.__owEmit("modes_changed", {
+            ...structuredClone(result),
+            switched_to: switched ? (selected?.name ?? "Dictation") : null,
+          });
+          return result;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = args ?? {};
           if (!handlers.has(event)) handlers.set(event, new Set());
@@ -73,5 +342,8 @@ async (page) => {
       }
       return delivered;
     };
+
+    // How many listeners an event has, without emitting anything.
+    window.__owListeners = (event) => handlers.get(event)?.size ?? 0;
   });
 }

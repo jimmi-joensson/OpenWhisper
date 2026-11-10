@@ -3,6 +3,7 @@ pub mod enumerate_devices;
 pub mod focus;
 pub mod history;
 pub mod memory;
+pub mod modes;
 pub mod recognizer_info;
 pub mod refine;
 pub mod settings;

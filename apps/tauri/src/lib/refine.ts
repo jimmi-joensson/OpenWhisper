@@ -20,6 +20,40 @@ export interface RefineSettings {
   openai: { base_url: string; model: string; effort: RefineEffort | null };
 }
 
+// The model names the Claude CLI takes as-is. Which of them work
+// depends on the user's plan, which the CLI does not let us ask: a
+// model the plan lacks shows up as a failed connection test, not as a
+// missing menu entry. Offered by the Refine pane and by a mode's own
+// model choice; both also take any other full model name.
+export const CLAUDE_MODELS = [
+  { value: "fable", label: "Fable" },
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
+] as const;
+
+export const EFFORT_LABELS: Record<RefineEffort, string> = {
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+};
+
+// What the Refine pane calls each backend, for sentences that name
+// one ("for the Claude backend").
+export const BACKEND_LABELS: Record<RefineBackend, string> = {
+  "claude-cli": "Claude",
+  "openai-compatible": "OpenAI-compatible",
+};
+
+// The effort levels each kind of backend takes today.
+export const BACKEND_EFFORTS: Record<RefineBackend, RefineEffort[]> = {
+  "claude-cli": ["low", "medium", "high", "xhigh", "max"],
+  "openai-compatible": ["minimal", "low", "medium", "high", "xhigh"],
+};
+
 export interface RefineState {
   settings: RefineSettings;
   default_instructions: string;
@@ -74,6 +108,18 @@ export interface RefineInfo {
   instruction: string;
   backend: string;
   elapsed_ms: number;
+  // Name of the mode the dictation ran in (TASK-96), when there is
+  // something to say about it: a mode the user made, or any mode
+  // (Dictation too) that ran because the app has it as its default.
+  // "" for Dictation as the selected mode and when Refine did not run.
+  mode: string;
+  // `mode` is the built-in Dictation mode.
+  mode_builtin: boolean;
+  // Why that mode ran. "" when Refine did not run.
+  mode_reason: "" | "selected" | "app-default";
+  // Name of the app whose default mode it was; "" unless
+  // `mode_reason` is "app-default".
+  mode_app: string;
 }
 
 export const NO_REFINE: RefineInfo = {
@@ -83,6 +129,10 @@ export const NO_REFINE: RefineInfo = {
   instruction: "",
   backend: "",
   elapsed_ms: 0,
+  mode: "",
+  mode_builtin: false,
+  mode_reason: "",
+  mode_app: "",
 };
 
 // Mirrors `RefineRun` in core/src/refine/history.rs. One Refine run;
@@ -113,6 +163,9 @@ export interface RefineRun {
   window_5h_resets_at: number | null;
   window_7d_used: number | null;
   window_7d_resets_at: number | null;
+  // Name of the mode the run was made in, when it was one the user
+  // made. null for the built-in Dictation mode and for older runs.
+  mode: string | null;
 }
 
 // Mirrors `PlanEstimate` in core/src/refine/history.rs. The windows

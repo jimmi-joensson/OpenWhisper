@@ -66,6 +66,9 @@ moved it: see `history.folder` in `settings.json`.
   dictated into), a comment line with its id, then the text. A
   `> Before Refine:` quote is the text before the cleanup model
   changed it.
+- A second comment line, `<!-- extra: mode=Formal -->`, names the
+  mode the text was rewritten in, when the person used one of their
+  own modes. It is not part of what they said.
 - To find something they said, search the folder, for example
   `rg -i "release plan" history/`. A day's file is named after its
   date, so "what did I say this morning" is today's file.

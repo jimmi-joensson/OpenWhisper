@@ -1,14 +1,17 @@
-//! Windows hotkey: single `WH_KEYBOARD_LL` hook owns both toggle (default
-//! Ctrl+Space) and cancel (default Esc) chord activation. Both slots are
-//! configurable from Settings → Shortcuts.
+//! Windows hotkey: a single `WH_KEYBOARD_LL` hook owns chord activation
+//! for every slot in the table in `hotkey/mod.rs` (`SLOTS`): toggle
+//! (default Ctrl+Space), cancel (default Esc) and the optional ones.
+//! All are configurable from Settings → Shortcuts. Chords only: a
+//! modifier-tap binding is unsupported on Windows.
 //!
 //! Why a low-level hook (issue #7): `RegisterHotKey` bleeds into Electron
 //! / WPF apps that install their own keyboard hooks ahead of us in the
 //! chain. WH_KEYBOARD_LL is system-wide, runs before the focused app, and
 //! can swallow the chord by returning a non-zero LRESULT.
 //!
-//! Cancel slot is gated on `dictation::is_recording()` — outside an active
-//! recording the cancel binding passes through to the focused app.
+//! A slot marked `gate_on_recording` (cancel) only matches while
+//! `dictation::is_recording()`. Outside an active recording its binding
+//! passes through to the focused app.
 //!
 //! Capture mode: when `crate::hotkey::is_capture_active()` is true the hook
 //! diverts to capture-only — every keyboard event is swallowed; the first
@@ -41,8 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_QUIT,
 };
 
+use super::{SkippedSlot, SlotSpec, SLOTS};
 use crate::settings::{HotkeyConfig, HotkeyKind, HotkeySettings};
-use crate::{do_cancel, do_toggle};
 use openwhisper_core::{dictation, verbose_log};
 
 const WM_KEYDOWN: u32 = 0x0100;
@@ -61,7 +64,8 @@ const MOD_WIN: u32 = 1 << 3;
 static EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Per-slot compiled binding read lock-free from the hook callback.
-/// `vk = 0` means "slot disabled" (compile failed → install errored).
+/// `vk = 0` means "nothing installed for this slot": an optional slot
+/// that is unbound or was skipped, or any slot before the first install.
 struct SlotAtomic {
     vk: AtomicU32,
     mods: AtomicU32,
@@ -87,8 +91,9 @@ impl SlotAtomic {
     }
 }
 
-static TOGGLE: SlotAtomic = SlotAtomic::new();
-static CANCEL: SlotAtomic = SlotAtomic::new();
+/// One per entry of `SLOTS`, same order: `HOOK_SLOTS[i]` holds the
+/// binding of `SLOTS[i]`, and the hook fires `SLOTS[i].action`.
+static HOOK_SLOTS: [SlotAtomic; SLOTS.len()] = [const { SlotAtomic::new() }; SLOTS.len()];
 
 struct EscapeHookState {
     thread: Option<JoinHandle<()>>,
@@ -101,26 +106,25 @@ fn hook_state() -> &'static Mutex<Option<EscapeHookState>> {
     HOOK_STATE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn install(_app: &AppHandle, settings: &HotkeySettings) -> Result<(), String> {
-    let (tvk, tmods) = compile_config(&settings.toggle).ok_or_else(|| {
-        format!(
-            "Unsupported toggle hotkey: {:?} {} {:?}",
-            settings.toggle.kind, settings.toggle.code, settings.toggle.mods
-        )
-    })?;
-    let (cvk, cmods) = compile_config(&settings.cancel).ok_or_else(|| {
-        format!(
-            "Unsupported cancel hotkey: {:?} {} {:?}",
-            settings.cancel.kind, settings.cancel.code, settings.cancel.mods
-        )
-    })?;
-    TOGGLE.set(tvk, tmods);
-    CANCEL.set(cvk, cmods);
-    verbose_log!(
-        "[ow.hotkey/win] install: toggle vk=0x{:02X} mods=0x{:02X}, cancel vk=0x{:02X} mods=0x{:02X}",
-        tvk, tmods, cvk, cmods
-    );
-    install_hook()
+/// Install the hook for every bound slot. `Ok` carries the optional
+/// slots that were left out (see `hotkey::compile_slots`).
+pub fn install(_app: &AppHandle, settings: &HotkeySettings) -> Result<Vec<SkippedSlot>, String> {
+    let (compiled, skipped) = super::compile_slots(settings, compile_config)?;
+    // Unbound and skipped slots go back to "nothing installed".
+    for slot in &HOOK_SLOTS {
+        slot.set(0, 0);
+    }
+    for (index, (vk, mods)) in compiled {
+        HOOK_SLOTS[index].set(vk, mods);
+        verbose_log!(
+            "[ow.hotkey/win] install: {} vk=0x{:02X} mods=0x{:02X}",
+            SLOTS[index].target.as_str(),
+            vk,
+            mods
+        );
+    }
+    install_hook()?;
+    Ok(skipped)
 }
 
 pub fn teardown(_app: &AppHandle) {
@@ -137,10 +141,10 @@ fn teardown_hook() {
             let _ = t.join();
         }
     }
-    TOGGLE.swallowed_down.store(false, Ordering::Relaxed);
-    TOGGLE.fired.store(false, Ordering::Relaxed);
-    CANCEL.swallowed_down.store(false, Ordering::Relaxed);
-    CANCEL.fired.store(false, Ordering::Relaxed);
+    for slot in &HOOK_SLOTS {
+        slot.swallowed_down.store(false, Ordering::Relaxed);
+        slot.fired.store(false, Ordering::Relaxed);
+    }
 }
 
 fn install_hook() -> Result<(), String> {
@@ -247,36 +251,21 @@ unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: L
 
         // Per-keydown trace, gated behind --verbose. Diagnoses chord
         // detection: shows the exact vk + held-mod mask the hook sees on
-        // every press so we can compare it to the configured
-        // (TOGGLE.vk, TOGGLE.mods) / (CANCEL.vk, CANCEL.mods) values.
+        // every press, to compare with what each slot was installed
+        // with (the `install:` lines).
         if is_down {
             verbose_log!(
-                "[ow.hotkey/win] keydown vk=0x{:02X} held_mods=0x{:02X} \
-                 toggle_vk=0x{:02X}/mods=0x{:02X} cancel_vk=0x{:02X}/mods=0x{:02X}",
+                "[ow.hotkey/win] keydown vk=0x{:02X} held_mods=0x{:02X}",
                 info.vkCode,
-                held,
-                TOGGLE.vk.load(Ordering::Relaxed),
-                TOGGLE.mods.load(Ordering::Relaxed),
-                CANCEL.vk.load(Ordering::Relaxed),
-                CANCEL.mods.load(Ordering::Relaxed)
+                held
             );
         }
 
-        // Toggle slot.
-        if try_match_slot(&TOGGLE, info.vkCode, is_down, is_up, held, false, "toggle") {
-            return LRESULT(1);
-        }
-        // Cancel slot — gate on recording.
-        if try_match_slot(
-            &CANCEL,
-            info.vkCode,
-            is_down,
-            is_up,
-            held,
-            true, /* gate_on_recording */
-            "cancel",
-        ) {
-            return LRESULT(1);
+        // First matching slot wins, in table order.
+        for (slot, spec) in HOOK_SLOTS.iter().zip(SLOTS) {
+            if try_match_slot(slot, spec, info.vkCode, is_down, is_up, held) {
+                return LRESULT(1);
+            }
         }
     }
     unsafe { CallNextHookEx(None, n_code, w_param, l_param) }
@@ -284,17 +273,17 @@ unsafe extern "system" fn hook_callback(n_code: i32, w_param: WPARAM, l_param: L
 
 fn try_match_slot(
     slot: &SlotAtomic,
+    spec: &SlotSpec,
     vk: u32,
     is_down: bool,
     is_up: bool,
     held: u32,
-    gate_on_recording: bool,
-    label: &'static str,
 ) -> bool {
     let target = slot.vk.load(Ordering::Relaxed);
     if target == 0 || vk != target {
         return false;
     }
+    let label = spec.target.as_str();
     let required = slot.mods.load(Ordering::Relaxed);
     if is_down && held != required && held != 0 {
         // Target vk arrived under SOME modifier(s) but not the configured
@@ -308,30 +297,17 @@ fn try_match_slot(
         );
     }
     if is_down && held == required {
-        if gate_on_recording && !dictation::is_recording() {
+        if spec.gate_on_recording && !dictation::is_recording() {
             return false;
         }
         if !slot.fired.swap(true, Ordering::Relaxed) {
             verbose_log!(
-                "[ow.hotkey/win] {label}: chord matched (vk=0x{:02X} mods=0x{:02X}) — firing",
+                "[ow.hotkey/win] {label}: chord matched (vk=0x{:02X} mods=0x{:02X}), firing",
                 vk, held
             );
-            // Pick the action by slot identity. Comparing static
-            // refs is the simplest tag — both pointers are unique
-            // and stable for the program's lifetime.
-            let toggle_ptr = std::ptr::addr_of!(TOGGLE) as *const ();
-            let slot_ptr = (slot as *const SlotAtomic) as *const ();
-            if std::ptr::eq(slot_ptr, toggle_ptr) {
-                thread::spawn(|| {
-                    if let Err(e) = do_toggle() {
-                        eprintln!("[hotkey/win] toggle action failed: {e}");
-                    }
-                });
-            } else {
-                thread::spawn(|| {
-                    let _ = do_cancel();
-                });
-            }
+            // The action hands its work to a thread; the hook callback
+            // has to return within the system's hook timeout.
+            (spec.action)();
         }
         slot.swallowed_down.store(true, Ordering::Relaxed);
         return true;
@@ -343,16 +319,22 @@ fn try_match_slot(
     false
 }
 
-fn compile_config(config: &HotkeyConfig) -> Option<(u32, u32)> {
+/// Compile a binding to `(vk, modifier mask)`. `Err` is a sentence for
+/// the user, shown when an optional slot is left out because of it.
+fn compile_config(config: &HotkeyConfig) -> Result<(u32, u32), String> {
     if !matches!(config.kind, HotkeyKind::Chord) {
-        return None;
+        return Err(
+            "A single modifier key is unsupported on Windows. Record a key combination instead."
+                .into(),
+        );
     }
-    let vk = chord_name_to_vk(&config.code)?;
+    let unsupported = || "This key combination is not supported on Windows.".to_string();
+    let vk = chord_name_to_vk(&config.code).ok_or_else(unsupported)?;
     let mut mods = 0u32;
     for m in &config.mods {
-        mods |= mod_name_to_mask(m)?;
+        mods |= mod_name_to_mask(m).ok_or_else(unsupported)?;
     }
-    Some((vk, mods))
+    Ok((vk, mods))
 }
 
 fn chord_name_to_vk(name: &str) -> Option<u32> {

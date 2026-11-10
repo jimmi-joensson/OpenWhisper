@@ -11,7 +11,7 @@ use std::ffi::c_void;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use objc2::rc::autoreleasepool;
-use objc2_app_kit::NSWorkspace;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
 use super::FocusContext;
 
@@ -36,7 +36,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-pub(super) fn read() -> FocusContext {
+pub(super) fn read(with_title: bool) -> FocusContext {
     // The pool matters off the main thread: the dictation pipeline
     // calls this from a worker that has no pool of its own.
     let mut ctx = autoreleasepool(|_| {
@@ -50,10 +50,35 @@ pub(super) fn read() -> FocusContext {
             ..FocusContext::default()
         }
     });
-    if ctx.pid != 0 {
+    if with_title && ctx.pid != 0 {
         ctx.window_title = window_title(ctx.pid as i32).unwrap_or_default();
     }
     ctx
+}
+
+/// The running apps a person would call apps: regular activation
+/// policy (a Dock icon; no agents, no helpers), with a bundle id, and
+/// not this process. Needs no permission.
+pub(super) fn running() -> Vec<(String, String)> {
+    let own_pid = std::process::id();
+    autoreleasepool(|_| {
+        let apps = NSWorkspace::sharedWorkspace().runningApplications();
+        let mut out = Vec::new();
+        for app in apps.iter() {
+            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+                continue;
+            }
+            if u32::try_from(app.processIdentifier()).ok() == Some(own_pid) {
+                continue;
+            }
+            let Some(id) = app.bundleIdentifier().map(|s| s.to_string()).filter(|s| !s.trim().is_empty()) else {
+                continue;
+            };
+            let name = app.localizedName().map(|s| s.to_string()).unwrap_or_default();
+            out.push((id, name));
+        }
+        out
+    })
 }
 
 /// Title of the app's focused window, when Accessibility is granted

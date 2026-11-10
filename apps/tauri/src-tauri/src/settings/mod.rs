@@ -93,19 +93,26 @@ pub fn settings_set_hotkey(
     Ok(())
 }
 
+/// Put a slot back to its default. Returns the binding the slot now
+/// has: the platform default for toggle and cancel, `None` for an
+/// optional slot, whose default is "not set" (reset clears it).
 #[tauri::command]
 pub fn settings_reset_hotkey(
     app: AppHandle,
     target: HotkeyTarget,
-) -> Result<HotkeyConfig, String> {
-    let cfg = match target {
-        HotkeyTarget::Toggle => default_toggle_hotkey(),
-        HotkeyTarget::Cancel => default_cancel_hotkey(),
+) -> Result<Option<HotkeyConfig>, String> {
+    let default = match target {
+        HotkeyTarget::Toggle => Some(default_toggle_hotkey()),
+        HotkeyTarget::Cancel => Some(default_cancel_hotkey()),
+        HotkeyTarget::CycleMode => None,
     };
     let path = settings_path(&app)?;
-    core::update_hotkey_slot(&path, target, cfg.clone())?;
+    match &default {
+        Some(cfg) => core::update_hotkey_slot(&path, target, cfg.clone())?,
+        None => core::clear_hotkey_slot(&path, target)?,
+    }
     crate::hotkey::install(&app);
-    Ok(cfg)
+    Ok(default)
 }
 
 #[tauri::command]

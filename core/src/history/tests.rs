@@ -15,9 +15,20 @@ fn add(dir: &Path, at_ms: i64, text: &str) -> HistoryEntry {
 }
 
 fn add_full(dir: &Path, at_ms: i64, text: &str, original: Option<&str>, app: (&str, &str)) -> HistoryEntry {
+    add_in_mode(dir, at_ms, text, original, app, "")
+}
+
+fn add_in_mode(
+    dir: &Path,
+    at_ms: i64,
+    text: &str,
+    original: Option<&str>,
+    app: (&str, &str),
+    mode: &str,
+) -> HistoryEntry {
     append(
         dir,
-        &NewEntry { at_ms, duration_ms: 4200, text, original, app_id: app.0, app_name: app.1 },
+        &NewEntry { at_ms, duration_ms: 4200, text, original, app_id: app.0, app_name: app.1, mode },
     )
     .expect("append")
     .expect("stored")
@@ -104,7 +115,15 @@ fn empty_text_is_not_stored() {
     let dir = tempdir().unwrap();
     let stored = append(
         dir.path(),
-        &NewEntry { at_ms: at(D(2026, 11, 10), 9, 0, 0), duration_ms: 0, text: "  \n ", original: None, app_id: "", app_name: "" },
+        &NewEntry {
+            at_ms: at(D(2026, 11, 10), 9, 0, 0),
+            duration_ms: 0,
+            text: "  \n ",
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "Formal",
+        },
     )
     .unwrap();
     assert_eq!(stored, None);
@@ -446,4 +465,308 @@ fn resolve_dir_prefers_the_chosen_folder() {
     assert_eq!(resolve_dir(&blank, default), default);
     let chosen = HistorySettings { folder: Some("/notes/dictations".into()), ..Default::default() };
     assert_eq!(resolve_dir(&chosen, default), Path::new("/notes/dictations"));
+}
+
+// --- the extra line and the mode (TASK-96) -----------------------
+
+/// A day file exactly as the released app wrote it before modes
+/// existed.
+const OLD_FORMAT_DAY: &str = "\
+---
+date: 2026-11-10
+entries: 2
+words: 18
+apps: [Chatter, Terminal]
+---
+
+## 14:02:12 · Chatter
+<!-- id: 20261110T140212 app: com.example.chat words: 8 seconds: 4.2 -->
+
+Send the report to the team before Friday.
+
+> Before Refine: send the reaport to the team before friday
+
+## 14:07:40 · Terminal
+<!-- id: 20261110T140740 app: com.example.terminal words: 10 seconds: 4.2 -->
+
+Check whether the build passes on Windows before we merge.
+";
+
+#[test]
+fn a_day_file_from_before_modes_reads_as_it_always_did() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, OLD_FORMAT_DAY).unwrap();
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(
+        page.entries,
+        vec![
+            HistoryEntry {
+                id: "20261110T140740".into(),
+                at_ms: at(date, 14, 7, 40),
+                duration_ms: 4200,
+                word_count: 10,
+                text: "Check whether the build passes on Windows before we merge.".into(),
+                original: None,
+                app_id: Some("com.example.terminal".into()),
+                app_name: Some("Terminal".into()),
+                mode: None,
+            },
+            HistoryEntry {
+                id: "20261110T140212".into(),
+                at_ms: at(date, 14, 2, 12),
+                duration_ms: 4200,
+                word_count: 8,
+                text: "Send the report to the team before Friday.".into(),
+                original: Some("send the reaport to the team before friday".into()),
+                app_id: Some("com.example.chat".into()),
+                app_name: Some("Chatter".into()),
+                mode: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_entry_without_a_mode_is_written_byte_for_byte_as_before() {
+    // The same two dictations the old-format file holds, written by
+    // this version without a mode: the file must come out identical.
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let first = add_full(
+        dir.path(),
+        at(date, 14, 2, 12),
+        "Send the report to the team before Friday. ",
+        Some("send the reaport to the team before friday"),
+        ("com.example.chat", "Chatter"),
+    );
+    add_full(
+        dir.path(),
+        at(date, 14, 7, 40),
+        "Check whether the build passes on Windows before we merge.",
+        None,
+        ("com.example.terminal", "Terminal"),
+    );
+    assert_eq!(first.mode, None);
+    assert_eq!(read(dir.path(), date), OLD_FORMAT_DAY);
+    assert!(!read(dir.path(), date).contains("extra:"));
+}
+
+#[test]
+fn a_mode_is_written_on_its_own_line_and_reads_back() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let written = add_in_mode(
+        dir.path(),
+        at(date, 9, 5, 0),
+        "Could you please let me know when the price list is ready?",
+        Some("hey oskar when is the price list ready"),
+        ("com.example.mail", "Mail"),
+        "Formal",
+    );
+    assert_eq!(written.mode.as_deref(), Some("Formal"));
+
+    let expected = "\
+---
+date: 2026-11-10
+entries: 1
+words: 12
+apps: [Mail]
+---
+
+## 09:05:00 · Mail
+<!-- id: 20261110T090500 app: com.example.mail words: 12 seconds: 4.2 -->
+<!-- extra: mode=Formal -->
+
+Could you please let me know when the price list is ready?
+
+> Before Refine: hey oskar when is the price list ready
+";
+    assert_eq!(read(dir.path(), date), expected);
+
+    let back = list(dir.path(), "", 50, 0);
+    assert_eq!(back.entries, vec![written.clone()]);
+    // The extra line is not part of the text or of its word count.
+    assert_eq!(back.entries[0].text, "Could you please let me know when the price list is ready?");
+    assert_eq!(back.entries[0].word_count, 12);
+    assert_eq!(get(dir.path(), &written.id), Some(written));
+}
+
+#[test]
+fn the_meta_line_of_an_entry_with_a_mode_is_the_line_older_apps_look_for() {
+    // An app released before modes finds an entry by a time heading
+    // whose next non-blank line matches META. That line must be
+    // untouched by the extra line under it.
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add_in_mode(dir.path(), at(date, 9, 5, 0), "With a mode.", None, ("com.example.mail", "Mail"), "Formal");
+    let file = read(dir.path(), date);
+    let lines: Vec<&str> = file.lines().collect();
+    let heading = lines.iter().position(|l| HEADING.is_match(l)).expect("heading");
+    let meta = lines[heading + 1];
+    assert_eq!(meta, "<!-- id: 20261110T090500 app: com.example.mail words: 3 seconds: 4.2 -->");
+    assert!(META.is_match(meta));
+    // And the extra line is not mistaken for it.
+    assert_eq!(lines[heading + 2], "<!-- extra: mode=Formal -->");
+    assert!(!META.is_match(lines[heading + 2]));
+    assert!(lines[heading + 3].is_empty());
+}
+
+#[test]
+fn mode_names_cannot_break_the_extra_line() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let e = add_in_mode(dir.path(), at(date, 9, 0, 0), "odd name", None, ("", ""), "  Short; sharp -->\nand = to the point ");
+    assert_eq!(e.mode.as_deref(), Some("Short sharp and = to the point"));
+    assert!(read(dir.path(), date).contains("\n<!-- extra: mode=Short sharp and = to the point -->\n"));
+    assert_eq!(list(dir.path(), "", 1, 0).entries[0], e);
+
+    // A name with nothing usable in it is no mode.
+    let e = add_in_mode(dir.path(), at(date, 9, 1, 0), "no name", None, ("", ""), " ; ");
+    assert_eq!(e.mode, None);
+    assert_eq!(read(dir.path(), date).matches("extra:").count(), 1);
+}
+
+#[test]
+fn unknown_extra_keys_are_ignored_and_kept() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Written by a later version: a key this one does not know, in
+    // front of the one it does.
+    let later = "\
+## 09:00:00 · Mail
+<!-- id: 20261110T090000 app: com.example.mail words: 2 seconds: 1.0 -->
+<!-- extra: kind=ask; mode=Formal; source=screen -->
+
+Good morning.
+";
+    fs::write(&path, later).unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!(e.mode.as_deref(), Some("Formal"));
+    assert_eq!(e.text, "Good morning.");
+
+    // Only unknown keys, or nothing at all: no mode, still not text.
+    fs::write(&path, later.replace("kind=ask; mode=Formal; source=screen", "kind=ask")).unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!((e.mode.clone(), e.text.as_str()), (None, "Good morning."));
+
+    // Adding an entry leaves the line it did not understand in place.
+    add(dir.path(), at(date, 10, 0, 0), "second");
+    assert!(read(dir.path(), date).contains("seconds: 1.0 -->\n<!-- extra: kind=ask -->\n\nGood morning."));
+}
+
+#[test]
+fn delete_and_append_work_around_entries_with_an_extra_line() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "first");
+    let middle = add_in_mode(dir.path(), at(date, 9, 1, 0), "second", Some("secund"), ("a.b", "AB"), "Formal");
+    let third = add_in_mode(dir.path(), at(date, 9, 2, 0), "third", None, ("", ""), "Write in English");
+    add(dir.path(), at(date, 9, 3, 0), "fourth");
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["fourth", "third", "second", "first"]);
+    let modes: Vec<Option<&str>> = page.entries.iter().map(|e| e.mode.as_deref()).collect();
+    assert_eq!(modes, [None, Some("Write in English"), Some("Formal"), None]);
+
+    assert!(delete(dir.path(), &middle.id).unwrap());
+    let expected = "\
+---
+date: 2026-11-10
+entries: 3
+words: 3
+apps: []
+---
+
+## 09:00:00
+<!-- id: 20261110T090000 words: 1 seconds: 4.2 -->
+
+first
+
+## 09:02:00
+<!-- id: 20261110T090200 words: 1 seconds: 4.2 -->
+<!-- extra: mode=Write in English -->
+
+third
+
+## 09:03:00
+<!-- id: 20261110T090300 words: 1 seconds: 4.2 -->
+
+fourth
+";
+    assert_eq!(read(dir.path(), date), expected);
+
+    // Deleting the entry with the extra line takes the line with it.
+    assert!(delete(dir.path(), &third.id).unwrap());
+    let file = read(dir.path(), date);
+    assert!(!file.contains("extra:"));
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["fourth", "first"]);
+
+    // Same second as an entry with an extra line: ids stay distinct.
+    let a = add_in_mode(dir.path(), at(date, 11, 0, 0), "one", None, ("", ""), "Formal");
+    let b = add(dir.path(), at(date, 11, 0, 0), "two");
+    assert_eq!((a.id.as_str(), b.id.as_str()), ("20261110T110000", "20261110T110000-2"));
+    assert_eq!(clear(dir.path()).unwrap(), 4);
+    assert!(!dir.path().join("2026").exists());
+}
+
+#[test]
+fn an_extra_looking_line_in_the_body_is_text() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Written by hand into the body of an entry, not directly under
+    // the comment line with the machine fields.
+    fs::write(
+        &path,
+        "\
+## 09:00:00
+<!-- id: 20261110T090000 words: 5 seconds: 1.0 -->
+
+<!-- extra: mode=Formal -->
+is what the line looks like.
+",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!(e.mode, None);
+    assert_eq!(e.text, "<!-- extra: mode=Formal -->\nis what the line looks like.");
+
+    // Dictated text that starts with the same characters is escaped
+    // on the way in and comes back as it was said.
+    let said = "<!-- extra: mode=Sneaky -->\nand more";
+    let written = add(dir.path(), at(date, 10, 0, 0), said);
+    assert_eq!(written.mode, None);
+    let back = get(dir.path(), &written.id).unwrap();
+    assert_eq!((back.text.as_str(), back.mode), (said, None));
+}
+
+#[test]
+fn apps_lists_each_app_once_most_recent_first() {
+    let dir = tempdir().unwrap();
+    assert!(apps(dir.path()).is_empty());
+    add_full(dir.path(), at(D(2026, 11, 8), 9, 0, 0), "a", None, ("com.example.mail", "Mail"));
+    add_full(dir.path(), at(D(2026, 11, 9), 9, 0, 0), "b", None, ("com.example.chat", "Chatter"));
+    add_full(dir.path(), at(D(2026, 11, 10), 8, 0, 0), "c", None, ("com.example.mail", "Mail Pro"));
+    add_full(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "d", None, ("notes.exe", ""));
+    // No app known: nothing to offer.
+    add(dir.path(), at(D(2026, 11, 10), 10, 0, 0), "e");
+
+    assert_eq!(
+        apps(dir.path()),
+        vec![
+            // Without a stored name, the id stands in.
+            ("notes.exe".to_string(), "notes.exe".to_string()),
+            // The newest name an app was seen under.
+            ("com.example.mail".to_string(), "Mail Pro".to_string()),
+            ("com.example.chat".to_string(), "Chatter".to_string()),
+        ]
+    );
+    assert!(apps(&dir.path().join("does-not-exist")).is_empty());
 }

@@ -30,7 +30,11 @@
 //!   dictations; switch it on or off, set the retention and the
 //!   folder.
 //! - `focus`: print which app is frontmost and its window title
-//!   (TASK-94).
+//!   (TASK-94); `--running` lists the apps that are open.
+//! - `modes`: the modes of the Refine step (TASK-96). List, add, edit
+//!   and delete your own modes, select one or cycle to the next, give
+//!   an app a default mode, and ask which mode a dictation would run
+//!   in. `refine run --mode <id>` runs text through one.
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -77,6 +81,8 @@ enum Command {
     History(commands::history::HistoryArgs),
     /// Print which app is frontmost right now.
     Focus(commands::focus::FocusArgs),
+    /// Modes: what Refine does with a dictation, and in which app.
+    Modes(commands::modes::ModesArgs),
 }
 
 fn main() -> Result<()> {
@@ -91,5 +97,6 @@ fn main() -> Result<()> {
         Command::Refine(args) => commands::refine::run(args, cli.json),
         Command::History(args) => commands::history::run(args, cli.json),
         Command::Focus(args) => commands::focus::run(args, cli.json),
+        Command::Modes(args) => commands::modes::run(args, cli.json),
     }
 }

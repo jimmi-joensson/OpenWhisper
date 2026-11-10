@@ -1,6 +1,10 @@
 //! `openwhisper focus`: print which app is frontmost right now
 //! (TASK-94). The same `core::focus::current()` call the desktop app
 //! uses to record which app a dictation went into.
+//!
+//! `openwhisper focus --running` lists the apps that are open
+//! (`core::focus::running_apps()`): the ids a default mode can be set
+//! for with `openwhisper modes app set` (TASK-96).
 
 use std::time::{Duration, Instant};
 
@@ -14,9 +18,38 @@ pub struct FocusArgs {
     /// app first. Without it the frontmost app is the terminal.
     #[arg(long, value_name = "MS", default_value_t = 0)]
     delay_ms: u64,
+    /// List the apps that are open now, with their ids, instead of
+    /// the frontmost one.
+    #[arg(long, conflicts_with = "delay_ms")]
+    running: bool,
+}
+
+/// `--running`: one line per open app, or a JSON array of
+/// `{ "app_id", "app_name" }`.
+fn running(json: bool) -> Result<()> {
+    let apps = focus::running_apps();
+    if json {
+        let rows: Vec<serde_json::Value> = apps
+            .iter()
+            .map(|(id, name)| serde_json::json!({ "app_id": id, "app_name": name }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if apps.is_empty() {
+        println!("No open apps could be read.");
+        return Ok(());
+    }
+    for (id, name) in &apps {
+        println!("{id:<44} {name}");
+    }
+    Ok(())
 }
 
 pub fn run(args: FocusArgs, json: bool) -> Result<()> {
+    if args.running {
+        return running(json);
+    }
     if args.delay_ms > 0 {
         eprintln!("reading in {} ms, switch to the app now", args.delay_ms);
         std::thread::sleep(Duration::from_millis(args.delay_ms));

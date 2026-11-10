@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
+  hotkeyFor,
   type HotkeyCapturedPayload,
   type HotkeyConfig,
   type HotkeySettings,
@@ -14,7 +15,7 @@ export function useCurrentHotkey(target: HotkeyTarget = "toggle"): HotkeyConfig 
   useEffect(() => {
     let alive = true;
     void invoke<HotkeySettings>("settings_get_hotkeys").then((s) => {
-      if (alive) setConfig(s[target]);
+      if (alive) setConfig(hotkeyFor(s, target));
     });
 
     let unlisten: UnlistenFn | undefined;

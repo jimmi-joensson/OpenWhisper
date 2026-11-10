@@ -25,6 +25,7 @@ mod history;
 mod hotkey;
 mod injection;
 mod media_control;
+mod modes;
 mod permissions;
 mod pill_hover;
 mod refine;
@@ -279,6 +280,14 @@ pub(crate) fn do_toggle() -> Result<(), String> {
 /// Shared cancel path. See [`do_toggle`].
 pub(crate) fn do_cancel() -> bool {
     dictation::run_cancel(&TauriDictationEnv)
+}
+
+/// Shared switch-mode path for the hotkey backends: one step to the
+/// next mode. See [`modes::cycle`]. Does file IO, so the backends call
+/// it from its own thread, never from the hook or tap thread.
+pub(crate) fn do_cycle_mode() -> Result<(), String> {
+    let app = APP_HANDLE.get().ok_or("modes: the app is still starting")?;
+    modes::cycle(app).map(|_| ())
 }
 
 #[tauri::command]
@@ -1008,6 +1017,10 @@ pub fn run() {
             openwhisper_core::dictation::set_injector(Box::new(
                 injection::TauriInjector::new(app.handle().clone()),
             ));
+            // Load the saved modes before the tray menu is built, so
+            // its Mode submenu starts out right, and before the first
+            // recording, which runs in the selected mode.
+            modes::init(app.handle());
             tray::install(app.handle())?;
             // AX-grant watcher: polls `AXIsProcessTrusted()` and brings
             // main forward when the user finishes granting AX in System
@@ -1246,6 +1259,14 @@ pub fn run() {
             history::history_delete,
             history::history_clear,
             history::history_reveal,
+            modes::modes_get,
+            modes::modes_select,
+            modes::modes_cycle,
+            modes::modes_add,
+            modes::modes_edit,
+            modes::modes_delete,
+            modes::modes_set_app_default,
+            modes::modes_clear_app_default,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

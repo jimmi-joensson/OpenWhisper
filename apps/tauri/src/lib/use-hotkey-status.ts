@@ -1,12 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { HotkeyTarget } from "./use-global-hotkey";
 
 export const HOTKEY_STATUS_EVENT = "hotkey_status";
+
+/** An optional slot that has a binding but was not installed. */
+export interface SkippedHotkeySlot {
+  target: HotkeyTarget;
+  /** A sentence for the user. */
+  reason: string;
+}
 
 export interface HotkeyStatus {
   ok: boolean;
   error: string;
+  /** Present only when an optional slot was left out. `ok` stays true:
+   *  dictation works, that one shortcut does not. */
+  skipped?: SkippedHotkeySlot[];
 }
 
 export interface HotkeyStatusView {

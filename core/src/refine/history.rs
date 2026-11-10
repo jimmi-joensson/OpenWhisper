@@ -7,8 +7,9 @@
 //! read the same data, and so it survives a restart.
 //!
 //! **No dictated text is stored**, not even the spoken instruction:
-//! only lengths, timings, the backend's settings and the reason for a
-//! fallback. The newest [`MAX_ROWS`] runs are kept.
+//! only lengths, timings, the backend's settings, the name of the mode
+//! when it was one the user made, and the reason for a fallback. The
+//! newest [`MAX_ROWS`] runs are kept.
 //!
 //! Each run also keeps what the call used (tokens, the API list-price
 //! cost) and, for the Claude CLI on a subscription, how full the
@@ -68,6 +69,10 @@ pub struct RefineRun {
     /// Share of the plan's 7-day window used after the call (0 to 1).
     pub window_7d_used: Option<f64>,
     pub window_7d_resets_at: Option<i64>,
+    /// Name of the mode the run was made in, when it was a mode the
+    /// user made. `None` for the built-in Dictation mode and for rows
+    /// written before modes existed.
+    pub mode: Option<String>,
 }
 
 impl RefineRun {
@@ -100,6 +105,7 @@ impl RefineRun {
             window_5h_resets_at: plan.and_then(|p| p.five_hour_resets_at),
             window_7d_used: plan.and_then(|p| p.seven_day_used),
             window_7d_resets_at: plan.and_then(|p| p.seven_day_resets_at),
+            mode: (!outcome.mode.is_builtin()).then(|| outcome.mode.name.clone()),
         })
     }
 
@@ -126,8 +132,8 @@ pub fn record(store: &Store, run: &RefineRun) {
              (at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
               chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, tokens_out, \
               cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-              window_7d_resets_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              window_7d_resets_at, mode) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.at_ms,
                 run.source,
@@ -149,6 +155,7 @@ pub fn record(store: &Store, run: &RefineRun) {
                 run.window_5h_resets_at,
                 run.window_7d_used,
                 run.window_7d_resets_at,
+                run.mode,
             ],
         )?;
         c.execute(
@@ -186,7 +193,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
             "SELECT at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
                     chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, \
                     tokens_out, cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-                    window_7d_resets_at \
+                    window_7d_resets_at, mode \
              FROM refine_runs ORDER BY id DESC LIMIT ?",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
@@ -211,6 +218,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
                 window_5h_resets_at: r.get(17)?,
                 window_7d_used: r.get(18)?,
                 window_7d_resets_at: r.get(19)?,
+                mode: r.get(20)?,
             })
         })?;
         let mut out = Vec::new();
@@ -466,6 +474,7 @@ mod tests {
             window_5h_resets_at: None,
             window_7d_used: None,
             window_7d_resets_at: None,
+            mode: None,
         }
     }
 
@@ -547,6 +556,7 @@ mod tests {
                     seven_day_resets_at: Some(1794646800),
                 }),
             }),
+            mode: crate::refine::ModeUse::default(),
         };
         let r = RefineRun::from_outcome(SOURCE_DICTATION, &outcome, 42).unwrap();
         assert_eq!(r.status, "refined");
@@ -565,7 +575,59 @@ mod tests {
         assert!(!json.contains("emanoil") && !json.contains("Emanoil"), "{json}");
         assert!(!json.contains("engelsk"), "{json}");
 
+        // The built-in mode leaves the mode column empty.
+        assert_eq!(r.mode, None);
+
         assert!(RefineRun::from_outcome(SOURCE_DICTATION, &RefineOutcome::disabled("x"), 1).is_none());
+    }
+
+    #[test]
+    fn a_custom_mode_is_recorded_by_name_and_round_trips() {
+        let (_dir, store) = fresh_store();
+        let mut outcome = RefineOutcome::disabled("hej anna vi ses i morgen");
+        outcome.status = RefineStatus::Refined;
+        outcome.text = "Hi Anna, see you tomorrow. ".into();
+        outcome.mode = crate::refine::ModeUse {
+            id: "write-in-english".into(),
+            name: "Write in English".into(),
+            reason: "app-default".into(),
+            app_name: "Mail".into(),
+        };
+        let with_mode = RefineRun::from_outcome(SOURCE_DICTATION, &outcome, 7).unwrap();
+        assert_eq!(with_mode.mode.as_deref(), Some("Write in English"));
+
+        record(&store, &run("refined", 700, None));
+        record(&store, &with_mode);
+        let got = recent(&store, 10).unwrap();
+        assert_eq!(got[0], with_mode);
+        assert_eq!(got[1].mode, None);
+    }
+
+    #[test]
+    fn rows_written_before_the_mode_column_read_as_no_mode() {
+        // The table as migrations 3 and 4 left it, with one row, then
+        // the mode column added the way migration 5 adds it.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE refine_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                status TEXT NOT NULL, backend TEXT NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
+                elapsed_ms INTEGER NOT NULL, warm_lead_ms INTEGER, chars_in INTEGER NOT NULL,
+                chars_out INTEGER NOT NULL, instruction INTEGER NOT NULL, detail TEXT NOT NULL,
+                tokens_in INTEGER, tokens_cached INTEGER, tokens_out INTEGER, cost_usd REAL,
+                window_5h_used REAL, window_5h_resets_at INTEGER, window_7d_used REAL,
+                window_7d_resets_at INTEGER);
+             INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
+                chars_in, chars_out, instruction, detail)
+             VALUES (5, 'dictation', 'refined', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '');
+             ALTER TABLE refine_runs ADD COLUMN mode TEXT;",
+        )
+        .unwrap();
+        let store = Store::from_connection_for_test(conn);
+        let got = recent(&store, 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].mode, None);
+        assert_eq!(got[0].elapsed_ms, 900);
     }
 
     #[test]

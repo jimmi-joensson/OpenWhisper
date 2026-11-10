@@ -162,7 +162,7 @@ keyring = { version = "3", optional = true, default-features = false, features =
 # types for the Accessibility calls. Same versions as the Tauri shell.
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray"] }
 core-foundation = { version = "0.10", optional = true }
 
 # Refine API key storage: Windows Credential Manager.

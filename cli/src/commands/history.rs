@@ -119,7 +119,7 @@ fn default_dir() -> Result<PathBuf> {
 }
 
 /// The folder the app writes to, from the saved settings.
-fn history_dir() -> Result<PathBuf> {
+pub(super) fn history_dir() -> Result<PathBuf> {
     let saved = settings::load_history_settings(&settings_path()?);
     Ok(history::resolve_dir(&saved, &default_dir()?))
 }

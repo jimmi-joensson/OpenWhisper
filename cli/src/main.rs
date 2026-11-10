@@ -22,6 +22,9 @@
 //!   the Tauri shell consumes.
 //! - `crash-dump` — list / read crash files (placeholder until
 //!   TASK-78 lands a concrete reader).
+//! - `refine`: the optional language-model cleanup step (TASK-93).
+//!   Run text through it, check and test the backend, edit its
+//!   settings, store the API key, run the live eval set.
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -62,6 +65,8 @@ enum Command {
     Settings(commands::settings::SettingsArgs),
     /// Inspect on-disk crash dumps written by the panic hook.
     CrashDump(commands::crash_dump::Args),
+    /// Refine: clean up a transcript with a language model.
+    Refine(commands::refine::RefineArgs),
 }
 
 fn main() -> Result<()> {
@@ -73,5 +78,6 @@ fn main() -> Result<()> {
         Command::Memory(args) => commands::memory::run(args, cli.json),
         Command::Settings(args) => commands::settings::run(args, cli.json),
         Command::CrashDump(args) => commands::crash_dump::run(args, cli.json),
+        Command::Refine(args) => commands::refine::run(args, cli.json),
     }
 }

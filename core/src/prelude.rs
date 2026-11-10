@@ -11,6 +11,8 @@
 //! - `diagnostics` — recognizer info + crash-dump trait surface
 //! - `file_transcription`: decode + transcribe audio/video files
 //! - `media_gate` — pause/resume gate trait + diagnostic
+//! - `refine`: optional language-model cleanup after transcription
+//!   (feature `refine`)
 //! - `model_lifecycle` — load/unload state machine for resident models
 //! - `settings` — schema types + cache accessors
 //! - `telemetry` — process memory readout
@@ -39,15 +41,21 @@ pub use crate::diagnostics::{
 };
 #[cfg(feature = "recognizer")]
 pub use crate::diagnostics::recognizer_info;
-pub use crate::dictation::{DictationSnapshot, Injector};
+pub use crate::dictation::{DictationSnapshot, Injector, RefineInfo};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};
 pub use crate::model_lifecycle::{
     LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
     registry_snapshot,
 };
 pub use crate::settings::{
-    AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
-    PerformanceSettings, PillSettings, StatsSettings, keep_models_warm,
+    AudioSettings, BehaviorSettings, ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings,
+    HotkeyTarget, OpenAiSettings, PerformanceSettings, PillSettings, RefineBackendKind,
+    RefineEffort, RefineSettings, StatsSettings, keep_models_warm,
+};
+#[cfg(feature = "refine")]
+pub use crate::refine::{
+    BackendState, BackendStatus, ConnectionTest, Prompt, RefineError, RefineOutcome, RefineStatus,
+    Refiner, backend_status, refine_text, test_connection,
 };
 pub use crate::stats::StatsSummary;
 pub use crate::store::{Store, StoreError};

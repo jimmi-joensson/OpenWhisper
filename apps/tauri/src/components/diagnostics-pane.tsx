@@ -1,3 +1,4 @@
+import { DiagnosticsRefineSection } from "./diagnostics-refine";
 import { useLayoutEffect, useRef, useState } from "react";
 import {
   RSS_SERIES_LEN,
@@ -99,8 +100,8 @@ function DiagnosticsOverview({
       <header className="ow-diagnostics__header">
         <h1 className="ow-diagnostics__title">Diagnostics</h1>
         <p className="ow-diagnostics__sub">
-          System and OpenWhisper memory at a glance. Per-model load and
-          unload live in Settings → Models.
+          Memory, crashes and how the Refine step is performing. Per-model
+          load and unload live in Settings → Models.
         </p>
       </header>
 
@@ -133,6 +134,8 @@ function DiagnosticsOverview({
           onOpen={onOpenCrashes}
         />
       </section>
+
+      <DiagnosticsRefineSection />
     </div>
   );
 }

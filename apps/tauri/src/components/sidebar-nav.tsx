@@ -9,6 +9,7 @@ import {
   Mic,
   Settings as SettingsIcon,
   SlidersHorizontal,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import { SETTINGS_PANES, type SettingsPaneId } from "../lib/settings-panes";
@@ -20,6 +21,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   models: Boxes,
   shortcuts: Keyboard,
   dictionary: BookA,
+  refine: Sparkles,
 };
 
 export type Route = "home" | "transcribe" | "settings" | "diagnostics";

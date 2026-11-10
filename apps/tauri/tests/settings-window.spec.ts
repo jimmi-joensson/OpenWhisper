@@ -34,6 +34,7 @@ test.describe("settings view", () => {
     await expect(page.getByRole("tab", { name: "Models" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Shortcuts" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Dictionary" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Refine" })).toBeVisible();
   });
 
   test("General is the landing pane", async ({ page }) => {
@@ -464,12 +465,17 @@ test.describe("settings view", () => {
       "true",
     );
     await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("tab", { name: "Refine" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.keyboard.press("ArrowDown");
     await expect(page.getByRole("tab", { name: "General" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
     await page.keyboard.press("ArrowUp");
-    await expect(page.getByRole("tab", { name: "Dictionary" })).toHaveAttribute(
+    await expect(page.getByRole("tab", { name: "Refine" })).toHaveAttribute(
       "aria-selected",
       "true",
     );

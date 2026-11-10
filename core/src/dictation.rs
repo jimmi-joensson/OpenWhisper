@@ -42,6 +42,9 @@ struct State {
     /// Dictionary fixes made in `transcript` (see
     /// [`crate::transcript::process_tracked`]). Cleared with it.
     replacements: Vec<crate::dictionary::Replacement>,
+    /// What the Refine step did to `transcript` (see
+    /// [`dictation_set_refine_result`]). Cleared with it.
+    refine: RefineInfo,
     confidence: f32,
     sample_count: u64,
     record_start: Option<Instant>,
@@ -67,6 +70,29 @@ struct State {
     download_bytes_total: u64,
 }
 
+/// Result of the Refine step for the current transcript, as the UI
+/// needs it. Plain strings so this module compiles (and the snapshot
+/// keeps its shape) without the `refine` feature.
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefineInfo {
+    /// The transcript before Refine (after rules and dictionary).
+    /// Empty when Refine did not run.
+    pub raw_transcript: String,
+    /// `""` when Refine did not run, otherwise the status id:
+    /// `refined`, `skipped-short`, `timeout`, `unavailable`,
+    /// `failed`, `rejected`.
+    pub status: String,
+    /// Why the transcript was not refined; empty otherwise.
+    pub detail: String,
+    /// The spoken instruction Refine carried out ("make that more
+    /// formal"), in the speaker's words; empty for plain cleanup.
+    pub instruction: String,
+    /// Backend id, e.g. `claude-cli`.
+    pub backend: String,
+    /// Time spent waiting for the backend.
+    pub elapsed_ms: u64,
+}
+
 impl State {
     fn new() -> Self {
         Self {
@@ -74,6 +100,7 @@ impl State {
             status_message: "idle — tap Record, speak, tap again".to_string(),
             transcript: String::new(),
             replacements: Vec::new(),
+            refine: RefineInfo::default(),
             confidence: 0.0,
             sample_count: 0,
             record_start: None,
@@ -102,6 +129,7 @@ pub struct DictationSnapshot {
     status_message: String,
     transcript: String,
     replacements: Vec<crate::dictionary::Replacement>,
+    refine: RefineInfo,
     confidence: f32,
     sample_count: u64,
     elapsed_ms: u64,
@@ -126,6 +154,12 @@ impl DictationSnapshot {
     /// (not part of the swift-bridge surface).
     pub fn replacements(&self) -> Vec<crate::dictionary::Replacement> {
         self.replacements.clone()
+    }
+    /// What the Refine step did to [`DictationSnapshot::transcript`],
+    /// including the unrefined text. Rust-only (not part of the
+    /// swift-bridge surface).
+    pub fn refine(&self) -> RefineInfo {
+        self.refine.clone()
     }
     pub fn confidence(&self) -> f32 {
         self.confidence
@@ -258,6 +292,7 @@ pub fn dictation_snapshot() -> DictationSnapshot {
         status_message: s.status_message.clone(),
         transcript: s.transcript.clone(),
         replacements: s.replacements.clone(),
+        refine: s.refine.clone(),
         confidence: s.confidence,
         sample_count: s.sample_count,
         elapsed_ms: s
@@ -313,6 +348,7 @@ pub fn dictation_request_toggle() -> u32 {
             // doesn't briefly show stale content while the shell spins up.
             s.transcript.clear();
             s.replacements.clear();
+            s.refine = RefineInfo::default();
             s.confidence = 0.0;
             s.sample_count = 0;
             s.error_message.clear();
@@ -332,6 +368,7 @@ pub fn dictation_request_cancel() -> bool {
         s.voiced_ms_at_drain = None;
         s.transcript.clear();
         s.replacements.clear();
+        s.refine = RefineInfo::default();
         s.confidence = 0.0;
         s.sample_count = 0;
         s.status_message = "cancelled".to_string();
@@ -485,6 +522,79 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
     })
 }
 
+/// The transcript is with the Refine backend. Status string only: the
+/// phase stays TRANSCRIBING, so the pill and the toggle gating do not
+/// change. Called only when a model call is actually about to happen.
+pub fn dictation_mark_refining() {
+    with_state(|s| {
+        if s.phase == PHASE_TRANSCRIBING {
+            s.status_message = "refining…".to_string();
+        }
+    });
+    crate::crashes::event_buffer::push_event(
+        "PhaseChange",
+        serde_json::json!({ "to": "Refining" }),
+    );
+}
+
+/// Record what the Refine step did, before the transcript is
+/// delivered, so the DONE tick already carries it. `info.status`
+/// empty means Refine did not run (switched off).
+pub fn dictation_set_refine_result(info: RefineInfo) {
+    with_state(|s| s.refine = info);
+}
+
+/// The Refine stage of the stop pipeline: rule-cleaned text in, the
+/// text to deliver out. With Refine off (the default) this returns
+/// `cleaned` unchanged and starts no process or request. Any failure
+/// inside Refine also returns `cleaned`; the reason lands on the
+/// snapshot (see [`RefineInfo`]).
+#[cfg(all(feature = "recognizer", feature = "refine"))]
+fn refine_stage(cleaned: &str) -> String {
+    if crate::refine::will_call_backend(cleaned) {
+        dictation_mark_refining();
+    }
+    let outcome = crate::refine::run_for_dictation(cleaned);
+    if outcome.status == crate::refine::RefineStatus::Disabled {
+        return outcome.text;
+    }
+    dictation_set_refine_result(RefineInfo {
+        raw_transcript: outcome.raw,
+        status: outcome.status.as_str().to_string(),
+        detail: outcome.detail,
+        instruction: outcome.instruction,
+        backend: outcome.backend,
+        elapsed_ms: outcome.elapsed_ms,
+    });
+    outcome.text
+}
+
+#[cfg(all(feature = "recognizer", not(feature = "refine")))]
+fn refine_stage(cleaned: &str) -> String {
+    cleaned.to_string()
+}
+
+/// Let the Refine backend start up while the user talks. No-op with
+/// Refine off or the feature not compiled in.
+#[cfg(feature = "recognizer")]
+fn refine_warm<E: DictationEnv>(env: &E) {
+    #[cfg(feature = "refine")]
+    env.spawn(
+        "openwhisper-refine-warm",
+        Box::new(crate::refine::warm_for_recording),
+    );
+    #[cfg(not(feature = "refine"))]
+    let _ = env;
+}
+
+/// Drop whatever [`refine_warm`] started (cancelled or empty
+/// recording, failed transcription).
+#[cfg(feature = "recognizer")]
+fn refine_discard() {
+    #[cfg(feature = "refine")]
+    crate::refine::discard_warm();
+}
+
 pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     IS_RECORDING.store(false, Ordering::Relaxed);
     let (started_at_ms, duration_ms, wall_clock_ms) = with_state(|s| {
@@ -619,6 +729,7 @@ pub fn run_toggle<E: DictationEnv>(env: &E) -> Result<(), String> {
     let action = dictation_request_toggle();
     match action {
         TOGGLE_BEGIN_RECORDING => {
+            let t_start = std::time::Instant::now();
             // Kick off model load lazily on first record so the UI's
             // "loading model" phase reflects real work. ensure_loaded is
             // idempotent — subsequent toggles short-circuit.
@@ -634,8 +745,19 @@ pub fn run_toggle<E: DictationEnv>(env: &E) -> Result<(), String> {
             // Fade out + pause other apps' audio BEFORE opening the
             // mic. See `media_gate::pause` doc.
             env.pause_audio();
+            let pause_ms = t_start.elapsed().as_millis();
             crate::audio::audio_start_capture()?;
             dictation_mark_capture_started();
+            // How long the hotkey press took to become a live mic.
+            // Refine is not in this number: it warms up on its own
+            // thread, started on the next line.
+            crate::verbose_log!(
+                "[ow.dictation] start pause_audio_ms={pause_ms} mic_live_ms={}",
+                t_start.elapsed().as_millis()
+            );
+            // Off the hotkey thread: it reads the dictionary, may read
+            // the keychain, and spawns a process.
+            refine_warm(env);
         }
         TOGGLE_STOP_RECORDING => {
             // Stop capture is cheap (cpal stream teardown). The expensive
@@ -666,6 +788,7 @@ pub fn run_cancel<E: DictationEnv>(env: &E) -> bool {
     crate::audio::audio_stop_capture();
     let _ = crate::audio::audio_drain_samples();
     let cancelled = dictation_request_cancel();
+    refine_discard();
     env.resume_audio();
     cancelled
 }
@@ -722,6 +845,7 @@ pub fn run_stop_pipeline() {
     dictation_mark_capture_stopped(count);
     if count == 0 {
         crate::verbose_log!("[ow.dictation] stop empty drain_ms={drain_ms}");
+        refine_discard();
         return;
     }
     // Defensive: recognizer_transcribe requires the engine to be
@@ -730,6 +854,7 @@ pub fn run_stop_pipeline() {
     // block until it's ready.
     let t_load = std::time::Instant::now();
     if let Err(e) = crate::recognizer::recognizer_ensure_loaded() {
+        refine_discard();
         dictation_deliver_error(&format!("recognizer load: {e}"));
         return;
     }
@@ -741,15 +866,24 @@ pub fn run_stop_pipeline() {
             let (cleaned, replacements) = crate::transcript::process_tracked(&res.text);
             // Before delivery, so the DONE tick already carries them.
             with_state(|s| s.replacements = replacements);
+            // Refine sits here: after the dictionary, before the text
+            // reaches the UI snapshot, the cursor and the clipboard.
+            let t_refine = std::time::Instant::now();
+            let text = refine_stage(&cleaned);
+            let refine_ms = t_refine.elapsed().as_millis();
             crate::verbose_log!(
                 "[ow.dictation] stop drain_ms={drain_ms} ensure_loaded_ms={load_ms} \
-                 transcribe_ms={transcribe_ms} samples={count} chars={} confidence={:.2}",
-                cleaned.len(),
+                 transcribe_ms={transcribe_ms} refine_ms={refine_ms} samples={count} \
+                 chars={} confidence={:.2}",
+                text.len(),
                 res.confidence
             );
-            dictation_deliver_transcript(&cleaned, res.confidence);
+            dictation_deliver_transcript(&text, res.confidence);
         }
-        Err(e) => dictation_deliver_error(&format!("transcribe: {e}")),
+        Err(e) => {
+            refine_discard();
+            dictation_deliver_error(&format!("transcribe: {e}"));
+        }
     }
 }
 
@@ -931,6 +1065,41 @@ mod tests {
         dictation_mark_capture_stopped(16000);
         let snap = try_snapshot_for_crash().expect("transcribing snapshot");
         assert_eq!(snap.samples_captured, 16000);
+    }
+
+    #[test]
+    fn refine_result_rides_the_snapshot_and_clears_with_the_transcript() {
+        let _lock = start();
+        let _ = dictation_request_toggle();
+        dictation_mark_capture_started();
+        dictation_mark_capture_stopped(16000);
+        dictation_mark_refining();
+        assert_eq!(dictation_snapshot().status_message(), "refining…");
+        assert_eq!(dictation_snapshot().phase(), PHASE_TRANSCRIBING);
+        dictation_set_refine_result(RefineInfo {
+            raw_transcript: "hello world ".into(),
+            status: "refined".into(),
+            detail: String::new(),
+            instruction: String::new(),
+            backend: "claude-cli".into(),
+            elapsed_ms: 740,
+        });
+        dictation_deliver_transcript("Hello, world. ", 0.9);
+        let snap = dictation_snapshot();
+        assert_eq!(snap.transcript(), "Hello, world. ");
+        assert_eq!(snap.refine().raw_transcript, "hello world ");
+        assert_eq!(snap.refine().status, "refined");
+        assert_eq!(snap.refine().elapsed_ms, 740);
+        // Next recording starts clean.
+        let _ = dictation_request_toggle();
+        assert_eq!(dictation_snapshot().refine(), RefineInfo::default());
+    }
+
+    #[test]
+    fn refining_status_only_while_transcribing() {
+        let _lock = start();
+        dictation_mark_refining();
+        assert_ne!(dictation_snapshot().status_message(), "refining…");
     }
 
     #[test]

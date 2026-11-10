@@ -95,6 +95,17 @@ pub fn process_tracked(text: &str) -> (String, Vec<crate::dictionary::Replacemen
     }
 }
 
+/// Last pass over text that came back from the Refine step (see
+/// [`crate::refine`]): the dictionary once more, so a model that wrote
+/// "Payproff" still ends up as "PayProff", then the same whitespace
+/// rules and trailing space as [`process`]. No filler stripping or
+/// dedupe: the model already made those calls.
+pub fn finalize_refined(text: &str) -> String {
+    let out = crate::dictionary::current_matcher().apply(text);
+    let out = normalize_whitespace(&out);
+    if out.is_empty() { out } else { format!("{out} ") }
+}
+
 fn strip_fillers(text: &str, lang: &FillerLang) -> String {
     let re = match lang {
         FillerLang::En => &*EN_FILLER_RE,

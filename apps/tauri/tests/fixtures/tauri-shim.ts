@@ -7,6 +7,15 @@ export interface MockTick {
   status_message?: string;
   transcript?: string;
   replacements?: { from: string; to: string }[];
+  // What the Refine step did (mirrors `RefineInfo` in core).
+  refine?: {
+    raw_transcript: string;
+    status: string;
+    detail: string;
+    instruction?: string;
+    backend: string;
+    elapsed_ms: number;
+  };
   confidence?: number;
   sample_count?: number;
   elapsed_ms?: number;
@@ -22,6 +31,14 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
   status_message: "",
   transcript: "",
   replacements: [],
+  refine: {
+    raw_transcript: "",
+    status: "",
+    detail: "",
+    instruction: "",
+    backend: "",
+    elapsed_ms: 0,
+  },
   confidence: 0,
   sample_count: 0,
   elapsed_ms: 0,
@@ -420,6 +437,183 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           const w = window as unknown as { __owDictionaryRevealCount?: number };
           w.__owDictionaryRevealCount = (w.__owDictionaryRevealCount ?? 0) + 1;
           return null;
+        }
+        // Refine pane (TASK-93). `__owRefineSettings` seeds the stored
+        // block; `__owRefineStatus` / `__owRefineTest` override what the
+        // backend probe and the connection test answer. Saves, test
+        // runs and the stored key are recorded for assertions. The key
+        // is write-only here too: no command ever returns it.
+        if (cmd.startsWith("refine_")) {
+          type Settings = {
+            enabled: boolean;
+            backend: "claude-cli" | "openai-compatible";
+            instructions: string;
+            timeout_ms: number;
+            min_words: number;
+            drift_guard: boolean;
+            claude_cli: { model: string; effort: string; path: string | null };
+            openai: { base_url: string; model: string; effort: string | null };
+          };
+          const w = window as unknown as {
+            __owRefineSettings?: Partial<Settings>;
+            __owRefineStored?: Settings;
+            __owRefineSaves?: Settings[];
+            __owRefineStatus?: Record<string, unknown>;
+            __owRefineStatusCount?: number;
+            __owRefineTest?: Record<string, unknown>;
+            __owRefineTestCount?: number;
+            __owRefineKey?: string;
+            __owRefineHistory?: { summary: unknown; runs: unknown[] };
+            __owRefineHistoryClearCount?: number;
+          };
+          const defaults: Settings = {
+            enabled: false,
+            backend: "claude-cli",
+            instructions: "",
+            timeout_ms: 5000,
+            min_words: 4,
+            drift_guard: true,
+            claude_cli: { model: "sonnet", effort: "low", path: null },
+            openai: { base_url: "https://api.openai.com/v1", model: "", effort: null },
+          };
+          if (!w.__owRefineStored) {
+            const seed = w.__owRefineSettings ?? {};
+            w.__owRefineStored = {
+              ...defaults,
+              ...seed,
+              claude_cli: { ...defaults.claude_cli, ...(seed.claude_cli ?? {}) },
+              openai: { ...defaults.openai, ...(seed.openai ?? {}) },
+            };
+          }
+          const stored = w.__owRefineStored;
+          const testSentence =
+            "so um this is a test of the refine step uh it should come back with punctuation";
+          if (cmd === "refine_get") {
+            return {
+              settings: stored,
+              default_instructions:
+                "Fix punctuation and capitalization. Remove filler words and false starts. Fix words that were obviously misheard by the speech recognizer.",
+              test_sentence: testSentence,
+            };
+          }
+          if (cmd === "refine_set") {
+            const { settings } = (args ?? {}) as { settings: Settings };
+            // Mimic core's clean-up: trimmed strings.
+            const saved: Settings = {
+              ...settings,
+              instructions: settings.instructions.trim(),
+              claude_cli: {
+                ...settings.claude_cli,
+                model: settings.claude_cli.model.trim() || "sonnet",
+              },
+              openai: {
+                ...settings.openai,
+                base_url: settings.openai.base_url.trim().replace(/\/+$/, ""),
+                model: settings.openai.model.trim(),
+              },
+            };
+            w.__owRefineStored = saved;
+            w.__owRefineSaves = [...(w.__owRefineSaves ?? []), saved];
+            return saved;
+          }
+          if (cmd === "refine_status") {
+            w.__owRefineStatusCount = (w.__owRefineStatusCount ?? 0) + 1;
+            const base = {
+              backend: stored.backend,
+              path: null,
+              version: null,
+              auth_method: null,
+              plan: null,
+              has_api_key: Boolean(w.__owRefineKey),
+            };
+            if (stored.backend === "claude-cli") {
+              return {
+                ...base,
+                state: "ready",
+                ready: true,
+                message: "Claude Code is signed in with your Claude subscription (max).",
+                destination:
+                  "Anthropic (Claude), through the Claude Code app signed in on this computer",
+                path: "/Users/test/.local/bin/claude",
+                version: "2.1.322 (Claude Code)",
+                auth_method: "claude.ai",
+                plan: "max",
+                ...(w.__owRefineStatus ?? {}),
+              };
+            }
+            const configured = Boolean(stored.openai.base_url && stored.openai.model);
+            let host = "the endpoint";
+            try {
+              host = new URL(stored.openai.base_url).host;
+            } catch {
+              // keep the placeholder
+            }
+            return {
+              ...base,
+              state: configured ? "ready" : "not-configured",
+              ready: configured,
+              message: configured
+                ? `Set up for ${stored.openai.model}. Use the connection test to check it.`
+                : "No model name is set.",
+              destination: `the server at ${host}`,
+              ...(w.__owRefineStatus ?? {}),
+            };
+          }
+          if (cmd === "refine_test") {
+            w.__owRefineTestCount = (w.__owRefineTestCount ?? 0) + 1;
+            return {
+              ok: true,
+              backend: stored.backend,
+              output:
+                "This is a test of the Refine step. It should come back with punctuation.",
+              message: "",
+              elapsed_ms: 1180,
+              ...(w.__owRefineTest ?? {}),
+            };
+          }
+          if (cmd === "refine_history") {
+            return (
+              w.__owRefineHistory ?? {
+                summary: {
+                  total: 0,
+                  refined: 0,
+                  skipped: 0,
+                  fallbacks: 0,
+                  timeouts: 0,
+                  unavailable: 0,
+                  failed: 0,
+                  rejected: 0,
+                  instructions: 0,
+                  median_ms: null,
+                  p90_ms: null,
+                  max_ms: null,
+                  median_warm_ms: null,
+                  median_cold_ms: null,
+                  warm_runs: 0,
+                  cold_runs: 0,
+                  last_problem_at_ms: null,
+                  last_problem: "",
+                  usage_runs: 0,
+                  avg_tokens_in: null,
+                  avg_tokens_out: null,
+                  avg_cost_usd: null,
+                  total_cost_usd: null,
+                  plan: null,
+                },
+                runs: [],
+              }
+            );
+          }
+          if (cmd === "refine_history_clear") {
+            w.__owRefineHistory = undefined;
+            w.__owRefineHistoryClearCount = (w.__owRefineHistoryClearCount ?? 0) + 1;
+            return null;
+          }
+          if (cmd === "refine_set_api_key") {
+            const { key } = (args ?? {}) as { key: string };
+            w.__owRefineKey = key.trim() || undefined;
+            return Boolean(w.__owRefineKey);
+          }
         }
         if (cmd === "settings_get_performance") {
           const w = window as unknown as { __owKeepModelsWarm?: boolean };

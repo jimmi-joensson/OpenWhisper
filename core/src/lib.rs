@@ -11,6 +11,8 @@ pub mod model_lifecycle;
 pub mod prelude;
 #[cfg(feature = "recognizer")]
 pub mod recognizer;
+#[cfg(feature = "refine")]
+pub mod refine;
 pub mod settings;
 pub mod stats;
 pub mod store;

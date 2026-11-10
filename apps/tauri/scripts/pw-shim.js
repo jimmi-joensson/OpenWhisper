@@ -31,6 +31,55 @@ async (page) => {
           window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
+        // optional `cycle_mode` slot is absent until set; its command
+        // target is "cycle-mode".
+        if (
+          cmd === "settings_get_hotkeys" ||
+          cmd === "settings_set_hotkey" ||
+          cmd === "settings_reset_hotkey"
+        ) {
+          window.__owHotkeys = window.__owHotkeys ?? {
+            toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+            cancel: { kind: "chord", code: "Escape", mods: [] },
+          };
+          // A copy, as over real IPC.
+          if (cmd === "settings_get_hotkeys") return structuredClone(window.__owHotkeys);
+
+          const { target, config } = args ?? {};
+          const key = target === "cycle-mode" ? "cycle_mode" : target;
+          window.__owHotkeyLastTarget = target;
+          if (cmd === "settings_set_hotkey") {
+            window.__owHotkeys[key] = config;
+            window.__owHotkeySetCount = (window.__owHotkeySetCount ?? 0) + 1;
+            window.__owHotkeyLastConfig = config;
+            return null;
+          }
+          window.__owHotkeyResetCount = (window.__owHotkeyResetCount ?? 0) + 1;
+          if (target === "cycle-mode") {
+            delete window.__owHotkeys[key];
+            return null;
+          }
+          const def =
+            target === "toggle"
+              ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
+              : { kind: "chord", code: "Escape", mods: [] };
+          window.__owHotkeys[key] = def;
+          return def;
+        }
+        if (cmd === "settings_capture_hotkey_start") {
+          window.__owCaptureStartCount = (window.__owCaptureStartCount ?? 0) + 1;
+          window.__owCaptureLastTarget = (args ?? {}).target;
+          return null;
+        }
+        if (cmd === "settings_capture_hotkey_cancel") {
+          window.__owCaptureCancelCount = (window.__owCaptureCancelCount ?? 0) + 1;
+          return null;
+        }
+        if (cmd === "modes_cycle") {
+          window.__owModesCycleCount = (window.__owModesCycleCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "plugin:event|listen") {
           const { event, handler } = args ?? {};
           if (!handlers.has(event)) handlers.set(event, new Set());

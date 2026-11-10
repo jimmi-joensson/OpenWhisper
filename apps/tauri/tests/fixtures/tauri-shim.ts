@@ -95,6 +95,11 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
         if (cmd === "plugin:app|name") return "OpenWhisper Dev";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
+        if (cmd === "modes_cycle") {
+          (window as unknown as { __owModesCycleCount?: number }).__owModesCycleCount =
+            ((window as unknown as { __owModesCycleCount?: number }).__owModesCycleCount ?? 0) + 1;
+          return null;
+        }
         if (cmd === "hotkey_status_current") return null;
         if (cmd === "permissions_status_current") return null;
         if (cmd === "hotkey_retry") {
@@ -107,50 +112,61 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             ((window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount ?? 0) + 1;
           return null;
         }
-        if (cmd === "settings_get_hotkeys") {
-          const stored = (window as unknown as { __owHotkeys?: unknown }).__owHotkeys;
-          return (
-            stored ?? {
-              toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
-              cancel: { kind: "chord", code: "Escape", mods: [] },
-            }
-          );
-        }
-        if (cmd === "settings_set_hotkey") {
-          const { target, config } = (args ?? {}) as {
-            target: "toggle" | "cancel";
-            config: unknown;
+        // Hotkey slots. `toggle` and `cancel` always have a binding;
+        // the optional `cycle_mode` slot is absent until set, the way
+        // the Rust side leaves it out of the payload. The command
+        // target for it is "cycle-mode" (kebab-case), the settings key
+        // "cycle_mode". Keep in step with scripts/pw-shim.js.
+        if (
+          cmd === "settings_get_hotkeys" ||
+          cmd === "settings_set_hotkey" ||
+          cmd === "settings_reset_hotkey"
+        ) {
+          const w = window as unknown as {
+            __owHotkeys?: Record<string, unknown>;
+            __owHotkeySetCount?: number;
+            __owHotkeyResetCount?: number;
+            __owHotkeyLastTarget?: string;
+            __owHotkeyLastConfig?: unknown;
           };
-          const w = window as unknown as { __owHotkeys?: Record<string, unknown> };
           w.__owHotkeys = w.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
-          w.__owHotkeys[target] = config;
-          (window as unknown as { __owHotkeySetCount?: number }).__owHotkeySetCount =
-            ((window as unknown as { __owHotkeySetCount?: number }).__owHotkeySetCount ?? 0) + 1;
-          (window as unknown as { __owHotkeyLastTarget?: string }).__owHotkeyLastTarget = target;
-          return null;
-        }
-        if (cmd === "settings_reset_hotkey") {
-          const { target } = (args ?? {}) as { target: "toggle" | "cancel" };
+          // A copy, as over real IPC: the caller must not see later
+          // writes through a shared object.
+          if (cmd === "settings_get_hotkeys") return structuredClone(w.__owHotkeys);
+
+          const { target, config } = (args ?? {}) as {
+            target: "toggle" | "cancel" | "cycle-mode";
+            config?: unknown;
+          };
+          const key = target === "cycle-mode" ? "cycle_mode" : target;
+          w.__owHotkeyLastTarget = target;
+          if (cmd === "settings_set_hotkey") {
+            w.__owHotkeys[key] = config;
+            w.__owHotkeySetCount = (w.__owHotkeySetCount ?? 0) + 1;
+            w.__owHotkeyLastConfig = config;
+            return null;
+          }
+          // Reset: the default binding, or "not set" (null) for the
+          // optional slot, which is removed.
+          w.__owHotkeyResetCount = (w.__owHotkeyResetCount ?? 0) + 1;
+          if (target === "cycle-mode") {
+            delete w.__owHotkeys[key];
+            return null;
+          }
           const def =
             target === "toggle"
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
               : { kind: "chord", code: "Escape", mods: [] };
-          const w = window as unknown as { __owHotkeys?: Record<string, unknown> };
-          w.__owHotkeys = w.__owHotkeys ?? {
-            toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
-            cancel: { kind: "chord", code: "Escape", mods: [] },
-          };
-          w.__owHotkeys[target] = def;
-          (window as unknown as { __owHotkeyResetCount?: number }).__owHotkeyResetCount =
-            ((window as unknown as { __owHotkeyResetCount?: number }).__owHotkeyResetCount ?? 0) + 1;
-          (window as unknown as { __owHotkeyLastTarget?: string }).__owHotkeyLastTarget = target;
+          w.__owHotkeys[key] = def;
           return def;
         }
         if (cmd === "settings_capture_hotkey_start") {
-          const { target } = (args ?? {}) as { target?: "toggle" | "cancel" };
+          const { target } = (args ?? {}) as {
+            target?: "toggle" | "cancel" | "cycle-mode";
+          };
           (window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount =
             ((window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount ?? 0) + 1;
           (window as unknown as { __owCaptureLastTarget?: string }).__owCaptureLastTarget = target;

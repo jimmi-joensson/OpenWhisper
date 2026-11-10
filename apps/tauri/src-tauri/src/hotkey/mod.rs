@@ -1,16 +1,23 @@
-//! Global hotkey + cancel-while-recording.
+//! Global hotkeys.
 //!
-//! Two configurable slots — toggle (start/stop dictation) and cancel
-//! (discard the current recording). Defaults: Right ⌘ / Esc on mac,
-//! Ctrl+Space / Esc on Windows. Both rebindable via Settings → Shortcuts.
+//! The slots are a table, [`SLOTS`]: toggle (start/stop dictation),
+//! cancel (discard the current recording, only while recording) and
+//! the optional cycle-mode slot (switch to the next mode). Defaults:
+//! Right ⌘ / Esc on mac, Ctrl+Space / Esc on Windows; cycle-mode is
+//! unbound until the user records a key. All rebindable via
+//! Settings → Shortcuts. A new slot is one more table entry plus its
+//! action; neither backend names a slot.
 //!
 //! Per-platform because activation gestures differ:
-//! - **Mac**: `CGEventTap` — toggle supports both modifier-tap (default
-//!   Right Cmd: tap-not-hold) and chord; cancel supports the same.
-//! - **Windows**: `WH_KEYBOARD_LL` hook — chord-only for both slots.
+//! - **Mac**: `CGEventTap`. Every slot supports both modifier-tap
+//!   (default Right Cmd: tap-not-hold) and chord.
+//! - **Windows**: `WH_KEYBOARD_LL` hook, chord-only for every slot.
 //!
 //! Status surface: `hotkey_status` Tauri event (see [`HotkeyStatus`]) and
 //! the `hotkey_retry` command. UI shows a HealthBanner when `ok = false`.
+//! A required slot (toggle, cancel) that cannot be compiled fails the
+//! install. An optional slot that cannot be is left out and named in
+//! `skipped`, with `ok` still true: dictation keeps working.
 //!
 //! Capture surface: Settings flips [`set_capture_active`] true while the
 //! user clicks "press keys…". The next eligible event is delivered via
@@ -23,7 +30,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::settings::{HotkeyConfig, HotkeyTarget};
+use crate::settings::{HotkeyConfig, HotkeySettings, HotkeyTarget};
 
 #[cfg(target_os = "macos")]
 mod mac;
@@ -34,6 +41,144 @@ mod windows;
 pub struct HotkeyStatus {
     pub ok: bool,
     pub error: String,
+    /// Optional slots that have a binding but were not installed, and
+    /// why. Left out of the payload when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedSlot>,
+}
+
+/// An optional slot the backend left out. `target` is
+/// [`HotkeyTarget::as_str`]; `reason` is a sentence for the user.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SkippedSlot {
+    pub target: &'static str,
+    pub reason: String,
+}
+
+/// One hotkey slot: which binding it reads and what it does.
+pub(crate) struct SlotSpec {
+    pub target: HotkeyTarget,
+    /// Fire only while a recording is active; outside one the key
+    /// passes through to the focused app.
+    pub gate_on_recording: bool,
+    /// Called on the hook / tap thread once per press. Must return at
+    /// once: anything slow goes on its own thread.
+    pub action: fn(),
+}
+
+/// Every slot, in match order: when two slots would match the same
+/// key event, the earlier one wins. Whether a slot may be unbound is
+/// [`HotkeyTarget::is_optional`]; an unbound slot installs nothing.
+pub(crate) const SLOTS: &[SlotSpec] = &[
+    SlotSpec { target: HotkeyTarget::Toggle, gate_on_recording: false, action: fire_toggle },
+    SlotSpec { target: HotkeyTarget::Cancel, gate_on_recording: true, action: fire_cancel },
+    SlotSpec { target: HotkeyTarget::CycleMode, gate_on_recording: false, action: fire_cycle_mode },
+];
+
+fn fire_toggle() {
+    let run = || {
+        if let Err(e) = crate::do_toggle() {
+            eprintln!("hotkey toggle failed: {e}");
+        }
+    };
+    // The Windows hook has always handed the toggle to a thread; the
+    // mac tap has always run it in place. Kept as they were.
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn(run);
+    }
+    #[cfg(not(target_os = "windows"))]
+    run();
+}
+
+fn fire_cancel() {
+    std::thread::spawn(|| {
+        let _ = crate::do_cancel();
+    });
+}
+
+fn fire_cycle_mode() {
+    std::thread::spawn(|| {
+        if let Err(e) = crate::do_cycle_mode() {
+            eprintln!("hotkey cycle-mode failed: {e}");
+        }
+    });
+}
+
+/// The binding stored for a slot, `None` when an optional slot is
+/// unbound.
+fn slot_config(settings: &HotkeySettings, target: HotkeyTarget) -> Option<&HotkeyConfig> {
+    match target {
+        HotkeyTarget::Toggle => Some(&settings.toggle),
+        HotkeyTarget::Cancel => Some(&settings.cancel),
+        HotkeyTarget::CycleMode => settings.cycle_mode.as_ref(),
+    }
+}
+
+/// Same key and same modifiers, whatever order the modifiers are in.
+fn same_binding(a: &HotkeyConfig, b: &HotkeyConfig) -> bool {
+    let sorted = |c: &HotkeyConfig| {
+        let mut mods = c.mods.clone();
+        mods.sort();
+        mods
+    };
+    a.kind == b.kind && a.code == b.code && sorted(a) == sorted(b)
+}
+
+/// Compile every bound slot with the backend's `compile`, which
+/// returns the compiled binding or a sentence saying why it cannot be
+/// used on this platform.
+///
+/// Returns the compiled slots as `(index into SLOTS, compiled)` in
+/// table order, plus the optional slots that were left out. A required
+/// slot that does not compile is an `Err`: the install fails as a
+/// whole, as it always has. An optional slot is left out when it does
+/// not compile, or when it repeats the keys of a slot before it (the
+/// earlier slot would win every press, and two modifier-taps on one
+/// key would both fire).
+pub(crate) fn compile_slots<T>(
+    settings: &HotkeySettings,
+    compile: impl Fn(&HotkeyConfig) -> Result<T, String>,
+) -> Result<(Vec<(usize, T)>, Vec<SkippedSlot>), String> {
+    let mut compiled: Vec<(usize, T)> = Vec::new();
+    let mut skipped = Vec::new();
+    for (index, spec) in SLOTS.iter().enumerate() {
+        let Some(config) = slot_config(settings, spec.target) else {
+            continue;
+        };
+        let optional = spec.target.is_optional();
+        if optional {
+            let taken = compiled.iter().find(|(i, _)| {
+                slot_config(settings, SLOTS[*i].target).is_some_and(|c| same_binding(c, config))
+            });
+            if let Some((i, _)) = taken {
+                skipped.push(SkippedSlot {
+                    target: spec.target.as_str(),
+                    reason: format!(
+                        "It uses the same keys as the {} shortcut.",
+                        SLOTS[*i].target.as_str()
+                    ),
+                });
+                continue;
+            }
+        }
+        match compile(config) {
+            Ok(value) => compiled.push((index, value)),
+            Err(reason) if optional => {
+                skipped.push(SkippedSlot { target: spec.target.as_str(), reason });
+            }
+            Err(_) => {
+                return Err(format!(
+                    "Unsupported {} hotkey: kind={:?} code={} mods={:?}",
+                    spec.target.as_str(),
+                    config.kind,
+                    config.code,
+                    config.mods
+                ));
+            }
+        }
+    }
+    Ok((compiled, skipped))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -69,8 +214,16 @@ fn cached_handle() -> Option<AppHandle> {
     handle_slot().lock().ok().and_then(|g| g.clone())
 }
 
-pub(crate) fn emit_status(app: &AppHandle, ok: bool, error: impl Into<String>) {
-    let status = HotkeyStatus { ok, error: error.into() };
+fn emit_status(app: &AppHandle, result: Result<Vec<SkippedSlot>, String>) {
+    let status = match result {
+        Ok(skipped) => {
+            for slot in &skipped {
+                eprintln!("hotkey: {} shortcut not installed: {}", slot.target, slot.reason);
+            }
+            HotkeyStatus { ok: true, error: String::new(), skipped }
+        }
+        Err(error) => HotkeyStatus { ok: false, error, skipped: Vec::new() },
+    };
     if let Ok(mut last) = LAST_STATUS.lock() {
         *last = Some(status.clone());
     }
@@ -138,31 +291,21 @@ pub fn set_active(app: &AppHandle, active: bool) {
     }
 }
 
-/// Install platform-specific hotkey + cancel hook. Idempotent — calling
+/// Install the platform hook for every bound slot. Idempotent: calling
 /// twice tears down and reinstalls. Used at boot, from `hotkey_retry`,
-/// and after any `settings_set_hotkey` save.
+/// and after any hotkey save, reset or clear.
 pub fn install(app: &AppHandle) {
     store_handle(app);
     let settings =
         crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings);
     #[cfg(target_os = "macos")]
-    {
-        match mac::install(app, &settings) {
-            Ok(()) => emit_status(app, true, ""),
-            Err(e) => emit_status(app, false, e),
-        }
-    }
+    emit_status(app, mac::install(app, &settings));
     #[cfg(target_os = "windows")]
-    {
-        match windows::install(app, &settings) {
-            Ok(()) => emit_status(app, true, ""),
-            Err(e) => emit_status(app, false, e),
-        }
-    }
+    emit_status(app, windows::install(app, &settings));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = settings;
-        emit_status(app, false, "hotkey: platform not supported in MVP");
+        emit_status(app, Err("hotkey: platform not supported in MVP".into()));
     }
 }
 
@@ -205,4 +348,139 @@ pub fn hotkey_retry(app: AppHandle) {
 #[tauri::command]
 pub fn hotkey_status_current() -> Option<HotkeyStatus> {
     LAST_STATUS.lock().ok().and_then(|g| g.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::default_settings;
+
+    /// A stand-in backend: chords compile to their key name, a
+    /// modifier-tap does not compile at all.
+    fn chords_only(config: &HotkeyConfig) -> Result<String, String> {
+        match config.kind {
+            crate::settings::HotkeyKind::Chord => Ok(config.code.clone()),
+            crate::settings::HotkeyKind::ModifierTap => Err("Chords only.".into()),
+        }
+    }
+
+    fn chord_settings() -> HotkeySettings {
+        HotkeySettings {
+            toggle: HotkeyConfig::chord("Space", &["Ctrl"]),
+            cancel: HotkeyConfig::chord("Escape", &[]),
+            cycle_mode: None,
+        }
+    }
+
+    fn targets<T>(compiled: &[(usize, T)]) -> Vec<&'static str> {
+        compiled.iter().map(|(i, _)| SLOTS[*i].target.as_str()).collect()
+    }
+
+    #[test]
+    fn the_table_has_one_entry_per_target_and_only_cancel_is_gated() {
+        let listed: Vec<&str> = SLOTS.iter().map(|s| s.target.as_str()).collect();
+        assert_eq!(listed, ["toggle", "cancel", "cycle-mode"]);
+        let gated: Vec<&str> = SLOTS
+            .iter()
+            .filter(|s| s.gate_on_recording)
+            .map(|s| s.target.as_str())
+            .collect();
+        assert_eq!(gated, ["cancel"]);
+    }
+
+    #[test]
+    fn an_unbound_optional_slot_installs_nothing_and_reports_nothing() {
+        let (compiled, skipped) = compile_slots(&chord_settings(), chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert!(skipped.is_empty());
+
+        // The platform defaults compile on a backend that takes everything.
+        let (compiled, skipped) =
+            compile_slots(&default_settings(), |c| Ok::<_, String>(c.code.clone())).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn a_bound_optional_slot_is_compiled_after_the_required_ones() {
+        let settings = HotkeySettings {
+            cycle_mode: Some(HotkeyConfig::chord("M", &["Ctrl", "Alt"])),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "cycle-mode"]);
+        assert_eq!(compiled[2].1, "M");
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn a_required_slot_that_does_not_compile_fails_the_install() {
+        let settings = HotkeySettings {
+            toggle: HotkeyConfig::modifier_tap("RightCommand"),
+            cycle_mode: Some(HotkeyConfig::chord("M", &["Ctrl"])),
+            ..chord_settings()
+        };
+        let err = compile_slots(&settings, chords_only).unwrap_err();
+        assert_eq!(err, "Unsupported toggle hotkey: kind=ModifierTap code=RightCommand mods=[]");
+    }
+
+    #[test]
+    fn an_optional_slot_that_does_not_compile_is_skipped_with_the_reason() {
+        let settings = HotkeySettings {
+            cycle_mode: Some(HotkeyConfig::modifier_tap("RightOption")),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert_eq!(
+            skipped,
+            [SkippedSlot { target: "cycle-mode", reason: "Chords only.".into() }]
+        );
+    }
+
+    #[test]
+    fn an_optional_slot_on_the_keys_of_another_slot_is_skipped() {
+        // Same chord as toggle, modifiers in another order.
+        let settings = HotkeySettings {
+            toggle: HotkeyConfig::chord("Space", &["Ctrl", "Shift"]),
+            cycle_mode: Some(HotkeyConfig::chord("Space", &["Shift", "Ctrl"])),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].target, "cycle-mode");
+        assert!(skipped[0].reason.contains("toggle"), "{}", skipped[0].reason);
+
+        // The cancel key too: outside a recording the cycle slot would
+        // otherwise take Escape away from every app.
+        let settings = HotkeySettings {
+            cycle_mode: Some(HotkeyConfig::chord("Escape", &[])),
+            ..chord_settings()
+        };
+        let (_, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert!(skipped[0].reason.contains("cancel"), "{}", skipped[0].reason);
+    }
+
+    #[test]
+    fn the_status_payload_only_grows_when_a_slot_was_skipped() {
+        let clean = HotkeyStatus { ok: true, error: String::new(), skipped: Vec::new() };
+        assert_eq!(
+            serde_json::to_value(&clean).unwrap(),
+            serde_json::json!({ "ok": true, "error": "" })
+        );
+        let with_skip = HotkeyStatus {
+            ok: true,
+            error: String::new(),
+            skipped: vec![SkippedSlot { target: "cycle-mode", reason: "Chords only.".into() }],
+        };
+        assert_eq!(
+            serde_json::to_value(&with_skip).unwrap(),
+            serde_json::json!({
+                "ok": true,
+                "error": "",
+                "skipped": [{ "target": "cycle-mode", "reason": "Chords only." }]
+            })
+        );
+    }
 }

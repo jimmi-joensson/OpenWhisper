@@ -281,9 +281,42 @@ pub(crate) fn do_cancel() -> bool {
     dictation::run_cancel(&TauriDictationEnv)
 }
 
+/// Emitted after the modes block changes. Payload: the saved
+/// `ModesSettings` (`active`, `custom`, `app_defaults`).
+pub(crate) const MODES_CHANGED_EVENT: &str = "modes_changed";
+
+/// Switch to the next mode: the action behind the cycle-mode hotkey
+/// and the `modes_cycle` command. One call, one step, recording or
+/// not. Reads the modes block from disk rather than the cache, since
+/// the CLI edits the same block. Does file IO, so the hotkey backends
+/// call it from its own thread, never from the hook or tap thread.
+pub(crate) fn do_cycle_mode() -> Result<openwhisper_core::settings::ModesSettings, String> {
+    // Two quick presses must be two steps, not two reads of one state.
+    static CYCLING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = CYCLING.lock().unwrap_or_else(|e| e.into_inner());
+
+    let app = APP_HANDLE.get().ok_or("modes: the app is still starting")?;
+    let path = settings::settings_path(app)?;
+    let current = openwhisper_core::settings::load_modes_settings(&path);
+    let next = openwhisper_core::modes::cycle(&current);
+    let saved = openwhisper_core::settings::save_modes_settings(&path, next)?;
+    if let Err(e) = app.emit(MODES_CHANGED_EVENT, &saved) {
+        eprintln!("{MODES_CHANGED_EVENT} emit failed: {e}");
+    }
+    Ok(saved)
+}
+
 #[tauri::command]
 fn dictation_toggle() -> Result<(), String> {
     do_toggle()
+}
+
+/// Same step as the cycle-mode hotkey. The Windows in-window keyboard
+/// fallback (`use-global-hotkey.ts`) calls it, because the keyboard
+/// hook does not see keys pressed while our own window has focus.
+#[tauri::command]
+fn modes_cycle() -> Result<openwhisper_core::settings::ModesSettings, String> {
+    do_cycle_mode()
 }
 
 /// Last `pause_now` outcome — `None` when the most recent pause did
@@ -1211,6 +1244,7 @@ pub fn run() {
             core_version,
             dictation_toggle,
             dictation_cancel,
+            modes_cycle,
             set_pill_click_through,
             reposition_pill,
             show_main_window,

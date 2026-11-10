@@ -1,9 +1,10 @@
 ---
 id: TASK-96
 title: Modes - named instruction sets with a default per app
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T16:14:00Z'
 labels:
   - modes
   - refine
@@ -13,6 +14,8 @@ labels:
 dependencies:
   - TASK-93
   - TASK-94
+documentation:
+  - backlog/docs/plans/doc-49 - Modes-implementation-plan.md
 priority: medium
 ordinal: 78000
 ---
@@ -36,3 +39,9 @@ Needs: storage for modes in settings, a switcher (pill, tray or hotkey; decide w
 - [ ] #5 Headless parity: modes can be listed, set and used from the CLI
 - [ ] #6 The live eval set covers at least one non-default mode
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-10: plan doc-49 written, subtasks 96.1 to 96.6 created. Branch task-96-modes. Hotkey feasibility: slots are two hard-coded fields in both shells (verified in hotkey/mac.rs and hotkey/windows.rs); they become a list here so the cycle slot and the later Ask slot are additions.
+<!-- SECTION:NOTES:END -->

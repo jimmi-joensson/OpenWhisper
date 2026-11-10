@@ -30,12 +30,20 @@ export interface MockTick {
   error_message?: string;
   can_toggle?: boolean;
   is_recording?: boolean;
+  // What the recording is (or the last one was) for (TASK-97).
+  session_kind?: "dictation" | "ask";
+  // The cancel key would do something: a recording or a running ask.
+  // Left out, `emitTick` sends what `is_recording` says, as Rust
+  // does while no ask runs.
+  cancel_would_act?: boolean;
   level?: number;
   download_bytes_done?: number;
   download_bytes_total?: number;
 }
 
-export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
+export const TICK_DEFAULTS: Required<
+  Omit<MockTick, "phase" | "status" | "cancel_would_act">
+> = {
   status_message: "",
   transcript: "",
   replacements: [],
@@ -57,6 +65,7 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
   error_message: "",
   can_toggle: true,
   is_recording: false,
+  session_kind: "dictation",
   level: 0,
   download_bytes_done: 0,
   download_bytes_total: 0,
@@ -74,7 +83,10 @@ declare global {
 
 // Install the Tauri 2 internals stub before the SPA boots. Records emitted
 // `dictation_tick` events into a queue the test can replay.
-async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
+async function installTauriShim(
+  page: Page,
+  label: "main" | "pill" | "answer" = "main",
+) {
   await page.addInitScript((windowLabel) => {
     const handlers = new Map<string, Set<number>>();
     const callbacks = new Map<number, (payload: unknown) => void>();
@@ -369,29 +381,37 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
         // the optional `cycle_mode` slot is absent until set, the way
         // the Rust side leaves it out of the payload. The command
         // target for it is "cycle-mode" (kebab-case), the settings key
-        // "cycle_mode". Keep in step with scripts/pw-shim.js.
+        // "cycle_mode". The optional `ask` slot (TASK-97) has a
+        // default (the mac one here, like the toggle default), which
+        // a seed without the key gets too, the way Rust fills it in
+        // for a file from before the slot; cleared, it is null. Keep
+        // in step with scripts/pw-shim.js.
         if (
           cmd === "settings_get_hotkeys" ||
           cmd === "settings_set_hotkey" ||
-          cmd === "settings_reset_hotkey"
+          cmd === "settings_reset_hotkey" ||
+          cmd === "settings_clear_hotkey"
         ) {
           const w = window as unknown as {
             __owHotkeys?: Record<string, unknown>;
             __owHotkeySetCount?: number;
             __owHotkeyResetCount?: number;
+            __owHotkeyClearCount?: number;
             __owHotkeyLastTarget?: string;
             __owHotkeyLastConfig?: unknown;
           };
+          const askDefault = { kind: "modifier-tap", code: "RightOption", mods: [] };
           w.__owHotkeys = w.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
+          if (!("ask" in w.__owHotkeys)) w.__owHotkeys.ask = askDefault;
           // A copy, as over real IPC: the caller must not see later
           // writes through a shared object.
           if (cmd === "settings_get_hotkeys") return structuredClone(w.__owHotkeys);
 
           const { target, config } = (args ?? {}) as {
-            target: "toggle" | "cancel" | "cycle-mode";
+            target: "toggle" | "cancel" | "cycle-mode" | "ask";
             config?: unknown;
           };
           const key = target === "cycle-mode" ? "cycle_mode" : target;
@@ -402,8 +422,18 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             w.__owHotkeyLastConfig = config;
             return null;
           }
+          if (cmd === "settings_clear_hotkey") {
+            // Only the optional slots can be without a key.
+            if (target === "toggle" || target === "cancel") {
+              throw `The ${target} shortcut cannot be removed, only changed.`;
+            }
+            w.__owHotkeyClearCount = (w.__owHotkeyClearCount ?? 0) + 1;
+            if (target === "ask") w.__owHotkeys.ask = null;
+            else delete w.__owHotkeys[key];
+            return null;
+          }
           // Reset: the default binding, or "not set" (null) for the
-          // optional slot, which is removed.
+          // switch-mode slot, which is removed.
           w.__owHotkeyResetCount = (w.__owHotkeyResetCount ?? 0) + 1;
           if (target === "cycle-mode") {
             delete w.__owHotkeys[key];
@@ -412,13 +442,180 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           const def =
             target === "toggle"
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
-              : { kind: "chord", code: "Escape", mods: [] };
+              : target === "ask"
+                ? askDefault
+                : { kind: "chord", code: "Escape", mods: [] };
           w.__owHotkeys[key] = def;
           return def;
         }
+        // Ask (TASK-97). `__owAskSettings` seeds the stored block and
+        // `__owAskBackend` overrides the backend status of `ask_get`.
+        // The one ask lives on `__owAskSnapshot`: `emitAskTick` (below)
+        // sets it, and cancel, dismiss, insert and copy answer from it
+        // the way core does. Every call is recorded in `__owAskCalls`,
+        // saves in `__owAskSaves`, copied text in `__owAskCopied` and
+        // inserted text in `__owAskInserted`. Keep in step with
+        // scripts/pw-shim.js.
+        if (cmd.startsWith("ask_")) {
+          type AskSettings = {
+            enabled: boolean;
+            web_search: boolean;
+            instructions: string;
+            model: string | null;
+            effort: string | null;
+            timeout_ms: number;
+          };
+          type AskSnapshot = Record<string, unknown> & {
+            id: number;
+            phase: string;
+            answer: string;
+            version: number;
+          };
+          const w = window as unknown as {
+            __owAskSettings?: Partial<AskSettings>;
+            __owAskStored?: AskSettings;
+            __owAskSaves?: AskSettings[];
+            __owAskBackend?: Record<string, unknown>;
+            __owAskCalls?: { cmd: string; args: Record<string, unknown> }[];
+            __owAskSnapshot?: AskSnapshot;
+            __owAskCopied?: string[];
+            __owAskInserted?: string[];
+          };
+          w.__owAskCalls = [...(w.__owAskCalls ?? []), { cmd, args: args ?? {} }];
+          if (!w.__owAskStored) {
+            w.__owAskStored = {
+              enabled: false,
+              web_search: false,
+              instructions: "",
+              model: null,
+              effort: null,
+              timeout_ms: 60000,
+              ...(w.__owAskSettings ?? {}),
+            };
+          }
+          const stored = w.__owAskStored;
+          // `AskSnapshot::default()` in core.
+          const idle = (version: number): AskSnapshot => ({
+            id: 0,
+            phase: "idle",
+            question: "",
+            answer: "",
+            notice: "",
+            error: "",
+            backend: "",
+            model: "",
+            effort: "",
+            web_search: false,
+            searching: false,
+            search_query: "",
+            started_at_ms: 0,
+            elapsed_ms: 0,
+            first_text_ms: null,
+            usage: null,
+            version,
+          });
+          const snap = w.__owAskSnapshot ?? idle(0);
+          const busy = ["listening", "thinking", "answering"].includes(snap.phase);
+          // A change of the ask: stored, and sent as `ask_tick`.
+          const change = (next: AskSnapshot) => {
+            w.__owAskSnapshot = next;
+            window.__owEmit("ask_tick", structuredClone(next));
+          };
+          if (cmd === "ask_get") {
+            return structuredClone({
+              settings: stored,
+              backend: {
+                backend: "claude-cli",
+                state: "ready",
+                ready: true,
+                message: "Claude Code is signed in with your Claude subscription (max).",
+                destination:
+                  "Anthropic (Claude), through the Claude Code app signed in on this computer",
+                path: "/Users/test/.local/bin/claude",
+                version: "2.1.322 (Claude Code)",
+                auth_method: "claude.ai",
+                plan: "max",
+                has_api_key: false,
+                ...(w.__owAskBackend ?? {}),
+              },
+              model: stored.model ?? "sonnet",
+              effort: stored.effort ?? "low",
+              web_search: stored.web_search,
+              timeout_ms: stored.web_search ? stored.timeout_ms * 2 : stored.timeout_ms,
+              notice: "",
+              limits: {
+                timeout_min_ms: 5000,
+                timeout_max_ms: 300000,
+                timeout_default_ms: 60000,
+                instructions_max_chars: 4000,
+              },
+              default_model: "sonnet",
+            });
+          }
+          if (cmd === "ask_set") {
+            const { settings } = (args ?? {}) as { settings: AskSettings };
+            // `AskSettings::cleaned` in core.
+            const saved: AskSettings = {
+              ...settings,
+              instructions: settings.instructions.trim().slice(0, 4000).trimEnd(),
+              model: settings.model?.trim() || null,
+              effort: settings.effort === "minimal" ? "low" : settings.effort,
+              timeout_ms: Math.min(Math.max(settings.timeout_ms, 5000), 300000),
+            };
+            w.__owAskStored = saved;
+            w.__owAskSaves = [...(w.__owAskSaves ?? []), saved];
+            window.__owEmit("ask_changed", structuredClone(saved));
+            return structuredClone(saved);
+          }
+          if (cmd === "ask_snapshot") return structuredClone(snap);
+          if (cmd === "ask_start") {
+            if (!stored.enabled) {
+              throw "Ask is switched off. Switch it on in the settings to ask questions.";
+            }
+            // No model here: the question is on the snapshot, and a
+            // test plays the answer with `emitAskTick`.
+            const { text } = (args ?? {}) as { text?: string };
+            const next = {
+              ...idle(snap.version + 1),
+              id: snap.id + 1,
+              phase: "thinking",
+              question: (text ?? "").trim(),
+            };
+            change(next);
+            return structuredClone(next);
+          }
+          if (cmd === "ask_toggle") return null;
+          if (cmd === "ask_cancel") {
+            if (!busy) return false;
+            // A listening ask is simply gone; a running one shows as
+            // cancelled, with what arrived of the answer.
+            change(
+              snap.phase === "listening"
+                ? idle(snap.version + 1)
+                : { ...snap, phase: "cancelled", searching: false, version: snap.version + 1 },
+            );
+            return true;
+          }
+          if (cmd === "ask_dismiss") {
+            change(idle(snap.version + 1));
+            return null;
+          }
+          if (cmd === "ask_insert") {
+            if (snap.phase !== "done") return false;
+            w.__owAskInserted = [...(w.__owAskInserted ?? []), snap.answer];
+            change(idle(snap.version + 1));
+            return true;
+          }
+          if (cmd === "ask_copy") {
+            if (!snap.answer.trim()) return false;
+            w.__owAskCopied = [...(w.__owAskCopied ?? []), snap.answer];
+            return true;
+          }
+          return null;
+        }
         if (cmd === "settings_capture_hotkey_start") {
           const { target } = (args ?? {}) as {
-            target?: "toggle" | "cancel" | "cycle-mode";
+            target?: "toggle" | "cancel" | "cycle-mode" | "ask";
           };
           (window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount =
             ((window as unknown as { __owCaptureStartCount?: number }).__owCaptureStartCount ?? 0) + 1;
@@ -729,6 +926,11 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             app_name: string | null;
             // Name of the mode the text was rewritten in (TASK-96).
             mode?: string | null;
+            // An ask (TASK-97): `kind` is "ask", `text` the question
+            // and `answer` its answer. Left out for a dictation; the
+            // list fills in null, as Rust sends it.
+            kind?: "ask" | null;
+            answer?: string | null;
           };
           const w = window as unknown as {
             __owHistorySettings?: Partial<HistorySettings>;
@@ -782,14 +984,16 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             const needle = (search ?? "").trim().toLowerCase();
             const hits = needle
               ? entries.filter((e) =>
-                  [e.text, e.original ?? "", e.app_name ?? ""].some((s) =>
+                  [e.text, e.original ?? "", e.app_name ?? "", e.answer ?? ""].some((s) =>
                     s.toLowerCase().includes(needle),
                   ),
                 )
               : entries;
             const from = offset ?? 0;
             return {
-              entries: hits.slice(from, from + (limit ?? 30)),
+              entries: hits
+                .slice(from, from + (limit ?? 30))
+                .map((e) => ({ ...e, kind: e.kind ?? null, answer: e.answer ?? null })),
               matched: hits.length,
               stored: entries.length,
             };
@@ -945,6 +1149,10 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
               w.__owRefineHistory ?? {
                 summary: {
                   total: 0,
+                  asks: 0,
+                  asks_answered: 0,
+                  ask_median_first_text_ms: null,
+                  ask_median_ms: null,
                   refined: 0,
                   skipped: 0,
                   fallbacks: 0,
@@ -1427,10 +1635,138 @@ export async function emitSettingsStatsChanged(
 }
 
 export async function emitTick(page: Page, tick: MockTick): Promise<number> {
-  const merged = { ...TICK_DEFAULTS, ...tick };
+  const merged = {
+    ...TICK_DEFAULTS,
+    cancel_would_act: tick.is_recording ?? false,
+    ...tick,
+  };
   return page.evaluate(
     (payload) => window.__owEmit("dictation_tick", payload),
     merged,
+  );
+}
+
+// ---------------------------------------------------------------
+// Ask (TASK-97).
+// ---------------------------------------------------------------
+
+// Mirrors `AskSnapshot` in core/src/ask/mod.rs: the payload of
+// `ask_tick` and what `ask_snapshot` returns.
+export interface MockAskSnapshot {
+  id: number;
+  phase:
+    | "idle"
+    | "listening"
+    | "thinking"
+    | "answering"
+    | "done"
+    | "error"
+    | "cancelled";
+  question: string;
+  answer: string;
+  notice: string;
+  error: string;
+  backend: string;
+  model: string;
+  effort: string;
+  web_search: boolean;
+  searching: boolean;
+  search_query: string;
+  started_at_ms: number;
+  elapsed_ms: number;
+  first_text_ms: number | null;
+  usage: {
+    tokens_in: number;
+    tokens_cached: number;
+    tokens_out: number;
+    cost_usd: number | null;
+    plan: unknown;
+  } | null;
+  version: number;
+}
+
+export const ASK_SNAPSHOT_DEFAULTS: MockAskSnapshot = {
+  id: 0,
+  phase: "idle",
+  question: "",
+  answer: "",
+  notice: "",
+  error: "",
+  backend: "claude-cli",
+  model: "sonnet",
+  effort: "low",
+  web_search: false,
+  searching: false,
+  search_query: "",
+  started_at_ms: 0,
+  elapsed_ms: 0,
+  first_text_ms: null,
+  usage: null,
+  version: 0,
+};
+
+// Mirrors `AskSettings` in core/src/settings/ask.rs: the payload of
+// `ask_changed`.
+export interface MockAskSettings {
+  enabled: boolean;
+  web_search: boolean;
+  instructions: string;
+  model: string | null;
+  effort: string | null;
+  timeout_ms: number;
+}
+
+// Push `ask_tick` as the Rust emitter does, and make the snapshot the
+// one the shim's `ask_snapshot`, `ask_cancel`, `ask_dismiss`,
+// `ask_insert` and `ask_copy` answer from. `version` goes up by
+// itself unless the test sets it. Returns how many listeners got it.
+export async function emitAskTick(
+  page: Page,
+  snapshot: Partial<MockAskSnapshot> & Pick<MockAskSnapshot, "phase">,
+): Promise<number> {
+  return page.evaluate(
+    ({ defaults, given }) => {
+      const w = window as unknown as { __owAskSnapshot?: { version: number } };
+      const next = {
+        ...defaults,
+        id: 1,
+        version: (w.__owAskSnapshot?.version ?? 0) + 1,
+        ...given,
+      };
+      w.__owAskSnapshot = next;
+      return window.__owEmit("ask_tick", next);
+    },
+    { defaults: ASK_SNAPSHOT_DEFAULTS, given: snapshot },
+  );
+}
+
+// Wait until something listens for `ask_tick`: App (the history
+// sync) in the main window, AnswerPanel in the answer window.
+// Nothing is emitted.
+export async function waitForAskTickListener(page: Page) {
+  await page.waitForFunction(() => window.__owListeners("ask_tick") > 0, undefined, {
+    timeout: 3000,
+  });
+}
+
+// Push `ask_changed` as Rust does after the Ask settings were saved
+// (the Ask pane, or the block edited by the headless CLI).
+export async function emitAskChanged(
+  page: Page,
+  settings: Partial<MockAskSettings>,
+): Promise<number> {
+  return page.evaluate(
+    (value) =>
+      window.__owEmit("ask_changed", {
+        enabled: false,
+        web_search: false,
+        instructions: "",
+        model: null,
+        effort: null,
+        timeout_ms: 60000,
+        ...value,
+      }),
+    settings,
   );
 }
 
@@ -1775,6 +2111,15 @@ export const test = base.extend({
 export const pillTest = base.extend({
   page: async ({ page }, use) => {
     await installTauriShim(page, "pill");
+    await use(page);
+  },
+});
+
+// Same shim, booted as the "answer" window: main.tsx then loads
+// AnswerPanel, the answer window of Ask.
+export const answerTest = base.extend({
+  page: async ({ page }, use) => {
+    await installTauriShim(page, "answer");
     await use(page);
   },
 });

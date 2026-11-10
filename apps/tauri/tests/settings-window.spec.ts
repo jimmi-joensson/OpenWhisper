@@ -1,4 +1,5 @@
 import {
+  emitAskChanged,
   emitBtResumeDelayChanged,
   emitDeviceState,
   emitPauseAudioChanged,
@@ -548,11 +549,17 @@ test.describe("settings — keep models warm", () => {
 });
 
 test.describe("settings — shortcuts pane", () => {
-  test("renders the three rows, Switch mode not set", async ({ page }) => {
+  test("renders the four rows, Switch mode not set", async ({ page }) => {
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Shortcuts" }).click();
-    await expect(page.locator(".ow-shortcuts__row")).toHaveCount(3);
+    await expect(page.locator(".ow-shortcuts__row")).toHaveCount(4);
+    await expect(page.locator(".ow-shortcuts__row-title")).toHaveText([
+      "Toggle dictation",
+      "Cancel while recording",
+      "Switch mode",
+      /^Ask/,
+    ]);
     await expect(
       page.getByRole("button", { name: "Rebind Toggle dictation" }),
     ).toContainText("Right ⌘");
@@ -712,6 +719,11 @@ test.describe("settings — shortcuts pane", () => {
     await expect(toggleChip).toHaveText("press keys…");
     await expect(cancelChip).toBeDisabled();
     await expect(modeChip).toBeDisabled();
+    // The Ask row locks with them: its chip, and Clear next to Reset.
+    await expect(page.getByRole("button", { name: "Rebind Ask" })).toBeDisabled();
+    for (const clear of await page.getByRole("button", { name: "Clear" }).all()) {
+      await expect(clear).toBeDisabled();
+    }
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
     // And from the optional row: the two dictation rows lock, chips
@@ -775,7 +787,12 @@ test.describe("settings — shortcuts pane", () => {
     await expect(
       page.getByRole("button", { name: "Rebind Cancel while recording" }),
     ).toContainText("Esc");
-    await expect(page.getByRole("button", { name: "Clear" })).toBeEnabled();
+    await expect(
+      page
+        .locator(".ow-shortcuts__row")
+        .filter({ hasText: "Switch mode" })
+        .getByRole("button", { name: "Clear" }),
+    ).toBeEnabled();
   });
 
   test("a key captured outside the window lands on the Switch mode row", async ({
@@ -822,7 +839,10 @@ test.describe("settings — shortcuts pane", () => {
     const modeChip = page.getByRole("button", { name: "Rebind Switch mode" });
     await expect(modeChip).toContainText("M");
 
-    const clear = page.getByRole("button", { name: "Clear" });
+    const clear = page
+      .locator(".ow-shortcuts__row")
+      .filter({ hasText: "Switch mode" })
+      .getByRole("button", { name: "Clear" });
     await clear.click();
 
     await expect(modeChip).toHaveText("Not set");
@@ -880,7 +900,11 @@ test.describe("settings — shortcuts pane", () => {
     await page.keyboard.press("Control+Alt+KeyM");
     await expect.poll(cycles).toBe(2);
 
-    await page.getByRole("button", { name: "Clear" }).click();
+    await page
+      .locator(".ow-shortcuts__row")
+      .filter({ hasText: "Switch mode" })
+      .getByRole("button", { name: "Clear" })
+      .click();
     await expect(modeChip).toHaveText("Not set");
     // Move focus off the now-disabled Clear button, so the press is
     // sure to reach the window listener and find nothing bound.
@@ -935,6 +959,241 @@ test.describe("settings — shortcuts pane", () => {
       window.__owEmit("hotkey_status", { ok: true, error: "" }),
     );
     await expect(page.locator(".ow-shortcuts__error")).toHaveCount(0);
+  });
+
+  // ---- the Ask slot (TASK-97) ----
+
+  const askRow = (page: import("@playwright/test").Page) =>
+    page.locator(".ow-shortcuts__row").filter({ hasText: "ask a question out loud" });
+  const askChip = (page: import("@playwright/test").Page) =>
+    page.getByRole("button", { name: "Rebind Ask" });
+  const seedAsk = (page: import("@playwright/test").Page, enabled: boolean) =>
+    page.addInitScript((on) => {
+      (window as unknown as { __owAskSettings?: unknown }).__owAskSettings = {
+        enabled: on,
+      };
+    }, enabled);
+
+  test("the Ask row shows the platform default and says what the key does", async ({
+    page,
+  }) => {
+    await seedAsk(page, true);
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+
+    const row = askRow(page);
+    await expect(row.locator(".ow-shortcuts__row-title")).toHaveText("Ask");
+    await expect(row).toContainText(
+      "Press it, ask a question out loud, press again. The answer shows in a panel and is not typed anywhere.",
+    );
+    // The shim's default is the mac one, like its toggle default.
+    await expect(askChip(page)).toContainText("Right ⌥");
+    // Optional with a default: it can go back to it, and it can be
+    // left without a key.
+    await expect(row.getByRole("button", { name: "Reset to default" })).toBeEnabled();
+    await expect(row.getByRole("button", { name: "Clear" })).toBeEnabled();
+    // Ask is on: nothing says otherwise.
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveCount(0);
+    await expect(page.getByTestId("shortcut-off-note-ask")).toHaveCount(0);
+  });
+
+  test("recording a key for Ask saves it to the ask slot", async ({ page }) => {
+    await seedAsk(page, true);
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const chip = askChip(page);
+    await chip.click();
+    await expect(chip).toHaveText("press keys…");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owCaptureLastTarget?: string })
+              .__owCaptureLastTarget,
+        ),
+      )
+      .toBe("ask");
+
+    // Real keys: the in-window capture path picks them up.
+    await page.keyboard.press("Control+Shift+Space");
+
+    await expect(chip).toContainText("Ctrl");
+    await expect(chip).toContainText("Shift");
+    await expect(chip).toContainText("Space");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __owHotkeyLastTarget?: string;
+            __owHotkeyLastConfig?: unknown;
+          };
+          return { target: w.__owHotkeyLastTarget, config: w.__owHotkeyLastConfig };
+        }),
+      )
+      .toEqual({
+        target: "ask",
+        config: { kind: "chord", code: "Space", mods: ["Ctrl", "Shift"] },
+      });
+    // The dictation rows keep their bindings.
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toContainText("Right ⌘");
+  });
+
+  test("Clear leaves Ask without a key and Reset to default brings it back", async ({
+    page,
+  }) => {
+    await seedAsk(page, true);
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const row = askRow(page);
+    const chip = askChip(page);
+    const clear = row.getByRole("button", { name: "Clear" });
+    const reset = row.getByRole("button", { name: "Reset to default" });
+    const slot = () =>
+      page.evaluate(() => {
+        const w = window as unknown as {
+          __owHotkeys?: Record<string, unknown>;
+          __owHotkeyClearCount?: number;
+          __owHotkeyResetCount?: number;
+          __owHotkeyLastTarget?: string;
+        };
+        return {
+          ask: w.__owHotkeys?.ask ?? null,
+          clears: w.__owHotkeyClearCount ?? 0,
+          resets: w.__owHotkeyResetCount ?? 0,
+          target: w.__owHotkeyLastTarget,
+        };
+      });
+    await expect(chip).toContainText("Right ⌥");
+
+    await clear.click();
+    await expect(chip).toHaveText("Not set");
+    await expect(clear).toBeDisabled();
+    // Its own command: reset would have restored the default.
+    await expect.poll(slot).toEqual({ ask: null, clears: 1, resets: 0, target: "ask" });
+
+    await reset.click();
+    await expect(chip).toContainText("Right ⌥");
+    await expect(clear).toBeEnabled();
+    await expect.poll(slot).toEqual({
+      ask: { kind: "modifier-tap", code: "RightOption", mods: [] },
+      clears: 1,
+      resets: 1,
+      target: "ask",
+    });
+    // Neither touched the other rows.
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toContainText("Right ⌘");
+    await expect(page.getByRole("button", { name: "Rebind Switch mode" })).toHaveText(
+      "Not set",
+    );
+  });
+
+  test("with Ask switched off the row says so, and follows the switch", async ({
+    page,
+  }) => {
+    // Ask is off by default.
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+
+    // The binding is kept and can still be changed; it is marked as
+    // not active.
+    await expect(askChip(page)).toContainText("Right ⌥");
+    await expect(askChip(page)).toBeEnabled();
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveText("Off");
+    await expect(page.getByTestId("shortcut-off-note-ask")).toHaveText(
+      "Ask is switched off, so this key does nothing. The key is kept for when you switch Ask on.",
+    );
+    // Only the Ask row is marked.
+    await expect(page.locator('[data-testid^="shortcut-off-"]')).toHaveCount(2);
+
+    // Switched on elsewhere (the Ask pane, the CLI): the mark goes.
+    await emitAskChanged(page, { enabled: true });
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveCount(0);
+    await expect(page.getByTestId("shortcut-off-note-ask")).toHaveCount(0);
+    await emitAskChanged(page, { enabled: false });
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveText("Off");
+  });
+
+  // Playwright's Desktop Chrome reports navigator.platform = "Win32",
+  // so the in-window keyboard fallback (Windows only) is live here.
+  test("in-window fallback: the Ask key toggles once per press, only while Ask is on", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owHotkeys?: unknown }).__owHotkeys = {
+        toggle: { kind: "chord", code: "Space", mods: ["Ctrl"] },
+        cancel: { kind: "chord", code: "Escape", mods: [] },
+        ask: { kind: "chord", code: "Space", mods: ["Ctrl", "Shift"] },
+      };
+    });
+    await seedAsk(page, true);
+    const toggles = () =>
+      page.evaluate(
+        () =>
+          (
+            (window as unknown as { __owAskCalls?: { cmd: string }[] }).__owAskCalls ?? []
+          ).filter((c) => c.cmd === "ask_toggle").length,
+      );
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(askChip(page)).toContainText("Space");
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveCount(0);
+
+    await page.keyboard.press("Control+Shift+Space");
+    await expect.poll(toggles).toBe(1);
+    // The dictation chord is another chord.
+    await page.keyboard.press("Control+Space");
+    await page.keyboard.press("Control+Shift+Space");
+    await expect.poll(toggles).toBe(2);
+
+    // Ask switched off: the key is left alone.
+    await emitAskChanged(page, { enabled: false });
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveText("Off");
+    await page.getByRole("heading", { name: "Shortcuts" }).click();
+    await page.keyboard.press("Control+Shift+Space");
+    // Let a stray invoke land before reading the count.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 50)));
+    expect(await toggles()).toBe(2);
+  });
+
+  test("an Ask key the backend could not install is reported on the pane", async ({
+    page,
+  }) => {
+    await seedAsk(page, true);
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(askChip(page)).toContainText("Right ⌥");
+
+    // What Windows reports for a single-modifier binding.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.__owEmit("hotkey_status", {
+            ok: true,
+            error: "",
+            skipped: [
+              {
+                target: "ask",
+                reason:
+                  "A single modifier key is unsupported on Windows. Record a key combination instead.",
+              },
+            ],
+          }),
+        ),
+      )
+      .toBeGreaterThan(0);
+    await expect(page.locator(".ow-shortcuts__error")).toHaveText(
+      "Ask is not active. A single modifier key is unsupported on Windows. Record a key combination instead.",
+    );
   });
 });
 

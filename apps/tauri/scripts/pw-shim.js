@@ -33,16 +33,21 @@ async (page) => {
         }
         // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
         // optional `cycle_mode` slot is absent until set; its command
-        // target is "cycle-mode".
+        // target is "cycle-mode". The optional `ask` slot has a
+        // default, which a seed without the key gets too; cleared, it
+        // is null.
         if (
           cmd === "settings_get_hotkeys" ||
           cmd === "settings_set_hotkey" ||
-          cmd === "settings_reset_hotkey"
+          cmd === "settings_reset_hotkey" ||
+          cmd === "settings_clear_hotkey"
         ) {
+          const askDefault = { kind: "modifier-tap", code: "RightOption", mods: [] };
           window.__owHotkeys = window.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
+          if (!("ask" in window.__owHotkeys)) window.__owHotkeys.ask = askDefault;
           // A copy, as over real IPC.
           if (cmd === "settings_get_hotkeys") return structuredClone(window.__owHotkeys);
 
@@ -55,6 +60,16 @@ async (page) => {
             window.__owHotkeyLastConfig = config;
             return null;
           }
+          if (cmd === "settings_clear_hotkey") {
+            // Only the optional slots can be without a key.
+            if (target === "toggle" || target === "cancel") {
+              throw `The ${target} shortcut cannot be removed, only changed.`;
+            }
+            window.__owHotkeyClearCount = (window.__owHotkeyClearCount ?? 0) + 1;
+            if (target === "ask") window.__owHotkeys.ask = null;
+            else delete window.__owHotkeys[key];
+            return null;
+          }
           window.__owHotkeyResetCount = (window.__owHotkeyResetCount ?? 0) + 1;
           if (target === "cycle-mode") {
             delete window.__owHotkeys[key];
@@ -63,9 +78,144 @@ async (page) => {
           const def =
             target === "toggle"
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
-              : { kind: "chord", code: "Escape", mods: [] };
+              : target === "ask"
+                ? askDefault
+                : { kind: "chord", code: "Escape", mods: [] };
           window.__owHotkeys[key] = def;
           return def;
+        }
+        // Ask (TASK-97), mirroring tests/fixtures/tauri-shim.ts.
+        // `__owAskSettings` seeds the stored block; the one ask lives
+        // on `__owAskSnapshot` (set it, then
+        // `__owEmit('ask_tick', window.__owAskSnapshot)`), and cancel,
+        // dismiss, insert and copy answer from it the way core does.
+        if (cmd.startsWith("ask_")) {
+          const w = window;
+          w.__owAskCalls = [...(w.__owAskCalls ?? []), { cmd, args: args ?? {} }];
+          if (!w.__owAskStored) {
+            w.__owAskStored = {
+              enabled: false,
+              web_search: false,
+              instructions: "",
+              model: null,
+              effort: null,
+              timeout_ms: 60000,
+              ...(w.__owAskSettings ?? {}),
+            };
+          }
+          const stored = w.__owAskStored;
+          // `AskSnapshot::default()` in core.
+          const idle = (version) => ({
+            id: 0,
+            phase: "idle",
+            question: "",
+            answer: "",
+            notice: "",
+            error: "",
+            backend: "",
+            model: "",
+            effort: "",
+            web_search: false,
+            searching: false,
+            search_query: "",
+            started_at_ms: 0,
+            elapsed_ms: 0,
+            first_text_ms: null,
+            usage: null,
+            version,
+          });
+          const snap = w.__owAskSnapshot ?? idle(0);
+          const busy = ["listening", "thinking", "answering"].includes(snap.phase);
+          const change = (next) => {
+            w.__owAskSnapshot = next;
+            window.__owEmit("ask_tick", structuredClone(next));
+          };
+          if (cmd === "ask_get") {
+            return structuredClone({
+              settings: stored,
+              backend: {
+                backend: "claude-cli",
+                state: "ready",
+                ready: true,
+                message: "Claude Code is signed in with your Claude subscription (max).",
+                destination:
+                  "Anthropic (Claude), through the Claude Code app signed in on this computer",
+                path: "/Users/test/.local/bin/claude",
+                version: "2.1.322 (Claude Code)",
+                auth_method: "claude.ai",
+                plan: "max",
+                has_api_key: false,
+                ...(w.__owAskBackend ?? {}),
+              },
+              model: stored.model ?? "sonnet",
+              effort: stored.effort ?? "low",
+              web_search: stored.web_search,
+              timeout_ms: stored.web_search ? stored.timeout_ms * 2 : stored.timeout_ms,
+              notice: "",
+              limits: {
+                timeout_min_ms: 5000,
+                timeout_max_ms: 300000,
+                timeout_default_ms: 60000,
+                instructions_max_chars: 4000,
+              },
+              default_model: "sonnet",
+            });
+          }
+          if (cmd === "ask_set") {
+            const { settings } = args ?? {};
+            // `AskSettings::cleaned` in core.
+            const saved = {
+              ...settings,
+              instructions: settings.instructions.trim().slice(0, 4000).trimEnd(),
+              model: settings.model?.trim() || null,
+              effort: settings.effort === "minimal" ? "low" : settings.effort,
+              timeout_ms: Math.min(Math.max(settings.timeout_ms, 5000), 300000),
+            };
+            w.__owAskStored = saved;
+            w.__owAskSaves = [...(w.__owAskSaves ?? []), saved];
+            window.__owEmit("ask_changed", structuredClone(saved));
+            return structuredClone(saved);
+          }
+          if (cmd === "ask_snapshot") return structuredClone(snap);
+          if (cmd === "ask_start") {
+            if (!stored.enabled) {
+              throw "Ask is switched off. Switch it on in the settings to ask questions.";
+            }
+            const next = {
+              ...idle(snap.version + 1),
+              id: snap.id + 1,
+              phase: "thinking",
+              question: ((args ?? {}).text ?? "").trim(),
+            };
+            change(next);
+            return structuredClone(next);
+          }
+          if (cmd === "ask_toggle") return null;
+          if (cmd === "ask_cancel") {
+            if (!busy) return false;
+            change(
+              snap.phase === "listening"
+                ? idle(snap.version + 1)
+                : { ...snap, phase: "cancelled", searching: false, version: snap.version + 1 },
+            );
+            return true;
+          }
+          if (cmd === "ask_dismiss") {
+            change(idle(snap.version + 1));
+            return null;
+          }
+          if (cmd === "ask_insert") {
+            if (snap.phase !== "done") return false;
+            w.__owAskInserted = [...(w.__owAskInserted ?? []), snap.answer];
+            change(idle(snap.version + 1));
+            return true;
+          }
+          if (cmd === "ask_copy") {
+            if (!snap.answer.trim()) return false;
+            w.__owAskCopied = [...(w.__owAskCopied ?? []), snap.answer];
+            return true;
+          }
+          return null;
         }
         if (cmd === "settings_capture_hotkey_start") {
           window.__owCaptureStartCount = (window.__owCaptureStartCount ?? 0) + 1;

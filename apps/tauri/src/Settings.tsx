@@ -6,6 +6,7 @@ import {
   cancelJsCapture,
   hotkeyFor,
   startJsCapture,
+  syncFallbackAskEnabled,
   syncFallbackBindings,
   withHotkey,
   type HotkeyCapturedPayload,
@@ -15,6 +16,8 @@ import {
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
+import { ASK_CHANGED_EVENT, type AskSettings, type AskState } from "./lib/ask";
+import { Badge } from "./components/ui/badge";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { LevelMeter } from "./components/level-meter";
 import {
@@ -622,13 +625,16 @@ function formatDelayShort(ms: number): string {
 }
 
 // One row per hotkey slot, in the order of the Rust slot table
-// (`hotkey/mod.rs`). An optional slot starts out not set, and its
-// reset control clears it instead of restoring a default.
+// (`hotkey/mod.rs`). An optional slot may be without a key. One that
+// has no default starts out not set, and its reset control clears it
+// instead of restoring a default; one that has a default gets both
+// controls (`hasDefault`).
 interface ShortcutRowDef {
   target: HotkeyTarget;
   title: string;
   hint: string;
   optional?: boolean;
+  hasDefault?: boolean;
 }
 
 const SHORTCUT_ROWS: ShortcutRowDef[] = [
@@ -648,7 +654,19 @@ const SHORTCUT_ROWS: ShortcutRowDef[] = [
     hint: "Cycles through your Refine modes. Not set until you record a key.",
     optional: true,
   },
+  {
+    target: "ask",
+    title: "Ask",
+    hint: "Press it, ask a question out loud, press again. The answer shows in a panel and is not typed anywhere.",
+    optional: true,
+    hasDefault: true,
+  },
 ];
+
+// Shown on the Ask row while Ask is switched off: the slot is not
+// installed then, whatever key it holds.
+const ASK_OFF_NOTE =
+  "Ask is switched off, so this key does nothing. The key is kept for when you switch Ask on.";
 
 // Shortcuts pane: capture-on-click rebind for every hotkey slot. Each
 // row is independent: clicking one chip starts a capture targeted at
@@ -663,6 +681,30 @@ function ShortcutsPane() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  // Whether Ask is switched on; null until known. The ask slot is
+  // only installed while it is.
+  const [askEnabled, setAskEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    invoke<AskState | null>("ask_get")
+      .then((state) => {
+        if (alive && state) setAskEnabled(state.settings.enabled);
+      })
+      .catch(() => {});
+    const unlisten = listen<AskSettings>(ASK_CHANGED_EVENT, (evt) => {
+      setAskEnabled(evt.payload.enabled);
+    });
+    return () => {
+      alive = false;
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // The Windows in-window fallback follows the switch too.
+  useEffect(() => {
+    if (askEnabled !== null) syncFallbackAskEnabled(askEnabled);
+  }, [askEnabled]);
 
   useEffect(() => {
     let alive = true;
@@ -756,8 +798,20 @@ function ShortcutsPane() {
     }
   }, []);
 
-  // Back to the slot's default: the platform binding for toggle and
-  // cancel, "not set" (null) for an optional slot.
+  // Leave an optional slot without a key. For a slot whose reset
+  // restores a default (Ask); the others clear through reset.
+  const clearTarget = useCallback(async (target: HotkeyTarget) => {
+    setError(null);
+    try {
+      await invoke("settings_clear_hotkey", { target });
+      setSettings((prev) => (prev ? withHotkey(prev, target, null) : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // Back to the slot's default: the platform binding for toggle,
+  // cancel and ask, "not set" (null) for the switch-mode slot.
   const resetTarget = useCallback(async (target: HotkeyTarget) => {
     setError(null);
     try {
@@ -787,11 +841,16 @@ function ShortcutsPane() {
           hint={row.hint}
           target={row.target}
           optional={row.optional}
+          hasDefault={row.hasDefault}
+          inactiveNote={
+            row.target === "ask" && askEnabled === false ? ASK_OFF_NOTE : null
+          }
           config={settings ? hotkeyFor(settings, row.target) : null}
           recordingTarget={recordingTarget}
           onStart={startCapture}
           onCancel={cancelCapture}
           onReset={resetTarget}
+          onClear={clearTarget}
         />
       ))}
 
@@ -819,11 +878,18 @@ interface ShortcutRowProps {
   target: HotkeyTarget;
   /** The slot may be unset: shows "Not set", and reset clears it. */
   optional?: boolean;
+  /** An optional slot that has a default to go back to: it gets
+   *  "Reset to default" next to "Clear". */
+  hasDefault?: boolean;
+  /** Why the binding does nothing right now, when it does nothing:
+   *  the row is marked "Off" and says this under the hint. */
+  inactiveNote?: string | null;
   config: HotkeyConfig | null;
   recordingTarget: HotkeyTarget | null;
   onStart: (target: HotkeyTarget) => void;
   onCancel: () => Promise<void>;
   onReset: (target: HotkeyTarget) => Promise<void>;
+  onClear: (target: HotkeyTarget) => Promise<void>;
 }
 
 function ShortcutRow({
@@ -831,11 +897,14 @@ function ShortcutRow({
   hint,
   target,
   optional = false,
+  hasDefault = false,
+  inactiveNote = null,
   config,
   recordingTarget,
   onStart,
   onCancel,
   onReset,
+  onClear,
 }: ShortcutRowProps) {
   const recording = recordingTarget === target;
   const otherRecording =
@@ -843,8 +912,23 @@ function ShortcutRow({
   return (
     <section className="ow-shortcuts__row">
       <div className="ow-shortcuts__row-label">
-        <div className="ow-shortcuts__row-title">{title}</div>
+        <div className="ow-shortcuts__row-title">
+          {title}
+          {inactiveNote && (
+            <Badge variant="secondary" data-testid={`shortcut-off-${target}`}>
+              Off
+            </Badge>
+          )}
+        </div>
         <div className="ow-shortcuts__row-hint">{hint}</div>
+        {inactiveNote && (
+          <div
+            className="ow-shortcuts__row-hint"
+            data-testid={`shortcut-off-note-${target}`}
+          >
+            {inactiveNote}
+          </div>
+        )}
       </div>
       <div className="ow-shortcuts__row-control">
         <button
@@ -876,6 +960,25 @@ function ShortcutRow({
           >
             Cancel
           </button>
+        ) : optional && hasDefault ? (
+          <>
+            <button
+              type="button"
+              className="ow-shortcuts__reset"
+              onClick={() => void onReset(target)}
+              disabled={otherRecording}
+            >
+              Reset to default
+            </button>
+            <button
+              type="button"
+              className="ow-shortcuts__reset"
+              onClick={() => void onClear(target)}
+              disabled={otherRecording || config === null}
+            >
+              Clear
+            </button>
+          </>
         ) : (
           <button
             type="button"

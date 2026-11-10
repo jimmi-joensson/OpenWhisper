@@ -18,6 +18,19 @@ export interface LatestTranscription {
   confidence: number;
 }
 
+// Whether this tick is a dictation finishing with text to show:
+// the phase just left TRANSCRIBING (or arrived at DONE), and the
+// recording was a dictation. An ask recording ends on DONE too, with
+// the transcript of the dictation before it still on the tick, so it
+// must not count: its question went to the answer panel.
+export function dictationJustFinished(prevPhase: number, t: DictationTick): boolean {
+  if (t.session_kind === "ask") return false;
+  const finalizing =
+    (prevPhase === PHASE_TRANSCRIBING && (t.phase === PHASE_DONE || t.phase === PHASE_IDLE)) ||
+    (t.phase === PHASE_DONE && prevPhase !== PHASE_DONE);
+  return finalizing && t.transcript.trim().length > 0;
+}
+
 export function useLastTranscription(): LatestTranscription | null {
   const [latest, setLatest] = useState<LatestTranscription | null>(null);
   const prevPhaseRef = useRef<number>(PHASE_IDLE);
@@ -25,11 +38,7 @@ export function useLastTranscription(): LatestTranscription | null {
   useEffect(() => {
     const unlisten = listen<DictationTick>(DICTATION_TICK_EVENT, (event) => {
       const t = event.payload;
-      const prev = prevPhaseRef.current;
-      const finalizing =
-        (prev === PHASE_TRANSCRIBING && (t.phase === PHASE_DONE || t.phase === PHASE_IDLE)) ||
-        (t.phase === PHASE_DONE && prev !== PHASE_DONE);
-      if (finalizing && t.transcript.trim().length > 0) {
+      if (dictationJustFinished(prevPhaseRef.current, t)) {
         setLatest({
           text: t.transcript,
           replacements: t.replacements ?? [],

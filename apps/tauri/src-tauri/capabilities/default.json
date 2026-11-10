@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for main + pill windows",
-  "windows": ["main", "pill"],
+  "description": "Capability for main + pill + answer windows",
+  "windows": ["main", "pill", "answer"],
   "permissions": [
     "core:default",
     "core:event:default",

@@ -1,0 +1,50 @@
+/*
+ * Answer window of Ask (TASK-97). Loaded only in the window labelled
+ * "answer" (main.tsx imports AnswerPanel lazily), so these global
+ * rules reach neither the main window nor the pill, and theirs do not
+ * reach this one.
+ *
+ * The window is 420 x 360 logical points, transparent, fixed in size
+ * and sits just above the pill. The card is anchored to the bottom
+ * edge so a short answer stays next to the pill.
+ */
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+.answer-root {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: white;
+}
+
+.answer-card {
+  box-sizing: border-box;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.78);
+  white-space: pre-wrap;
+}
+
+.answer-phase {
+  opacity: 0.6;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

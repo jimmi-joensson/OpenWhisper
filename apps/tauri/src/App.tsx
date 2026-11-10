@@ -83,9 +83,10 @@ function App() {
   // Windows-only fallback for the WebView2-focused case where the Rust
   // WH_KEYBOARD_LL hook is bypassed by Chromium's raw-input registration
   // (tauri-apps/tauri#13919). No-op on macOS — CGEventTap already
-  // captures in-focus events. Cancel binding gates on isRecording so Esc
-  // still works normally inside OW when idle.
-  useGlobalHotkey({ isRecording: dictation.isRecording });
+  // captures in-focus events. Cancel binding gates on "there is
+  // something to cancel" (a recording, a running ask) so Esc still
+  // works normally inside OW otherwise.
+  useGlobalHotkey({ cancelWouldAct: dictation.cancelWouldAct });
 
   // Dev-only pill state override. When `enabled`, the auto-emit from the
   // dictation hook is suppressed and we drive the pill from the floating

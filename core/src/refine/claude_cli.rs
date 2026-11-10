@@ -70,9 +70,9 @@ pub const ID: &str = "claude-cli";
 pub const DESTINATION: &str =
     "Anthropic (Claude), through the Claude Code app signed in on this computer";
 
-const NOT_INSTALLED: &str = "Claude Code is not installed on this computer. Install it from \
+pub(crate) const NOT_INSTALLED: &str = "Claude Code is not installed on this computer. Install it from \
 claude.com/claude-code, run `claude` once in a terminal and sign in.";
-const NOT_SIGNED_IN: &str =
+pub(crate) const NOT_SIGNED_IN: &str =
     "Claude Code is installed but not signed in. Run `claude` in a terminal and sign in.";
 
 /// How long the `claude auth status` / `--version` probes may take.
@@ -366,13 +366,16 @@ pub fn spawn_args(model: &str, effort: RefineEffort, system_prompt_file: &Path) 
 }
 
 /// Write the system prompt to a private temp file for
-/// `--system-prompt-file`. It holds the cleanup instructions and the
-/// dictionary terms, never a transcript. Removed when the process is
-/// dropped.
-fn write_prompt_file(system: &str) -> Result<PathBuf, RefineError> {
+/// `--system-prompt-file`. It holds the instructions and the
+/// dictionary terms, never a transcript. The caller removes it when
+/// its process is dropped. `feature` ("Refine", "Ask") names the file
+/// and the error; Ask starts its CLI processes through the same
+/// helpers (see `crate::ask::claude_cli`).
+pub(crate) fn write_prompt_file(feature: &str, system: &str) -> Result<PathBuf, RefineError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let name = format!(
-        "openwhisper-refine-{}-{}.txt",
+        "openwhisper-{}-{}-{}.txt",
+        feature.to_lowercase(),
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     );
@@ -387,11 +390,14 @@ fn write_prompt_file(system: &str) -> Result<PathBuf, RefineError> {
     options
         .open(&path)
         .and_then(|mut f| f.write_all(system.as_bytes()))
-        .map_err(|e| RefineError::Backend(format!("Could not write the Refine prompt file: {e}")))?;
+        .map_err(|e| RefineError::Backend(format!("Could not write the {feature} prompt file: {e}")))?;
     Ok(path)
 }
 
-fn command(bin: &Path) -> Command {
+/// A `Command` for the CLI at `bin`: a neutral working directory, a
+/// `PATH` that finds `node`, no console window on Windows. Shared
+/// with Ask.
+pub(crate) fn command(bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
     // A neutral directory: nothing project-specific to pick up.
     cmd.current_dir(std::env::temp_dir());
@@ -452,7 +458,7 @@ impl Process {
         effort: RefineEffort,
         system: &str,
     ) -> Result<Self, RefineError> {
-        let prompt_file = write_prompt_file(system)?;
+        let prompt_file = write_prompt_file("Refine", system)?;
         let mut cmd = command(bin);
         cmd.args(spawn_args(model, effort, &prompt_file))
             .stdin(Stdio::piped())
@@ -591,7 +597,7 @@ impl Drop for Process {
 }
 
 /// `Some` when `line` is the CLI's final `result` event.
-fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
+pub(crate) fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v["type"].as_str() != Some("result") {
         return None;
@@ -611,7 +617,7 @@ fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
 }
 
 /// Tokens and list-price cost from the CLI's `result` event.
-fn parse_usage(result_line: &str) -> Option<CallUsage> {
+pub(crate) fn parse_usage(result_line: &str) -> Option<CallUsage> {
     let v: Value = serde_json::from_str(result_line.trim()).ok()?;
     let usage = v.get("usage")?;
     let n = |key: &str| usage[key].as_u64().unwrap_or(0);
@@ -627,7 +633,7 @@ fn parse_usage(result_line: &str) -> Option<CallUsage> {
 
 /// The plan's usage windows from the CLI's `rate_limit_event`. Only
 /// present when the CLI is signed in with a subscription.
-fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
+pub(crate) fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v["type"].as_str() != Some("rate_limit_event") {
         return None;
@@ -642,7 +648,7 @@ fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
 }
 
 /// Turn an error text from the CLI into the right [`RefineError`].
-fn classify_failure(message: &str) -> RefineError {
+pub(crate) fn classify_failure(message: &str) -> RefineError {
     let lower = message.to_lowercase();
     let auth = ["/login", "not logged in", "log in", "sign in", "authentication", "invalid api key", "oauth"]
         .iter()
@@ -654,7 +660,7 @@ fn classify_failure(message: &str) -> RefineError {
     }
 }
 
-fn exit_error(stderr: &str) -> RefineError {
+pub(crate) fn exit_error(stderr: &str) -> RefineError {
     let said = one_line(stderr);
     if said.is_empty() {
         RefineError::Backend("Claude Code exited without an answer".into())

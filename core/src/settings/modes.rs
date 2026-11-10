@@ -109,7 +109,7 @@ impl Default for ModesSettings {
     }
 }
 
-fn lenient_effort<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RefineEffort>, D::Error> {
+pub(super) fn lenient_effort<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RefineEffort>, D::Error> {
     let raw: Option<serde_json::Value> = Option::deserialize(d)?;
     Ok(raw
         .as_ref()

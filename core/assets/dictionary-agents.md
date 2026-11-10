@@ -69,6 +69,11 @@ moved it: see `history.folder` in `settings.json`.
 - A second comment line, `<!-- extra: mode=Formal -->`, names the
   mode the text was rewritten in, when the person used one of their
   own modes. It is not part of what they said.
+- An entry whose second comment line says `kind=ask` is a question
+  the person asked OpenWhisper out loud, not something they dictated
+  into an app. Its text is the question, and the `> Answer:` quote
+  under it is what the model answered. It has no app in its heading:
+  the answer was shown in a panel, not typed anywhere.
 - To find something they said, search the folder, for example
   `rg -i "release plan" history/`. A day's file is named after its
   date, so "what did I say this morning" is today's file.

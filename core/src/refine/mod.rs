@@ -889,6 +889,16 @@ pub(crate) mod test_support {
         FACTORY.lock().ok().and_then(|g| g.clone())
     }
 
+    /// Install (or with `None` remove) the backend factory without
+    /// taking the test lock: for a test that already holds it through
+    /// another module's scope (`crate::ask::test_support::scope`) and
+    /// wants to see that Refine is *not* called.
+    pub(crate) fn set_factory(make: Option<Factory>) {
+        if let Ok(mut g) = FACTORY.lock() {
+            *g = make;
+        }
+    }
+
     /// Holds the global test lock and resets shared state on drop.
     pub(crate) struct Scope {
         _guard: MutexGuard<'static, ()>,

@@ -3028,6 +3028,7 @@ dependencies = [
 name = "openwhisper-core"
 version = "0.6.1"
 dependencies = [
+ "base64 0.22.1",
  "bzip2",
  "chrono",
  "core-foundation 0.10.1",

@@ -24,12 +24,18 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer", "refine", "focus"]
+tauri = ["recognizer", "refine", "focus", "ask"]
 # Refine (TASK-93): optional language-model cleanup after transcription,
 # through the user's Claude Code CLI or an OpenAI-compatible endpoint.
 # Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
 # client or a keychain binding it never calls.
 refine = ["dep:ureq", "dep:keyring"]
+# Ask (TASK-97): a spoken question, answered by the model Refine is set
+# up with and shown in a panel instead of typed. Builds on Refine's
+# backends (binary lookup, HTTP client, keychain), hence the
+# dependency. `base64` carries images to the model (the screen, in
+# TASK-98).
+ask = ["refine", "dep:base64"]
 # Focus context (TASK-94): which app is frontmost and its window title.
 # Its own feature so the SwiftUI staticlib flavor does not pull in the
 # platform bindings it never calls.
@@ -106,6 +112,9 @@ ndarray = { version = "0.16", optional = true }
 # shell consumes from k2-fsa/sherpa-onnx releases). Also the HTTP client
 # of Refine's OpenAI-compatible backend (feature `refine`).
 ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
+# Ask (feature `ask`): images travel to the model base64-encoded, in
+# both wire formats. Already in the lockfile through other crates.
+base64 = { version = "0.22", optional = true }
 # SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
 sha2 = { version = "0.10", optional = true }
 tar = { version = "0.4", optional = true }

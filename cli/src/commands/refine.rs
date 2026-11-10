@@ -18,6 +18,8 @@
 //! - `history`: what Refine did on recent dictations in the desktop
 //!   app (status, response time, warm or cold, reason for a fallback).
 //!   The same data as the app's Diagnostics pane; no dictated text.
+//!   Asks (`openwhisper ask`, TASK-97) are rows of the same table,
+//!   listed with the source `ask` and counted on a line of their own.
 //!
 //! `run`, `test` and `eval` work whether or not Refine is enabled:
 //! invoking them is the opt-in. They send the text to the configured
@@ -607,6 +609,17 @@ fn show_history(args: HistoryArgs, json: bool) -> Result<()> {
     );
     println!("too short      {}", summary.skipped);
     println!("instructions   {}", summary.instructions);
+    if summary.asks > 0 {
+        // Asks share the table (and the plan); the numbers above are
+        // about Refine only.
+        println!(
+            "asks           {} ({} answered; median first text {}, whole answer {})",
+            summary.asks,
+            summary.asks_answered,
+            ms(summary.ask_median_first_text_ms),
+            ms(summary.ask_median_ms)
+        );
+    }
     println!(
         "response time  median {}, p90 {}, slowest {}",
         ms(summary.median_ms),

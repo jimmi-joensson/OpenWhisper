@@ -66,14 +66,14 @@ const OPTIONAL_PARAMS: &[&str] = &["temperature", "reasoning_effort"];
 /// the extra round trip.
 static REFUSED: Mutex<Option<HashSet<(String, String, &'static str)>>> = Mutex::new(None);
 
-fn is_refused(url: &str, model: &str, param: &'static str) -> bool {
+pub(crate) fn is_refused(url: &str, model: &str, param: &'static str) -> bool {
     REFUSED.lock().ok().is_some_and(|g| {
         g.as_ref()
             .is_some_and(|set| set.contains(&(url.to_string(), model.to_string(), param)))
     })
 }
 
-fn remember_refused(url: &str, model: &str, param: &'static str) {
+pub(crate) fn remember_refused(url: &str, model: &str, param: &'static str) {
     if let Ok(mut g) = REFUSED.lock() {
         g.get_or_insert_with(HashSet::new)
             .insert((url.to_string(), model.to_string(), param));
@@ -81,7 +81,7 @@ fn remember_refused(url: &str, model: &str, param: &'static str) {
 }
 
 /// Which optional field a 400 complains about, if any.
-fn refused_param(message: &str) -> Option<&'static str> {
+pub(crate) fn refused_param(message: &str) -> Option<&'static str> {
     let lower = message.to_lowercase();
     if lower.contains("reasoning_effort") || lower.contains("reasoning effort") {
         Some("reasoning_effort")
@@ -92,7 +92,9 @@ fn refused_param(message: &str) -> Option<&'static str> {
     }
 }
 
-enum CallError {
+/// How one HTTP call failed. Shared with Ask, which posts to the same
+/// endpoint and reports its errors in the same words.
+pub(crate) enum CallError {
     Http(u16, String),
     Other(RefineError),
 }
@@ -172,7 +174,7 @@ impl Refiner for OpenAiCompat {
 }
 
 impl CallError {
-    fn into_refine(self, settings: &OpenAiSettings) -> RefineError {
+    pub(crate) fn into_refine(self, settings: &OpenAiSettings) -> RefineError {
         match self {
             Self::Other(e) => e,
             Self::Http(401 | 403, message) => RefineError::Unavailable(format!(
@@ -190,7 +192,7 @@ impl CallError {
     }
 }
 
-fn transport_error(t: &ureq::Transport, settings: &OpenAiSettings) -> RefineError {
+pub(crate) fn transport_error(t: &ureq::Transport, settings: &OpenAiSettings) -> RefineError {
     let text = t.to_string();
     let lower = text.to_lowercase();
     if lower.contains("timed out") || lower.contains("timeout") {
@@ -242,7 +244,7 @@ pub fn destination(settings: &OpenAiSettings) -> String {
     }
 }
 
-fn config_problem(settings: &OpenAiSettings) -> Option<String> {
+pub(crate) fn config_problem(settings: &OpenAiSettings) -> Option<String> {
     let url = settings.base_url.trim();
     if url.is_empty() {
         return Some("No endpoint URL is set.".to_string());
@@ -291,7 +293,7 @@ Use the connection test to check it.",
 
 /// Token counts from the response's `usage` block, when the server
 /// sends one. No cost: prices are the provider's business.
-fn parse_usage(body: &str) -> Option<CallUsage> {
+pub(crate) fn parse_usage(body: &str) -> Option<CallUsage> {
     let v: Value = serde_json::from_str(body).ok()?;
     let usage = v.get("usage")?;
     let tokens_in = usage["prompt_tokens"].as_u64()?;
@@ -308,7 +310,7 @@ fn parse_usage(body: &str) -> Option<CallUsage> {
 
 /// `choices[0].message.content`, as a string or as a list of text
 /// parts.
-fn extract_content(body: &str) -> Result<String, RefineError> {
+pub(crate) fn extract_content(body: &str) -> Result<String, RefineError> {
     let v: Value = serde_json::from_str(body)
         .map_err(|_| RefineError::Backend("the endpoint did not answer with JSON".into()))?;
     let content = &v["choices"][0]["message"]["content"];
@@ -335,7 +337,7 @@ fn extract_content(body: &str) -> Result<String, RefineError> {
 
 /// The human part of an error body: `error.message`, `error` as a
 /// string, `message`, or the start of the raw body.
-fn error_message(body: &str) -> String {
+pub(crate) fn error_message(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         for candidate in [&v["error"]["message"], &v["error"], &v["message"]] {
             if let Some(text) = candidate.as_str() {

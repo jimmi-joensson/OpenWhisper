@@ -1,0 +1,1202 @@
+//! Ask: a spoken question, answered by a language model and shown in
+//! a panel instead of being typed (TASK-97).
+//!
+//! ```text
+//! ask key --> record --> transcribe (local) --> rules + dictionary --> ASK --> panel
+//!   |                                                                  ^
+//!   +-- begin_listening(): backend starts up meanwhile ----------------+
+//! ```
+//!
+//! The same microphone, recorder and local transcription as a
+//! dictation ([`crate::dictation`]); what differs is where the text
+//! goes. A dictation is typed where the cursor is. An ask is sent to
+//! the model as a question, and the answer only ever exists on the
+//! snapshot here ([`AskSnapshot`]) until the person copies or inserts
+//! it themselves. Nothing in this module calls the injector.
+//!
+//! Three rules shape it:
+//!
+//! - **Opt-in.** An ask sends the question off the machine, so it has
+//!   its own switch ([`crate::settings::AskSettings::enabled`], off by
+//!   default). The backend is the one Refine is set up with: the
+//!   user's Claude Code CLI or an OpenAI-compatible endpoint.
+//! - **An ask never changes anything.** The model gets no tools at
+//!   all, so it can answer and nothing else. The one exception is the
+//!   built-in web search, and only while the user has switched that
+//!   on. The Claude CLI is always started with `--permission-mode
+//!   default`, so a machine whose own default is a looser mode cannot
+//!   widen this. A backend that sees the model reach for any other
+//!   tool stops and reports an error.
+//! - **The answer is never typed by itself.** See above.
+//!
+//! This is a separate pipeline from [`crate::refine::Refiner`], which
+//! is text in, text out within a few seconds. An answer is long, so
+//! it streams ([`AskEvent`]); it can be cancelled ([`CancelFlag`]);
+//! and a backend is a conversation that can take more than one turn
+//! ([`AskBackend`]), which is how the screen will be sent after the
+//! question in TASK-98.
+//!
+//! Entry points:
+//!
+//! - one ask at a time, process-wide, for the desktop app:
+//!   [`begin_listening`] when the ask recording starts, [`submit`]
+//!   with the transcript (or typed text), [`cancel`], [`dismiss`],
+//!   and [`snapshot`] for the panel. The dictation pipeline uses the
+//!   split forms [`mark_listening`], [`warm_listening`] and
+//!   [`submit_listening`], which tie the three steps of one recording
+//!   together by id.
+//! - the plain function for everything else (the CLI, the eval set):
+//!   [`answer`], or [`AskPlan`] when the backend should be warmed
+//!   first. No global state.
+
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+
+use crate::refine::history::{self as runs, RefineRun};
+use crate::refine::{BackendStatus, RefineError};
+use crate::settings::{
+    ASK_TIMEOUT_MAX_MS, AskSettings, ClaudeCliSettings, OpenAiSettings, RefineBackendKind, RefineEffort,
+    RefineSettings,
+};
+
+pub mod claude_cli;
+pub mod eval;
+pub mod openai_compat;
+pub mod prompt;
+
+pub use crate::refine::CallUsage;
+
+// --- what goes in and what comes out -------------------------------
+
+/// An image sent along with a question. Empty until the screen is
+/// sent (TASK-98); the wire format of both backends is in place.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AskImage {
+    /// MIME type, e.g. `image/png`.
+    pub media_type: String,
+    /// The file's bytes, not encoded.
+    pub data: Vec<u8>,
+}
+
+/// Never prints the bytes: a screenshot does not belong in a log.
+impl fmt::Debug for AskImage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AskImage({}, {} bytes)", self.media_type, self.data.len())
+    }
+}
+
+/// One turn sent to the model.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AskInput {
+    pub text: String,
+    pub images: Vec<AskImage>,
+}
+
+impl AskInput {
+    /// A turn that is only text.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self { text: text.into(), images: Vec::new() }
+    }
+}
+
+/// What happens while an answer is on its way.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskEvent {
+    /// The next piece of the answer. Pieces in order make the answer.
+    Text(String),
+    /// The model is searching the web for this.
+    Searching { query: String },
+    /// That search is back; the model carries on.
+    SearchDone,
+}
+
+/// A finished answer.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct AskReply {
+    /// The whole answer, trimmed.
+    pub text: String,
+    /// From sending the question to the first piece of text. `None`
+    /// when the backend did not stream.
+    pub first_text_ms: Option<u64>,
+    /// From sending the question to the end of the answer.
+    pub elapsed_ms: u64,
+    /// Tokens, list-price cost and plan windows, as far as the
+    /// backend reports them.
+    pub usage: Option<CallUsage>,
+    /// When the backend had been started ahead of the question (at
+    /// record start): how many ms ahead. `None` = it started cold, or
+    /// this was a later turn of the same conversation.
+    pub warm_lead_ms: Option<u64>,
+    /// Something the person should know about how the answer was
+    /// made ("web search is not available with this backend"). Empty
+    /// most of the time.
+    pub notice: String,
+}
+
+/// Why there is no answer.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskError {
+    /// The backend cannot run at all: Ask is switched off, the CLI is
+    /// not installed or not signed in, the endpoint is not set up.
+    /// The message says what to do.
+    Unavailable(String),
+    /// No answer within the timeout.
+    Timeout,
+    /// The person cancelled.
+    Cancelled,
+    /// The backend ran and failed.
+    Backend(String),
+}
+
+impl fmt::Display for AskError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(m) | Self::Backend(m) => f.write_str(m),
+            Self::Timeout => f.write_str("no answer in time"),
+            Self::Cancelled => f.write_str("cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for AskError {}
+
+/// Both features talk to the same backends, so a missing or
+/// signed-out CLI reads the same in Ask as in Refine.
+impl From<RefineError> for AskError {
+    fn from(e: RefineError) -> Self {
+        match e {
+            RefineError::Unavailable(m) => Self::Unavailable(m),
+            RefineError::Timeout => Self::Timeout,
+            RefineError::Backend(m) => Self::Backend(m),
+        }
+    }
+}
+
+/// Shared between whoever may cancel an ask and the backend that runs
+/// it. Backends check it at least every [`POLL`], also while nothing
+/// arrives from the model.
+#[derive(Clone, Debug, Default)]
+pub struct CancelFlag(Arc<AtomicBool>);
+
+impl CancelFlag {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the backend to stop. Cannot be undone.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// How often a backend that is waiting for the model looks at the
+/// cancel flag and the clock.
+pub(crate) const POLL: Duration = Duration::from_millis(25);
+
+/// What a conversation is started with. Fixed for its lifetime: a
+/// backend given another setup starts over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskSetup {
+    /// The system prompt ([`prompt::system_prompt`]).
+    pub system: String,
+    pub model: String,
+    /// `None` sends no effort (OpenAI-compatible only; the Claude CLI
+    /// then gets low).
+    pub effort: Option<RefineEffort>,
+    /// The model may use the built-in web search. No other tool
+    /// exists for an ask, whatever this says.
+    pub web_search: bool,
+}
+
+/// An Ask backend: a conversation with a model.
+///
+/// Dropping the backend ends the conversation and releases whatever
+/// it started (kills a child process, closes a connection).
+pub trait AskBackend: Send {
+    /// Stable id for logs and the UI, e.g. `"claude-cli"`.
+    fn id(&self) -> &'static str;
+
+    /// Start anything that can overlap the recording, so the first
+    /// [`AskBackend::send`] is fast. Must not send anything to the
+    /// model (there is no question yet).
+    fn warm(&mut self, setup: &AskSetup);
+
+    /// Send one turn and stream the answer into `sink`. `input.text`
+    /// goes out as given. Blocks until the answer is complete.
+    ///
+    /// Returns [`AskError::Cancelled`] within a few [`POLL`]s of
+    /// `cancel` being set, and [`AskError::Timeout`] when the backend
+    /// takes longer than `timeout`: for the whole turn (the Claude
+    /// CLI) or without sending anything (a streaming endpoint, which
+    /// may be a slow local model that is making steady progress).
+    /// After an error the conversation is over. After an answer,
+    /// `send` may be called again with the same setup for a further
+    /// turn in the same conversation.
+    fn send(
+        &mut self,
+        setup: &AskSetup,
+        input: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+        timeout: Duration,
+    ) -> Result<AskReply, AskError>;
+}
+
+/// The text and timings of one turn as it streams in. Backends feed
+/// it; it feeds the sink.
+pub(crate) struct Turn<'a> {
+    sink: &'a mut dyn FnMut(AskEvent),
+    started: Instant,
+    first_text: Option<Duration>,
+    text: String,
+    /// A new message began after text was already shown (the model
+    /// spoke, searched, and speaks again): its text starts a new
+    /// paragraph.
+    gap: bool,
+}
+
+impl<'a> Turn<'a> {
+    pub(crate) fn new(sink: &'a mut dyn FnMut(AskEvent), started: Instant) -> Self {
+        Self { sink, started, first_text: None, text: String::new(), gap: false }
+    }
+
+    /// The next piece of the answer.
+    pub(crate) fn text(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let mut piece = String::new();
+        if self.gap {
+            self.gap = false;
+            if !self.text.ends_with('\n') {
+                piece.push_str("\n\n");
+            }
+        }
+        piece.push_str(delta);
+        self.first_text.get_or_insert_with(|| self.started.elapsed());
+        self.text.push_str(&piece);
+        (self.sink)(AskEvent::Text(piece));
+    }
+
+    /// The model started another message in the same turn.
+    pub(crate) fn new_message(&mut self) {
+        if !self.text.is_empty() {
+            self.gap = true;
+        }
+    }
+
+    pub(crate) fn event(&mut self, event: AskEvent) {
+        (self.sink)(event);
+    }
+
+    pub(crate) fn has_text(&self) -> bool {
+        !self.text.trim().is_empty()
+    }
+
+    pub(crate) fn finish(self, usage: Option<CallUsage>, warm_lead: Option<Duration>, notice: &str) -> AskReply {
+        AskReply {
+            text: prompt::clean_answer(&self.text),
+            first_text_ms: self.first_text.map(|d| d.as_millis() as u64),
+            elapsed_ms: self.started.elapsed().as_millis() as u64,
+            usage,
+            warm_lead_ms: warm_lead.map(|d| d.as_millis() as u64),
+            notice: notice.to_string(),
+        }
+    }
+}
+
+// --- one ask, worked out -------------------------------------------
+
+/// Said in the reply when web search was asked for and the backend
+/// has none.
+pub const WEB_SEARCH_UNAVAILABLE: &str =
+    "Web search is only available with the Claude backend. This answer comes from the model alone.";
+
+const ASK_OFF: &str = "Ask is switched off. Switch it on in the settings to ask questions.";
+const NO_QUESTION: &str = "There was no question to answer.";
+const NO_ANSWER: &str = "The model returned no answer.";
+
+/// Everything one ask is made with, worked out from the two settings
+/// blocks: which backend, the conversation setup, the timeout. The
+/// app and the CLI go through the same type, so `openwhisper ask run`
+/// does exactly what the ask key does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskPlan {
+    /// The backend Refine is set up with.
+    pub backend: RefineBackendKind,
+    pub setup: AskSetup,
+    /// [`AskSettings::timeout_ms`], doubled while web search is in
+    /// use: a search alone takes 15 to 20 seconds.
+    pub timeout: Duration,
+    /// See [`AskReply::notice`].
+    pub notice: String,
+    claude_cli: ClaudeCliSettings,
+    openai: OpenAiSettings,
+}
+
+impl AskPlan {
+    /// The plan for these settings, with the dictionary terms given
+    /// instead of read from the user's dictionary. For the eval set
+    /// and tests.
+    pub fn with_terms(ask: &AskSettings, refine: &RefineSettings, terms: &[String]) -> Self {
+        let ask = ask.clone().cleaned();
+        let openai = refine.backend == RefineBackendKind::OpenaiCompatible;
+        // Only the Claude CLI has a web search to switch on.
+        let web_search = ask.web_search && !openai;
+        let notice = if ask.web_search && openai { WEB_SEARCH_UNAVAILABLE } else { "" };
+        let timeout_ms = if web_search { ask.timeout_ms.saturating_mul(2) } else { ask.timeout_ms };
+        let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
+        Self {
+            backend: refine.backend,
+            setup: AskSetup {
+                system: prompt::system_prompt(&ask.instructions, terms, web_search, &today),
+                model: ask.model_for(refine),
+                effort: ask.effort_for(refine),
+                web_search,
+            },
+            timeout: Duration::from_millis(timeout_ms.min(ASK_TIMEOUT_MAX_MS * 2)),
+            notice: notice.to_string(),
+            claude_cli: refine.claude_cli.clone(),
+            openai: refine.openai.clone(),
+        }
+    }
+
+    /// The plan for these settings and the current dictionary.
+    pub fn new(ask: &AskSettings, refine: &RefineSettings) -> Self {
+        let matcher = crate::dictionary::current_matcher();
+        Self::with_terms(ask, refine, matcher.prompt_terms())
+    }
+
+    /// A backend for this plan. Cheap: nothing is started until
+    /// [`AskBackend::warm`] or [`AskBackend::send`].
+    pub fn backend(&self) -> Box<dyn AskBackend> {
+        #[cfg(test)]
+        if let Some(make) = test_support::factory() {
+            return make(self);
+        }
+        match self.backend {
+            RefineBackendKind::OpenaiCompatible => Box::new(openai_compat::OpenAiAsk::new(
+                self.openai.clone(),
+                crate::refine::secrets::api_key().unwrap_or(None),
+            )),
+            _ => Box::new(claude_cli::ClaudeCliAsk::new(self.claude_cli.clone())),
+        }
+    }
+
+    /// Where the question is sent, in the words Refine uses for the
+    /// same backend.
+    pub fn destination(&self) -> String {
+        match self.backend {
+            RefineBackendKind::OpenaiCompatible => crate::refine::openai_compat::destination(&self.openai),
+            _ => crate::refine::claude_cli::DESTINATION.to_string(),
+        }
+    }
+
+    /// The effort as an id; `""` when none is sent.
+    pub fn effort_id(&self) -> &'static str {
+        self.setup.effort.map_or("", RefineEffort::as_str)
+    }
+
+    /// Ask `question` through `backend`: the question is fenced
+    /// ([`prompt::user_message`]), the answer streams into `sink`.
+    /// `question.text` is the question as heard or typed.
+    pub fn send(
+        &self,
+        backend: &mut dyn AskBackend,
+        question: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+    ) -> Result<AskReply, AskError> {
+        if question.text.trim().is_empty() && question.images.is_empty() {
+            return Err(AskError::Backend(NO_QUESTION.to_string()));
+        }
+        let input = AskInput { text: prompt::user_message(&question.text), images: question.images.clone() };
+        let result = backend.send(&self.setup, &input, sink, cancel, self.timeout);
+        // Lengths only, never the text: verbose logs end up in bug
+        // reports.
+        crate::verbose_log!(
+            "[ow.ask] backend={} ok={} chars_in={} chars_out={} first_text_ms={:?} ms={:?}",
+            backend.id(),
+            result.is_ok(),
+            question.text.trim().chars().count(),
+            result.as_ref().map_or(0, |r| r.text.chars().count()),
+            result.as_ref().ok().and_then(|r| r.first_text_ms),
+            result.as_ref().ok().map(|r| r.elapsed_ms)
+        );
+        let mut reply = result?;
+        if reply.text.is_empty() {
+            return Err(AskError::Backend(NO_ANSWER.to_string()));
+        }
+        if reply.notice.is_empty() {
+            reply.notice = self.notice.clone();
+        }
+        Ok(reply)
+    }
+}
+
+/// Answer one question with a fresh backend: the pure form of an ask,
+/// with no global state. `ask` and `refine` are the two settings
+/// blocks (the backend, binary path, URL and key are Refine's);
+/// `input.text` is the question as heard or typed.
+///
+/// Does not look at [`AskSettings::enabled`]: a caller that got here
+/// decided to ask (`openwhisper ask run` is its own opt-in).
+pub fn answer(
+    ask: &AskSettings,
+    refine: &RefineSettings,
+    input: &AskInput,
+    sink: &mut dyn FnMut(AskEvent),
+    cancel: &CancelFlag,
+) -> Result<AskReply, AskError> {
+    let plan = AskPlan::new(ask, refine);
+    let mut backend = plan.backend();
+    plan.send(backend.as_mut(), input, sink, cancel)
+}
+
+/// What the Ask pane and `openwhisper ask status` show.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AskStatus {
+    /// The saved block.
+    pub settings: AskSettings,
+    /// Whether the backend can run, and where questions are sent
+    /// ([`BackendStatus::destination`]).
+    pub backend: BackendStatus,
+    /// The model and effort an ask would use right now.
+    pub model: String,
+    /// `""` when no effort is sent.
+    pub effort: String,
+    /// Web search is on and the backend has one.
+    pub web_search: bool,
+    pub timeout_ms: u64,
+    /// See [`AskReply::notice`].
+    pub notice: String,
+}
+
+/// Check whether an ask can run with these settings. Makes no model
+/// call; for the Claude CLI it runs `claude auth status`.
+pub fn status(ask: &AskSettings, refine: &RefineSettings) -> AskStatus {
+    let plan = AskPlan::with_terms(ask, refine, &[]);
+    AskStatus {
+        settings: ask.clone().cleaned(),
+        backend: crate::refine::backend_status(refine),
+        model: plan.setup.model.clone(),
+        effort: plan.effort_id().to_string(),
+        web_search: plan.setup.web_search,
+        timeout_ms: plan.timeout.as_millis() as u64,
+        notice: plan.notice,
+    }
+}
+
+// --- the one ask of the running app --------------------------------
+
+/// Where the current ask stands.
+#[non_exhaustive]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskPhase {
+    /// No ask.
+    #[default]
+    Idle,
+    /// The question is being recorded or transcribed.
+    Listening,
+    /// The question is with the model; no text has come back yet.
+    Thinking,
+    /// The answer is streaming in.
+    Answering,
+    /// The answer is complete.
+    Done,
+    /// There is no answer; [`AskSnapshot::error`] says why.
+    Error,
+    /// The person cancelled while the model was working.
+    Cancelled,
+}
+
+impl AskPhase {
+    /// Stable id, same as the serialized form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Listening => "listening",
+            Self::Thinking => "thinking",
+            Self::Answering => "answering",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Something is in flight that a cancel would stop.
+    pub fn is_busy(self) -> bool {
+        matches!(self, Self::Listening | Self::Thinking | Self::Answering)
+    }
+}
+
+/// The current ask, as the panel shows it.
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct AskSnapshot {
+    /// Tells one ask from the next. 0 before the first.
+    pub id: u64,
+    pub phase: AskPhase,
+    /// The question as it was sent (after rules and dictionary).
+    pub question: String,
+    /// The answer so far while `answering`, the whole answer when
+    /// `done`. Kept when an ask is cancelled or fails midway.
+    pub answer: String,
+    /// See [`AskReply::notice`].
+    pub notice: String,
+    /// Why there is no answer; empty unless the phase is `error`.
+    pub error: String,
+    /// Backend id, model and effort (`""` when none is sent).
+    pub backend: String,
+    pub model: String,
+    pub effort: String,
+    /// Web search is on for this ask.
+    pub web_search: bool,
+    /// The model is searching the web right now.
+    pub searching: bool,
+    /// What it is searching for, or last searched for.
+    pub search_query: String,
+    /// When the ask began (the recording, or the submit for typed
+    /// text), Unix epoch milliseconds.
+    pub started_at_ms: i64,
+    /// Since the question was sent. Counts up while the model works
+    /// (it is read off the clock when the snapshot is taken, without
+    /// a new `version`), then stays.
+    pub elapsed_ms: u64,
+    /// From sending the question to the first text.
+    pub first_text_ms: Option<u64>,
+    pub usage: Option<CallUsage>,
+    /// Goes up on every change, so a shell can emit only on change.
+    pub version: u64,
+}
+
+struct Warm {
+    plan: AskPlan,
+    backend: Box<dyn AskBackend>,
+}
+
+struct Session {
+    snap: AskSnapshot,
+    /// When the question went to the backend.
+    sent: Option<Instant>,
+    /// Stops the request in flight.
+    cancel: CancelFlag,
+    /// The backend warmed for the recording in flight.
+    warm: Option<Warm>,
+    /// Voiced length of the recording the question came from.
+    spoken_ms: i64,
+}
+
+impl Session {
+    fn running(&self, id: u64) -> bool {
+        self.snap.id == id && matches!(self.snap.phase, AskPhase::Thinking | AskPhase::Answering)
+    }
+
+    fn listening(&self, id: u64) -> bool {
+        self.snap.id == id && self.snap.phase == AskPhase::Listening
+    }
+
+    /// Back to no ask. The id stays, so a late writer of the ask that
+    /// was here still finds it, sees the phase and leaves it alone.
+    fn reset(&mut self) -> Option<Warm> {
+        self.cancel.cancel();
+        self.cancel = CancelFlag::new();
+        self.sent = None;
+        self.spoken_ms = 0;
+        self.snap = AskSnapshot { id: self.snap.id, version: self.snap.version, ..AskSnapshot::default() };
+        self.warm.take()
+    }
+}
+
+static SESSION: LazyLock<Mutex<Session>> = LazyLock::new(|| {
+    Mutex::new(Session {
+        snap: AskSnapshot::default(),
+        sent: None,
+        cancel: CancelFlag::new(),
+        warm: None,
+        spoken_ms: 0,
+    })
+});
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Lock-free mirror of [`AskPhase::is_busy`], for [`is_busy`].
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+fn read<R>(f: impl FnOnce(&mut Session) -> R) -> R {
+    // A panic while the lock was held left a complete snapshot
+    // behind (every write is a few assignments), so poison is ignored.
+    let mut guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+/// Like [`read`], for a change the panel should see.
+fn change<R>(f: impl FnOnce(&mut Session) -> R) -> R {
+    read(|s| {
+        let out = f(s);
+        s.snap.version += 1;
+        BUSY.store(s.snap.phase.is_busy(), Ordering::Relaxed);
+        out
+    })
+}
+
+fn now_ms() -> i64 {
+    crate::history::now_ms()
+}
+
+fn switched_off() -> AskError {
+    AskError::Unavailable(ASK_OFF.to_string())
+}
+
+/// The ask recording started: the phase goes to `listening`. Cheap
+/// (no file, no process), so it can run on the hotkey thread; follow
+/// it with [`warm_listening`] off that thread. Returns the id of the
+/// new ask, which replaces whatever ask was there (a request still
+/// running is cancelled).
+///
+/// With Ask switched off this does nothing and says so.
+pub fn mark_listening() -> Result<u64, AskError> {
+    let ask = crate::settings::current_ask_settings();
+    if !ask.enabled {
+        return Err(switched_off());
+    }
+    let refine = crate::settings::current_refine_settings();
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    let old = change(|s| {
+        let old = s.reset();
+        s.snap = AskSnapshot {
+            id,
+            phase: AskPhase::Listening,
+            backend: refine.backend.as_str().to_string(),
+            model: ask.model_for(&refine),
+            effort: ask.effort_for(&refine).map_or("", RefineEffort::as_str).to_string(),
+            web_search: ask.web_search && refine.backend != RefineBackendKind::OpenaiCompatible,
+            started_at_ms: now_ms(),
+            version: s.snap.version,
+            ..AskSnapshot::default()
+        };
+        old
+    });
+    // Outside the lock: dropping a backend kills and reaps a process.
+    drop(old);
+    Ok(id)
+}
+
+/// Let the backend start up while the person talks (the Claude CLI
+/// takes over a second to boot; warmed, the first text is back in
+/// about half a second). Reads the dictionary and may spawn a
+/// process, so call it off the hotkey thread. Does nothing when the
+/// ask `id` is no longer listening (a short recording, a quick
+/// cancel): a backend that comes up late is dropped.
+pub fn warm_listening(id: u64) {
+    if !read(|s| s.listening(id)) {
+        return;
+    }
+    let started = Instant::now();
+    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    let mut backend = plan.backend();
+    backend.warm(&plan.setup);
+    crate::verbose_log!(
+        "[ow.ask] warm backend={} setup_ms={} web_search={} (own thread, recording already running)",
+        backend.id(),
+        started.elapsed().as_millis(),
+        plan.setup.web_search
+    );
+    let mut slot = Some(Warm { plan, backend });
+    read(|s| {
+        if s.listening(id) {
+            s.warm = slot.take();
+        }
+    });
+    drop(slot);
+}
+
+/// [`mark_listening`] and [`warm_listening`] in one call, on the
+/// calling thread: run it off the hotkey thread.
+pub fn begin_listening() -> Result<u64, AskError> {
+    let id = mark_listening()?;
+    warm_listening(id);
+    Ok(id)
+}
+
+/// Ask `question` (typed text, or a transcript when the caller does
+/// not track the recording). Blocks until the ask is over and returns
+/// the snapshot it ended with: `done`, `error`, `cancelled`, or `idle`
+/// when the question was empty or the ask was dismissed. The phases
+/// in between are on [`snapshot`] meanwhile.
+///
+/// Replaces whatever ask was there. An ask that is `listening` is
+/// taken over, with the backend warmed for it.
+///
+/// With Ask switched off this does nothing and says so.
+pub fn submit(question: &str) -> Result<AskSnapshot, AskError> {
+    if !crate::settings::current_ask_settings().enabled {
+        return Err(switched_off());
+    }
+    let (id, warm, old) = change(|s| {
+        if s.snap.phase == AskPhase::Listening {
+            let warm = s.warm.take();
+            start(s, question, 0);
+            (s.snap.id, warm, None)
+        } else {
+            let old = s.reset();
+            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+            s.snap.id = id;
+            s.snap.started_at_ms = now_ms();
+            start(s, question, 0);
+            (id, None, old)
+        }
+    });
+    drop(old);
+    Ok(run(id, question, warm))
+}
+
+/// [`submit`] for the dictation pipeline: the transcript of the ask
+/// recording `id` is ready. Goes ahead only when that ask is still
+/// listening. When it was cancelled, dismissed or replaced meanwhile,
+/// nothing is sent and the result is [`AskError::Cancelled`].
+/// `spoken_ms` is the voiced length of the recording, for the history
+/// entry.
+pub fn submit_listening(id: u64, question: &str, spoken_ms: i64) -> Result<AskSnapshot, AskError> {
+    if !crate::settings::current_ask_settings().enabled {
+        // Switched off while the person was talking.
+        let warm = change(|s| if s.listening(id) { s.reset() } else { None });
+        drop(warm);
+        return Err(switched_off());
+    }
+    let warm = change(|s| {
+        if !s.listening(id) {
+            return Err(AskError::Cancelled);
+        }
+        let warm = s.warm.take();
+        start(s, question, spoken_ms);
+        Ok(warm)
+    })?;
+    Ok(run(id, question, warm))
+}
+
+/// The question is known: `thinking`. Under the session lock.
+fn start(s: &mut Session, question: &str, spoken_ms: i64) {
+    s.cancel = CancelFlag::new();
+    s.sent = Some(Instant::now());
+    s.spoken_ms = spoken_ms;
+    s.snap.question = question.trim().to_string();
+    s.snap.phase = AskPhase::Thinking;
+}
+
+/// Run the ask `id` to its end. The session is already `thinking`.
+fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
+    let question = question.trim();
+    if question.is_empty() {
+        // Nothing was heard: no call, no error, no ask.
+        drop(warm);
+        let late = change(|s| if s.running(id) { s.reset() } else { None });
+        drop(late);
+        return snapshot();
+    }
+    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    // The backend warmed while the person talked is used when it was
+    // warmed for exactly this plan, which is every ask where no
+    // setting or dictionary term changed meanwhile.
+    let mut backend = match warm {
+        Some(warm) if warm.plan == plan => warm.backend,
+        stale => {
+            drop(stale);
+            plan.backend()
+        }
+    };
+    let backend_id = backend.id();
+    let going = change(|s| {
+        s.running(id).then(|| {
+            s.snap.backend = backend_id.to_string();
+            s.snap.model = plan.setup.model.clone();
+            s.snap.effort = plan.effort_id().to_string();
+            s.snap.web_search = plan.setup.web_search;
+            s.snap.notice = plan.notice.clone();
+            (s.cancel.clone(), s.snap.started_at_ms, s.spoken_ms)
+        })
+    });
+    let Some((cancel, started_at_ms, spoken_ms)) = going else {
+        // Cancelled or replaced before the backend was even ready.
+        return snapshot();
+    };
+
+    let sent = Instant::now();
+    let mut sink = |event: AskEvent| {
+        change(|s| {
+            if !s.running(id) {
+                return;
+            }
+            match event {
+                AskEvent::Text(piece) => {
+                    if s.snap.first_text_ms.is_none() {
+                        s.snap.first_text_ms = Some(sent.elapsed().as_millis() as u64);
+                    }
+                    s.snap.answer.push_str(&piece);
+                    s.snap.phase = AskPhase::Answering;
+                    s.snap.searching = false;
+                }
+                AskEvent::Searching { query } => {
+                    s.snap.searching = true;
+                    s.snap.search_query = query;
+                }
+                AskEvent::SearchDone => s.snap.searching = false,
+            }
+        });
+    };
+    let result = plan.send(backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
+    // One ask is one conversation: the process goes with the answer.
+    drop(backend);
+    let elapsed_ms = sent.elapsed().as_millis() as u64;
+
+    // The answer counts only when the ask is still the one on show:
+    // not cancelled, dismissed or replaced in its last moment.
+    let accepted = change(|s| {
+        if s.snap.id != id {
+            return false;
+        }
+        match s.snap.phase {
+            AskPhase::Thinking | AskPhase::Answering => {
+                s.snap.searching = false;
+                s.snap.elapsed_ms = elapsed_ms;
+                s.sent = None;
+                match &result {
+                    Ok(reply) => {
+                        s.snap.answer = reply.text.clone();
+                        s.snap.notice = reply.notice.clone();
+                        s.snap.first_text_ms = s.snap.first_text_ms.or(reply.first_text_ms);
+                        s.snap.usage = reply.usage.clone();
+                        s.snap.phase = AskPhase::Done;
+                        true
+                    }
+                    Err(AskError::Cancelled) => {
+                        s.snap.phase = AskPhase::Cancelled;
+                        false
+                    }
+                    Err(e) => {
+                        s.snap.error = error_text(e, &plan);
+                        s.snap.phase = AskPhase::Error;
+                        false
+                    }
+                }
+            }
+            // `cancel` already put the phase there; the time is ours.
+            AskPhase::Cancelled => {
+                s.snap.elapsed_ms = elapsed_ms;
+                s.sent = None;
+                false
+            }
+            _ => false,
+        }
+    });
+
+    let status = match &result {
+        Ok(_) if accepted => "answered",
+        Ok(_) | Err(AskError::Cancelled) => "cancelled",
+        Err(AskError::Timeout) => "timeout",
+        Err(AskError::Unavailable(_)) => "unavailable",
+        Err(AskError::Backend(_)) => "failed",
+    };
+    runs::record_run(&run_record(status, &plan, backend_id, question, &result, started_at_ms, elapsed_ms));
+    if let (true, Ok(reply)) = (accepted, &result) {
+        keep_in_history(question, &reply.text, started_at_ms, spoken_ms);
+    }
+    snapshot()
+}
+
+/// What the panel says for an error.
+fn error_text(e: &AskError, plan: &AskPlan) -> String {
+    match e {
+        AskError::Timeout => format!("No answer within {} seconds.", plan.timeout.as_secs()),
+        other => other.to_string(),
+    }
+}
+
+/// The diagnostics row of one ask: a row in `refine_runs` with source
+/// [`runs::SOURCE_ASK`], so the plan usage estimate covers asks too.
+/// Lengths, timings and tokens; never the question or the answer.
+fn run_record(
+    status: &str,
+    plan: &AskPlan,
+    backend_id: &str,
+    question: &str,
+    result: &Result<AskReply, AskError>,
+    at_ms: i64,
+    elapsed_ms: u64,
+) -> RefineRun {
+    let reply = result.as_ref().ok();
+    let usage = reply.and_then(|r| r.usage.as_ref());
+    let windows = usage.and_then(|u| u.plan.as_ref());
+    RefineRun {
+        at_ms,
+        source: runs::SOURCE_ASK.to_string(),
+        status: status.to_string(),
+        backend: backend_id.to_string(),
+        model: plan.setup.model.clone(),
+        effort: plan.effort_id().to_string(),
+        elapsed_ms: elapsed_ms as i64,
+        warm_lead_ms: reply.and_then(|r| r.warm_lead_ms).map(|ms| ms as i64),
+        chars_in: question.trim().chars().count() as i64,
+        chars_out: reply.map_or(0, |r| r.text.chars().count() as i64),
+        instruction: false,
+        detail: match result {
+            Ok(_) => String::new(),
+            Err(e) => error_text(e, plan),
+        },
+        tokens_in: usage.map(|u| u.tokens_in as i64),
+        tokens_cached: usage.map(|u| u.tokens_cached as i64),
+        tokens_out: usage.map(|u| u.tokens_out as i64),
+        cost_usd: usage.and_then(|u| u.cost_usd),
+        window_5h_used: windows.and_then(|p| p.five_hour_used),
+        window_5h_resets_at: windows.and_then(|p| p.five_hour_resets_at),
+        window_7d_used: windows.and_then(|p| p.seven_day_used),
+        window_7d_resets_at: windows.and_then(|p| p.seven_day_resets_at),
+        mode: None,
+        first_text_ms: reply.and_then(|r| r.first_text_ms).map(|ms| ms as i64),
+    }
+}
+
+/// With transcript history on, keep the finished ask: the question as
+/// the entry's text, the answer under it ([`crate::history`]).
+/// Cancelled and failed asks are not kept.
+fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64) {
+    let settings = crate::settings::current_history_settings();
+    let Some(dir) = crate::history::current_dir() else {
+        return;
+    };
+    if settings.enabled {
+        let entry = crate::history::NewEntry {
+            at_ms: if at_ms > 0 { at_ms } else { now_ms() },
+            duration_ms: spoken_ms,
+            text: question,
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: crate::history::KIND_ASK,
+            answer: Some(answer),
+        };
+        if let Err(e) = crate::history::append(&dir, &entry) {
+            eprintln!("[history] could not save the ask: {e}");
+        }
+    }
+    // Retention applies with history on or off.
+    if let Err(e) = crate::history::prune(&dir, &settings, now_ms()) {
+        eprintln!("[history] prune failed: {e}");
+    }
+}
+
+/// Stop the current ask. While the model is working, the request is
+/// killed and the phase goes to `cancelled` at once (what has arrived
+/// of the answer stays on the snapshot). While `listening`, the ask
+/// is simply gone: back to `idle`, and the transcript of that
+/// recording will not be sent. In any other phase nothing happens.
+/// Returns whether there was something to stop.
+pub fn cancel() -> bool {
+    let (stopped, warm) = change(|s| match s.snap.phase {
+        AskPhase::Listening => (true, s.reset()),
+        AskPhase::Thinking | AskPhase::Answering => {
+            s.cancel.cancel();
+            s.snap.phase = AskPhase::Cancelled;
+            s.snap.searching = false;
+            s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
+            (true, None)
+        }
+        _ => (false, None),
+    });
+    drop(warm);
+    stopped
+}
+
+/// Close the ask: cancel it when it is still running, then `idle`
+/// with nothing on the snapshot. What the panel's close button calls.
+pub fn dismiss() {
+    let warm = change(Session::reset);
+    drop(warm);
+}
+
+/// The current ask.
+pub fn snapshot() -> AskSnapshot {
+    read(|s| {
+        let mut snap = s.snap.clone();
+        if let Some(sent) = s.sent.filter(|_| matches!(snap.phase, AskPhase::Thinking | AskPhase::Answering)) {
+            snap.elapsed_ms = sent.elapsed().as_millis() as u64;
+        }
+        snap
+    })
+}
+
+/// An ask is listening, thinking or answering: a cancel would stop
+/// something. Lock-free, so a keyboard hook can gate the cancel key
+/// on it.
+pub fn is_busy() -> bool {
+    BUSY.load(Ordering::Relaxed)
+}
+
+/// The complete answer, only once the ask is `done`. This is what an
+/// explicit "insert" or "copy" hands on; core never does so itself.
+pub fn finished_answer() -> Option<String> {
+    read(|s| (s.snap.phase == AskPhase::Done).then(|| s.snap.answer.clone()))
+}
+
+// --- test support --------------------------------------------------
+
+/// Stub backend and factory override for unit tests in this crate.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::MutexGuard;
+
+    type Factory = Arc<dyn Fn(&AskPlan) -> Box<dyn AskBackend> + Send + Sync>;
+
+    static FACTORY: Mutex<Option<Factory>> = Mutex::new(None);
+
+    pub(crate) fn factory() -> Option<Factory> {
+        FACTORY.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Holds the global test lock and resets shared state on drop.
+    pub(crate) struct Scope {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            super::dismiss();
+            if let Ok(mut g) = FACTORY.lock() {
+                *g = None;
+            }
+            crate::settings::set_ask_settings_cache(AskSettings::default());
+            crate::settings::set_refine_settings_cache(RefineSettings::default());
+        }
+    }
+
+    /// Install `make` as the backend factory and `settings` as the
+    /// current Ask settings for the lifetime of the returned scope.
+    /// Refine is at its defaults (the Claude backend).
+    ///
+    /// Holds the lock that serializes tests touching the process-wide
+    /// ask, the settings caches or the factory override.
+    pub(crate) fn scope(
+        settings: AskSettings,
+        make: impl Fn(&AskPlan) -> Box<dyn AskBackend> + Send + Sync + 'static,
+    ) -> Scope {
+        let guard = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::dismiss();
+        if let Ok(mut g) = FACTORY.lock() {
+            *g = Some(Arc::new(make));
+        }
+        crate::settings::set_ask_settings_cache(settings);
+        crate::settings::set_refine_settings_cache(RefineSettings::default());
+        Scope { _guard: guard }
+    }
+
+    /// The process-wide store ([`crate::stats::store`]), in memory,
+    /// registered on first use, so a test can read the diagnostics
+    /// rows an ask leaves. Tests elsewhere in the crate then write
+    /// their stats and Refine rows into it as well, which harms
+    /// nothing.
+    pub(crate) fn store() -> &'static crate::store::Store {
+        crate::stats::set_store(Arc::new(crate::store::Store::in_memory_for_test()));
+        crate::stats::store().expect("a store is registered")
+    }
+
+    /// What the [`Stub`]s of one test saw and did.
+    #[derive(Default, Debug)]
+    pub(crate) struct Calls {
+        pub made: usize,
+        pub warmed: usize,
+        pub sent: Vec<String>,
+        pub dropped: usize,
+        pub last_system: String,
+        pub last_images: usize,
+    }
+
+    type Script =
+        Arc<dyn Fn(&AskInput, &mut dyn FnMut(AskEvent), &CancelFlag) -> Result<String, AskError> + Send + Sync>;
+
+    /// Backend that answers from a closure and records its calls. The
+    /// closure streams through the sink like a real backend and
+    /// returns the whole answer.
+    pub(crate) struct Stub {
+        pub calls: Arc<Mutex<Calls>>,
+        pub script: Script,
+    }
+
+    impl Stub {
+        pub(crate) fn new(
+            calls: Arc<Mutex<Calls>>,
+            script: impl Fn(&AskInput, &mut dyn FnMut(AskEvent), &CancelFlag) -> Result<String, AskError>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            calls.lock().unwrap().made += 1;
+            Self { calls, script: Arc::new(script) }
+        }
+
+        /// A stub that streams `answer` in two pieces.
+        pub(crate) fn saying(calls: Arc<Mutex<Calls>>, answer: &'static str) -> Self {
+            Self::new(calls, move |_, sink, _| {
+                let half = answer.char_indices().nth(answer.chars().count() / 2).map_or(0, |(i, _)| i);
+                sink(AskEvent::Text(answer[..half].to_string()));
+                sink(AskEvent::Text(answer[half..].to_string()));
+                Ok(answer.to_string())
+            })
+        }
+    }
+
+    impl AskBackend for Stub {
+        fn id(&self) -> &'static str {
+            "stub"
+        }
+        fn warm(&mut self, _setup: &AskSetup) {
+            self.calls.lock().unwrap().warmed += 1;
+        }
+        fn send(
+            &mut self,
+            setup: &AskSetup,
+            input: &AskInput,
+            sink: &mut dyn FnMut(AskEvent),
+            cancel: &CancelFlag,
+            _timeout: Duration,
+        ) -> Result<AskReply, AskError> {
+            {
+                let mut c = self.calls.lock().unwrap();
+                c.sent.push(input.text.clone());
+                c.last_system = setup.system.clone();
+                c.last_images = input.images.len();
+            }
+            let text = (self.script)(input, sink, cancel)?;
+            Ok(AskReply {
+                text: text.trim().to_string(),
+                first_text_ms: Some(120),
+                elapsed_ms: 480,
+                usage: Some(CallUsage { tokens_in: 900, tokens_cached: 800, tokens_out: 40, cost_usd: Some(0.002), plan: None }),
+                warm_lead_ms: Some(2500),
+                notice: String::new(),
+            })
+        }
+    }
+
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            if let Ok(mut c) = self.calls.lock() {
+                c.dropped += 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

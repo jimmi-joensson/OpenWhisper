@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Check, Copy, Trash2 } from "lucide-react";
 
-import { TranscriptNotes } from "@/components/transcript-row";
+import { ModeMarker, TranscriptNotes } from "@/components/transcript-row";
 import type { DictionaryReplacement } from "@/lib/dictation";
 import { formatClock, groupByDay, type HistoryEntry } from "@/lib/history";
 import type { RefineInfo } from "@/lib/refine";
@@ -100,6 +100,11 @@ function HistoryRow({
             replacements={notes.replacements}
             refine={notes.refine}
           />
+        )}
+        {/* The notes of the dictation that just finished name the mode
+            themselves, with the reason. */}
+        {entry.mode && !notes?.refine.mode && (
+          <ModeMarker name={entry.mode} testId="history-row-mode" />
         )}
         {(long || (original && !notes)) && (
           <div className="ow-history-row__links">

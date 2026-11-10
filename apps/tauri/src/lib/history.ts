@@ -33,6 +33,9 @@ export interface HistoryEntry {
   original: string | null;
   app_id: string | null;
   app_name: string | null;
+  // Name of the mode the text was rewritten in, when it was one the
+  // user made; null for the built-in Dictation mode.
+  mode: string | null;
 }
 
 export interface HistoryPage {

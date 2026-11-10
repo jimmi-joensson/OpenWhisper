@@ -760,6 +760,12 @@ body[data-platform="macos"] .ow-titlebar {
   border-radius: 8px;
 }
 
+/* A card with a wider control than a switch (the Mode select) takes
+   a row of its own, under the switches. */
+.ow-home-switch--wide {
+  grid-column: 1 / -1;
+}
+
 /* Transcript history on Home (TASK-95). */
 .ow-history {
   display: flex;

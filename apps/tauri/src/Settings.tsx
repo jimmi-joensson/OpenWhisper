@@ -40,6 +40,7 @@ import { useDictation } from "./lib/use-dictation";
 import { usePauseAudio } from "./lib/use-pause-audio";
 import { DictionaryPane } from "./components/dictionary-pane";
 import { RefinePane } from "./components/refine-pane";
+import { ModesPane } from "./components/modes-pane";
 import { GeneralPane } from "./components/general-pane";
 import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
@@ -71,9 +72,11 @@ const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 interface SettingsShellProps {
   active: SettingsPaneId;
   onBack: () => void;
+  // Lets a pane send the user to another pane (Modes to Refine).
+  onSelectPane?: (pane: SettingsPaneId) => void;
 }
 
-export function SettingsShell({ active, onBack }: SettingsShellProps) {
+export function SettingsShell({ active, onBack, onSelectPane }: SettingsShellProps) {
   return (
     <div className="ow-settings">
       <button
@@ -96,6 +99,7 @@ export function SettingsShell({ active, onBack }: SettingsShellProps) {
         {active === "shortcuts" && <ShortcutsPane />}
         {active === "dictionary" && <DictionaryPane />}
         {active === "refine" && <RefinePane />}
+        {active === "modes" && <ModesPane onOpenPane={onSelectPane} />}
       </div>
     </div>
   );

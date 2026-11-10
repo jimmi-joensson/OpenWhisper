@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { ArrowRight, BookA, Check, Copy, Sparkles, TriangleAlert } from "lucide-react";
+import {
+  ArrowRight,
+  BookA,
+  Check,
+  Copy,
+  Layers,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
 
 import type { DictionaryReplacement } from "../lib/dictation";
 import { NO_REFINE, refineFellBack, type RefineInfo } from "../lib/refine";
@@ -62,7 +70,8 @@ interface TranscriptNotesProps {
 
 // What happened to a transcript on its way out: the dictionary fixes,
 // what Refine did (with the original one click away), or why Refine
-// was skipped. Only known for the dictation that just finished, so it
+// was skipped, and the mode it ran in when that was one of the user's
+// own. Only known for the dictation that just finished, so it
 // is shown on the latest row, wherever that row lives: on its own on
 // Home, or as the first entry of the history list.
 export function TranscriptNotes({
@@ -134,7 +143,40 @@ export function TranscriptNotes({
           </span>
         </div>
       )}
+      {refine.mode && (
+        <ModeMarker
+          name={refine.mode}
+          app={refine.mode_reason === "app-default" ? refine.mode_app : ""}
+          testId="home-latest-mode"
+        />
+      )}
     </>
+  );
+}
+
+// The mode a dictation ran in, when it was one the user made, and why
+// it was that one when the reason is the app's default ("Mode: Formal,
+// default for Chatter"). Same quiet line as the Refine marker. A
+// stored history entry only knows the name, so it shows the name alone.
+export function ModeMarker({
+  name,
+  app = "",
+  testId,
+}: {
+  name: string;
+  // The app whose default mode it was; "" when the mode was simply
+  // the selected one, or when the reason is not known.
+  app?: string;
+  testId: string;
+}) {
+  return (
+    <div className="ow-transcript-row__refine" data-testid={testId}>
+      <Layers size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+      <span>
+        Mode: {name}
+        {app ? `, default for ${app}` : ""}
+      </span>
+    </div>
   );
 }
 

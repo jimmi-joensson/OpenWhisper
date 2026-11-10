@@ -15,6 +15,12 @@ export interface MockTick {
     instruction?: string;
     backend: string;
     elapsed_ms: number;
+    // The mode the dictation ran in (TASK-96): its name ("" for the
+    // built-in Dictation mode), why it ran and, for an app default,
+    // the app's name.
+    mode?: string;
+    mode_reason?: "" | "selected" | "app-default";
+    mode_app?: string;
   };
   confidence?: number;
   sample_count?: number;
@@ -38,6 +44,9 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
     instruction: "",
     backend: "",
     elapsed_ms: 0,
+    mode: "",
+    mode_reason: "",
+    mode_app: "",
   },
   confidence: 0,
   sample_count: 0,
@@ -53,6 +62,8 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
 declare global {
   interface Window {
     __owEmit: (event: string, payload: unknown) => number;
+    // How many listeners an event has, without emitting anything.
+    __owListeners: (event: string) => number;
     __TAURI_INTERNALS__: unknown;
     __TAURI_EVENT_PLUGIN_INTERNALS__: unknown;
   }
@@ -95,10 +106,181 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
         if (cmd === "plugin:app|name") return "OpenWhisper Dev";
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
-        if (cmd === "modes_cycle") {
-          (window as unknown as { __owModesCycleCount?: number }).__owModesCycleCount =
-            ((window as unknown as { __owModesCycleCount?: number }).__owModesCycleCount ?? 0) + 1;
-          return null;
+        // Modes (TASK-96). An in-memory modes block that behaves like
+        // core: ids are slugs made from the name, the built-in
+        // Dictation mode is listed first, deleting a mode drops the app
+        // defaults that used it and moves the selection back to
+        // Dictation. `__owModesSettings` seeds the block. The apps
+        // offered for a default are the apps of the seeded history
+        // entries plus the apps that already have one. Every change is
+        // recorded in `__owModesCalls` and emits `modes_changed`, as
+        // Rust does. Keep in step with scripts/pw-shim.js.
+        if (cmd.startsWith("modes_")) {
+          type Mode = {
+            id: string;
+            name: string;
+            instructions: string;
+            model: string | null;
+            effort: string | null;
+          };
+          type AppDefault = { app_id: string; app_name: string; mode: string };
+          type ModesSettings = { active: string; custom: Mode[]; app_defaults: AppDefault[] };
+          const w = window as unknown as {
+            __owModesSettings?: Partial<ModesSettings>;
+            __owModesStored?: ModesSettings;
+            __owModesCalls?: { cmd: string; args: Record<string, unknown> }[];
+            __owModesCycleCount?: number;
+            __owHistoryEntries?: { app_id: string | null; app_name: string | null }[];
+            __owRefineSettings?: { instructions?: string };
+            __owRefineStored?: { instructions: string };
+          };
+          const BUILTIN = "dictation";
+          // `mode_slug` in core: lower case, letters and digits kept,
+          // every run of anything else one hyphen.
+          const slug = (text: string) =>
+            text
+              .trim()
+              .toLowerCase()
+              .replace(/[^\p{L}\p{N}]+/gu, "-")
+              .replace(/^-+|-+$/g, "");
+          // `ModesSettings::cleaned` in core.
+          const cleaned = (raw: ModesSettings): ModesSettings => {
+            const custom: Mode[] = [];
+            const exists = (id: string) => id === BUILTIN || custom.some((m) => m.id === id);
+            for (const mode of raw.custom) {
+              const name = mode.name.trim().slice(0, 40).trimEnd();
+              if (!name) continue;
+              const base = slug(mode.id) || slug(name) || "mode";
+              let id = base;
+              for (let n = 2; exists(id); n++) id = `${base}-${n}`;
+              custom.push({
+                id,
+                name,
+                instructions: mode.instructions.trim(),
+                model: mode.model?.trim() || null,
+                effort: mode.effort ?? null,
+              });
+            }
+            const active = exists(slug(raw.active)) ? slug(raw.active) : BUILTIN;
+            const app_defaults: AppDefault[] = [];
+            for (const d of raw.app_defaults) {
+              const entry = { app_id: d.app_id.trim(), app_name: d.app_name.trim(), mode: slug(d.mode) };
+              if (!entry.app_id || !exists(entry.mode)) continue;
+              const at = app_defaults.findIndex((x) => x.app_id === entry.app_id);
+              if (at >= 0) app_defaults[at] = entry;
+              else app_defaults.push(entry);
+            }
+            return { active, custom, app_defaults };
+          };
+          if (!w.__owModesStored) {
+            w.__owModesStored = cleaned({
+              active: BUILTIN,
+              custom: [],
+              app_defaults: [],
+              ...(w.__owModesSettings ?? {}),
+            });
+          }
+          const stored = w.__owModesStored;
+          // `modes::list` in core: the built-in mode, put together
+          // from the Refine instructions, then the user's own.
+          const list = (settings: ModesSettings) => [
+            {
+              id: BUILTIN,
+              name: "Dictation",
+              instructions:
+                w.__owRefineStored?.instructions ?? w.__owRefineSettings?.instructions ?? "",
+              model: null,
+              effort: null,
+              builtin: true,
+            },
+            ...settings.custom.map((m) => ({ ...m, builtin: false })),
+          ];
+          // A copy, as over real IPC.
+          const now = (settings: ModesSettings) =>
+            structuredClone({ settings, modes: list(settings) });
+          if (cmd === "modes_get") {
+            const apps: { id: string; name: string }[] = [];
+            for (const e of w.__owHistoryEntries ?? []) {
+              if (e.app_id && !apps.some((a) => a.id === e.app_id)) {
+                apps.push({ id: e.app_id, name: e.app_name ?? e.app_id });
+              }
+            }
+            for (const d of stored.app_defaults) {
+              if (!apps.some((a) => a.id === d.app_id)) {
+                apps.push({ id: d.app_id, name: d.app_name || d.app_id });
+              }
+            }
+            return { ...now(stored), apps };
+          }
+          const a = (args ?? {}) as Record<string, unknown>;
+          const unknown = (id: unknown) => `There is no mode with the id "${String(id)}".`;
+          const has = (id: unknown) =>
+            id === BUILTIN || stored.custom.some((m) => m.id === id);
+          let next: ModesSettings = structuredClone(stored);
+          // The user switching mode, as opposed to editing the modes.
+          let switched = false;
+          if (cmd === "modes_save") {
+            next = a.settings as ModesSettings;
+          } else if (cmd === "modes_select") {
+            if (!has(a.id)) throw unknown(a.id);
+            next.active = a.id as string;
+            switched = true;
+          } else if (cmd === "modes_cycle") {
+            w.__owModesCycleCount = (w.__owModesCycleCount ?? 0) + 1;
+            const ids = [BUILTIN, ...next.custom.map((m) => m.id)];
+            next.active = ids[(ids.indexOf(next.active) + 1) % ids.length];
+            switched = true;
+          } else if (cmd === "modes_add") {
+            if (!String(a.name ?? "").trim()) throw "A mode needs a name.";
+            next.custom.push({
+              id: "",
+              name: a.name as string,
+              instructions: (a.instructions as string) ?? "",
+              model: (a.model as string | null) ?? null,
+              effort: (a.effort as string | null) ?? null,
+            });
+          } else if (cmd === "modes_edit") {
+            if (a.id === BUILTIN) {
+              throw "The Dictation mode is built in. It cannot be renamed, and its instructions are the Refine instructions.";
+            }
+            const mode = next.custom.find((m) => m.id === a.id);
+            if (!mode) throw unknown(a.id);
+            if (!String(a.name ?? "").trim()) throw "A mode needs a name.";
+            mode.name = a.name as string;
+            mode.instructions = (a.instructions as string) ?? "";
+            mode.model = (a.model as string | null) ?? null;
+            mode.effort = (a.effort as string | null) ?? null;
+          } else if (cmd === "modes_delete") {
+            if (a.id === BUILTIN) throw "The Dictation mode is built in and cannot be deleted.";
+            if (!has(a.id)) throw unknown(a.id);
+            // `cleaned` drops its app defaults and the selection.
+            next.custom = next.custom.filter((m) => m.id !== a.id);
+          } else if (cmd === "modes_set_app_default") {
+            if (!String(a.appId ?? "").trim()) throw "An app default needs the id of the app.";
+            if (!has(a.modeId)) throw unknown(a.modeId);
+            next.app_defaults.push({
+              app_id: a.appId as string,
+              app_name: (a.appName as string) ?? "",
+              mode: a.modeId as string,
+            });
+          } else if (cmd === "modes_clear_app_default") {
+            if (!next.app_defaults.some((d) => d.app_id === a.appId)) {
+              throw `The app "${String(a.appId)}" has no default mode.`;
+            }
+            next.app_defaults = next.app_defaults.filter((d) => d.app_id !== a.appId);
+          } else {
+            return null;
+          }
+          const saved = cleaned(next);
+          w.__owModesStored = saved;
+          w.__owModesCalls = [...(w.__owModesCalls ?? []), { cmd, args: a }];
+          const result = now(saved);
+          const selected = result.modes.find((m) => m.id === saved.active);
+          window.__owEmit("modes_changed", {
+            ...structuredClone(result),
+            switched_to: switched ? (selected?.name ?? "Dictation") : null,
+          });
+          return result;
         }
         if (cmd === "hotkey_status_current") return null;
         if (cmd === "permissions_status_current") return null;
@@ -474,6 +656,8 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             original: string | null;
             app_id: string | null;
             app_name: string | null;
+            // Name of the mode the text was rewritten in (TASK-96).
+            mode?: string | null;
           };
           const w = window as unknown as {
             __owHistorySettings?: Partial<HistorySettings>;
@@ -1042,7 +1226,51 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
       }
       return delivered;
     };
+
+    window.__owListeners = (event: string) => handlers.get(event)?.size ?? 0;
   }, label);
+}
+
+// What `modes_changed` carries (mirrors `ModesChanged` in
+// src-tauri/src/modes.rs): the stored block, the list of modes with
+// the built-in one first, and the name of the mode now selected when
+// the change was the user switching mode.
+export interface MockModesChanged {
+  settings: {
+    active: string;
+    custom: {
+      id: string;
+      name: string;
+      instructions: string;
+      model: string | null;
+      effort: string | null;
+    }[];
+    app_defaults: { app_id: string; app_name: string; mode: string }[];
+  };
+  modes: {
+    id: string;
+    name: string;
+    instructions: string;
+    model: string | null;
+    effort: string | null;
+    builtin: boolean;
+  }[];
+  switched_to: string | null;
+}
+
+// Wait until something listens for `modes_changed`: App in the main
+// window, PillOverlay in the pill window. Nothing is emitted, since a
+// probe payload would itself change what is on screen.
+export async function waitForModesListener(page: Page) {
+  await page.waitForFunction(() => window.__owListeners("modes_changed") > 0, undefined, {
+    timeout: 3000,
+  });
+}
+
+// Push `modes_changed` as Rust does after a change made outside this
+// window: the switch-mode hotkey, the tray menu.
+export async function emitModesChanged(page: Page, payload: MockModesChanged): Promise<number> {
+  return page.evaluate((value) => window.__owEmit("modes_changed", value), payload);
 }
 
 // Push a `behavior_show_in_fullscreen_changed` event at the

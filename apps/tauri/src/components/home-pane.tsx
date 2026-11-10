@@ -25,7 +25,7 @@ interface HomePaneProps {
   recognizerError?: string | null;
   onRecognizerRetry?: () => void;
   // Open the settings behind a quick-switch card.
-  onOpenSettings?: (target: "refine" | "history") => void;
+  onOpenSettings?: (target: "refine" | "history" | "modes") => void;
   // Open the History screen.
   onOpenHistory?: () => void;
 }

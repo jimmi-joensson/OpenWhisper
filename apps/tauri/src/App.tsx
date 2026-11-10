@@ -13,6 +13,7 @@ import { SettingsShell } from "./Settings";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
 import { useHistorySync } from "./lib/use-history";
+import { useModesSync } from "./lib/use-modes";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
@@ -145,14 +146,16 @@ function App() {
   // Keep the history lists in step with the store, whichever screen
   // is showing.
   useHistorySync();
+  // Same for the modes: the hotkey and the tray menu change them too.
+  useModesSync();
 
   const goBack = useCallback(() => setRoute("home"), []);
 
-  // The settings shortcut on a Home card: Refine has its own pane,
-  // History is a section of General and is scrolled into view once
-  // the pane has rendered.
-  const openSettingsFor = useCallback((target: "refine" | "history") => {
-    setSettingsPane(target === "refine" ? "refine" : "general");
+  // The settings shortcut on a Home card: Refine and Modes have their
+  // own panes, History is a section of General and is scrolled into
+  // view once the pane has rendered.
+  const openSettingsFor = useCallback((target: "refine" | "history" | "modes") => {
+    setSettingsPane(target === "history" ? "general" : target);
     setRoute("settings");
     if (target === "history") {
       const reveal = (triesLeft: number) => {
@@ -247,7 +250,11 @@ function App() {
           <CrashesLaunchToast onView={() => setRoute("diagnostics")} />
           <main className="ow-app__body">
             {route === "settings" && (
-              <SettingsShell active={settingsPane} onBack={goBack} />
+              <SettingsShell
+                active={settingsPane}
+                onBack={goBack}
+                onSelectPane={setSettingsPane}
+              />
             )}
             {route === "history" && (
               <HistoryPane onOpenSettings={() => openSettingsFor("history")} />

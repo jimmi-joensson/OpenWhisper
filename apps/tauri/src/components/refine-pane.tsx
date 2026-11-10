@@ -31,7 +31,13 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { RefineBackend, RefineEffort } from "@/lib/refine";
+import {
+  BACKEND_EFFORTS,
+  CLAUDE_MODELS,
+  EFFORT_LABELS,
+  type RefineBackend,
+  type RefineEffort,
+} from "@/lib/refine";
 import { useRefine } from "@/lib/use-refine";
 
 // Where the OS keeps the API key. Each platform sees only its own
@@ -152,7 +158,7 @@ export function RefinePane() {
           />
           <EffortField
             value={settings.claude_cli.effort}
-            levels={CLAUDE_EFFORTS}
+            levels={BACKEND_EFFORTS["claude-cli"]}
             onChange={(effort) => {
               if (effort) void update({ claude_cli: { ...settings.claude_cli, effort } });
             }}
@@ -173,7 +179,7 @@ export function RefinePane() {
           />
           <EffortField
             value={settings.openai.effort}
-            levels={OPENAI_EFFORTS}
+            levels={BACKEND_EFFORTS["openai-compatible"]}
             allowNone
             onChange={(effort) =>
               void update({ openai: { ...settings.openai, effort } })
@@ -298,16 +304,8 @@ function BackendStatusAlert({
   );
 }
 
-// The model names the Claude CLI takes as-is. Which of them work
-// depends on the user's plan, which the CLI does not let us ask: a
-// model the plan lacks shows up as a failed connection test, not as a
-// missing menu entry. "Other" takes any full model name.
-const CLAUDE_MODELS = [
-  { value: "fable", label: "Fable" },
-  { value: "opus", label: "Opus" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "haiku", label: "Haiku" },
-] as const;
+// "Other" takes any full model name; the named choices are
+// `CLAUDE_MODELS`.
 const OTHER_MODEL = "__other__";
 
 // What a model choice means for a dictation. Sonnet and Haiku numbers
@@ -411,17 +409,6 @@ function ClaudeModelField({
 }
 
 const EFFORT_NONE = "none";
-const EFFORT_LABELS: Record<RefineEffort, string> = {
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra high",
-  max: "Max",
-};
-// The levels each kind of backend takes today.
-const CLAUDE_EFFORTS: RefineEffort[] = ["low", "medium", "high", "xhigh", "max"];
-const OPENAI_EFFORTS: RefineEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
 
 // How hard the model thinks before answering.
 function EffortField({

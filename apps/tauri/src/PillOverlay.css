@@ -25,6 +25,7 @@ body,
 }
 
 .pill-root {
+  position: relative;
   width: 100vw;
   height: 100vh;
   display: flex;
@@ -92,4 +93,52 @@ body,
 .pill-svg {
   overflow: visible;
   flex-shrink: 0;
+}
+
+/* Name of the mode, shown for a moment after the user switches mode
+ * (TASK-96). PillOverlay.tsx writes the text and flips `data-visible`;
+ * nothing here changes the capsule.
+ *
+ * Placement: the capsule is centered in the 180x110 window and grows
+ * upward from its bottom edge (transform-origin above), so at its 1.5x
+ * recording size its top is 22px above the window's center. The label's
+ * bottom edge sits 6px above that, which leaves its top about 9px below
+ * the window's top edge. A long name is cut off with an ellipsis rather
+ * than widening anything.
+ *
+ * It never takes a click: `pointer-events: none` here, and the window
+ * itself only accepts clicks while the cursor is over the capsule
+ * (pill_hover.rs).
+ *
+ * Motion: opacity only, in quickly and out a little slower. No movement,
+ * so reduced motion needs no case of its own. */
+.pill-mode-label {
+  position: absolute;
+  left: 50%;
+  bottom: calc(50% + 28px);
+  transform: translateX(-50%);
+  box-sizing: border-box;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  color: white;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  opacity: 0;
+  transition: opacity 240ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.pill-mode-label[data-visible="true"] {
+  opacity: 1;
+  transition: opacity 120ms cubic-bezier(0.23, 1, 0.32, 1);
 }

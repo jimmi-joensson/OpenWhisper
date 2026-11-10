@@ -37,7 +37,7 @@ fn default_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// The folder in use: the user's choice, else the default.
-fn history_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn history_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let settings = core_settings::current_history_settings();
     Ok(history::resolve_dir(&settings, &default_dir(app)?))
 }

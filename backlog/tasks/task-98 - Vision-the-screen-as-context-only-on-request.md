@@ -4,6 +4,7 @@ title: Vision - the screen as context, only on request
 status: To Do
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T15:33:00Z'
 labels:
   - vision
   - ask
@@ -44,4 +45,20 @@ Open points: which display on a multi-monitor setup (proposal: the one with the 
 - [ ] #6 Apps on the never-capture list block the capture and the answer says so
 - [ ] #7 macOS permission flow is clear; Windows path verified on a real machine before leaving In Review
 - [ ] #8 Headless parity: the CLI can run an ask with a screenshot
+- [ ] #9 A password manager's windows never reach a screenshot: listed apps are left out of the image itself (not captured and then hidden), on macOS and Windows, with an eval that checks the pixels
+- [ ] #10 When the focused app is on the never-capture list no screenshot is taken at all, and the answer says so
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Requirement from the user (2026-11-10): the tool must never read from a password manager; in a whole-screen capture its window has to be gone, like the phone setting that blacks an app out in screenshots.
+
+Findings so far (web search, not yet tried in code):
+- That phone-style protection is set by the app that owns the window. 1Password has no such setting on the desktop as far as found (open feature requests on its forum; its official release notes were not checked). On macOS it would not help anyway: since 15.4 a window that asks to be excluded is still captured by ScreenCaptureKit, and an Apple engineer states there is no public API to prevent capture.
+- So the protection has to be on our side, where the screenshot is taken. macOS: ScreenCaptureKit can capture a display while excluding chosen applications (SCContentFilter display:excludingApplications:exceptingWindows:), so their windows are not in the image. Windows: no equivalent found for a whole-monitor capture; plan is to paint over the rectangles of the listed apps' windows before the image leaves the process (covers more than needed when a window is partly hidden, which is the safe side).
+- Second layer on both: paint over the listed apps' window rectangles after capture as well, in case exclusion did not apply.
+- Default list: 1Password, Bitwarden, KeePassXC, LastPass, Dashlane, Apple Passwords / Keychain Access; editable.
+- Not covered by an app list, and to be said plainly in the settings: a password manager's browser extension popup (it is part of the browser window), a password shown on a web page or in a terminal.
+History is left as it is: the user may dictate into a password manager's notes field, and that text is theirs to keep.
+<!-- SECTION:NOTES:END -->

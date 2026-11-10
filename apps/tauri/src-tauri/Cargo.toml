@@ -59,6 +59,10 @@ block2 = "0.6"
 # tree transitively via tauri-nspanel; promoted to a direct dep so we
 # can `use objc2_app_kit::NSScreen` without a re-export.
 objc2-app-kit = "0.3"
+# NSString for NSRunningApplication lookups by bundle identifier
+# (closing the other OpenWhisper build at startup). Already in the
+# tree through objc2-app-kit.
+objc2-foundation = "0.3"
 # Convert the pill webview window to a real NSPanel via objc class
 # swizzle so it can render over other apps' fullscreen Spaces. Plain
 # NSWindow + collection-behavior is unreliable cross-app on Sonoma+
@@ -74,6 +78,8 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    # Process snapshot, to find the other OpenWhisper build at startup.
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",
     # SMTC media-session pause/play + BT endpoint detection
     # (TASK-61.4 audio ducking). CoInitializeEx + STGM_READ are in

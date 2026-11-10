@@ -39,7 +39,7 @@ BUNDLE_ID="com.openwhisper.app.dev"
 BUILT_APP_PATH="$REPO_ROOT/target/debug/bundle/macos/OpenWhisper Dev.app"
 INSTALLED_APP_PATH="/Applications/OpenWhisper Dev.app"
 
-echo "==> Quitting any running OpenWhisper Dev instances (release left alone)"
+echo "==> Quitting any running OpenWhisper Dev instances (the Dev build closes the release app itself when it starts)"
 # Try graceful Quit first (lets the app clean up: unhook hotkey, save, etc).
 osascript -e 'tell application "OpenWhisper Dev" to quit' 2>/dev/null || true
 

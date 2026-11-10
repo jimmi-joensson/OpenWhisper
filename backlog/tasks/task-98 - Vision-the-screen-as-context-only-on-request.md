@@ -1,10 +1,10 @@
 ---
 id: TASK-98
 title: Vision - the screen as context, only on request
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T16:41:00Z'
+updated_date: '2026-11-10T23:25:00Z'
 labels:
   - vision
   - ask
@@ -13,6 +13,8 @@ labels:
   - tauri
 dependencies:
   - TASK-97
+documentation:
+  - backlog/docs/plans/doc-51 - Vision-implementation-plan.md
 priority: medium
 ordinal: 80000
 ---
@@ -68,4 +70,6 @@ Feasibility (2026-11-10, subagent runs; the orchestrator re-ran image input and 
 - macOS capture: SCContentFilter(display:excludingApplications:exceptingWindows:) with SCScreenshotManager, through objc2-screen-capture-kit, about 50 ms per capture. An excluded app's window is gone and what is behind it shows (magenta test window over a green one: green pixels). Works from a plain thread. Needs the Screen Recording grant; a CLI run from a terminal uses the terminal's grant. Window rectangles for the paint-over layer come from CGWindowListCopyWindowInfo without any grant. Downscaling smears a painted edge by about 1 px, so paint at native size, then resize.
 - Windows (docs only, not run): no capture-side exclusion exists; BitBlt of the foreground window's monitor, then paint over the listed apps' window rectangles (EnumWindows, DWM extended frame bounds, cloaked check). Compiles for x86_64-pc-windows-gnu.
 - Not verified: behaviour without the grant, Retina and multi-display, the macOS 15 recurring screen-recording alert, anything on Windows at run time.
+
+2026-11-11: plan doc-51 - Vision-implementation-plan.md, subtasks 98.1 to 98.5. Branch task-98-vision, stacked on task-97-ask. The orchestrator tried to re-run the capture prototype twice; both times the display was asleep and ScreenCaptureKit listed no display, so the exclusion result rests on the feasibility agent's run. An ask with the display asleep must end as 'no screenshot' with a plain reason.
 <!-- SECTION:NOTES:END -->

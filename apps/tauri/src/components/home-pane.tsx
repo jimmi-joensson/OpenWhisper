@@ -93,7 +93,13 @@ export function HomePane({
           </p>
         </section>
 
-        {latest && <TranscriptRow text={latest.text} timestamp={latest.timestamp} />}
+        {latest && (
+          <TranscriptRow
+            text={latest.text}
+            timestamp={latest.timestamp}
+            replacements={latest.replacements}
+          />
+        )}
       </div>
     </div>
   );

@@ -6,10 +6,12 @@ import {
   PHASE_IDLE,
   PHASE_TRANSCRIBING,
   type DictationTick,
+  type DictionaryReplacement,
 } from "./dictation";
 
 export interface LatestTranscription {
   text: string;
+  replacements: DictionaryReplacement[];
   timestamp: number;
   confidence: number;
 }
@@ -28,6 +30,7 @@ export function useLastTranscription(): LatestTranscription | null {
       if (finalizing && t.transcript.trim().length > 0) {
         setLatest({
           text: t.transcript,
+          replacements: t.replacements ?? [],
           timestamp: Date.now(),
           confidence: t.confidence,
         });

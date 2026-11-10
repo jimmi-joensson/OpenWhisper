@@ -39,6 +39,9 @@ struct State {
     phase: u32,
     status_message: String,
     transcript: String,
+    /// Dictionary fixes made in `transcript` (see
+    /// [`crate::transcript::process_tracked`]). Cleared with it.
+    replacements: Vec<crate::dictionary::Replacement>,
     confidence: f32,
     sample_count: u64,
     record_start: Option<Instant>,
@@ -70,6 +73,7 @@ impl State {
             phase: PHASE_IDLE,
             status_message: "idle — tap Record, speak, tap again".to_string(),
             transcript: String::new(),
+            replacements: Vec::new(),
             confidence: 0.0,
             sample_count: 0,
             record_start: None,
@@ -97,6 +101,7 @@ pub struct DictationSnapshot {
     phase: u32,
     status_message: String,
     transcript: String,
+    replacements: Vec<crate::dictionary::Replacement>,
     confidence: f32,
     sample_count: u64,
     elapsed_ms: u64,
@@ -116,6 +121,11 @@ impl DictationSnapshot {
     }
     pub fn transcript(&self) -> String {
         self.transcript.clone()
+    }
+    /// Dictionary fixes in [`DictationSnapshot::transcript`]. Rust-only
+    /// (not part of the swift-bridge surface).
+    pub fn replacements(&self) -> Vec<crate::dictionary::Replacement> {
+        self.replacements.clone()
     }
     pub fn confidence(&self) -> f32 {
         self.confidence
@@ -247,6 +257,7 @@ pub fn dictation_snapshot() -> DictationSnapshot {
         phase: s.phase,
         status_message: s.status_message.clone(),
         transcript: s.transcript.clone(),
+        replacements: s.replacements.clone(),
         confidence: s.confidence,
         sample_count: s.sample_count,
         elapsed_ms: s
@@ -301,6 +312,7 @@ pub fn dictation_request_toggle() -> u32 {
             // Fresh session — clear previous transcript/error so the UI
             // doesn't briefly show stale content while the shell spins up.
             s.transcript.clear();
+            s.replacements.clear();
             s.confidence = 0.0;
             s.sample_count = 0;
             s.error_message.clear();
@@ -319,6 +331,7 @@ pub fn dictation_request_cancel() -> bool {
         s.record_start_epoch_ms = None;
         s.voiced_ms_at_drain = None;
         s.transcript.clear();
+        s.replacements.clear();
         s.confidence = 0.0;
         s.sample_count = 0;
         s.status_message = "cancelled".to_string();
@@ -725,7 +738,9 @@ pub fn run_stop_pipeline() {
     match crate::recognizer::recognizer_transcribe(&samples) {
         Ok(res) => {
             let transcribe_ms = t_tx.elapsed().as_millis();
-            let cleaned = crate::transcript::process(&res.text);
+            let (cleaned, replacements) = crate::transcript::process_tracked(&res.text);
+            // Before delivery, so the DONE tick already carries them.
+            with_state(|s| s.replacements = replacements);
             crate::verbose_log!(
                 "[ow.dictation] stop drain_ms={drain_ms} ensure_loaded_ms={load_ms} \
                  transcribe_ms={transcribe_ms} samples={count} chars={} confidence={:.2}",

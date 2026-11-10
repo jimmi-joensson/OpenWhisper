@@ -8,6 +8,31 @@ import {
 } from "./fixtures/tauri-shim";
 
 test.describe("home pane", () => {
+  test("latest-transcript row lists dictionary fixes", async ({ page }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+    await emitTick(page, { phase: 3, status: "transcribing" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "Emanoil is on the PayProff font ",
+      replacements: [
+        { from: "Immanuel", to: "Emanoil" },
+        { from: "payproof", to: "PayProff" },
+      ],
+    });
+    const fixes = page.getByRole("list", { name: "Dictionary fixes" });
+    await expect(fixes.getByRole("listitem")).toHaveCount(2);
+    await expect(fixes.getByRole("listitem").first()).toContainText("Immanuel");
+    await expect(fixes.getByRole("listitem").first()).toContainText("Emanoil");
+
+    // A transcript without fixes shows no list.
+    await emitTick(page, { phase: 3, status: "transcribing" });
+    await emitTick(page, { phase: 4, status: "idle", transcript: "plain text" });
+    await expect(page.getByTestId("home-latest-row")).toContainText("plain text");
+    await expect(page.getByTestId("home-latest-fixes")).toHaveCount(0);
+  });
+
   test("renders hero with live hotkey hint", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Ready when you are" })).toBeVisible();

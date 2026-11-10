@@ -1,9 +1,17 @@
+// Mirrors `Replacement` in core/src/dictionary.rs.
+export interface DictionaryReplacement {
+  from: string;
+  to: string;
+}
+
 // Mirrors `DictationTick` in src-tauri/src/lib.rs.
 export interface DictationTick {
   phase: number;
   status: "idle" | "recording" | "transcribing";
   status_message: string;
   transcript: string;
+  // Dictionary fixes in `transcript`: what the recognizer wrote → the term.
+  replacements: DictionaryReplacement[];
   confidence: number;
   sample_count: number;
   elapsed_ms: number;

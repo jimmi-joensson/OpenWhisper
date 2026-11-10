@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use openwhisper_core::dictionary::{self as dictionary, DictionaryTerm};
 use openwhisper_core::settings as core;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -182,4 +183,90 @@ pub fn settings_set_user_wpm(app: AppHandle, wpm: u32) -> Result<u32, String> {
     let stored = current_stats_settings().unwrap_or_default().user_wpm;
     let _ = app.emit("settings_stats_changed", stored);
     Ok(stored)
+}
+
+// --- Dictionary ----------------------------------------------------
+//
+// `dictionary.json` lives next to `settings.json`. Core owns parsing,
+// matching and the mtime reload; the shell only resolves the path,
+// points core at it at boot, and exposes read/save/reveal commands.
+
+fn dictionary_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("app_config_dir: {e}"))?;
+    Ok(dir.join(dictionary::FILE_NAME))
+}
+
+/// Boot-time: point core's transcript post-pass at the user's file.
+pub fn init_dictionary(app: &AppHandle) {
+    if let Ok(p) = dictionary_path(app) {
+        dictionary::set_path(&p);
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct DictionaryState {
+    pub path: String,
+    pub terms: Vec<DictionaryTerm>,
+}
+
+#[tauri::command]
+pub fn dictionary_get(app: AppHandle) -> Result<DictionaryState, String> {
+    let path = dictionary_path(&app)?;
+    let dict = dictionary::load(&path)?;
+    Ok(DictionaryState {
+        path: path.display().to_string(),
+        terms: dict.terms,
+    })
+}
+
+/// Replace the whole term list. Core trims, merges duplicates and
+/// sorts; the stored result is returned so the UI shows what the file
+/// now holds.
+#[tauri::command]
+pub fn dictionary_save(
+    app: AppHandle,
+    terms: Vec<DictionaryTerm>,
+) -> Result<DictionaryState, String> {
+    let path = dictionary_path(&app)?;
+    let saved = dictionary::save(&path, &dictionary::Dictionary { terms })?;
+    Ok(DictionaryState {
+        path: path.display().to_string(),
+        terms: saved.terms,
+    })
+}
+
+/// Show `dictionary.json` in Finder / Explorer, creating an empty one
+/// first so there is something to select.
+#[tauri::command]
+pub fn dictionary_reveal(app: AppHandle) -> Result<(), String> {
+    let path = dictionary_path(&app)?;
+    if !path.exists() {
+        dictionary::save(&path, &dictionary::Dictionary::default())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&path);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(&path));
+        c
+    };
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("reveal {}: {e}", path.display()))
 }

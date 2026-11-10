@@ -6,6 +6,7 @@ export interface MockTick {
   status: "idle" | "recording" | "transcribing";
   status_message?: string;
   transcript?: string;
+  replacements?: { from: string; to: string }[];
   confidence?: number;
   sample_count?: number;
   elapsed_ms?: number;
@@ -20,6 +21,7 @@ export interface MockTick {
 export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
   status_message: "",
   transcript: "",
+  replacements: [],
   confidence: 0,
   sample_count: 0,
   elapsed_ms: 0,
@@ -379,6 +381,45 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
               in_process: m.in_process ?? true,
             })),
           };
+        }
+        // Dictionary pane. `__owDictionary` holds the stored terms;
+        // save mimics core's clean-up (trim, drop empties, merge a
+        // repeated term, sort) so the pane renders what Rust returns.
+        if (cmd === "dictionary_get" || cmd === "dictionary_save") {
+          type Term = { term: string; heard_as?: string[] };
+          const w = window as unknown as {
+            __owDictionary?: Term[];
+            __owDictionarySaveCount?: number;
+          };
+          if (cmd === "dictionary_save") {
+            const { terms } = (args ?? {}) as { terms: Term[] };
+            const merged: Term[] = [];
+            for (const t of terms) {
+              const term = t.term.trim();
+              if (!term) continue;
+              const heard = (t.heard_as ?? []).map((h) => h.trim()).filter(Boolean);
+              const existing = merged.find(
+                (m) => m.term.toLowerCase() === term.toLowerCase(),
+              );
+              if (existing) {
+                existing.heard_as = [...(existing.heard_as ?? []), ...heard];
+              } else {
+                merged.push(heard.length ? { term, heard_as: heard } : { term });
+              }
+            }
+            merged.sort((a, b) => a.term.toLowerCase().localeCompare(b.term.toLowerCase()));
+            w.__owDictionary = merged;
+            w.__owDictionarySaveCount = (w.__owDictionarySaveCount ?? 0) + 1;
+          }
+          return {
+            path: "/Users/test/Library/Application Support/com.openwhisper.app/dictionary.json",
+            terms: w.__owDictionary ?? [],
+          };
+        }
+        if (cmd === "dictionary_reveal") {
+          const w = window as unknown as { __owDictionaryRevealCount?: number };
+          w.__owDictionaryRevealCount = (w.__owDictionaryRevealCount ?? 0) + 1;
+          return null;
         }
         if (cmd === "settings_get_performance") {
           const w = window as unknown as { __owKeepModelsWarm?: boolean };

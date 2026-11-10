@@ -29,6 +29,7 @@ mod permissions;
 mod pill_hover;
 mod refine;
 mod settings;
+mod sibling;
 mod tray;
 
 use media_control::PlatformMediaController;
@@ -845,6 +846,11 @@ pub fn run() {
                     eprintln!("[crashes] no log dir resolved; panic hook disabled");
                 }
             }
+
+            // Only one OpenWhisper at a time: if the other build (Dev
+            // or production) is running, it is closed. Otherwise both
+            // answer the same hotkey and every dictation happens twice.
+            sibling::close_other_builds(app.handle());
 
             // Menu-bar-only — no Dock icon. Matches Superwhisper / Dropbox /
             // the shipped SwiftUI app (which calls

@@ -3017,6 +3017,7 @@ name = "openwhisper-cli"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs 5.0.1",
  "openwhisper-core",
@@ -3029,6 +3030,7 @@ version = "0.6.1"
 dependencies = [
  "bzip2",
  "chrono",
+ "core-foundation 0.10.1",
  "coreaudio-rs",
  "cpal",
  "dirs 5.0.1",
@@ -3036,6 +3038,9 @@ dependencies = [
  "keyring",
  "ndarray",
  "num_cpus",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "opus-decoder",
  "ort",
  "regex",
@@ -3053,6 +3058,7 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+ "windows 0.61.3",
 ]
 
 [[package]]

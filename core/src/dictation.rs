@@ -623,6 +623,35 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     if let Some(inj) = INJECTOR.get() {
         inj.inject(text);
     }
+    // Transcript history (TASK-95) is opt-in: with it off nothing is
+    // written and the frontmost app is not even read. It runs after
+    // the injector was called: that pastes from its own thread and a
+    // paste does not move focus, so the read below names the app that
+    // receives the text without holding the paste up. It runs before
+    // the stats write, whose "changed" signal then also covers it.
+    let history = crate::settings::current_history_settings();
+    if let Some(dir) = crate::history::current_dir() {
+        if history.enabled {
+            let original = with_state(|s| s.refine.raw_transcript.clone());
+            let (app_id, app_name) = delivered_to_app();
+            let at_ms = if started_at_ms > 0 { started_at_ms } else { crate::history::now_ms() };
+            let entry = crate::history::NewEntry {
+                at_ms,
+                duration_ms,
+                text,
+                original: Some(original.as_str()),
+                app_id: &app_id,
+                app_name: &app_name,
+            };
+            if let Err(e) = crate::history::append(&dir, &entry) {
+                eprintln!("[history] could not save the dictation: {e}");
+            }
+        }
+        // Retention applies with history on or off.
+        if let Err(e) = crate::history::prune(&dir, &history, crate::history::now_ms()) {
+            eprintln!("[history] prune failed: {e}");
+        }
+    }
     // Stats write happens after inject so a failing DB doesn't delay the
     // paste. Stats writer no-ops on empty text and never panics or
     // mutates dictation phase, so a failure here cannot stall the
@@ -636,6 +665,24 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
             text,
         );
     }
+}
+
+/// Id and name of the app the transcript was just delivered to, for
+/// the history entry. Empty when it is not known, or when one of
+/// OpenWhisper's own windows has focus (then the text only went to
+/// the clipboard).
+#[cfg(feature = "focus")]
+fn delivered_to_app() -> (String, String) {
+    let focus = crate::focus::current();
+    if focus.is_self {
+        return Default::default();
+    }
+    (focus.app_id, focus.app_name)
+}
+
+#[cfg(not(feature = "focus"))]
+fn delivered_to_app() -> (String, String) {
+    Default::default()
 }
 
 /// Implemented by the shell (Tauri's `TauriInjector`) and registered once

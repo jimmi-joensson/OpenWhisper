@@ -438,6 +438,104 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
           w.__owDictionaryRevealCount = (w.__owDictionaryRevealCount ?? 0) + 1;
           return null;
         }
+        // Transcript history (TASK-95). `__owHistorySettings` seeds the
+        // settings block and `__owHistoryEntries` the stored dictations
+        // (newest first). Saves, deletes, clears and reveals are
+        // recorded for assertions. Search, paging and removal mimic
+        // core::history. The folder picker answers with `__owDialogPick`.
+        if (cmd.startsWith("history_")) {
+          type HistorySettings = {
+            enabled: boolean;
+            retention_days: number;
+            folder: string | null;
+          };
+          type HistoryEntry = {
+            id: string;
+            at_ms: number;
+            duration_ms: number;
+            word_count: number;
+            text: string;
+            original: string | null;
+            app_id: string | null;
+            app_name: string | null;
+          };
+          const w = window as unknown as {
+            __owHistorySettings?: Partial<HistorySettings>;
+            __owHistoryStored?: HistorySettings;
+            __owHistorySaves?: HistorySettings[];
+            __owHistoryEntries?: HistoryEntry[];
+            __owHistoryDeleted?: string[];
+            __owHistoryClearCount?: number;
+            __owHistoryRevealCount?: number;
+          };
+          if (!w.__owHistoryStored) {
+            w.__owHistoryStored = {
+              enabled: false,
+              retention_days: 30,
+              folder: null,
+              ...(w.__owHistorySettings ?? {}),
+            };
+          }
+          const entries = w.__owHistoryEntries ?? [];
+          const defaultFolder =
+            "/Users/test/Library/Application Support/com.openwhisper.app/history";
+          const state = () => ({
+            settings: w.__owHistoryStored,
+            folder: w.__owHistoryStored?.folder ?? defaultFolder,
+            default_folder: defaultFolder,
+          });
+          if (cmd === "history_get") {
+            return state();
+          }
+          if (cmd === "history_set") {
+            const { settings } = (args ?? {}) as { settings: HistorySettings };
+            const saved = {
+              ...settings,
+              retention_days: Math.min(settings.retention_days, 3650),
+              folder: settings.folder?.trim() || null,
+            };
+            w.__owHistoryStored = saved;
+            w.__owHistorySaves = [...(w.__owHistorySaves ?? []), saved];
+            return state();
+          }
+          if (cmd === "history_reveal") {
+            w.__owHistoryRevealCount = (w.__owHistoryRevealCount ?? 0) + 1;
+            return null;
+          }
+          if (cmd === "history_list") {
+            const { search, limit, offset } = (args ?? {}) as {
+              search?: string;
+              limit?: number;
+              offset?: number;
+            };
+            const needle = (search ?? "").trim().toLowerCase();
+            const hits = needle
+              ? entries.filter((e) =>
+                  [e.text, e.original ?? "", e.app_name ?? ""].some((s) =>
+                    s.toLowerCase().includes(needle),
+                  ),
+                )
+              : entries;
+            const from = offset ?? 0;
+            return {
+              entries: hits.slice(from, from + (limit ?? 30)),
+              matched: hits.length,
+              stored: entries.length,
+            };
+          }
+          if (cmd === "history_delete") {
+            const { id } = (args ?? {}) as { id: string };
+            w.__owHistoryDeleted = [...(w.__owHistoryDeleted ?? []), id];
+            const before = entries.length;
+            w.__owHistoryEntries = entries.filter((e) => e.id !== id);
+            return w.__owHistoryEntries.length < before;
+          }
+          if (cmd === "history_clear") {
+            w.__owHistoryClearCount = (w.__owHistoryClearCount ?? 0) + 1;
+            w.__owHistoryEntries = [];
+            return entries.length;
+          }
+        }
         // Refine pane (TASK-93). `__owRefineSettings` seeds the stored
         // block; `__owRefineStatus` / `__owRefineTest` override what the
         // backend probe and the connection test answer. Saves, test

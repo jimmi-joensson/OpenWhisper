@@ -87,8 +87,9 @@ fn fire_stats_changed() {
 /// Record one successful dictation. Empty / whitespace-only text returns
 /// without inserting (mirrors the dictation flow's empty-sample drain).
 /// Word count is whitespace-split on the trimmed text. The transcript
-/// itself is NOT persisted today — `transcript` stays NULL until the
-/// history opt-in lands; only counters and timing are kept.
+/// itself is never persisted here: `transcript` stays NULL and only
+/// counters and timing are kept. The opt-in transcript history lives
+/// in Markdown files, see [`crate::history`].
 pub fn record_dictation(
     store: &Store,
     started_at_ms: i64,

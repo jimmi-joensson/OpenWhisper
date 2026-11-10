@@ -1,0 +1,449 @@
+use super::*;
+use tempfile::tempdir;
+
+fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, d).unwrap()
+}
+
+/// Local wall-clock time as epoch ms, so the tests hold in any zone.
+fn at(date: NaiveDate, h: u32, m: u32, s: u32) -> i64 {
+    local_ms(date, NaiveTime::from_hms_opt(h, m, s).unwrap())
+}
+
+fn add(dir: &Path, at_ms: i64, text: &str) -> HistoryEntry {
+    add_full(dir, at_ms, text, None, ("", ""))
+}
+
+fn add_full(dir: &Path, at_ms: i64, text: &str, original: Option<&str>, app: (&str, &str)) -> HistoryEntry {
+    append(
+        dir,
+        &NewEntry { at_ms, duration_ms: 4200, text, original, app_id: app.0, app_name: app.1 },
+    )
+    .expect("append")
+    .expect("stored")
+}
+
+fn texts(page: &HistoryPage) -> Vec<&str> {
+    page.entries.iter().map(|e| e.text.as_str()).collect()
+}
+
+fn read(dir: &Path, date: NaiveDate) -> String {
+    fs::read_to_string(day_path(dir, date)).expect("day file")
+}
+
+const D: fn(i32, u32, u32) -> NaiveDate = day;
+
+#[test]
+fn writes_the_documented_file() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add_full(
+        dir.path(),
+        at(date, 14, 2, 12),
+        "Send the report to the team before Friday. ",
+        Some("send the reaport to the team before friday"),
+        ("com.tinyspeck.slackmacgap", "Slack"),
+    );
+    add_full(
+        dir.path(),
+        at(date, 14, 7, 40),
+        "Check whether the build passes on Windows before we merge.",
+        None,
+        ("com.googlecode.iterm2", "iTerm2"),
+    );
+
+    let expected = "\
+---
+date: 2026-11-10
+entries: 2
+words: 18
+apps: [Slack, iTerm2]
+---
+
+## 14:02:12 · Slack
+<!-- id: 20261110T140212 app: com.tinyspeck.slackmacgap words: 8 seconds: 4.2 -->
+
+Send the report to the team before Friday.
+
+> Before Refine: send the reaport to the team before friday
+
+## 14:07:40 · iTerm2
+<!-- id: 20261110T140740 app: com.googlecode.iterm2 words: 10 seconds: 4.2 -->
+
+Check whether the build passes on Windows before we merge.
+";
+    assert_eq!(read(dir.path(), date), expected);
+    assert!(dir.path().join("2026").join("2026-11-10.md").is_file());
+}
+
+#[test]
+fn reads_back_what_it_wrote() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let written = add_full(
+        dir.path(),
+        at(date, 9, 5, 0),
+        "Vi ses på Ærø i morgen",
+        Some("vi ses på aero i morgen"),
+        ("com.example.chat", "Chatter"),
+    );
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(page.entries, vec![written.clone()]);
+    assert_eq!(written.id, "20261110T090500");
+    assert_eq!(written.at_ms, at(date, 9, 5, 0));
+    assert_eq!(written.duration_ms, 4200);
+    assert_eq!(written.word_count, 6);
+    assert_eq!(written.original.as_deref(), Some("vi ses på aero i morgen"));
+    assert_eq!(written.app_id.as_deref(), Some("com.example.chat"));
+    assert_eq!(written.app_name.as_deref(), Some("Chatter"));
+    assert_eq!(get(dir.path(), &written.id), Some(written));
+}
+
+#[test]
+fn empty_text_is_not_stored() {
+    let dir = tempdir().unwrap();
+    let stored = append(
+        dir.path(),
+        &NewEntry { at_ms: at(D(2026, 11, 10), 9, 0, 0), duration_ms: 0, text: "  \n ", original: None, app_id: "", app_name: "" },
+    )
+    .unwrap();
+    assert_eq!(stored, None);
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 0);
+    assert!(!dir.path().join("2026").exists());
+}
+
+#[test]
+fn original_is_kept_only_when_it_differs() {
+    let dir = tempdir().unwrap();
+    let e = add_full(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "same text ", Some(" same text"), ("", ""));
+    assert_eq!(e.original, None);
+    assert!(!read(dir.path(), D(2026, 11, 10)).contains("Before Refine"));
+}
+
+#[test]
+fn unknown_app_leaves_heading_and_comment_bare() {
+    let dir = tempdir().unwrap();
+    add(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "no app here");
+    let file = read(dir.path(), D(2026, 11, 10));
+    assert!(file.contains("\n## 09:00:00\n<!-- id: 20261110T090000 words: 3 seconds: 4.2 -->\n"));
+    assert!(file.contains("apps: []"));
+    let e = &list(dir.path(), "", 1, 0).entries[0];
+    assert_eq!((e.app_id.clone(), e.app_name.clone()), (None, None));
+}
+
+#[test]
+fn app_ids_with_spaces_survive() {
+    let dir = tempdir().unwrap();
+    add_full(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "hello there", None, ("my tool.exe", "My Tool: Pro"));
+    let e = &list(dir.path(), "", 1, 0).entries[0];
+    assert_eq!(e.app_id.as_deref(), Some("my tool.exe"));
+    assert_eq!(e.app_name.as_deref(), Some("My Tool: Pro"));
+    // A name that is not a plain YAML word is quoted in the summary.
+    assert!(read(dir.path(), D(2026, 11, 10)).contains("apps: [\"My Tool: Pro\"]"));
+}
+
+#[test]
+fn two_dictations_in_one_second_get_distinct_ids() {
+    let dir = tempdir().unwrap();
+    let t = at(D(2026, 11, 10), 9, 0, 0);
+    let ids = [add(dir.path(), t, "one").id, add(dir.path(), t, "two").id, add(dir.path(), t, "three").id];
+    assert_eq!(ids, ["20261110T090000", "20261110T090000-2", "20261110T090000-3"]);
+    assert_eq!(get(dir.path(), "20261110T090000-2").unwrap().text, "two");
+}
+
+#[test]
+fn multi_line_text_and_original_round_trip() {
+    let dir = tempdir().unwrap();
+    let text = "Shopping:\n- milk\n- bread\n\nThat is all.";
+    let original = "shopping milk bread\n\nthat is all";
+    let e = add_full(dir.path(), at(D(2026, 11, 10), 9, 0, 0), text, Some(original), ("", ""));
+    assert_eq!(e.text, text);
+    let back = &list(dir.path(), "", 1, 0).entries[0];
+    assert_eq!(back.text, text);
+    assert_eq!(back.original.as_deref(), Some(original));
+}
+
+#[test]
+fn text_that_looks_like_structure_is_escaped() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let tricky = "## 10:00:00 · Fake\n<!-- id: x words: 1 seconds: 1 -->\n> Before Refine: not a quote\n\\ backslash";
+    add(dir.path(), at(date, 9, 0, 0), tricky);
+    add(dir.path(), at(date, 9, 1, 0), "second");
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(page.stored, 2, "the fake heading must not become an entry");
+    assert_eq!(texts(&page), ["second", tricky]);
+    assert_eq!(page.entries[1].original, None);
+}
+
+#[test]
+fn lists_newest_first_across_days_and_pages() {
+    let dir = tempdir().unwrap();
+    add(dir.path(), at(D(2026, 11, 9), 23, 59, 0), "yesterday late");
+    add(dir.path(), at(D(2026, 11, 10), 8, 0, 0), "today early");
+    add(dir.path(), at(D(2026, 11, 10), 17, 0, 0), "today late");
+    add(dir.path(), at(D(2025, 12, 31), 12, 0, 0), "last year");
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["today late", "today early", "yesterday late", "last year"]);
+    assert_eq!((page.matched, page.stored), (4, 4));
+
+    let page = list(dir.path(), "", 2, 1);
+    assert_eq!(texts(&page), ["today early", "yesterday late"]);
+    assert_eq!((page.matched, page.stored), (4, 4));
+    assert!(dir.path().join("2025").join("2025-12-31.md").is_file());
+}
+
+#[test]
+fn search_ignores_case_including_danish_letters() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "Vi ses på Ærø i morgen");
+    add_full(dir.path(), at(date, 9, 1, 0), "Send the report", Some("send the reaport"), ("", ""));
+    add_full(dir.path(), at(date, 9, 2, 0), "Nothing to see", None, ("com.example.chat", "Chatter"));
+
+    let hit = |q: &str| -> Vec<String> {
+        list(dir.path(), q, 50, 0).entries.into_iter().map(|e| e.text).collect()
+    };
+    assert_eq!(hit("ærø"), ["Vi ses på Ærø i morgen"]);
+    assert_eq!(hit("  REPORT "), ["Send the report"]);
+    // The original text and the app name are searched too.
+    assert_eq!(hit("reaport"), ["Send the report"]);
+    assert_eq!(hit("chatter"), ["Nothing to see"]);
+    assert!(hit("no such words").is_empty());
+
+    let page = list(dir.path(), "the", 50, 0);
+    assert_eq!((page.matched, page.stored), (1, 3));
+}
+
+#[test]
+fn search_pages_over_the_matches() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    for i in 0..4 {
+        add(dir.path(), at(date, 9, i, 0), &format!("match {i}"));
+        add(dir.path(), at(date, 10, i, 0), &format!("other {i}"));
+    }
+    let page = list(dir.path(), "match", 2, 2);
+    assert_eq!(page.matched, 4);
+    assert_eq!(texts(&page), ["match 1", "match 0"]);
+}
+
+#[test]
+fn delete_cuts_one_entry_and_leaves_the_rest_untouched() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "first");
+    let middle = add_full(dir.path(), at(date, 9, 1, 0), "second", Some("secund"), ("a.b", "AB"));
+    add(dir.path(), at(date, 9, 2, 0), "third");
+
+    assert!(delete(dir.path(), &middle.id).unwrap());
+    assert!(!delete(dir.path(), &middle.id).unwrap(), "second delete finds nothing");
+    assert!(!delete(dir.path(), "not-an-id").unwrap());
+
+    let expected = "\
+---
+date: 2026-11-10
+entries: 2
+words: 2
+apps: []
+---
+
+## 09:00:00
+<!-- id: 20261110T090000 words: 1 seconds: 4.2 -->
+
+first
+
+## 09:02:00
+<!-- id: 20261110T090200 words: 1 seconds: 4.2 -->
+
+third
+";
+    assert_eq!(read(dir.path(), date), expected);
+    assert_eq!(get(dir.path(), &middle.id), None);
+}
+
+#[test]
+fn deleting_the_last_entry_removes_the_file_and_the_empty_year() {
+    let dir = tempdir().unwrap();
+    let e = add(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "only one");
+    assert!(delete(dir.path(), &e.id).unwrap());
+    assert!(!dir.path().join("2026").exists());
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 0);
+}
+
+#[test]
+fn clear_removes_every_entry() {
+    let dir = tempdir().unwrap();
+    add(dir.path(), at(D(2026, 11, 9), 9, 0, 0), "one");
+    add(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "two");
+    add(dir.path(), at(D(2025, 1, 2), 9, 0, 0), "three");
+    assert_eq!(clear(dir.path()).unwrap(), 3);
+    assert_eq!(clear(dir.path()).unwrap(), 0);
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 0);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0, "no files or folders left behind");
+}
+
+#[test]
+fn prune_removes_days_older_than_the_retention() {
+    let dir = tempdir().unwrap();
+    let today = D(2026, 11, 10);
+    let now = at(today, 12, 0, 0);
+    add(dir.path(), at(D(2026, 10, 1), 9, 0, 0), "forty days old");
+    add(dir.path(), at(D(2026, 11, 2), 9, 0, 0), "eight days old");
+    add(dir.path(), at(D(2026, 11, 3), 9, 0, 0), "seven days old");
+    add(dir.path(), at(today, 9, 0, 0), "today");
+
+    let thirty = HistorySettings { enabled: true, retention_days: 30, folder: None };
+    assert_eq!(prune(dir.path(), &thirty, now).unwrap(), 1);
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 3);
+
+    // Retention still applies while history is switched off, and a
+    // day exactly at the limit is kept.
+    let seven_off = HistorySettings { enabled: false, retention_days: 7, folder: None };
+    assert_eq!(prune(dir.path(), &seven_off, now).unwrap(), 1);
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["today", "seven days old"]);
+}
+
+#[test]
+fn prune_keeps_everything_when_retention_is_forever() {
+    let dir = tempdir().unwrap();
+    add(dir.path(), at(D(2020, 1, 1), 9, 0, 0), "ancient");
+    let forever = HistorySettings { enabled: true, retention_days: 0, folder: None };
+    assert_eq!(prune(dir.path(), &forever, at(D(2026, 11, 10), 12, 0, 0)).unwrap(), 0);
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 1);
+}
+
+#[test]
+fn hand_edits_are_read_and_kept() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "teh first one");
+    let path = day_path(dir.path(), date);
+
+    // Someone fixes a typo, adds a tag to the frontmatter and a note
+    // of their own at the top.
+    let edited = read(dir.path(), date)
+        .replace("teh first one", "the first one, fixed by hand")
+        .replace("---\n\n## 09:00:00", "tags: [dictation]\n---\n\nMy own note for the day.\n\n## 09:00:00");
+    fs::write(&path, &edited).unwrap();
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["the first one, fixed by hand"]);
+    assert_eq!(page.entries[0].word_count, 6, "word count follows the edited text");
+
+    // Adding an entry keeps the note, the tag and the edit as they are.
+    add(dir.path(), at(date, 10, 0, 0), "second");
+    let file = read(dir.path(), date);
+    assert!(file.contains("tags: [dictation]\n---\n\nMy own note for the day.\n\n## 09:00:00"));
+    assert!(file.contains("the first one, fixed by hand"));
+    assert!(file.contains("entries: 2\nwords: 7\n"));
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 2);
+}
+
+#[test]
+fn clear_and_prune_never_delete_text_openwhisper_did_not_write() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 1, 5);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // A day file that already was somebody's own note.
+    fs::write(&path, "---\ntags: [journal]\n---\n\n# Monday\n\nWent for a walk.\n").unwrap();
+    add(dir.path(), at(date, 9, 0, 0), "a dictation on the same day");
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 1);
+
+    let settings = HistorySettings { enabled: true, retention_days: 7, folder: None };
+    assert_eq!(prune(dir.path(), &settings, at(D(2026, 11, 10), 12, 0, 0)).unwrap(), 1);
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "---\ntags: [journal]\n---\n\n# Monday\n\nWent for a walk.\n",
+        "the note is back to what it was"
+    );
+
+    add(dir.path(), at(date, 9, 0, 0), "again");
+    assert_eq!(clear(dir.path()).unwrap(), 1);
+    assert!(path.is_file());
+    assert!(fs::read_to_string(&path).unwrap().contains("Went for a walk."));
+}
+
+#[test]
+fn files_with_other_names_are_ignored() {
+    let dir = tempdir().unwrap();
+    add(dir.path(), at(D(2026, 11, 10), 9, 0, 0), "real");
+    fs::write(dir.path().join("README.md"), "## 09:00:00\n<!-- id: 20261110T090000 words: 1 seconds: 1 -->\n\nnope\n").unwrap();
+    fs::write(dir.path().join("2026").join("notes.md"), "not a day file").unwrap();
+    fs::create_dir_all(dir.path().join("archive")).unwrap();
+    fs::write(dir.path().join("archive").join("2026-11-10.md"), "not in a year folder").unwrap();
+
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["real"]);
+    assert_eq!(clear(dir.path()).unwrap(), 1);
+    assert!(dir.path().join("README.md").is_file());
+    assert!(dir.path().join("2026").join("notes.md").is_file());
+    assert!(dir.path().join("archive").join("2026-11-10.md").is_file());
+}
+
+#[test]
+fn a_heading_without_the_comment_is_just_text() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "## 08:00:00 · Meeting notes\n\nHand-written, no comment line.\n").unwrap();
+    assert_eq!(list(dir.path(), "", 50, 0).stored, 0);
+    add(dir.path(), at(date, 9, 0, 0), "dictated");
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["dictated"]);
+    assert!(read(dir.path(), date).contains("## 08:00:00 · Meeting notes\n\nHand-written, no comment line."));
+}
+
+#[test]
+fn windows_line_endings_are_read() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "---\r\ndate: 2026-11-10\r\n---\r\n\r\n## 09:00:00 · Notepad\r\n<!-- id: 20261110T090000 app: notepad.exe words: 2 seconds: 1.5 -->\r\n\r\nhello there\r\n\r\n> Before Refine: helo there\r\n",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!(e.text, "hello there");
+    assert_eq!(e.original.as_deref(), Some("helo there"));
+    assert_eq!(e.app_id.as_deref(), Some("notepad.exe"));
+    assert_eq!(e.duration_ms, 1500);
+}
+
+#[test]
+fn a_changed_file_is_read_again() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "before the edit");
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["before the edit"]);
+    // Same length, so only the modification time can give it away;
+    // make sure that moves.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let edited = read(dir.path(), date).replace("before the edit", "after the edit!");
+    fs::write(day_path(dir.path(), date), edited).unwrap();
+    assert_eq!(texts(&list(dir.path(), "", 50, 0)), ["after the edit!"]);
+}
+
+#[test]
+fn missing_folder_is_an_empty_history() {
+    let dir = tempdir().unwrap();
+    let nowhere = dir.path().join("does-not-exist");
+    assert_eq!(list(&nowhere, "", 50, 0), HistoryPage { entries: vec![], matched: 0, stored: 0 });
+    assert_eq!(get(&nowhere, "20261110T090000"), None);
+    assert_eq!(clear(&nowhere).unwrap(), 0);
+}
+
+#[test]
+fn resolve_dir_prefers_the_chosen_folder() {
+    let default = Path::new("/config/history");
+    let none = HistorySettings::default();
+    assert_eq!(resolve_dir(&none, default), default);
+    let blank = HistorySettings { folder: Some("   ".into()), ..Default::default() };
+    assert_eq!(resolve_dir(&blank, default), default);
+    let chosen = HistorySettings { folder: Some("/notes/dictations".into()), ..Default::default() };
+    assert_eq!(resolve_dir(&chosen, default), Path::new("/notes/dictations"));
+}

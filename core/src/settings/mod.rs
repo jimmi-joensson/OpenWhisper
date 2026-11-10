@@ -30,6 +30,11 @@
 //!   ([`RefineSettings`], TASK-93). Kept as raw JSON in the envelope
 //!   so a malformed block falls back to defaults without taking the
 //!   sibling blocks down with it. The API key is not stored here.
+//! - `history`: whether dictated text is kept on disk, for how long
+//!   and in which folder ([`HistorySettings`], TASK-95). Off by
+//!   default. The text itself lives in Markdown files, see
+//!   [`crate::history`]. Raw JSON in
+//!   the envelope for the same reason as `refine`.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
 //!  load after upgrade and folded into the current `hotkeys` shape;
@@ -55,6 +60,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+mod history;
+pub use history::{HISTORY_RETENTION_DEFAULT_DAYS, HISTORY_RETENTION_MAX_DAYS, HistorySettings};
 
 mod refine;
 pub use refine::{
@@ -173,6 +181,8 @@ struct SettingsFile {
     performance: Option<PerformanceSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refine: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +336,7 @@ static BEHAVIOR_CURRENT: Mutex<Option<BehaviorSettings>> = Mutex::new(None);
 static STATS_CURRENT: Mutex<Option<StatsSettings>> = Mutex::new(None);
 static PERFORMANCE_CURRENT: Mutex<Option<PerformanceSettings>> = Mutex::new(None);
 static REFINE_CURRENT: Mutex<Option<RefineSettings>> = Mutex::new(None);
+static HISTORY_CURRENT: Mutex<Option<HistorySettings>> = Mutex::new(None);
 
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
@@ -486,6 +497,7 @@ pub fn save_settings(path: &Path, settings: HotkeySettings) -> Result<(), String
         stats,
         performance,
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -527,6 +539,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
         stats: Some(clamped),
         performance,
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = STATS_CURRENT.lock() {
@@ -570,6 +583,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
         stats,
         performance,
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -613,6 +627,7 @@ pub fn save_behavior_settings(
         stats,
         performance,
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -637,6 +652,7 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
         stats,
         performance,
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
@@ -683,6 +699,7 @@ pub fn save_performance_settings(
         stats,
         performance: Some(settings),
         refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
@@ -754,9 +771,76 @@ pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<Ref
         stats,
         performance,
         refine: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+        history: file.history.or_else(current_history_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = REFINE_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    Ok(settings)
+}
+
+/// The history block as last loaded or saved in this process;
+/// defaults (history off) when nothing was loaded yet. Read by the
+/// dictation pipeline on every delivered transcript.
+pub fn current_history_settings() -> HistorySettings {
+    HISTORY_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+}
+
+/// Seed the history cache without touching disk. For shells that
+/// resolve settings some other way, and for tests.
+pub fn set_history_settings_cache(settings: HistorySettings) {
+    if let Ok(mut g) = HISTORY_CURRENT.lock() {
+        *g = Some(settings.cleaned());
+    }
+}
+
+fn current_history_json() -> Option<serde_json::Value> {
+    let current = HISTORY_CURRENT.lock().ok().and_then(|g| g.clone())?;
+    serde_json::to_value(current).ok()
+}
+
+/// Read the history block from disk and cache it. Always re-reads,
+/// like [`load_refine_settings`]: the headless CLI
+/// (`openwhisper history config`) edits the same block. A missing or
+/// malformed block yields the defaults (history off).
+pub fn load_history_settings(path: &Path) -> HistorySettings {
+    let file = read_file(path);
+    let settings = file
+        .history
+        .and_then(|v| serde_json::from_value::<HistorySettings>(v).ok())
+        .unwrap_or_default()
+        .cleaned();
+    if let Ok(mut g) = HISTORY_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+/// Persist the history block (cleaned) and update the cache. Returns
+/// what was written.
+pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<HistorySettings, String> {
+    let settings = settings.cleaned();
+    let file = read_file(path);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill,
+        stats,
+        performance,
+        refine: file.refine.or_else(current_refine_json),
+        history: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+    };
+    write_file(path, &merged)?;
+    if let Ok(mut g) = HISTORY_CURRENT.lock() {
         *g = Some(settings.clone());
     }
     Ok(settings)

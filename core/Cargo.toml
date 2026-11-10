@@ -24,12 +24,22 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer", "refine"]
+tauri = ["recognizer", "refine", "focus"]
 # Refine (TASK-93): optional language-model cleanup after transcription,
 # through the user's Claude Code CLI or an OpenAI-compatible endpoint.
 # Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
 # client or a keychain binding it never calls.
 refine = ["dep:ureq", "dep:keyring"]
+# Focus context (TASK-94): which app is frontmost and its window title.
+# Its own feature so the SwiftUI staticlib flavor does not pull in the
+# platform bindings it never calls.
+focus = [
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+    "dep:core-foundation",
+    "dep:windows",
+]
 # In-core ASR. On macOS the shipped SwiftUI app uses FluidAudio via the
 # Swift bridge — this feature is for the cross-platform Tauri shell and
 # bench harness on Windows/Linux, where we drive Parakeet-TDT-v3 ONNX
@@ -148,10 +158,23 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 coreaudio-rs = { version = "0.14", default-features = false, features = ["core_audio"] }
 # Refine API key storage: macOS Keychain. Never a config file.
 keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
+# Focus context: NSWorkspace for the frontmost app, CoreFoundation
+# types for the Accessibility calls. Same versions as the Tauri shell.
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString"] }
+core-foundation = { version = "0.10", optional = true }
 
 # Refine API key storage: Windows Credential Manager.
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
+# Focus context: foreground window, owning process, exe version info.
+windows = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 # Portable WAV reader for the recognizer smoke example (cross-platform —

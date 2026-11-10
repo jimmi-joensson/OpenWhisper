@@ -1,10 +1,19 @@
 import iconSrc from "../assets/icon-128.png";
+import { useEffect, useState } from "react";
+
 import { HealthBanner } from "./health-banner";
+import { HOME_HISTORY_COUNT, HomeHistory } from "./home-history";
+import { HomeSwitches } from "./home-switches";
 import { StatsStrip } from "./stats-strip";
 import { TranscriptRow } from "./transcript-row";
 import { useCurrentHotkey } from "../lib/use-current-hotkey";
 import { useLastTranscription } from "../lib/use-last-transcription";
+import { useHistoryPage, useHistorySettings } from "../lib/use-history";
 import { formatHotkeyLabel } from "../lib/hotkey-format";
+
+// How long a finished dictation may take to show up in the history
+// list before Home shows it in a row of its own instead.
+const LATEST_SETTLE_MS = 1500;
 
 interface HomePaneProps {
   hotkeyError?: string | null;
@@ -15,6 +24,10 @@ interface HomePaneProps {
   onAutomationOpenSettings?: () => void;
   recognizerError?: string | null;
   onRecognizerRetry?: () => void;
+  // Open the settings behind a quick-switch card.
+  onOpenSettings?: (target: "refine" | "history") => void;
+  // Open the History screen.
+  onOpenHistory?: () => void;
 }
 
 export function HomePane({
@@ -26,10 +39,34 @@ export function HomePane({
   onAutomationOpenSettings,
   recognizerError,
   onRecognizerRetry,
+  onOpenSettings,
+  onOpenHistory,
 }: HomePaneProps) {
   const toggleConfig = useCurrentHotkey("toggle");
   const chord = formatHotkeyLabel(toggleConfig);
   const latest = useLastTranscription();
+  const history = useHistorySettings();
+  const recent = useHistoryPage("", 0, HOME_HISTORY_COUNT);
+  // With history on, the dictation that just finished is the first
+  // entry of the history list and is shown there, with its dictionary
+  // fixes and Refine marker. The row of its own is only for a latest
+  // transcript that is not in the list: history off, or not stored.
+  const newest = recent.page?.entries[0];
+  const latestEntryId =
+    latest && newest && newest.text.trim() === latest.text.trim() ? newest.id : null;
+  // The list re-reads a moment after the dictation ends. Until then
+  // the entry is not there yet; wait briefly before falling back to
+  // the row of its own, so it does not flash in and out.
+  const [settled, setSettled] = useState(true);
+  const latestAt = latest?.timestamp ?? null;
+  useEffect(() => {
+    if (latestAt === null) return;
+    setSettled(false);
+    const timer = setTimeout(() => setSettled(true), LATEST_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [latestAt]);
+  const historyOn = history.settings?.enabled ?? false;
+  const showLatestRow = latest !== null && latestEntryId === null && (!historyOn || settled);
 
   return (
     <div className="ow-home-route">
@@ -93,12 +130,32 @@ export function HomePane({
           </p>
         </section>
 
-        {latest && (
+        <HomeSwitches
+          history={history.settings}
+          onHistoryChange={(enabled) => history.update({ enabled })}
+          onOpenSettings={onOpenSettings}
+        />
+
+        {showLatestRow && latest && (
           <TranscriptRow
             text={latest.text}
             timestamp={latest.timestamp}
             replacements={latest.replacements}
             refine={latest.refine}
+          />
+        )}
+
+        {history.settings && (
+          <HomeHistory
+            enabled={history.settings.enabled}
+            page={recent.page}
+            error={recent.error}
+            latest={
+              latest && latestEntryId !== null
+                ? { id: latestEntryId, replacements: latest.replacements, refine: latest.refine }
+                : null
+            }
+            onSeeAll={onOpenHistory}
           />
         )}
       </div>

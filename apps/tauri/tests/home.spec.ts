@@ -105,10 +105,10 @@ test.describe("home pane", () => {
     const row = page.getByTestId("home-latest-row");
     await expect(row).toBeVisible();
     const copyBtn = page.getByTestId("home-latest-copy");
-    await expect(copyBtn).toHaveCSS("opacity", "0");
+    await expect(copyBtn).toBeHidden();
 
     await row.hover();
-    await expect(copyBtn).toHaveCSS("opacity", "1");
+    await expect(copyBtn).toBeVisible();
     await copyBtn.click();
 
     const clip = await page.evaluate(() => navigator.clipboard.readText());

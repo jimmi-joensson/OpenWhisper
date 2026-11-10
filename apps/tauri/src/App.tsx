@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { DiagnosticsPane, type Platform } from "./components/diagnostics-pane";
+import { HistoryPane } from "./components/history-pane";
 import { HomePane } from "./components/home-pane";
 import { TranscribePane } from "./components/transcribe-pane";
 import { DevToolsPanel } from "./components/dev-tools-panel";
@@ -11,6 +12,7 @@ import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { useDictation } from "./lib/use-dictation";
+import { useHistorySync } from "./lib/use-history";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
@@ -42,6 +44,8 @@ function titlebarTitle(route: Route): string {
       return "OpenWhisper";
     case "settings":
       return "OpenWhisper — Settings";
+    case "history":
+      return "OpenWhisper — History";
     case "transcribe":
       return "OpenWhisper — Transcribe";
     case "diagnostics":
@@ -138,7 +142,30 @@ function App() {
     return () => unlisten?.();
   }, []);
 
+  // Keep the history lists in step with the store, whichever screen
+  // is showing.
+  useHistorySync();
+
   const goBack = useCallback(() => setRoute("home"), []);
+
+  // The settings shortcut on a Home card: Refine has its own pane,
+  // History is a section of General and is scrolled into view once
+  // the pane has rendered.
+  const openSettingsFor = useCallback((target: "refine" | "history") => {
+    setSettingsPane(target === "refine" ? "refine" : "general");
+    setRoute("settings");
+    if (target === "history") {
+      const reveal = (triesLeft: number) => {
+        const section = document.getElementById("settings-history");
+        if (section) {
+          section.scrollIntoView({ block: "start" });
+        } else if (triesLeft > 0) {
+          requestAnimationFrame(() => reveal(triesLeft - 1));
+        }
+      };
+      requestAnimationFrame(() => reveal(20));
+    }
+  }, []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev
   // override is active so manual selections aren't immediately overwritten
@@ -222,6 +249,9 @@ function App() {
             {route === "settings" && (
               <SettingsShell active={settingsPane} onBack={goBack} />
             )}
+            {route === "history" && (
+              <HistoryPane onOpenSettings={() => openSettingsFor("history")} />
+            )}
             {route === "transcribe" && <TranscribePane />}
             {route === "diagnostics" && (
               <DiagnosticsPane platform={platform} />
@@ -247,6 +277,8 @@ function App() {
                   void invoke("open_automation_settings").catch(() => {});
                 }}
                 recognizerError={recognizerError}
+                onOpenSettings={openSettingsFor}
+                onOpenHistory={() => setRoute("history")}
               />
             )}
           </main>

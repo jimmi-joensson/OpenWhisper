@@ -23,10 +23,6 @@ export function TranscriptRow({
   refine = NO_REFINE,
 }: TranscriptRowProps) {
   const [copied, setCopied] = useState(false);
-  const [showOriginal, setShowOriginal] = useState(false);
-  const refined = refine.status === "refined";
-  const original = refine.raw_transcript.trim();
-  const changed = refined && original !== text.trim();
 
   const onCopy = async () => {
     try {
@@ -39,71 +35,15 @@ export function TranscriptRow({
   };
 
   return (
-    <div className="ow-transcript-row" data-testid="home-latest-row">
+    <div className="ow-transcript-row ow-hover-host" data-testid="home-latest-row">
       <div className="ow-transcript-row__body">
         <p className="ow-transcript-row__text ow-selectable">{text}</p>
-        {replacements.length > 0 && (
-          <div className="ow-transcript-row__fixes" data-testid="home-latest-fixes">
-            <BookA size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
-            <ul className="ow-transcript-row__fix-list" aria-label="Dictionary fixes">
-              {replacements.map((r) => (
-                <li key={`${r.from}->${r.to}`} className="ow-transcript-row__fix">
-                  <span className="ow-transcript-row__fix-from">{r.from}</span>
-                  <ArrowRight size={10} aria-label="replaced with" />
-                  <span className="ow-transcript-row__fix-to">{r.to}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {refined && (
-          <div className="ow-transcript-row__refine" data-testid="home-latest-refine">
-            <Sparkles size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
-            <span>
-              {refine.instruction
-                ? `Refined, as you asked: “${refine.instruction}”`
-                : changed
-                  ? "Refined"
-                  : "Refined, nothing to change"}
-            </span>
-            {changed && (
-              <button
-                type="button"
-                className="ow-transcript-row__refine-toggle"
-                aria-expanded={showOriginal}
-                onClick={() => setShowOriginal((v) => !v)}
-              >
-                {showOriginal ? "Hide original" : "Show original"}
-              </button>
-            )}
-          </div>
-        )}
-        {changed && showOriginal && (
-          <p
-            className="ow-transcript-row__original ow-selectable"
-            data-testid="home-latest-original"
-          >
-            {original}
-          </p>
-        )}
-        {refineFellBack(refine) && (
-          <div
-            className="ow-transcript-row__refine"
-            data-testid="home-latest-refine"
-            data-fallback="true"
-          >
-            <TriangleAlert size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
-            <span>
-              Not refined, typed as transcribed
-              {refine.detail ? `: ${refine.detail}` : "."}
-            </span>
-          </div>
-        )}
+        <TranscriptNotes text={text} replacements={replacements} refine={refine} />
         <span className="ow-transcript-row__time">{formatRelativeTime(timestamp)}</span>
       </div>
       <button
         type="button"
-        className="ow-transcript-row__copy"
+        className="ow-transcript-row__copy ow-hover-reveal"
         data-testid="home-latest-copy"
         onClick={() => void onCopy()}
         aria-label={copied ? "Copied" : "Copy transcript"}
@@ -111,6 +51,90 @@ export function TranscriptRow({
         {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
       </button>
     </div>
+  );
+}
+
+interface TranscriptNotesProps {
+  text: string;
+  replacements?: DictionaryReplacement[];
+  refine?: RefineInfo;
+}
+
+// What happened to a transcript on its way out: the dictionary fixes,
+// what Refine did (with the original one click away), or why Refine
+// was skipped. Only known for the dictation that just finished, so it
+// is shown on the latest row, wherever that row lives: on its own on
+// Home, or as the first entry of the history list.
+export function TranscriptNotes({
+  text,
+  replacements = [],
+  refine = NO_REFINE,
+}: TranscriptNotesProps) {
+  const [showOriginal, setShowOriginal] = useState(false);
+  const refined = refine.status === "refined";
+  const original = refine.raw_transcript.trim();
+  const changed = refined && original !== text.trim();
+
+  return (
+    <>
+      {replacements.length > 0 && (
+        <div className="ow-transcript-row__fixes" data-testid="home-latest-fixes">
+          <BookA size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+          <ul className="ow-transcript-row__fix-list" aria-label="Dictionary fixes">
+            {replacements.map((r) => (
+              <li key={`${r.from}->${r.to}`} className="ow-transcript-row__fix">
+                <span className="ow-transcript-row__fix-from">{r.from}</span>
+                <ArrowRight size={10} aria-label="replaced with" />
+                <span className="ow-transcript-row__fix-to">{r.to}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {refined && (
+        <div className="ow-transcript-row__refine" data-testid="home-latest-refine">
+          <Sparkles size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+          <span>
+            {refine.instruction
+              ? `Refined, as you asked: “${refine.instruction}”`
+              : changed
+                ? "Refined"
+                : "Refined, nothing to change"}
+          </span>
+          {changed && (
+            <button
+              type="button"
+              className="ow-transcript-row__refine-toggle"
+              aria-expanded={showOriginal}
+              onClick={() => setShowOriginal((v) => !v)}
+            >
+              {showOriginal ? "Hide original" : "Show original"}
+            </button>
+          )}
+        </div>
+      )}
+      {changed && showOriginal && (
+        <p
+          className="ow-transcript-row__original ow-selectable"
+          data-testid="home-latest-original"
+        >
+          {original}
+        </p>
+      )}
+      {refineFellBack(refine) && (
+        <div
+          className="ow-transcript-row__refine"
+          data-testid="home-latest-refine"
+          data-fallback="true"
+        >
+          <TriangleAlert size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
+          <span>
+            Not refined, typed as transcribed
+            {refine.detail ? `: ${refine.detail}` : "."}
+          </span>
+        </div>
+      )}
+    </>
   );
 }
 

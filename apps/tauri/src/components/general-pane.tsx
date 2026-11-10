@@ -31,6 +31,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Separator } from "@/components/ui/separator";
+import { HistorySettingsSection } from "@/components/history-settings";
 import { useShowInFullscreen } from "@/lib/use-show-in-fullscreen";
 import { useTheme } from "@/lib/use-theme";
 import {
@@ -231,6 +232,13 @@ export function GeneralPane() {
 
       <Separator />
 
+      <div id="settings-history" className="scroll-mt-4">
+        <SectionHeader>History</SectionHeader>
+      </div>
+      <HistorySettingsSection />
+
+      <Separator />
+
       <SectionHeader>Stats</SectionHeader>
       <Field orientation="horizontal">
         <FieldContent>
@@ -287,7 +295,8 @@ export function GeneralPane() {
                 <AlertDialogDescription>
                   This permanently deletes every recorded dictation row.
                   Your Today / Week / All-time counters and Time Saved
-                  total all return to zero. This cannot be undone.
+                  total all return to zero. Saved transcript history is
+                  not touched. This cannot be undone.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

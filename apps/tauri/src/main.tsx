@@ -1,6 +1,9 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import { queryClient } from "./lib/query-client";
 
 // Suppress the WebView right-click context menu in production. The menu's
 // "Reload" entry would re-mount the React tree against a Rust process
@@ -30,8 +33,10 @@ const Root: React.ComponentType =
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <React.Suspense fallback={null}>
-      <Root />
-    </React.Suspense>
+    <QueryClientProvider client={queryClient}>
+      <React.Suspense fallback={null}>
+        <Root />
+      </React.Suspense>
+    </QueryClientProvider>
   </React.StrictMode>,
 );

@@ -15,7 +15,7 @@ path = "src/main.rs"
 # Same library the Tauri shell consumes. `recognizer` enables the
 # in-core ASR path (FluidAudio on Mac via the Swift bridge,
 # ort + Parakeet ONNX on Win/Linux).
-openwhisper-core = { path = "../core", default-features = false, features = ["recognizer", "refine"] }
+openwhisper-core = { path = "../core", default-features = false, features = ["recognizer", "refine", "focus"] }
 # clap derive keeps the parser definition close to the subcommand
 # handlers and gives us --help + shell completion for free.
 clap = { version = "4", features = ["derive"] }
@@ -30,6 +30,9 @@ serde_json = "1"
 # (~/Library/Application Support/com.openwhisper.app/settings.json on
 # Mac; %APPDATA%\com.openwhisper.app\settings.json on Windows).
 dirs = "5"
+# Local-time stamps in `openwhisper history`. Same version and
+# features as core.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 # JSON parsing for the smoke test that asserts on `cli --json

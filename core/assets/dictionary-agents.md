@@ -55,6 +55,24 @@ PayProff), add it so the next dictation comes out right:
 - The person can also edit the list in OpenWhisper under Settings >
   Dictionary.
 
+## Dictation history (only if the person switched it on)
+
+OpenWhisper can keep what the person dictated. It is off by default.
+When it is on, `history/` in this folder holds one Markdown file per
+day, for example `history/2026/2026-11-10.md`. The person may have
+moved it: see `history.folder` in `settings.json`.
+
+- Each dictation is a `## HH:MM:SS · App` heading (the app it was
+  dictated into), a comment line with its id, then the text. A
+  `> Before Refine:` quote is the text before the cleanup model
+  changed it.
+- To find something they said, search the folder, for example
+  `rg -i "release plan" history/`. A day's file is named after its
+  date, so "what did I say this morning" is today's file.
+- These are private notes. Read them when the person asks you to look
+  something up; don't quote them elsewhere and don't edit them unless
+  asked.
+
 ## Where the file lives
 
 | OS | Folder |

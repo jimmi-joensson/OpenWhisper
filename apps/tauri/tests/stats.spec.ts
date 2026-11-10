@@ -93,7 +93,7 @@ test.describe("stats — Settings → General", () => {
     await page.goto("/");
 
     // Open Settings via the sidebar item.
-    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     // General pane is the default landing pane.
     const trigger = page.getByTestId("stats-reset-trigger");
     await expect(trigger).toBeVisible();
@@ -113,7 +113,7 @@ test.describe("stats — Settings → General", () => {
   test("Typing speed input persists via settings_set_user_wpm and clamps out-of-range", async ({ page }) => {
     await setUserWpm(page, 40);
     await page.goto("/");
-    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
 
     const input = page.getByLabel("Typing speed in words per minute");
     await expect(input).toHaveValue("40");

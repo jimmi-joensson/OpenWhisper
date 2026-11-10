@@ -25,6 +25,7 @@ mod hotkey;
 mod injection;
 mod media_control;
 mod permissions;
+mod pill_hover;
 mod settings;
 mod tray;
 
@@ -584,11 +585,11 @@ async fn set_pill_click_through(
     app: tauri::AppHandle,
     passthrough: bool,
 ) -> Result<(), String> {
-    let pill = app
-        .get_webview_window("pill")
-        .ok_or_else(|| "pill window not found".to_string())?;
-    pill.set_ignore_cursor_events(passthrough)
-        .map_err(|e| e.to_string())
+    // The hover poll decides per cursor position; this only says whether
+    // the pill may take clicks at all (idle) or never (recording,
+    // transcribing). See `pill_hover`.
+    pill_hover::set_clickable(&app, !passthrough);
+    Ok(())
 }
 
 /// Last (x, y) we passed to `pill.set_position` — used by `place_pill`
@@ -1163,6 +1164,10 @@ pub fn run() {
             // drift. Re-running place_pill on a 500 ms cadence picks
             // up work-area changes; place_pill self-dedupes via
             // LAST_PILL_POSITION so this is free when nothing moved.
+            // Only the visible capsule takes clicks, not the whole
+            // transparent pill window.
+            pill_hover::install(app.handle().clone());
+
             let app_for_refresh = app.handle().clone();
             thread::Builder::new()
                 .name("openwhisper-pill-refresh".into())

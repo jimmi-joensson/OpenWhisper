@@ -212,7 +212,9 @@ export function PillOverlay() {
     };
   }, []);
 
-  // Click-through follows status: idle = clickable, otherwise pass-through.
+  // Click-through follows status: idle = the capsule is clickable (Rust
+  // accepts clicks only while the cursor is over it, see pill_hover.rs),
+  // otherwise the whole window passes clicks through.
   useEffect(() => {
     const clickable = renderedStatus === "idle";
     invoke("set_pill_click_through", { passthrough: !clickable }).catch(

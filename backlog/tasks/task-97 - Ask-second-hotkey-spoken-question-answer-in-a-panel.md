@@ -4,6 +4,7 @@ title: Ask - second hotkey, spoken question, answer in a panel
 status: To Do
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T16:41:00Z'
 labels:
   - ask
   - core
@@ -34,3 +35,15 @@ Needs: the hotkey, an ask pipeline in core (separate from the Refiner trait: ans
 - [ ] #5 Headless parity: openwhisper ask reaches the same core function
 - [ ] #6 Latency measured per backend and written into the task notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Feasibility (2026-11-10, Claude Code 2.1.322, Sonnet low, run by a subagent and re-run by the orchestrator for streaming and image input):
+- Hotkey: both shells hold two hard-coded slots (toggle, cancel). macOS takes modifier taps and chords, Windows chords only; chords match exactly, so Ctrl+Shift+Space and Ctrl+Space do not collide. Slots become a list in TASK-96.3; Ask adds one. The dictation key is tap-to-toggle, there is no hold mode. Fn cannot be bound on macOS today (not in the modifier table).
+- Streaming: the lean Refine flags plus --include-partial-messages give stream_event lines; text arrives as content_block_delta / text_delta. The final result and usage lines are unchanged. Thinking deltas can precede text and are skipped.
+- Latency text-only: cold first text 1.3 to 2.3 s, total 2.4 to 3.3 s; process spawned 3 s ahead: first text 0.5 to 0.7 s, total 1.4 to 1.5 s.
+- Web search: --tools WebSearch --allowedTools WebSearch with the other lean flags. A question that searches took 16 to 20 s and the text arrives in one burst; one that does not, 0.9 s. This machine's CLI default permission mode is auto, so the Ask path pins --permission-mode default.
+- One warm process can take the question later and a second user turn after the first result (context kept).
+- OpenAI-compatible: streaming over the existing ureq client works against a fake SSE server (BufReader over the body); no real endpoint was available.
+<!-- SECTION:NOTES:END -->

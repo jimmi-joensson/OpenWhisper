@@ -4,7 +4,7 @@ title: Vision - the screen as context, only on request
 status: To Do
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T15:33:00Z'
+updated_date: '2026-11-10T16:41:00Z'
 labels:
   - vision
   - ask
@@ -61,4 +61,11 @@ Findings so far (web search, not yet tried in code):
 - Default list: 1Password, Bitwarden, KeePassXC, LastPass, Dashlane, Apple Passwords / Keychain Access; editable.
 - Not covered by an app list, and to be said plainly in the settings: a password manager's browser extension popup (it is part of the browser window), a password shown on a web page or in a terminal.
 History is left as it is: the user may dictate into a password manager's notes field, and that text is theirs to keep.
+
+Feasibility (2026-11-10, subagent runs; the orchestrator re-ran image input and re-runs the capture prototype before the design):
+- Image input: one stdin line with an image block (base64, image/png or image/jpeg) and a text block works with the lean Refine flags, tools off. The model read a 16 px line of synthetic text. Adds 0.2 to 0.3 s to first text; about 2,000 image tokens at 1568 px wide. With --no-session-persistence (already passed) no copy of the image was found on disk; without it the CLI writes the image to its session file and a temp PNG, so the flag is load-bearing.
+- Smart trigger: a text-only first turn that answers a fixed marker when it needs the screen was right on 32 of 32 prompts (English and Danish, Sonnet); the image then goes in a second turn of the same process. About 1 s extra when the screen is needed, none when it is not.
+- macOS capture: SCContentFilter(display:excludingApplications:exceptingWindows:) with SCScreenshotManager, through objc2-screen-capture-kit, about 50 ms per capture. An excluded app's window is gone and what is behind it shows (magenta test window over a green one: green pixels). Works from a plain thread. Needs the Screen Recording grant; a CLI run from a terminal uses the terminal's grant. Window rectangles for the paint-over layer come from CGWindowListCopyWindowInfo without any grant. Downscaling smears a painted edge by about 1 px, so paint at native size, then resize.
+- Windows (docs only, not run): no capture-side exclusion exists; BitBlt of the foreground window's monitor, then paint over the listed apps' window rectangles (EnumWindows, DWM extended frame bounds, cloaked check). Compiles for x86_64-pc-windows-gnu.
+- Not verified: behaviour without the grant, Retina and multi-display, the macOS 15 recurring screen-recording alert, anything on Windows at run time.
 <!-- SECTION:NOTES:END -->

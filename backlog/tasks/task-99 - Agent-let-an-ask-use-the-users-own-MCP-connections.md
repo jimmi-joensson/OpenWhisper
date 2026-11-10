@@ -4,6 +4,7 @@ title: Agent - let an ask use the user's own MCP connections
 status: To Do
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
+updated_date: '2026-11-10T16:41:00Z'
 labels:
   - agent
   - ask
@@ -39,3 +40,17 @@ Before designing: verify that the headless Claude Code CLI sees the connections 
 - [ ] #6 Headless parity: the CLI can run an agent ask
 - [ ] #7 Terms check redone and reported before release to other users
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Spike (2026-11-10, Claude Code 2.1.322, Sonnet low, fake MCP server only; no real connector tool was called):
+- Headless claude -p can use MCP servers given with --mcp-config and --strict-mcp-config. --safe-mode drops them, so the Agent path uses --setting-sources "" instead (no hooks, plugins or user permission rules; sign-in still works).
+- Connections it sees by default on this machine: 33 servers, 474 tools (5 user-scope, 2 plugin, 26 account connectors of which 9 connected). Listing without a model call: a control_request mcp_status on stream-json input (3.5 to 4.6 s). Loading every connector into a run costs about 260,000 prompt tokens, so servers are chosen one by one: a generated strict config with only the enabled servers.
+- Permissions without a terminal: a tool that is not allowed is denied, the run continues, and the denial is reported with its input. Names are mcp__server__tool with wildcards. This machine's default mode is auto, which runs unlisted tools without asking: the Agent path must pin --permission-mode default.
+- Confirm step: --permission-prompt-tool stdio on a stream-json process sends a control_request can_use_tool with the tool name and input and waits (100 s tested) for allow, allow with edited input, or deny. Also works: an approve tool on an MCP server of our own (documented), and deny-then-resume (arguments can drift).
+- Tool calls and results are assistant tool_use and user tool_result lines, with display names.
+- Run time: no tool 2.4 s, one tool call 3.3 to 3.6 s, two 3.9 to 4.5 s; the fake server adds no start-up time.
+- Injection probe: a tool result that told the model to send the thread to an outside address was not obeyed in 6 of 6 runs, with or without the gate. Small sample; the gate is the protection.
+- Terms: docs say --bare will become the default for -p, which would cut subscription sign-in; Anthropic says products for others should not offer claude.ai login. To be re-checked before release (AC 7).
+<!-- SECTION:NOTES:END -->

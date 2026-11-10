@@ -154,9 +154,12 @@ export function TranscriptNotes({
   );
 }
 
-// The mode a dictation ran in, when it was one the user made, and why
-// it was that one when the reason is the app's default ("Mode: Formal,
-// default for Chatter"). Same quiet line as the Refine marker. A
+// The mode a dictation ran in, when there is something to say about
+// it: a mode the user made, or the mode the app has as its default,
+// with that reason ("Mode: Formal, default for Chatter"; also "Mode:
+// Dictation, default for Terminal", since that default may have
+// overridden a mode the user selected). Rust decides when a mode is
+// named (`RefineInfo.mode`). Same quiet line as the Refine marker. A
 // stored history entry only knows the name, so it shows the name alone.
 export function ModeMarker({
   name,

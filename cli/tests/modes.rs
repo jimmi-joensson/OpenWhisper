@@ -198,6 +198,124 @@ fn an_app_default_decides_what_resolve_answers() {
 }
 
 #[test]
+fn a_name_another_mode_has_is_refused() {
+    let cfg = Config::new("unique-names");
+    cfg.add_formal();
+    let err = cfg.fails(&["modes", "add", "--name", " FORMAL ", "--instructions", "x"]);
+    assert!(err.contains("There is already a mode called \"Formal\""), "{err}");
+    let err = cfg.fails(&["modes", "add", "--name", "dictation", "--instructions", "x"]);
+    assert!(err.contains("already a mode called \"Dictation\""), "{err}");
+    cfg.json(&["modes", "add", "--name", "Casual", "--instructions", "x"]);
+    let err = cfg.fails(&["modes", "edit", "casual", "--name", "formal"]);
+    assert!(err.contains("already a mode called \"Formal\""), "{err}");
+    // Nothing was added or renamed by the refused calls.
+    let list = cfg.json(&["modes", "list"]);
+    assert_eq!(ids(&list), ["dictation", "formal", "casual"]);
+    assert_eq!(list["modes"][2]["name"], "Casual");
+}
+
+#[test]
+fn an_app_id_matches_whatever_its_case() {
+    let cfg = Config::new("app-case");
+    cfg.add_formal();
+    let set = cfg.json(&["modes", "app", "set", "com.example.Mail", "formal", "--name", "Mail"]);
+    assert_eq!(set["app_id"], "com.example.mail", "stored in lower case");
+    assert_eq!(set["app_name"], "Mail", "the name is kept as given");
+    for id in ["com.example.mail", "COM.EXAMPLE.MAIL", "com.example.Mail"] {
+        let choice = cfg.json(&["modes", "resolve", "--app", id]);
+        assert_eq!(choice["mode"]["id"], "formal", "{id}");
+        assert_eq!(choice["reason"], "app-default", "{id}");
+    }
+    // Another spelling replaces the default and clears it.
+    cfg.json(&["modes", "app", "set", "COM.EXAMPLE.MAIL", "dictation"]);
+    let listed = cfg.json(&["modes", "app", "list"]);
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    assert_eq!(listed[0]["mode"], "dictation");
+    assert_eq!(listed[0]["app_name"], "Mail");
+    assert_eq!(cfg.json(&["modes", "app", "unset", "Com.Example.Mail"])["removed"], "com.example.mail");
+    assert_eq!(cfg.json(&["modes", "app", "list"]).as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn a_modes_model_is_stored_for_a_backend_and_shown_as_unused_with_the_other() {
+    let cfg = Config::new("mode-backend");
+    // Without --backend: the backend Refine uses (the Claude CLI in a
+    // fresh config).
+    let added = cfg.json(&[
+        "modes", "add", "--name", "Careful", "--instructions", "x", "--model", "opus", "--effort", "high",
+    ]);
+    assert_eq!(added["mode"]["backend"], "claude-cli");
+    assert_eq!(added["mode"]["overrides_apply"], true);
+    // Named: stored for that one, and not in use here.
+    let added = cfg.json(&[
+        "modes", "add", "--name", "Small", "--instructions", "x", "--model", "small-model", "--backend",
+        "openai-compatible",
+    ]);
+    assert_eq!(added["mode"]["backend"], "openai-compatible");
+    assert_eq!(added["mode"]["overrides_apply"], false);
+    // A mode without a model or effort has no backend.
+    assert_eq!(cfg.add_formal()["mode"]["backend"], Value::Null);
+    assert!(cfg.fails(&["modes", "add", "--name", "X", "--instructions", "y", "--backend", "openai-compatible"])
+        .contains("--model and --effort"));
+    assert!(cfg
+        .fails(&["modes", "add", "--name", "X", "--instructions", "y", "--model", "m", "--backend", "telepathy"])
+        .contains("telepathy"));
+
+    // The user switches Refine to the other backend: the Claude model
+    // stays stored and is reported as not in use; the list says so.
+    cfg.json(&["refine", "config", "--backend", "openai-compatible"]);
+    let careful = cfg.json(&["modes", "show", "careful"]);
+    assert_eq!(careful["model"], "opus");
+    assert_eq!(careful["overrides_apply"], false);
+    assert_eq!(cfg.json(&["modes", "show", "small"])["overrides_apply"], true);
+    let out = cfg.spawn(&["modes", "list"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("opus, high effort (for claude-cli, not in use: same as Refine)"), "{stdout}");
+
+    // An effort given now is for the backend in use and replaces the
+    // Claude model with it.
+    let edited = cfg.json(&["modes", "edit", "careful", "--effort", "minimal"]);
+    assert_eq!(edited["mode"]["model"], Value::Null);
+    assert_eq!(edited["mode"]["effort"], "minimal");
+    assert_eq!(edited["mode"]["backend"], "openai-compatible");
+    assert_eq!(edited["mode"]["overrides_apply"], true);
+}
+
+#[test]
+fn the_apps_a_default_can_be_given_to_are_listed_without_any_history() {
+    let cfg = Config::new("candidates");
+    cfg.add_formal();
+    cfg.json(&["modes", "app", "set", "Editor.EXE", "formal"]);
+
+    // What is open on this machine cannot be pinned in a test; the
+    // shape can, and so can the app that has a default: it is listed
+    // first, once, with its mode, whatever else is running.
+    let running = cfg.json(&["focus", "--running"]);
+    let running = running.as_array().expect("an array of open apps");
+    for app in running {
+        assert!(app["app_id"].as_str().is_some_and(|id| !id.trim().is_empty()), "{app}");
+        assert!(app["app_name"].as_str().is_some_and(|name| !name.trim().is_empty()), "{app}");
+    }
+
+    let listed = cfg.json(&["modes", "app", "list", "--candidates"]);
+    let listed = listed.as_array().expect("an array of apps");
+    assert_eq!(listed[0]["app_id"], "editor.exe");
+    assert_eq!(listed[0]["mode"], "formal");
+    assert_eq!(listed[0]["mode_name"], "Formal");
+    let mut ids: Vec<String> = listed.iter().map(|a| a["app_id"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(ids.iter().all(|id| *id == id.to_lowercase()), "ids in the stored form: {ids:?}");
+    let count = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), count, "each app once");
+    // The others have no default yet.
+    assert!(listed[1..].iter().all(|a| a["mode"].is_null()), "{listed:?}");
+
+    // The plain list is still only the apps with a default.
+    assert_eq!(cfg.json(&["modes", "app", "list"]).as_array().map(Vec::len), Some(1));
+}
+
+#[test]
 fn deleting_a_mode_takes_its_app_default_along() {
     let cfg = Config::new("delete-default");
     cfg.add_formal();

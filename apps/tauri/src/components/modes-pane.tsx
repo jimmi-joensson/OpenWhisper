@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CircleAlert, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { ModeDialog } from "@/components/mode-dialog";
@@ -38,7 +38,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import type { ModeApp, ModeView } from "@/lib/modes";
-import { CLAUDE_MODELS, EFFORT_LABELS } from "@/lib/refine";
+import { BACKEND_LABELS, CLAUDE_MODELS, EFFORT_LABELS } from "@/lib/refine";
 import type { SettingsPaneId } from "@/lib/settings-panes";
 import { useModes, useRefineState } from "@/lib/use-modes";
 
@@ -71,6 +71,20 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
     open: false,
     mode: null,
   });
+
+  // Where keyboard focus goes when a dialog closes: the row it was
+  // opened from. The default (the button that opened it) does not
+  // work for a row's Edit and Delete, which are hidden again by then
+  // and cannot take focus; the row can, and shows them when it has
+  // keyboard focus. A row that is gone (deleted) hands over to the
+  // New mode button.
+  const openedFrom = useRef<HTMLElement | null>(null);
+  const newButton = useRef<HTMLButtonElement | null>(null);
+  const focusAfterClose = () => {
+    const row = openedFrom.current;
+    if (row === null) return true;
+    return row.isConnected ? row : newButton.current;
+  };
 
   const state = modes.state;
   const refineOff = refine !== null && !refine.settings.enabled;
@@ -118,11 +132,18 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
               mode={mode}
               selected={mode.id === state.settings.active}
               standardInstructions={refine?.default_instructions ?? ""}
-              onEdit={() => {
-                if (mode.builtin) onOpenPane?.("refine");
-                else setEditor({ open: true, mode });
+              onEdit={(row) => {
+                if (mode.builtin) {
+                  onOpenPane?.("refine");
+                  return;
+                }
+                openedFrom.current = row;
+                setEditor({ open: true, mode });
               }}
-              onDelete={() => setRemoval({ open: true, mode })}
+              onDelete={(row) => {
+                openedFrom.current = row;
+                setRemoval({ open: true, mode });
+              }}
             />
           ))}
         </ul>
@@ -133,7 +154,11 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
         className="self-start"
         disabled={!state}
         data-testid="mode-new"
-        onClick={() => setEditor({ open: true, mode: null })}
+        ref={newButton}
+        onClick={() => {
+          openedFrom.current = null;
+          setEditor({ open: true, mode: null });
+        }}
       >
         <Plus data-icon="inline-start" />
         New mode
@@ -144,17 +169,17 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
       <SectionHeader>Default mode per app</SectionHeader>
       <FieldDescription>
         When you dictate into one of these apps, its mode is used instead
-        of the selected one.
+        of the selected one. The list shows the apps that are open now and
+        the apps in your history.
       </FieldDescription>
 
       {state && state.apps.length === 0 && (
         <Empty className="border" data-testid="modes-apps-empty">
           <EmptyHeader>
-            <EmptyTitle>No apps yet</EmptyTitle>
+            <EmptyTitle>No apps to show</EmptyTitle>
             <EmptyDescription>
-              Apps appear here once your history has dictations made in
-              them. History is off until you turn it on in General. To set
-              a default without it, run{" "}
+              Open the app you want a default for and come back here. You
+              can also run{" "}
               <code className="font-mono text-xs">openwhisper modes app set</code>{" "}
               with the id of the app.
             </EmptyDescription>
@@ -179,6 +204,7 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
         onOpenChange={(open) => setEditor((d) => ({ ...d, open }))}
         mode={editor.mode}
         backend={refine?.settings.backend ?? "claude-cli"}
+        finalFocus={focusAfterClose}
         onSave={(draft) => modes.save(editor.mode?.id ?? null, draft)}
       />
 
@@ -186,7 +212,7 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
         open={removal.open}
         onOpenChange={(open) => setRemoval((d) => ({ ...d, open }))}
       >
-        <AlertDialogContent>
+        <AlertDialogContent finalFocus={focusAfterClose}>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete the mode “{removal.mode?.name}”?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -213,9 +239,16 @@ export function ModesPane({ onOpenPane }: ModesPaneProps) {
   );
 }
 
-// The model and effort a mode has of its own, in words; "" when it
-// follows the Refine settings for both.
+// The model and effort a mode runs with, in words, when it has any of
+// its own; "" when it has none and follows the Refine settings. Its
+// own ones belong to the Refine backend they were picked for: with
+// the other backend in use (core says so, `overrides_apply`) the mode
+// runs with the Refine settings, and the line says that instead.
 function ownSettings(mode: ModeView): string {
+  if (mode.override_backend === null) return "";
+  if (!mode.overrides_apply) {
+    return `Model and effort: Same as Refine. Its own are for the ${BACKEND_LABELS[mode.override_backend]} backend.`;
+  }
   const parts: string[] = [];
   if (mode.model) {
     const known = CLAUDE_MODELS.find((m) => m.value === mode.model);
@@ -236,9 +269,11 @@ function ModeRow({
   selected: boolean;
   // What Dictation does when the user wrote no Refine instructions.
   standardInstructions: string;
-  onEdit: () => void;
-  onDelete: () => void;
+  // Both get the row's element: where focus returns to afterwards.
+  onEdit: (row: HTMLElement | null) => void;
+  onDelete: (row: HTMLElement | null) => void;
 }) {
+  const rowRef = useRef<HTMLLIElement | null>(null);
   // One line; the row cuts it off where it runs out of room.
   const written = mode.instructions.replace(/\s+/g, " ").trim();
   const excerpt =
@@ -246,10 +281,16 @@ function ModeRow({
   const own = ownSettings(mode);
 
   return (
+    // The row is a tab stop: Edit and Delete are hidden until the row
+    // is hovered or has keyboard focus (`.ow-hover-host` in App.css),
+    // and a hidden button cannot be tabbed to. Tab lands on the row,
+    // which shows them, and the next Tab reaches Edit.
     <li
-      className="ow-hover-host flex items-center gap-2 border-b py-2 last:border-b-0"
+      className="ow-hover-host flex items-center gap-2 rounded-md border-b py-2 outline-none last:border-b-0 focus-visible:ring-3 focus-visible:ring-ring/50"
       data-testid="mode-row"
       data-mode={mode.id}
+      tabIndex={0}
+      ref={rowRef}
     >
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex items-center gap-2">
@@ -270,14 +311,19 @@ function ModeRow({
           </span>
         )}
       </div>
+      {/* An explicit tab stop on each button: the macOS webview leaves
+          buttons out of the Tab order unless the system setting for
+          keyboard navigation is on, and these are the only way to edit
+          or delete a mode. */}
       <div className="ow-hover-reveal flex shrink-0 gap-1">
         <Button
           variant="ghost"
           size="icon-sm"
+          tabIndex={0}
           aria-label={
             mode.builtin ? "Edit the Dictation instructions in Refine" : `Edit ${mode.name}`
           }
-          onClick={onEdit}
+          onClick={() => onEdit(rowRef.current)}
         >
           <Pencil />
         </Button>
@@ -285,8 +331,9 @@ function ModeRow({
           <Button
             variant="ghost"
             size="icon-sm"
+            tabIndex={0}
             aria-label={`Delete ${mode.name}`}
-            onClick={onDelete}
+            onClick={() => onDelete(rowRef.current)}
           >
             <Trash2 />
           </Button>

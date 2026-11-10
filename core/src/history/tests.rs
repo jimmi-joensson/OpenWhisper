@@ -563,7 +563,7 @@ fn a_mode_is_written_on_its_own_line_and_reads_back() {
         dir.path(),
         at(date, 9, 5, 0),
         "Could you please let me know when the price list is ready?",
-        Some("hey mikael when is the price list ready"),
+        Some("hey oskar when is the price list ready"),
         ("com.example.mail", "Mail"),
         "Formal",
     );
@@ -583,7 +583,7 @@ apps: [Mail]
 
 Could you please let me know when the price list is ready?
 
-> Before Refine: hey mikael when is the price list ready
+> Before Refine: hey oskar when is the price list ready
 ";
     assert_eq!(read(dir.path(), date), expected);
 

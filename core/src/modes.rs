@@ -21,6 +21,7 @@
 //!   [`set_app_default`], [`clear_app_default`]: each takes the block
 //!   and returns a new, cleaned one. Saving it is the caller's step
 //!   ([`crate::settings::save_modes_settings`]).
+//! - [`apps_for_defaults`]: the apps a default mode can be given to.
 //!
 //! What a mode does to the prompt and the model call is in
 //! `crate::refine` (feature `refine`).
@@ -28,8 +29,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{
-    AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODES_MAX, Mode, ModesSettings, RefineEffort,
-    RefineSettings,
+    AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODES_MAX, Mode, ModesSettings, RefineBackendKind,
+    RefineEffort, RefineSettings, app_key, mode_name_key,
 };
 
 /// A mode as the UI and the pipeline see it: a custom mode, or the
@@ -47,6 +48,10 @@ pub struct ModeView {
     /// `None` = the effort in the Refine settings. Always `None` for
     /// the built-in mode.
     pub effort: Option<RefineEffort>,
+    /// The Refine backend `model` and `effort` were chosen for
+    /// ([`Mode::backend`]). `None` without a model or effort, and for
+    /// a block written before the field existed.
+    pub backend: Option<RefineBackendKind>,
     /// The built-in Dictation mode: cannot be renamed or deleted.
     pub builtin: bool,
 }
@@ -60,6 +65,7 @@ impl ModeView {
             instructions: refine.instructions.clone(),
             model: None,
             effort: None,
+            backend: None,
             builtin: true,
         }
     }
@@ -71,8 +77,27 @@ impl ModeView {
             instructions: mode.instructions.clone(),
             model: mode.model.clone(),
             effort: mode.effort,
+            backend: mode.backend,
             builtin: false,
         }
+    }
+
+    /// The backend this mode's own model and effort are for, or
+    /// `None` when it has neither. A model or effort stored without a
+    /// backend (a block from before the field existed) is for the
+    /// Claude CLI: that was the only backend with named models, and
+    /// "opus" sent to an OpenAI-compatible server fails every
+    /// dictation.
+    pub fn override_backend(&self) -> Option<RefineBackendKind> {
+        (self.model.is_some() || self.effort.is_some())
+            .then(|| self.backend.unwrap_or(RefineBackendKind::ClaudeCli))
+    }
+
+    /// The mode's own model and effort are used while `active` is the
+    /// Refine backend. `false` also when it has neither: then there
+    /// is nothing to apply and the Refine settings stand.
+    pub fn overrides_apply(&self, active: RefineBackendKind) -> bool {
+        self.override_backend() == Some(active)
     }
 
     /// The mode rewrites the text on purpose: it is a custom mode with
@@ -142,7 +167,10 @@ pub fn get(modes: &ModesSettings, refine: &RefineSettings, id: &str) -> Option<M
 pub fn resolve(modes: &ModesSettings, refine: &RefineSettings, app: Option<(&str, &str)>) -> ModeChoice {
     if let Some((app_id, app_name)) = app {
         let app_id = app_id.trim();
-        let default = modes.app_defaults.iter().find(|d| !app_id.is_empty() && d.app_id == app_id);
+        // Ids are compared in lower case on both sides, so a block
+        // that was never cleaned matches too.
+        let key = app_key(app_id);
+        let default = modes.app_defaults.iter().find(|d| !key.is_empty() && app_key(&d.app_id) == key);
         if let Some(default) = default
             && let Some(mode) = get(modes, refine, &default.mode)
         {
@@ -175,20 +203,55 @@ pub struct ModeEdit {
     pub instructions: Option<String>,
     pub model: Option<Option<String>>,
     pub effort: Option<Option<RefineEffort>>,
+    /// The Refine backend the model and effort in this edit are for:
+    /// the one in use where they were picked. Pass it whenever
+    /// `model` or `effort` is set.
+    ///
+    /// It matters when the mode already has a model or effort for
+    /// *another* backend. Those are not what the person editing saw
+    /// (the app shows "Same as Refine" for them), so an edit that
+    /// names no model and no effort leaves them alone, and an edit
+    /// that names one replaces both: a model for one backend and an
+    /// effort for the other cannot be stored together.
+    pub backend: Option<RefineBackendKind>,
 }
 
 fn unknown(id: &str) -> String {
     format!("There is no mode with the id \"{id}\".")
 }
 
+/// Refuse a name another mode already has, ignoring case and outer
+/// space. `except` is the id of the mode being renamed.
+fn check_name_free(modes: &ModesSettings, name: &str, except: Option<&str>) -> Result<(), String> {
+    let key = mode_name_key(name);
+    let holder = if key == mode_name_key(BUILTIN_MODE_NAME) {
+        Some(BUILTIN_MODE_NAME)
+    } else {
+        modes
+            .custom
+            .iter()
+            .find(|m| Some(m.id.as_str()) != except && mode_name_key(&m.name) == key)
+            .map(|m| m.name.as_str())
+    };
+    match holder {
+        Some(taken) => Err(format!("There is already a mode called \"{taken}\". Give this one another name.")),
+        None => Ok(()),
+    }
+}
+
 /// Add a custom mode at the end of the list. Its id is made from the
 /// name; read it from the last entry of `custom` in the result.
+///
+/// `backend` is the Refine backend `model` and `effort` were chosen
+/// for (the one in use); it is stored only when the mode has one of
+/// them. The name must not be another mode's name, ignoring case.
 pub fn add(
     modes: &ModesSettings,
     name: &str,
     instructions: &str,
     model: Option<&str>,
     effort: Option<RefineEffort>,
+    backend: Option<RefineBackendKind>,
 ) -> Result<ModesSettings, String> {
     if name.trim().is_empty() {
         return Err("A mode needs a name.".to_string());
@@ -196,6 +259,7 @@ pub fn add(
     if modes.custom.len() >= MODES_MAX {
         return Err(format!("There are already {MODES_MAX} modes. Delete one before adding another."));
     }
+    check_name_free(modes, name, None)?;
     let mut next = modes.clone();
     next.custom.push(Mode {
         id: String::new(),
@@ -203,6 +267,7 @@ pub fn add(
         instructions: instructions.to_string(),
         model: model.map(str::to_string),
         effort,
+        backend,
     });
     Ok(next.cleaned())
 }
@@ -222,16 +287,34 @@ pub fn edit(modes: &ModesSettings, id: &str, changes: &ModeEdit) -> Result<Modes
         if name.trim().is_empty() {
             return Err("A mode needs a name.".to_string());
         }
+        check_name_free(modes, name, Some(id))?;
         mode.name = name.clone();
     }
     if let Some(instructions) = &changes.instructions {
         mode.instructions = instructions.clone();
     }
-    if let Some(model) = &changes.model {
-        mode.model = model.clone();
-    }
-    if let Some(effort) = changes.effort {
-        mode.effort = effort;
+    let names_a_value = matches!(changes.model, Some(Some(_))) || matches!(changes.effort, Some(Some(_)));
+    let kept_for_another_backend = match (changes.backend, mode.override_backend()) {
+        (Some(edit_for), Some(stored_for)) => edit_for != stored_for,
+        _ => false,
+    };
+    if kept_for_another_backend {
+        // See `ModeEdit::backend`.
+        if names_a_value {
+            mode.model = changes.model.clone().flatten();
+            mode.effort = changes.effort.flatten();
+            mode.backend = changes.backend;
+        }
+    } else {
+        if let Some(model) = &changes.model {
+            mode.model = model.clone();
+        }
+        if let Some(effort) = changes.effort {
+            mode.effort = effort;
+        }
+        if names_a_value && changes.backend.is_some() {
+            mode.backend = changes.backend;
+        }
     }
     Ok(next.cleaned())
 }
@@ -291,18 +374,15 @@ pub fn set_app_default(
         return Err(unknown(mode_id));
     }
     let mut next = modes.clone();
+    let app_id = app_key(app_id);
     let known_name = next
         .app_defaults
         .iter()
-        .find(|d| d.app_id == app_id)
+        .find(|d| app_key(&d.app_id) == app_id)
         .map(|d| d.app_name.clone())
         .unwrap_or_default();
     let app_name = if app_name.trim().is_empty() { known_name } else { app_name.trim().to_string() };
-    next.app_defaults.push(AppDefault {
-        app_id: app_id.to_string(),
-        app_name,
-        mode: mode_id.to_string(),
-    });
+    next.app_defaults.push(AppDefault { app_id, app_name, mode: mode_id.to_string() });
     Ok(next.cleaned())
 }
 
@@ -310,17 +390,76 @@ pub fn set_app_default(
 /// again.
 pub fn clear_app_default(modes: &ModesSettings, app_id: &str) -> Result<ModesSettings, String> {
     let app_id = app_id.trim();
-    if !modes.app_defaults.iter().any(|d| d.app_id == app_id) {
+    let key = app_key(app_id);
+    if !modes.app_defaults.iter().any(|d| app_key(&d.app_id) == key) {
         return Err(format!("The app \"{app_id}\" has no default mode."));
     }
     let mut next = modes.clone();
-    next.app_defaults.retain(|d| d.app_id != app_id);
+    next.app_defaults.retain(|d| app_key(&d.app_id) != key);
     Ok(next.cleaned())
+}
+
+/// An app that can be given a default mode.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ModeApp {
+    /// The app id in the form defaults are stored in
+    /// ([`crate::settings::app_key`]: lower case), so it can be
+    /// compared with [`AppDefault::app_id`] as is.
+    pub id: String,
+    /// Name to show a person, as the app gives it; the id when no
+    /// name is known.
+    pub name: String,
+}
+
+/// The apps offered for a default mode, each once:
+///
+/// 1. the apps that have a default, in stored order (also when they
+///    are neither running nor in the history: set from the CLI, or
+///    the history was cleared since);
+/// 2. the apps dictated into before, as the history lists them
+///    ([`crate::history::apps`], most recent first);
+/// 3. the apps that are open now (`crate::focus::running_apps`).
+///
+/// `history` and `running` are `(app_id, app_name)` pairs. Ids are
+/// compared ignoring case; the first place an app turns up decides
+/// its position. Its name is the first one known in that order, and
+/// the id when there is none.
+pub fn apps_for_defaults(
+    modes: &ModesSettings,
+    history: &[(String, String)],
+    running: &[(String, String)],
+) -> Vec<ModeApp> {
+    let mut apps: Vec<ModeApp> = Vec::new();
+    let defaults = modes.app_defaults.iter().map(|d| (d.app_id.as_str(), d.app_name.as_str()));
+    let seen = history.iter().chain(running).map(|(id, name)| (id.as_str(), name.as_str()));
+    for (id, name) in defaults.chain(seen) {
+        let id = app_key(id);
+        let name = name.trim();
+        if id.is_empty() {
+            continue;
+        }
+        match apps.iter_mut().find(|a| a.id == id) {
+            // Listed already: only a missing name is filled in.
+            Some(known) => {
+                if known.name == known.id && !name.is_empty() {
+                    known.name = name.to_string();
+                }
+            }
+            None => apps.push(ModeApp {
+                name: if name.is_empty() { id.clone() } else { name.to_string() },
+                id,
+            }),
+        }
+    }
+    apps
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CLAUDE: Option<RefineBackendKind> = Some(RefineBackendKind::ClaudeCli);
+    const OPENAI: Option<RefineBackendKind> = Some(RefineBackendKind::OpenaiCompatible);
 
     fn refine() -> RefineSettings {
         RefineSettings { instructions: "Use British spelling.".into(), ..RefineSettings::default() }
@@ -328,8 +467,8 @@ mod tests {
 
     /// Dictation plus "Formal" and "Write in English".
     fn three() -> ModesSettings {
-        let m = add(&ModesSettings::default(), "Formal", "Rewrite it in a formal tone.", None, None).unwrap();
-        add(&m, "Write in English", "Write it in English.", Some("opus"), Some(RefineEffort::Medium)).unwrap()
+        let m = add(&ModesSettings::default(), "Formal", "Rewrite it in a formal tone.", None, None, None).unwrap();
+        add(&m, "Write in English", "Write it in English.", Some("opus"), Some(RefineEffort::Medium), CLAUDE).unwrap()
     }
 
     #[test]
@@ -350,7 +489,7 @@ mod tests {
 
     #[test]
     fn only_a_custom_mode_with_instructions_rewrites() {
-        let modes = add(&three(), "Careful", "  ", Some("opus"), None).unwrap();
+        let modes = add(&three(), "Careful", "  ", Some("opus"), None, CLAUDE).unwrap();
         let views = list(&modes, &refine());
         assert!(!views[0].rewrites(), "Dictation cleans up");
         assert!(views[1].rewrites());
@@ -426,17 +565,21 @@ mod tests {
     fn add_makes_an_id_from_the_name_and_refuses_an_empty_name() {
         let modes = three();
         assert_eq!(modes.custom[0].id, "formal");
-        let again = add(&modes, "Formal", "Another one.", None, None).unwrap();
+        // The id "formal" stays with the renamed mode, so a new mode
+        // called Formal gets the next one.
+        let renamed =
+            edit(&modes, "formal", &ModeEdit { name: Some("Business tone".into()), ..ModeEdit::default() }).unwrap();
+        let again = add(&renamed, "Formal", "Another one.", None, None, None).unwrap();
         assert_eq!(again.custom.last().unwrap().id, "formal-2");
         // Selecting nothing new: adding does not change the selection.
         assert_eq!(again.active, BUILTIN_MODE_ID);
-        assert_eq!(add(&modes, "   ", "x", None, None).unwrap_err(), "A mode needs a name.");
+        assert_eq!(add(&modes, "   ", "x", None, None, None).unwrap_err(), "A mode needs a name.");
 
         let mut full = ModesSettings::default();
         for i in 0..MODES_MAX {
-            full = add(&full, &format!("Mode {i}"), "x", None, None).unwrap();
+            full = add(&full, &format!("Mode {i}"), "x", None, None, None).unwrap();
         }
-        let err = add(&full, "One too many", "x", None, None).unwrap_err();
+        let err = add(&full, "One too many", "x", None, None, None).unwrap_err();
         assert!(err.contains("already 50 modes"), "{err}");
     }
 
@@ -550,5 +693,205 @@ mod tests {
         assert!(cleared.app_defaults.is_empty());
         let err = clear_app_default(&cleared, "com.example.mail").unwrap_err();
         assert_eq!(err, "The app \"com.example.mail\" has no default mode.");
+    }
+
+    #[test]
+    fn a_name_another_mode_has_is_refused_ignoring_case_and_space() {
+        let modes = three();
+        let taken = "There is already a mode called \"Formal\". Give this one another name.";
+        for name in ["Formal", "formal", "  FORMAL  "] {
+            assert_eq!(add(&modes, name, "x", None, None, None).unwrap_err(), taken, "{name}");
+        }
+        // The built-in mode's name is taken too.
+        let err = add(&modes, " dictation ", "x", None, None, None).unwrap_err();
+        assert_eq!(err, "There is already a mode called \"Dictation\". Give this one another name.");
+
+        // Renaming onto another mode's name is refused the same way.
+        let rename = |to: &str| ModeEdit { name: Some(to.into()), ..ModeEdit::default() };
+        assert_eq!(edit(&modes, "write-in-english", &rename("FORMAL")).unwrap_err(), taken);
+        assert!(edit(&modes, "formal", &rename("Dictation")).unwrap_err().contains("\"Dictation\""));
+        // A mode can keep its own name, also with another case.
+        assert_eq!(edit(&modes, "formal", &rename("Formal")).unwrap(), modes);
+        assert_eq!(edit(&modes, "formal", &rename("FORMAL")).unwrap().custom[0].name, "FORMAL");
+        // Nothing was stored by a refused call.
+        assert_eq!(modes, three());
+    }
+
+    #[test]
+    fn app_defaults_match_whatever_the_case_of_the_id() {
+        let modes = three();
+        let modes = set_app_default(&modes, "com.example.Mail", "Mail", "formal").unwrap();
+        // Stored in lower case; the name is kept as given.
+        assert_eq!(modes.app_defaults[0].app_id, "com.example.mail");
+        assert_eq!(modes.app_defaults[0].app_name, "Mail");
+        for id in ["com.example.Mail", "com.example.mail", "COM.EXAMPLE.MAIL", " com.example.MAIL "] {
+            let choice = resolve(&modes, &refine(), Some((id, "")));
+            assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::AppDefault), "{id}");
+            assert_eq!(choice.app_name, "Mail");
+        }
+        // Another spelling replaces the default, it does not add one.
+        let modes = set_app_default(&modes, "COM.EXAMPLE.MAIL", "", "write-in-english").unwrap();
+        assert_eq!(modes.app_defaults.len(), 1);
+        assert_eq!(modes.app_defaults[0].app_name, "Mail");
+        assert_eq!(modes.app_defaults[0].mode, "write-in-english");
+        // And another spelling clears it.
+        assert!(clear_app_default(&modes, "Com.Example.Mail").unwrap().app_defaults.is_empty());
+
+        // A block that was never cleaned (mixed case in the file) matches too.
+        let raw = ModesSettings {
+            app_defaults: vec![AppDefault { app_id: "Editor.EXE".into(), app_name: String::new(), mode: "formal".into() }],
+            ..three()
+        };
+        assert_eq!(resolve(&raw, &refine(), Some(("editor.exe", "Editor"))).mode.id, "formal");
+    }
+
+    #[test]
+    fn a_models_backend_is_stored_with_it() {
+        let modes = add(&ModesSettings::default(), "Plain", "x", None, None, OPENAI).unwrap();
+        assert_eq!(modes.custom[0].backend, None, "nothing of its own: no backend");
+        let modes = add(&modes, "Small", "x", Some("small-model"), None, OPENAI).unwrap();
+        assert_eq!(modes.custom[1].backend, OPENAI);
+        let views = list(&modes, &refine());
+        assert_eq!(views[2].override_backend(), OPENAI);
+        assert!(views[2].overrides_apply(RefineBackendKind::OpenaiCompatible));
+        assert!(!views[2].overrides_apply(RefineBackendKind::ClaudeCli));
+        assert!(!views[1].overrides_apply(RefineBackendKind::ClaudeCli), "nothing to apply");
+        assert!(!views[0].overrides_apply(RefineBackendKind::ClaudeCli), "the built-in mode has none");
+
+        // Stored before the field existed: for the Claude CLI.
+        let old = ModesSettings {
+            custom: vec![Mode { name: "Old".into(), model: Some("opus".into()), ..Mode::default() }],
+            ..ModesSettings::default()
+        }
+        .cleaned();
+        let view = &list(&old, &refine())[1];
+        assert_eq!(view.backend, None);
+        assert_eq!(view.override_backend(), CLAUDE);
+        assert!(!view.overrides_apply(RefineBackendKind::OpenaiCompatible));
+    }
+
+    #[test]
+    fn an_edit_for_another_backend_replaces_or_leaves_the_stored_model_and_effort() {
+        let modes = add(&ModesSettings::default(), "Small", "x", Some("small-model"), Some(RefineEffort::Minimal), OPENAI)
+            .unwrap();
+        let own = |m: &ModesSettings| {
+            let mode = m.custom_mode("small").unwrap();
+            (mode.model.clone(), mode.effort, mode.backend)
+        };
+
+        // Edited while the Claude CLI is in use, where the dialog showed
+        // "Same as Refine" for both: a rename does not cost the mode its
+        // OpenAI model.
+        let renamed = edit(
+            &modes,
+            "small",
+            &ModeEdit {
+                name: Some("Tiny".into()),
+                model: Some(None),
+                effort: Some(None),
+                backend: CLAUDE,
+                ..ModeEdit::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(renamed.custom[0].name, "Tiny");
+        assert_eq!(own(&renamed), (Some("small-model".into()), Some(RefineEffort::Minimal), OPENAI));
+
+        // Picking an effort there replaces both: the model was for the
+        // other backend and does not carry over.
+        let picked = edit(
+            &modes,
+            "small",
+            &ModeEdit { model: Some(None), effort: Some(Some(RefineEffort::High)), backend: CLAUDE, ..ModeEdit::default() },
+        )
+        .unwrap();
+        assert_eq!(own(&picked), (None, Some(RefineEffort::High), CLAUDE));
+        let picked = edit(
+            &modes,
+            "small",
+            &ModeEdit { model: Some(Some("opus".into())), backend: CLAUDE, ..ModeEdit::default() },
+        )
+        .unwrap();
+        assert_eq!(own(&picked), (Some("opus".into()), None, CLAUDE));
+
+        // The same backend: fields change one by one, as before.
+        let same = edit(
+            &modes,
+            "small",
+            &ModeEdit { effort: Some(Some(RefineEffort::Low)), backend: OPENAI, ..ModeEdit::default() },
+        )
+        .unwrap();
+        assert_eq!(own(&same), (Some("small-model".into()), Some(RefineEffort::Low), OPENAI));
+        // Without a backend in the edit (a clear from the CLI), the
+        // stored values are the ones meant.
+        let cleared =
+            edit(&modes, "small", &ModeEdit { model: Some(None), effort: Some(None), ..ModeEdit::default() }).unwrap();
+        assert_eq!(own(&cleared), (None, None, None));
+
+        // An old block's model gets its backend on the next edit that
+        // names one.
+        let old = ModesSettings {
+            custom: vec![Mode { name: "Old".into(), model: Some("opus".into()), ..Mode::default() }],
+            ..ModesSettings::default()
+        }
+        .cleaned();
+        let touched = edit(
+            &old,
+            "old",
+            &ModeEdit { effort: Some(Some(RefineEffort::High)), backend: CLAUDE, ..ModeEdit::default() },
+        )
+        .unwrap();
+        let mode = touched.custom_mode("old").unwrap();
+        assert_eq!((mode.model.as_deref(), mode.effort, mode.backend), (Some("opus"), Some(RefineEffort::High), CLAUDE));
+    }
+
+    fn pairs(apps: &[(&str, &str)]) -> Vec<(String, String)> {
+        apps.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect()
+    }
+
+    fn app(id: &str, name: &str) -> ModeApp {
+        ModeApp { id: id.into(), name: name.into() }
+    }
+
+    #[test]
+    fn apps_for_defaults_lists_defaults_then_history_then_running_apps() {
+        let modes = set_app_default(&three(), "com.example.notes", "Notes", "formal").unwrap();
+        let modes = set_app_default(&modes, "editor.exe", "", BUILTIN_MODE_ID).unwrap();
+        let history = pairs(&[("com.example.chat", "Chatter"), ("com.example.Mail", "Mailbox")]);
+        let running = pairs(&[("com.example.browser", "Browser"), ("com.example.chat", "Chatter 2")]);
+        assert_eq!(
+            apps_for_defaults(&modes, &history, &running),
+            vec![
+                app("com.example.notes", "Notes"),
+                // No stored name: the id stands in for it.
+                app("editor.exe", "editor.exe"),
+                app("com.example.chat", "Chatter"),
+                // Ids come back in the stored form; names as given.
+                app("com.example.mail", "Mailbox"),
+                app("com.example.browser", "Browser"),
+            ]
+        );
+    }
+
+    #[test]
+    fn apps_for_defaults_lists_each_app_once_whatever_the_case() {
+        let modes = set_app_default(&three(), "Editor.EXE", "", "formal").unwrap();
+        let history = pairs(&[("com.example.Mail", "Mail"), ("COM.EXAMPLE.MAIL", "Mail again"), ("  ", "Nameless")]);
+        let running = pairs(&[("EDITOR.exe", "Editor"), ("com.example.mail", "Mail now"), ("com.example.new", " ")]);
+        assert_eq!(
+            apps_for_defaults(&modes, &history, &running),
+            vec![
+                // The default had no name: the running app supplies it.
+                app("editor.exe", "Editor"),
+                app("com.example.mail", "Mail"),
+                app("com.example.new", "com.example.new"),
+            ]
+        );
+        // With History off and nothing set: the open apps alone.
+        assert_eq!(
+            apps_for_defaults(&ModesSettings::default(), &[], &pairs(&[("com.example.browser", "Browser")])),
+            vec![app("com.example.browser", "Browser")]
+        );
+        assert!(apps_for_defaults(&ModesSettings::default(), &[], &[]).is_empty());
     }
 }

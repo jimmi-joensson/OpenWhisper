@@ -49,7 +49,7 @@ pub use crate::model_lifecycle::{
     LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
     registry_snapshot,
 };
-pub use crate::modes::{ModeChoice, ModeEdit, ModeReason, ModeView};
+pub use crate::modes::{ModeApp, ModeChoice, ModeEdit, ModeReason, ModeView};
 pub use crate::settings::{
     AppDefault, AudioSettings, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, BehaviorSettings,
     ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, Mode, ModesSettings,

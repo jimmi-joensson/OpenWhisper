@@ -1,5 +1,6 @@
 //! Windows focus read: the foreground window, its owning process and
-//! that process's exe.
+//! that process's exe. The list of running apps is the same read for
+//! every visible top-level window.
 //!
 //! Known limit: a packaged (UWP) app's window belongs to
 //! `ApplicationFrameHost.exe`, so such apps all report that host
@@ -7,7 +8,7 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
@@ -15,13 +16,14 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    EnumWindows, GWL_EXSTYLE, GetForegroundWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, WS_EX_TOOLWINDOW,
 };
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 
 use super::{FocusContext, exe_file_name, exe_stem};
 
-pub(super) fn read() -> FocusContext {
+pub(super) fn read(with_title: bool) -> FocusContext {
     // SAFETY: Win32 calls with buffers we own; every handle opened
     // here is closed before returning.
     unsafe {
@@ -32,21 +34,83 @@ pub(super) fn read() -> FocusContext {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
-        let mut title = [0u16; 512];
-        let len = GetWindowTextW(hwnd, &mut title).max(0) as usize;
-        let window_title = String::from_utf16_lossy(&title[..len.min(title.len())]);
+        let window_title = if with_title {
+            let mut title = [0u16; 512];
+            let len = GetWindowTextW(hwnd, &mut title).max(0) as usize;
+            String::from_utf16_lossy(&title[..len.min(title.len())])
+        } else {
+            String::new()
+        };
 
         let (app_id, app_name) = match exe_path(pid) {
-            Some(path) => {
-                let name = file_description(&path)
-                    .filter(|d| !d.trim().is_empty())
-                    .unwrap_or_else(|| exe_stem(&path));
-                (exe_file_name(&path), name)
-            }
+            Some(path) => app_of_exe(&path),
             None => (String::new(), String::new()),
         };
         FocusContext { app_id, app_name, window_title, pid, is_self: false }
     }
+}
+
+/// Id and name of the app whose exe is at `path`: the file name in
+/// lower case, and the file's description (the stem of the file name
+/// when it has none).
+unsafe fn app_of_exe(path: &str) -> (String, String) {
+    let name = unsafe { file_description(path) }
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| exe_stem(path));
+    (exe_file_name(path), name)
+}
+
+/// The processes that own a visible top-level window with a title
+/// (tool windows left out), each exe once, without this process. Same
+/// ids and names as [`read`]. A process we may not query (elevated)
+/// is skipped.
+pub(super) fn running() -> Vec<(String, String)> {
+    let own_pid = std::process::id();
+    let mut pids: Vec<u32> = Vec::new();
+    // SAFETY: `pids` outlives the call, and the callback is the only
+    // user of the pointer while `EnumWindows` runs.
+    unsafe {
+        let _ = EnumWindows(Some(collect_window_pid), LPARAM(&mut pids as *mut Vec<u32> as isize));
+    }
+    let mut paths: Vec<String> = Vec::new();
+    let mut apps = Vec::new();
+    for pid in pids {
+        if pid == own_pid {
+            continue;
+        }
+        // SAFETY: see `exe_path` and `file_description`.
+        let Some(path) = (unsafe { exe_path(pid) }) else {
+            continue;
+        };
+        // One read of the version info per exe, however many
+        // processes and windows it has.
+        if paths.iter().any(|known| known.eq_ignore_ascii_case(&path)) {
+            continue;
+        }
+        apps.push(unsafe { app_of_exe(&path) });
+        paths.push(path);
+    }
+    apps
+}
+
+/// `EnumWindows` callback: note the owning process of every window a
+/// person would call a window. `lparam` points at a `Vec<u32>`.
+unsafe extern "system" fn collect_window_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    // SAFETY: `lparam` is the `Vec<u32>` passed by `running`, alive
+    // for the whole enumeration and not touched by anyone else.
+    unsafe {
+        let pids = &mut *(lparam.0 as *mut Vec<u32>);
+        let tool_window = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        if IsWindowVisible(hwnd).as_bool() && !tool_window && GetWindowTextLengthW(hwnd) > 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid != 0 && !pids.contains(&pid) {
+                pids.push(pid);
+            }
+        }
+    }
+    // Keep going.
+    BOOL(1)
 }
 
 /// Full path of the process's exe. `None` for a process we may not
@@ -123,6 +187,16 @@ mod tests {
     fn reads_own_exe_path() {
         let path = unsafe { exe_path(std::process::id()) }.expect("own exe path");
         assert!(path.to_lowercase().ends_with(".exe"), "{path}");
+    }
+
+    #[test]
+    fn running_apps_have_exe_ids_and_leave_this_process_out() {
+        let own = exe_file_name(&unsafe { exe_path(std::process::id()) }.expect("own exe path"));
+        for (id, name) in running() {
+            assert_eq!(id, id.to_lowercase(), "{id}");
+            assert!(!name.is_empty(), "{id}");
+            assert_ne!(id, own);
+        }
     }
 
     #[test]

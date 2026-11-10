@@ -4,7 +4,7 @@
 // and effort. Every rule about modes (ids, what a delete does, which
 // mode runs) lives in core; this file only names the shapes.
 
-import type { RefineEffort } from "./refine";
+import type { RefineBackend, RefineEffort } from "./refine";
 
 // Id of the built-in Dictation mode: today's cleanup, whose
 // instructions are the Refine instructions.
@@ -19,10 +19,14 @@ export interface Mode {
   model: string | null;
   // null = the effort in the Refine settings.
   effort: RefineEffort | null;
+  // The Refine backend `model` and `effort` were picked for. null
+  // without either, and in a block from before this was stored.
+  backend: RefineBackend | null;
 }
 
 // "In this app, use that mode."
 export interface AppDefault {
+  // Stored in lower case by core.
   app_id: string;
   // May be empty; then the id is shown.
   app_name: string;
@@ -39,12 +43,21 @@ export interface ModesSettings {
 }
 
 // A mode as it is listed: a custom one, or the built-in one put
-// together from the Refine settings.
+// together from the Refine settings. Mirrors `ModeRow` in
+// src-tauri/src/modes.rs.
 export interface ModeView extends Mode {
   builtin: boolean;
+  // The backend the mode's own model and effort are for; null when it
+  // has neither. Decided in core.
+  override_backend: RefineBackend | null;
+  // They are in use, because that backend is the one Refine uses.
+  // false: the mode runs with the Refine model and effort.
+  overrides_apply: boolean;
 }
 
-// An app that can be given a default mode.
+// An app that can be given a default mode. `id` is in the form core
+// stores app defaults in (lower case), so it compares with
+// `AppDefault.app_id` as is.
 export interface ModeApp {
   id: string;
   name: string;
@@ -59,7 +72,8 @@ export interface ModesNow {
 
 // What `modes_get` returns.
 export interface ModesState extends ModesNow {
-  // Apps seen in the history, then apps that already have a default.
+  // The apps that already have a default, then the apps seen in the
+  // history, then the apps that are open now.
   apps: ModeApp[];
 }
 

@@ -6,8 +6,11 @@
 //! Tap-not-hold semantics for modifier-tap: the slot fires on release iff
 //! no other key was pressed while the modifier was held — so holding the
 //! modifier as a chord (`Cmd+Q`, etc.) does *not* fire the slot. Another
-//! modifier counts as another key: holding Right Command and pressing
-//! Right Option fires neither a Right Command tap nor a Right Option tap.
+//! modifier does not count as another key (hold Shift, tap Right Command:
+//! the tap fires), with one exception: the key of another installed
+//! modifier-tap slot. Holding Right Command and pressing Right Option
+//! fires neither a Right Command tap nor a Right Option tap when both
+//! are bound, so one gesture never fires two slots.
 //!
 //! Chord semantics: fire on the configured non-modifier KeyDown when the
 //! configured high-level modifier mask matches exactly. Both KeyDown and
@@ -89,16 +92,6 @@ const NX_DEVICE_RCMD: u64 = 0x0010;
 const NX_DEVICE_LOPT: u64 = 0x0020;
 const NX_DEVICE_ROPT: u64 = 0x0040;
 const NX_DEVICE_RCTRL: u64 = 0x2000;
-/// Every left/right modifier bit. Caps Lock and Fn have no bit here,
-/// so a lit Caps Lock never reads as a held modifier.
-const NX_DEVICE_MOD_MASK: u64 = NX_DEVICE_LCTRL
-    | NX_DEVICE_LSHIFT
-    | NX_DEVICE_RSHIFT
-    | NX_DEVICE_LCMD
-    | NX_DEVICE_RCMD
-    | NX_DEVICE_LOPT
-    | NX_DEVICE_ROPT
-    | NX_DEVICE_RCTRL;
 
 // High-level CGEventFlags — collapse left/right. Used for chord matching.
 const CG_FLAG_SHIFT: u64 = 0x0002_0000;
@@ -408,8 +401,9 @@ fn dispatch(slots: &[SlotState], etype: CGEventType, flags: u64, key_code: i64) 
         // so the same event goes to all of them.
         CGEventType::FlagsChanged => {
             let mut swallow = false;
-            for slot_ref in slots.iter().filter(|s| s.is_modifier_tap()) {
-                swallow |= modifier_tap_step(slot_ref, flags, key_code);
+            for (index, slot_ref) in slots.iter().enumerate().filter(|(_, s)| s.is_modifier_tap()) {
+                let rivals = rival_tap_keys(slots, index);
+                swallow |= modifier_tap_step(slot_ref, rivals, flags, key_code);
             }
             swallow
         }
@@ -452,24 +446,39 @@ fn dispatch(slots: &[SlotState], etype: CGEventType, flags: u64, key_code: i64) 
     }
 }
 
+/// The device-side bits of the keys the *other* installed modifier-tap
+/// slots are bound to: the only modifiers that spoil the tap of the
+/// slot at `index`. Zero when it is the only modifier-tap slot.
+fn rival_tap_keys(slots: &[SlotState], index: usize) -> u64 {
+    let others = slots
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| *i != index && s.is_modifier_tap())
+        .fold(0u64, |mask, (_, s)| mask | s.mod_mask);
+    others & !slots[index].mod_mask
+}
+
 /// Run one modifier-tap state step for a single slot. Returns true iff
 /// this event should be swallowed (i.e. the FlagsChanged keycode matches
 /// the slot's configured modifier).
 ///
-/// A different modifier counts as another key, in both orders: one
-/// already held when this slot's key goes down, and one pressed or
-/// released while this slot's key is held. Either way the release does
-/// not fire, so two modifier-tap slots can never both fire from one
-/// gesture.
-fn modifier_tap_step(slot_ref: &SlotState, flags: u64, key_code: i64) -> bool {
+/// `rival_tap_keys` are the keys of the other modifier-tap slots (see
+/// [`rival_tap_keys`]). One of those counts as another key, in both
+/// orders: already held when this slot's key goes down, or pressed
+/// while this slot's key is held. Either way the release does not
+/// fire, so two modifier-tap slots can never both fire from one
+/// gesture. Any other modifier (Shift, Caps Lock, a Command key no
+/// slot is bound to) leaves the tap alone: with a single modifier-tap
+/// slot this is the tap it has always been.
+fn modifier_tap_step(slot_ref: &SlotState, rival_tap_keys: u64, flags: u64, key_code: i64) -> bool {
     let mod_active = (flags & slot_ref.mod_mask) != 0;
     let was_down = slot_ref.mod_down.load(Ordering::Relaxed);
+    let rival_held = (flags & rival_tap_keys) != 0;
     if mod_active && !was_down {
-        let other_modifier_held = (flags & NX_DEVICE_MOD_MASK & !slot_ref.mod_mask) != 0;
         slot_ref.mod_down.store(true, Ordering::Relaxed);
         slot_ref
             .other_pressed_while_held
-            .store(other_modifier_held, Ordering::Relaxed);
+            .store(rival_held, Ordering::Relaxed);
         key_code == slot_ref.code_kv
     } else if !mod_active && was_down {
         slot_ref.mod_down.store(false, Ordering::Relaxed);
@@ -479,7 +488,7 @@ fn modifier_tap_step(slot_ref: &SlotState, flags: u64, key_code: i64) -> bool {
         }
         key_code == slot_ref.code_kv
     } else {
-        if was_down && key_code != slot_ref.code_kv {
+        if was_down && rival_held {
             slot_ref.other_pressed_while_held.store(true, Ordering::Relaxed);
         }
         false
@@ -767,11 +776,28 @@ mod tests {
         assert_eq!(count(fired), 0);
     }
 
+    /// What `main` does, and what a single modifier-tap slot must keep
+    /// doing: Shift is not "another key".
     #[test]
-    fn another_modifier_pressed_while_the_tap_key_is_held_cancels_the_tap() {
+    fn with_one_tap_slot_a_held_shift_does_not_stop_the_tap() {
         let (slot, fired) = counting_slot!(FIRED, HotkeyConfig::modifier_tap("RightCommand"));
         let slots = [slot];
 
+        // Hold Shift, tap Right Command, release Shift.
+        flags_changed(&slots, LSHIFT_HELD, KV_LSHIFT);
+        assert!(flags_changed(&slots, LSHIFT_HELD | RCMD_HELD, KV_RCMD));
+        assert!(flags_changed(&slots, LSHIFT_HELD, KV_RCMD));
+        assert_eq!(count(fired), 1, "the tap fires with Shift held");
+        flags_changed(&slots, NOTHING_HELD, KV_LSHIFT);
+        assert_eq!(count(fired), 1, "and only once");
+    }
+
+    #[test]
+    fn with_one_tap_slot_a_modifier_pressed_during_the_hold_does_not_stop_the_tap() {
+        let (slot, fired) = counting_slot!(FIRED, HotkeyConfig::modifier_tap("RightCommand"));
+        let slots = [slot];
+
+        // Shift goes down and up while Right Command is held.
         flags_changed(&slots, RCMD_HELD, KV_RCMD);
         assert!(
             !flags_changed(&slots, RCMD_HELD | LSHIFT_HELD, KV_LSHIFT),
@@ -779,30 +805,61 @@ mod tests {
         );
         assert!(!flags_changed(&slots, RCMD_HELD, KV_LSHIFT));
         flags_changed(&slots, NOTHING_HELD, KV_RCMD);
-        assert_eq!(count(fired), 0);
+        assert_eq!(count(fired), 1);
+
+        // Right Option is no slot's key here, so it is like Shift.
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, RCMD_HELD, KV_ROPT);
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        assert_eq!(count(fired), 2);
 
         // Caps Lock arrives as a FlagsChanged too, and counts the same.
         flags_changed(&slots, RCMD_HELD, KV_RCMD);
         flags_changed(&slots, RCMD_HELD | CAPS_LOCK_LIT, KV_CAPS_LOCK);
         flags_changed(&slots, CAPS_LOCK_LIT, KV_RCMD);
-        assert_eq!(count(fired), 0);
+        assert_eq!(count(fired), 3);
     }
 
     #[test]
-    fn a_tap_key_pressed_while_another_modifier_is_held_does_not_fire() {
-        let (slot, fired) = counting_slot!(FIRED, HotkeyConfig::modifier_tap("RightCommand"));
-        let slots = [slot];
+    fn with_two_tap_slots_a_modifier_that_is_no_slots_key_does_not_stop_either() {
+        let (command, command_fired) =
+            counting_slot!(COMMAND_FIRED, HotkeyConfig::modifier_tap("RightCommand"));
+        let (option, option_fired) =
+            counting_slot!(OPTION_FIRED, HotkeyConfig::modifier_tap("RightOption"));
+        let slots = [command, option];
 
+        // Shift held, each tapped in turn.
         flags_changed(&slots, LSHIFT_HELD, KV_LSHIFT);
         flags_changed(&slots, LSHIFT_HELD | RCMD_HELD, KV_RCMD);
         flags_changed(&slots, LSHIFT_HELD, KV_RCMD);
+        assert_eq!((count(command_fired), count(option_fired)), (1, 0));
+        flags_changed(&slots, LSHIFT_HELD | ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, LSHIFT_HELD, KV_ROPT);
+        assert_eq!((count(command_fired), count(option_fired)), (1, 1));
         flags_changed(&slots, NOTHING_HELD, KV_LSHIFT);
-        assert_eq!(count(fired), 0);
 
-        // The next clean tap fires again.
+        // Shift pressed during the hold of one of them.
         flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | LSHIFT_HELD, KV_LSHIFT);
+        flags_changed(&slots, RCMD_HELD, KV_LSHIFT);
         flags_changed(&slots, NOTHING_HELD, KV_RCMD);
-        assert_eq!(count(fired), 1);
+        assert_eq!((count(command_fired), count(option_fired)), (2, 1));
+    }
+
+    #[test]
+    fn a_chord_slot_next_to_a_tap_slot_adds_no_rival_key() {
+        let (command, command_fired) =
+            counting_slot!(COMMAND_FIRED, HotkeyConfig::modifier_tap("RightCommand"));
+        let (chord, chord_fired) = counting_slot!(CHORD_FIRED, HotkeyConfig::chord("M", &["Ctrl", "Alt"]));
+        let slots = [command, chord];
+        assert_eq!(rival_tap_keys(&slots, 0), 0);
+
+        // Right Option held (a chord's modifier, no tap slot's key).
+        flags_changed(&slots, ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, ROPT_HELD | RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, ROPT_HELD, KV_RCMD);
+        assert_eq!((count(command_fired), count(chord_fired)), (1, 0));
     }
 
     #[test]

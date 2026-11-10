@@ -91,15 +91,50 @@ pub struct RefineInfo {
     pub backend: String,
     /// Time spent waiting for the backend.
     pub elapsed_ms: u64,
-    /// Name of the mode the dictation ran in (TASK-96). Empty for the
-    /// built-in Dictation mode and when Refine did not run.
+    /// Name of the mode the dictation ran in (TASK-96), when there is
+    /// something to say about it: a custom mode, or any mode,
+    /// Dictation included, that ran because the app has it as its
+    /// default (so "which mode, and why" is never blank when an app
+    /// default overrode the selected mode). Empty for Dictation as
+    /// the selected mode and when Refine did not run.
     pub mode: String,
+    /// `mode` names the built-in Dictation mode. The history file
+    /// only records a custom mode, so it reads this.
+    pub mode_builtin: bool,
     /// Why that mode ran: `selected` or `app-default`. Empty when
     /// Refine did not run.
     pub mode_reason: String,
     /// The app whose default mode it was; empty unless `mode_reason`
     /// is `app-default`.
     pub mode_app: String,
+}
+
+#[cfg(feature = "refine")]
+impl RefineInfo {
+    /// What the UI is told about a Refine run. `None` when Refine is
+    /// off: then nothing ran and there is nothing to show.
+    pub fn from_outcome(outcome: &crate::refine::RefineOutcome) -> Option<Self> {
+        if outcome.status == crate::refine::RefineStatus::Disabled {
+            return None;
+        }
+        let mode = &outcome.mode;
+        let by_app = mode.reason == crate::modes::ModeReason::AppDefault.as_str();
+        Some(Self {
+            raw_transcript: outcome.raw.clone(),
+            status: outcome.status.as_str().to_string(),
+            detail: outcome.detail.clone(),
+            instruction: outcome.instruction.clone(),
+            backend: outcome.backend.clone(),
+            elapsed_ms: outcome.elapsed_ms,
+            // Dictation as the selected mode is the plain case and
+            // gets no label. Dictation because the app says so does:
+            // it may have overridden a custom mode the user selected.
+            mode: if mode.is_builtin() && !by_app { String::new() } else { mode.name.clone() },
+            mode_builtin: mode.is_builtin(),
+            mode_reason: mode.reason.clone(),
+            mode_app: mode.app_name.clone(),
+        })
+    }
 }
 
 impl State {
@@ -560,24 +595,13 @@ pub fn dictation_set_refine_result(info: RefineInfo) {
 /// snapshot (see [`RefineInfo`]).
 #[cfg(all(feature = "recognizer", feature = "refine"))]
 fn refine_stage(cleaned: &str) -> String {
-    if crate::refine::will_call_backend(cleaned) {
-        dictation_mark_refining();
+    // The mode is worked out once, when the transcript is ready (see
+    // `run_for_dictation_announced`); the status goes up from there,
+    // only when the text is really sent.
+    let outcome = crate::refine::run_for_dictation_announced(cleaned, dictation_mark_refining);
+    if let Some(info) = RefineInfo::from_outcome(&outcome) {
+        dictation_set_refine_result(info);
     }
-    let outcome = crate::refine::run_for_dictation(cleaned);
-    if outcome.status == crate::refine::RefineStatus::Disabled {
-        return outcome.text;
-    }
-    dictation_set_refine_result(RefineInfo {
-        raw_transcript: outcome.raw,
-        status: outcome.status.as_str().to_string(),
-        detail: outcome.detail,
-        instruction: outcome.instruction,
-        backend: outcome.backend,
-        elapsed_ms: outcome.elapsed_ms,
-        mode: if outcome.mode.is_builtin() { String::new() } else { outcome.mode.name },
-        mode_reason: outcome.mode.reason,
-        mode_app: outcome.mode.app_name,
-    });
     outcome.text
 }
 
@@ -645,9 +669,12 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
     if let Some(dir) = crate::history::current_dir() {
         if history.enabled {
             // The mode is part of the entry only when it shaped the
-            // text: a custom mode whose answer was used.
+            // text: a custom mode whose answer was used. The built-in
+            // mode is never written, also when the snapshot names it
+            // (an app default).
             let (original, mode) = with_state(|s| {
-                let mode = if s.refine.status == "refined" { s.refine.mode.clone() } else { String::new() };
+                let custom = s.refine.status == "refined" && !s.refine.mode_builtin;
+                let mode = if custom { s.refine.mode.clone() } else { String::new() };
                 (s.refine.raw_transcript.clone(), mode)
             });
             let (app_id, app_name) = delivered_to_app();
@@ -1149,6 +1176,7 @@ mod tests {
             backend: "claude-cli".into(),
             elapsed_ms: 740,
             mode: "Formal".into(),
+            mode_builtin: false,
             mode_reason: "app-default".into(),
             mode_app: "Mail".into(),
         });
@@ -1189,7 +1217,7 @@ mod tests {
 
     fn refined_in(mode: &str, status: &str) -> RefineInfo {
         RefineInfo {
-            raw_transcript: "hey mikael send me the price list ".into(),
+            raw_transcript: "hey oskar send me the price list ".into(),
             status: status.into(),
             backend: "claude-cli".into(),
             mode: mode.into(),
@@ -1205,7 +1233,7 @@ mod tests {
         let entry = deliver_with_history(dir.path(), Some(refined_in("Formal", "refined")));
         assert_eq!(entry.mode.as_deref(), Some("Formal"));
         assert_eq!(entry.text, "Could you please send the price list?");
-        assert_eq!(entry.original.as_deref(), Some("hey mikael send me the price list"));
+        assert_eq!(entry.original.as_deref(), Some("hey oskar send me the price list"));
     }
 
     #[test]
@@ -1225,6 +1253,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         with_state(|s| *s = State::new());
         assert_eq!(deliver_with_history(dir.path(), None).mode, None);
+    }
+
+    #[cfg(feature = "refine")]
+    fn outcome_in(mode: crate::refine::ModeUse) -> crate::refine::RefineOutcome {
+        crate::refine::RefineOutcome {
+            text: "Could you please send the price list? ".into(),
+            raw: "hey oskar send me the price list ".into(),
+            status: crate::refine::RefineStatus::Refined,
+            detail: String::new(),
+            instruction: String::new(),
+            backend: "claude-cli".into(),
+            model: "haiku".into(),
+            effort: "low".into(),
+            elapsed_ms: 640,
+            warm_lead_ms: None,
+            usage: None,
+            mode,
+        }
+    }
+
+    #[cfg(feature = "refine")]
+    #[test]
+    fn the_snapshot_names_dictation_when_an_app_default_put_it_over_the_selected_mode() {
+        use crate::refine::ModeUse;
+        // Dictation because the app says so: named, with the app.
+        let by_app = ModeUse { reason: "app-default".into(), app_name: "Terminal".into(), ..ModeUse::default() };
+        let info = RefineInfo::from_outcome(&outcome_in(by_app)).unwrap();
+        assert_eq!(info.mode, "Dictation");
+        assert!(info.mode_builtin);
+        assert_eq!((info.mode_reason.as_str(), info.mode_app.as_str()), ("app-default", "Terminal"));
+        assert_eq!(info.raw_transcript, "hey oskar send me the price list ");
+        assert_eq!((info.status.as_str(), info.elapsed_ms), ("refined", 640));
+
+        // Dictation as the selected mode: the plain case, no label.
+        let info = RefineInfo::from_outcome(&outcome_in(ModeUse::default())).unwrap();
+        assert_eq!((info.mode.as_str(), info.mode_builtin), ("", true));
+        assert_eq!(info.mode_reason, "selected");
+
+        // A custom mode is named either way.
+        for reason in ["selected", "app-default"] {
+            let custom = ModeUse {
+                id: "formal".into(),
+                name: "Formal".into(),
+                reason: reason.into(),
+                app_name: if reason == "selected" { String::new() } else { "Mail".into() },
+            };
+            let info = RefineInfo::from_outcome(&outcome_in(custom)).unwrap();
+            assert_eq!((info.mode.as_str(), info.mode_builtin), ("Formal", false), "{reason}");
+            assert_eq!(info.mode_reason, reason);
+        }
+
+        // Refine off: nothing to tell.
+        assert_eq!(RefineInfo::from_outcome(&crate::refine::RefineOutcome::disabled("hello ")), None);
+    }
+
+    #[cfg(feature = "refine")]
+    #[test]
+    fn history_never_records_the_built_in_mode_even_when_the_snapshot_names_it() {
+        let _lock = start();
+        let by_app = crate::refine::ModeUse {
+            reason: "app-default".into(),
+            app_name: "Terminal".into(),
+            ..crate::refine::ModeUse::default()
+        };
+        let info = RefineInfo::from_outcome(&outcome_in(by_app)).unwrap();
+        assert_eq!(info.mode, "Dictation");
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(deliver_with_history(dir.path(), Some(info)).mode, None);
     }
 
     #[test]

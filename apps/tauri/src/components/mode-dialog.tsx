@@ -30,6 +30,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ModeDraft, ModeView } from "@/lib/modes";
 import {
   BACKEND_EFFORTS,
+  BACKEND_LABELS,
   CLAUDE_MODELS,
   EFFORT_LABELS,
   type RefineBackend,
@@ -53,16 +54,26 @@ interface ModeDialogProps {
   backend: RefineBackend;
   // Resolves to what went wrong, or null when the mode is saved.
   onSave: (draft: ModeDraft) => Promise<string | null>;
+  // Where focus goes when the dialog closes; the default is the
+  // element that had it when the dialog opened.
+  finalFocus?: () => HTMLElement | boolean | null;
 }
 
 // New mode and Edit mode: a name, the instructions, and optionally a
 // model and effort of the mode's own. The form lives in a child that
 // mounts with the dialog, so every opening starts from the mode as it
 // is stored.
-export function ModeDialog({ open, onOpenChange, mode, backend, onSave }: ModeDialogProps) {
+export function ModeDialog({
+  open,
+  onOpenChange,
+  mode,
+  backend,
+  onSave,
+  finalFocus,
+}: ModeDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" data-testid="mode-dialog">
+      <DialogContent className="sm:max-w-md" data-testid="mode-dialog" finalFocus={finalFocus}>
         <ModeForm
           key={mode?.id ?? ""}
           mode={mode}
@@ -85,7 +96,17 @@ function ModeForm({
   // takes whatever name it is given.
   const models: readonly { value: string; label: string }[] =
     backend === "claude-cli" ? CLAUDE_MODELS : [];
-  const storedModel = mode?.model ?? null;
+  // A mode's own model and effort belong to the Refine backend they
+  // were picked for. With the other backend in use they are not what
+  // the mode runs with (core decides, `overrides_apply`), so the form
+  // starts from "Same as Refine" and says whose they are. Saving
+  // without picking anything leaves them stored; picking a model or an
+  // effort replaces them. That rule is in core too.
+  const forOtherBackend =
+    mode !== null && mode.override_backend !== null && !mode.overrides_apply
+      ? mode.override_backend
+      : null;
+  const storedModel = forOtherBackend ? null : (mode?.model ?? null);
   const namedModel = storedModel !== null && models.some((m) => m.value === storedModel);
 
   const [name, setName] = useState(mode?.name ?? "");
@@ -94,7 +115,8 @@ function ModeForm({
     storedModel === null ? SAME_AS_REFINE : namedModel ? storedModel : OTHER_MODEL,
   );
   const [otherModel, setOtherModel] = useState(namedModel ? "" : (storedModel ?? ""));
-  const [effort, setEffort] = useState<RefineEffort | null>(mode?.effort ?? null);
+  const storedEffort = forOtherBackend ? null : (mode?.effort ?? null);
+  const [effort, setEffort] = useState<RefineEffort | null>(storedEffort);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -106,7 +128,6 @@ function ModeForm({
   // A level the mode already has stays on offer, also when the
   // backend in use does not take it.
   const levels = BACKEND_EFFORTS[backend];
-  const storedEffort = mode?.effort ?? null;
   const offered =
     storedEffort && !levels.includes(storedEffort) ? [storedEffort, ...levels] : levels;
   const effortItems = [
@@ -236,6 +257,14 @@ function ModeForm({
             </SelectContent>
           </Select>
         </Field>
+        {forOtherBackend && (
+          <FieldDescription data-testid="mode-other-backend">
+            This mode has a model and effort of its own for the{" "}
+            {BACKEND_LABELS[forOtherBackend]} backend. Refine uses the{" "}
+            {BACKEND_LABELS[backend]} backend now, so the mode runs with the
+            Refine settings. Picking a model or an effort here replaces them.
+          </FieldDescription>
+        )}
       </FieldGroup>
 
       {error && (

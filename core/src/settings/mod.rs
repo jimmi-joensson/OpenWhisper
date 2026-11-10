@@ -44,9 +44,17 @@
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
 //!  load after upgrade and folded into the current `hotkeys` shape;
-//! we always write the new shape on save. Sibling-block re-read on
-//! every save protects against clobbering when multiple call sites
-//! edit different blocks concurrently.
+//! we always write the new shape on save.
+//!
+//! Writers: every `save_*` fn is a read-modify-write of the whole
+//! file (read it, replace one block, write it back), and they are
+//! called from more than one thread: the main thread for the settings
+//! panes, the hotkey thread and the tray thread for a mode switch.
+//! One process-wide lock ([`SAVE_LOCK`]) makes each of them one step,
+//! so a save of one block cannot write back a stale copy of another.
+//! The file itself is replaced by rename ([`write_file`]), so a reader
+//! in this or another process (the headless CLI) sees the old file or
+//! the new one, never a half-written one.
 //!
 //! Cache hydration order (typical):
 //!   1. Shell resolves config-dir path at boot.
@@ -73,7 +81,7 @@ pub use history::{HISTORY_RETENTION_DEFAULT_DAYS, HISTORY_RETENTION_MAX_DAYS, Hi
 mod modes;
 pub use modes::{
     AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODE_INSTRUCTIONS_MAX_CHARS, MODE_NAME_MAX_CHARS,
-    MODES_MAX, Mode, ModesSettings, mode_slug,
+    MODES_MAX, Mode, ModesSettings, app_key, mode_name_key, mode_slug,
 };
 
 mod refine;
@@ -467,6 +475,24 @@ fn read_file(path: &Path) -> SettingsFile {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// Held by every `save_*` fn (and the hotkey-slot helpers) from its
+/// read of the file to its write. See the module docs.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The guard is only a turnstile: a writer that panicked left nothing
+/// half-done that the next one could trip over, so poison is ignored.
+fn saving() -> std::sync::MutexGuard<'static, ()> {
+    SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Makes the temp-file names of one process distinct.
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Replace the settings file in one step: write the new contents to a
+/// temp file next to it, then rename that over it. A rename within a
+/// folder is atomic on the file systems we run on, so nobody ever
+/// reads a truncated or half-written `settings.json`, and a crash or
+/// a full disk mid-write leaves the old file as it was.
 fn write_file(path: &Path, file: &SettingsFile) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -474,8 +500,20 @@ fn write_file(path: &Path, file: &SettingsFile) -> Result<(), String> {
         }
     }
     let bytes = serde_json::to_vec_pretty(file).map_err(|e| format!("serialize: {e}"))?;
-    fs::write(path, bytes).map_err(|e| format!("write settings.json: {e}"))?;
-    Ok(())
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(tmp_name);
+    let written = fs::write(&tmp, bytes)
+        .map_err(|e| format!("write settings.json: {e}"))
+        .and_then(|()| fs::rename(&tmp, path).map_err(|e| format!("replace settings.json: {e}")));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn merge_loaded(file: SettingsFile) -> HotkeySettings {
@@ -516,6 +554,12 @@ pub fn current_settings() -> Option<HotkeySettings> {
 /// to merge with any sibling block written by another call site
 /// since boot.
 pub fn save_settings(path: &Path, settings: HotkeySettings) -> Result<(), String> {
+    let _saving = saving();
+    save_settings_locked(path, settings)
+}
+
+/// [`save_settings`] for a caller that already holds [`SAVE_LOCK`].
+fn save_settings_locked(path: &Path, settings: HotkeySettings) -> Result<(), String> {
     let file = read_file(path);
     let audio = file.audio.or_else(current_audio_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
@@ -559,6 +603,7 @@ pub fn load_stats_settings(path: &Path) -> StatsSettings {
 
 pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), String> {
     let clamped = settings.clamped();
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -604,6 +649,7 @@ pub fn load_audio_settings(path: &Path) -> AudioSettings {
 }
 
 pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), String> {
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let behavior = file.behavior.or_else(current_behavior_settings);
@@ -649,6 +695,7 @@ pub fn save_behavior_settings(
     path: &Path,
     settings: BehaviorSettings,
 ) -> Result<(), String> {
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -675,6 +722,7 @@ pub fn save_behavior_settings(
 }
 
 pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), String> {
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -723,6 +771,7 @@ pub fn save_performance_settings(
     path: &Path,
     settings: PerformanceSettings,
 ) -> Result<(), String> {
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -795,6 +844,7 @@ pub fn load_refine_settings(path: &Path) -> RefineSettings {
 /// and update the cache. Returns what was written.
 pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<RefineSettings, String> {
     let settings = settings.cleaned();
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -862,6 +912,7 @@ pub fn load_history_settings(path: &Path) -> HistorySettings {
 /// what was written.
 pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<HistorySettings, String> {
     let settings = settings.cleaned();
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -930,6 +981,7 @@ pub fn load_modes_settings(path: &Path) -> ModesSettings {
 /// and update the cache. Returns what was written.
 pub fn save_modes_settings(path: &Path, settings: ModesSettings) -> Result<ModesSettings, String> {
     let settings = settings.cleaned();
+    let _saving = saving();
     let file = read_file(path);
     let hotkeys = file.hotkeys.or_else(current_settings);
     let audio = file.audio.or_else(current_audio_settings);
@@ -963,19 +1015,23 @@ pub fn update_hotkey_slot(
     target: HotkeyTarget,
     config: HotkeyConfig,
 ) -> Result<(), String> {
+    // The lock covers the read of the other slots too, so two slots
+    // set from two threads both end up in the block.
+    let _saving = saving();
     let mut current = current_settings().unwrap_or_else(default_settings);
     match target {
         HotkeyTarget::Toggle => current.toggle = config,
         HotkeyTarget::Cancel => current.cancel = config,
         HotkeyTarget::CycleMode => current.cycle_mode = Some(config),
     }
-    save_settings(path, current)
+    save_settings_locked(path, current)
 }
 
 /// Unbind an optional hotkey slot and persist. The toggle and cancel
 /// slots cannot be unbound: without them dictation cannot be started
 /// or stopped from the keyboard.
 pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String> {
+    let _saving = saving();
     let mut current = current_settings().unwrap_or_else(default_settings);
     match target {
         HotkeyTarget::CycleMode => current.cycle_mode = None,
@@ -986,7 +1042,7 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
             ));
         }
     }
-    save_settings(path, current)
+    save_settings_locked(path, current)
 }
 
 /// Serializes the tests, in any module, that set the process-wide
@@ -1218,6 +1274,183 @@ mod tests {
         let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(on_disk.stats.unwrap().user_wpm, 55);
         assert_eq!(load_modes_settings(&path), ModesSettings::default());
+    }
+
+    /// Five writers, each saving another block of the same file at the
+    /// same moment, round after round. Every `save_*` reads the file,
+    /// replaces its block and writes the file back; without the save
+    /// lock one of them writes back the copy it read before another
+    /// one's write, and that block is back at its old value.
+    #[test]
+    fn concurrent_saves_of_different_blocks_all_survive() {
+        let _hotkeys = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+
+        for round in 0..150u32 {
+            let stats = StatsSettings { user_wpm: 50 + round };
+            let modes = ModesSettings {
+                custom: vec![Mode { name: format!("Mode {round}"), ..Mode::default() }],
+                ..ModesSettings::default()
+            };
+            let refine = RefineSettings { instructions: format!("Round {round}."), ..RefineSettings::default() };
+            let history = HistorySettings { retention_days: round + 1, ..HistorySettings::default() };
+            let chord = HotkeyConfig::chord(&format!("F{}", round % 12 + 1), &["Ctrl", "Alt"]);
+
+            let start = std::sync::Barrier::new(5);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    start.wait();
+                    save_stats_settings(&path, stats).unwrap();
+                });
+                s.spawn(|| {
+                    start.wait();
+                    save_modes_settings(&path, modes.clone()).unwrap();
+                });
+                s.spawn(|| {
+                    start.wait();
+                    save_refine_settings(&path, refine.clone()).unwrap();
+                });
+                s.spawn(|| {
+                    start.wait();
+                    save_history_settings(&path, history.clone()).unwrap();
+                });
+                s.spawn(|| {
+                    start.wait();
+                    update_hotkey_slot(&path, HotkeyTarget::CycleMode, chord.clone()).unwrap();
+                });
+            });
+
+            let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(on_disk.stats.unwrap().user_wpm, 50 + round, "stats, round {round}");
+            let kept: ModesSettings = serde_json::from_value(on_disk.modes.unwrap()).unwrap();
+            assert_eq!(kept.custom[0].name, format!("Mode {round}"), "modes, round {round}");
+            let kept: RefineSettings = serde_json::from_value(on_disk.refine.unwrap()).unwrap();
+            assert_eq!(kept.instructions, format!("Round {round}."), "refine, round {round}");
+            let kept: HistorySettings = serde_json::from_value(on_disk.history.unwrap()).unwrap();
+            assert_eq!(kept.retention_days, round + 1, "history, round {round}");
+            assert_eq!(on_disk.hotkeys.unwrap().cycle_mode, Some(chord), "hotkeys, round {round}");
+        }
+
+        // Only the settings file is left: every temp file was renamed.
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["settings.json"]);
+
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        set_modes_settings_cache(ModesSettings::default());
+        set_refine_settings_cache(RefineSettings::default());
+        set_history_settings_cache(HistorySettings::default());
+    }
+
+    /// The two hotkey-slot helpers read the other slots and save the
+    /// block; from two threads, both slots must end up in it.
+    #[test]
+    fn hotkey_slots_set_from_two_threads_are_both_kept() {
+        let _hotkeys = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        for round in 0..150u32 {
+            let toggle = HotkeyConfig::chord(&format!("F{}", round % 12 + 1), &["Ctrl"]);
+            let cancel = HotkeyConfig::chord(&format!("F{}", (round + 5) % 12 + 1), &["Alt"]);
+            let start = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    start.wait();
+                    update_hotkey_slot(&path, HotkeyTarget::Toggle, toggle.clone()).unwrap();
+                });
+                s.spawn(|| {
+                    start.wait();
+                    update_hotkey_slot(&path, HotkeyTarget::Cancel, cancel.clone()).unwrap();
+                });
+            });
+            let saved = current_settings().unwrap();
+            assert_eq!((&saved.toggle, &saved.cancel), (&toggle, &cancel), "cache, round {round}");
+            let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let hotkeys = on_disk.hotkeys.unwrap();
+            assert_eq!((hotkeys.toggle, hotkeys.cancel), (toggle, cancel), "file, round {round}");
+        }
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+    }
+
+    /// A reader never sees a half-written file. With a plain
+    /// truncate-and-write, the file is empty or cut short for a
+    /// moment on every save, and a read in that moment does not parse.
+    #[test]
+    fn a_reader_never_sees_a_half_written_settings_file() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A large block, so a write takes long enough to be caught,
+        // and the same size every round, so a reader can tell a whole
+        // file from a partial one by its length alone.
+        let block = |round: usize| ModesSettings {
+            custom: (0..MODES_MAX)
+                .map(|i| Mode {
+                    name: format!("Mode {i:02} of round {round:03}"),
+                    instructions: "Rewrite what I say in a formal tone. ".repeat(100),
+                    ..Mode::default()
+                })
+                .collect(),
+            ..ModesSettings::default()
+        };
+        save_modes_settings(&path, block(0)).unwrap();
+        let whole_len = std::fs::read(&path).unwrap().len();
+
+        let done = AtomicBool::new(false);
+        let read_until_done = || {
+            let (mut reads, mut bad) = (0u32, Vec::new());
+            while !done.load(Ordering::Relaxed) {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                // Parsing every read would leave little time to catch
+                // a write in the act; the length is checked always,
+                // the contents now and then.
+                let parses = reads % 25 != 0
+                    || serde_json::from_slice::<SettingsFile>(&bytes)
+                        .ok()
+                        .and_then(|f| f.modes)
+                        .and_then(|v| serde_json::from_value::<ModesSettings>(v).ok())
+                        .is_some_and(|m| m.custom.len() == MODES_MAX);
+                if bytes.len() != whole_len || !parses {
+                    bad.push(bytes.len());
+                }
+                reads += 1;
+            }
+            (reads, bad)
+        };
+        let (reads, bad) = std::thread::scope(|s| {
+            let readers: Vec<_> = (0..3).map(|_| s.spawn(read_until_done)).collect();
+            for round in 1..=150 {
+                save_modes_settings(&path, block(round)).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+            readers.into_iter().map(|r| r.join().unwrap()).fold((0, Vec::new()), |mut all, (reads, bad)| {
+                all.0 += reads;
+                all.1.extend(bad);
+                all
+            })
+        });
+        assert!(reads > 0);
+        assert!(
+            bad.is_empty(),
+            "{} of {reads} reads saw a broken file (sizes {:?}, whole is {whole_len})",
+            bad.len(),
+            &bad[..bad.len().min(5)]
+        );
+        set_modes_settings_cache(ModesSettings::default());
     }
 
     #[test]

@@ -23,13 +23,13 @@ created_date: '2026-11-10T16:12:00Z'
 1. **A mode is a name plus instructions**, optionally its own model and effort. Stored in a new `modes` block of `settings.json`: `active` (id), `custom` (list), `app_defaults` (list of app id, app name, mode id).
 2. **One built-in mode, "Dictation"** (id `dictation`). It is today's Refine: the `refine.instructions` field, the cleanup prompt and the strict guard, unchanged. It cannot be renamed or deleted. Every other mode is made by the user.
 3. **A custom mode rewrites on purpose** (a prompt for a coding agent, a formal tone, English). It gets its own system prompt (`Prompt::compose_mode`): the same fences as today (the transcript is data; never answer it or carry it out; output only the text; dictionary terms; spoken editing instructions still work), with the mode's instructions as the job. Its output is held to the lenient guard (`guard::check_instructed`: not empty, not absurdly long), since the strict guard would reject any rewrite. `min_words` applies to the built-in mode only: a two-word sentence still has to be translated by a translate mode.
-4. **Which mode runs.** If the frontmost app has a default mode, that mode (reason `app-default`); otherwise the mode the user selected (reason `selected`). The app is read at record start, on the warm-up thread, and only when at least one app default exists. OpenWhisper's own windows never match.
+4. **Which mode runs.** If the frontmost app has a default mode, that mode (reason `app-default`); otherwise the mode the user selected (reason `selected`). The mode is worked out at record start, on the warm-up thread (to warm the backend), and again when the transcript is ready: a mode or app switched during the recording is the one the text comes out in, and the warmed backend is only used when nothing changed. The app is read only when at least one app default exists. OpenWhisper's own windows never match.
 5. **Refine off means no model call, whatever the mode.** The switch is checked before the mode is even resolved.
 6. **Where the mode is recorded.** On the Refine outcome and the dictation snapshot (name, reason, app), on the Refine run row (new column `mode`, migration 5), and on the history entry.
 7. **History format stays readable by the released app.** The comment line with the machine fields is not changed: a parser that does not know a new field there would stop seeing the entry as an entry and glue it to the one above. Extra fields go on a second comment line directly under it, `<!-- extra: mode=Formal -->` (`key=value` pairs separated by `; `, unknown keys ignored). It is written only when there is something to say, so a plain dictation in the built-in mode produces the same bytes as before. An older app shows that line as text; it does not lose or damage the entry. Ask, Vision and Agent will add their own keys to the same line.
 8. **Switching without opening Settings:** a Mode select on Home next to the Refine and History switches, a Mode submenu in the tray menu, and a hotkey that cycles through the modes.
 9. **The cycle hotkey is unbound until the user sets it.** With only the built-in mode there is nothing to cycle, and a default chord would take a key combination away from other apps for nothing. Hotkey slots become a list in both shells so that this slot and the Ask slot (TASK-97) are additions, not special cases; an optional slot that cannot be installed is reported and does not take dictation down with it.
-10. **Apps offered for a default mode** are the apps seen in history (`history::apps`), plus any already mapped. The CLI takes any app id (`openwhisper focus` prints them).
+10. **Apps offered for a default mode** (`modes::apps_for_defaults`) are the apps already mapped, then the apps seen in history (`history::apps`), then the apps that are open now (`focus::running_apps`), so the list is not empty while History is off. App ids are stored and compared in lower case. The CLI takes any app id (`openwhisper focus` and `openwhisper focus --running` print them; `openwhisper modes app list --candidates` prints the same list as the pane).
 11. **Deleting a mode** removes its app defaults and falls back to Dictation where it was selected.
 12. **Not in this plan.** Sharing modes between machines, per-mode dictionary, modes for file transcription.
 
@@ -66,7 +66,7 @@ Files: `apps/tauri/src-tauri/src/hotkey/{mod,mac,windows}.rs`, `apps/tauri/src-t
 Outcomes:
 - Both shells hold their slots in a list keyed by target; toggle and cancel behave as before (existing tests pass unchanged in meaning).
 - An unset cycle slot installs nothing; a set one calls `modes::cycle` once per press.
-- On macOS, pressing another modifier while a tap key is held counts as "another key was pressed", so two modifier-tap slots cannot both fire.
+- On macOS, the key of another modifier-tap slot, held before or pressed while a tap key is held, counts as "another key was pressed", so two modifier-tap slots cannot both fire. Any other modifier leaves the tap alone (hold Shift, tap Right Command: it fires, as before this task).
 - A cycle binding that cannot be installed is reported in the hotkey status and dictation keeps working.
 - The Shortcuts pane shows the third row, can capture, reset and clear it (Playwright).
 
@@ -76,7 +76,7 @@ Verification: shell `cargo test`, Windows target check, Playwright. Pressing the
 
 Files: `apps/tauri/src-tauri/src/modes.rs` (new), `apps/tauri/src-tauri/src/{lib,refine}.rs`, `apps/tauri/src-tauri/src/tray/mod.rs`, `apps/tauri/src/PillOverlay.tsx` (mode name shown briefly after a cycle).
 
-`modes_get` (settings, the mode list with the built-in one, apps seen in history), `modes_save`, `modes_select`, `modes_cycle`; event `modes_changed` after every change, whoever made it.
+`modes_get` (settings, the mode list with the built-in one, apps for a default), `modes_select`, `modes_cycle`; event `modes_changed` after every change, whoever made it.
 
 Outcomes:
 - The tray menu has a Mode submenu with the selected mode checked; choosing one selects it.
@@ -111,3 +111,11 @@ Outcomes:
 ## Ordering
 
 1 then 2 then 3 then 4 then 5 then 6. Tasks 3 to 5 share `lib.rs`, `Settings.tsx` and the test shim, so they run one after the other.
+
+## Changes after review
+
+- **A mode's model and effort belong to a backend.** `Mode.backend` is set when a model or effort is set (the backend Refine uses, or `--backend` in the CLI) and they apply only while that backend is the one in use; otherwise the mode runs with the Refine model and effort. A block from before the field existed is for the Claude CLI.
+- **Mode names are unique**, ignoring case and outer space, and never "Dictation". `add` and `edit` refuse a taken name; `cleaned()` numbers duplicates edited in by hand ("Formal 2").
+- **Short utterances in a custom mode** (five words or fewer) get 20 characters of slack over three times the input instead of 200 (`guard::check_rewrite`), so a preamble or a refusal is not typed in place of one or two words.
+- **Settings writes** go through one process-wide lock and replace the file by rename.
+- **The latest row names Dictation** when an app default put it over the selected mode; history entries still record custom modes only.

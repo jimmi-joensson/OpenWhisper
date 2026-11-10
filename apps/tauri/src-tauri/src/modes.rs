@@ -9,18 +9,26 @@
 //! saved block (the next recording reads it there), `modes_changed`
 //! is emitted to every window and the tray menu is rebuilt.
 //!
+//! Those are three threads, and the pane reads the block from a
+//! fourth. Everything here that puts a block into core's cache does
+//! it while holding one lock ([`modes_lock`]): a change (read, edit,
+//! save) and a plain read ([`read_fresh`]). Without it a read that
+//! started before a change could finish after it and leave the cache
+//! holding the block from before the change, and the next recording
+//! would run in the mode the user just switched away from.
+//!
 //! The same operations are reachable headless through
 //! `openwhisper modes …`.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
-use openwhisper_core::history;
-use openwhisper_core::modes::{self, ModeEdit, ModeView};
+use openwhisper_core::modes::{self, ModeApp, ModeEdit, ModeView};
 use openwhisper_core::settings::{
-    self as core_settings, AppDefault, BUILTIN_MODE_NAME, ModesSettings, RefineEffort,
+    self as core_settings, BUILTIN_MODE_NAME, ModesSettings, RefineBackendKind, RefineEffort,
     RefineSettings,
 };
+use openwhisper_core::{focus, history};
 use tauri::{AppHandle, Emitter};
 
 use crate::settings::settings_path;
@@ -36,16 +44,25 @@ pub struct ModesNow {
     pub settings: ModesSettings,
     /// Every mode in the order it is listed and cycled, the built-in
     /// Dictation mode first.
-    pub modes: Vec<ModeView>,
+    pub modes: Vec<ModeRow>,
 }
 
-/// An app that can be given a default mode.
-#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct ModeApp {
-    /// See `openwhisper_core::focus::FocusContext::app_id`.
-    pub id: String,
-    /// Name to show a person; the id when no name is known.
-    pub name: String,
+/// A mode as the windows list it: core's view of it, plus what its
+/// own model and effort mean with the Refine backend in use. Core
+/// decides that (`ModeView::overrides_apply`); the windows only show
+/// it.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ModeRow {
+    #[serde(flatten)]
+    pub view: ModeView,
+    /// The backend the mode's own model and effort were chosen for;
+    /// `None` when it has neither.
+    pub override_backend: Option<RefineBackendKind>,
+    /// They are in use: that backend is the one Refine uses. `false`
+    /// means the mode runs with the Refine model and effort, either
+    /// because it has none of its own or because they are for the
+    /// other backend.
+    pub overrides_apply: bool,
 }
 
 /// What the Modes pane and the select on Home load: `settings`,
@@ -54,8 +71,10 @@ pub struct ModeApp {
 pub struct ModesState {
     #[serde(flatten)]
     pub now: ModesNow,
-    /// Apps seen in the history, most recently used first, then apps
-    /// that have a default mode but are not in the history.
+    /// The apps a default mode can be given to: the ones that have
+    /// one, then the ones dictated into before (from the history,
+    /// when it is on), then the ones that are open now
+    /// (`modes::apps_for_defaults`).
     pub apps: Vec<ModeApp>,
 }
 
@@ -73,30 +92,50 @@ pub struct ModesChanged {
 }
 
 fn now(settings: ModesSettings, refine: &RefineSettings) -> ModesNow {
-    ModesNow {
-        modes: modes::list(&settings, refine),
-        settings,
-    }
+    let modes = modes::list(&settings, refine)
+        .into_iter()
+        .map(|view| ModeRow {
+            override_backend: view.override_backend(),
+            overrides_apply: view.overrides_apply(refine.backend),
+            view,
+        })
+        .collect();
+    ModesNow { modes, settings }
 }
 
 fn selected_name(now: &ModesNow) -> String {
     now.modes
         .iter()
-        .find(|m| m.id == now.settings.active)
-        .map(|m| m.name.clone())
+        .find(|m| m.view.id == now.settings.active)
+        .map(|m| m.view.name.clone())
         .unwrap_or_else(|| BUILTIN_MODE_NAME.to_string())
+}
+
+/// The lock every read and change of the modes block in this process
+/// holds while it touches core's cache. See the module docs.
+fn modes_lock() -> MutexGuard<'static, ()> {
+    static MODES: Mutex<()> = Mutex::new(());
+    MODES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Read the block from disk into core's cache. The headless CLI edits
 /// the same block, so the cache can be behind; when it was, the tray
-/// menu is rebuilt from what was read.
-fn load_fresh(path: &Path) -> ModesSettings {
+/// menu is rebuilt from what was read. The caller holds
+/// [`modes_lock`].
+fn load_fresh(_held: &MutexGuard<'static, ()>, path: &Path) -> ModesSettings {
     let cached = core_settings::current_modes_settings();
     let settings = core_settings::load_modes_settings(path);
     if settings != cached {
         crate::tray::refresh();
     }
     settings
+}
+
+/// [`load_fresh`] for a caller that only reads: takes the lock for
+/// the read, so it cannot put a block from before a change into the
+/// cache after that change.
+fn read_fresh(path: &Path) -> ModesSettings {
+    load_fresh(&modes_lock(), path)
 }
 
 /// One change to the modes block: read it from disk, let `edit` (a
@@ -109,11 +148,10 @@ fn change(
     switch: bool,
     edit: impl FnOnce(&ModesSettings) -> Result<ModesSettings, String>,
 ) -> Result<ModesNow, String> {
-    static CHANGING: Mutex<()> = Mutex::new(());
-    let _one_at_a_time = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+    let one_at_a_time = modes_lock();
 
     let path = settings_path(app)?;
-    let current = load_fresh(&path);
+    let current = load_fresh(&one_at_a_time, &path);
     let next = edit(&current)?;
     // Saving also puts the block in core's cache.
     let saved = core_settings::save_modes_settings(&path, next)?;
@@ -135,7 +173,7 @@ fn change(
 /// modes.
 pub fn init(app: &AppHandle) {
     if let Ok(path) = settings_path(app) {
-        let _ = core_settings::load_modes_settings(&path);
+        let _ = read_fresh(&path);
     }
 }
 
@@ -151,52 +189,27 @@ pub(crate) fn select(app: &AppHandle, id: &str) -> Result<ModesNow, String> {
     change(app, true, |current| modes::select(current, id))
 }
 
-/// The apps offered for a default mode: those seen in the history, in
-/// that order, then those that have a default but are not in the
-/// history (set from the CLI, or the history was cleared since).
-fn merge_apps(seen: Vec<(String, String)>, defaults: &[AppDefault]) -> Vec<ModeApp> {
-    let mut apps: Vec<ModeApp> = seen
-        .into_iter()
-        .map(|(id, name)| ModeApp { id, name })
-        .collect();
-    for default in defaults {
-        if apps.iter().any(|a| a.id == default.app_id) {
-            continue;
-        }
-        let name = default.app_name.trim();
-        apps.push(ModeApp {
-            id: default.app_id.clone(),
-            name: if name.is_empty() { default.app_id.clone() } else { name.to_string() },
-        });
-    }
-    apps
-}
-
 /// Fresh read from disk: the block is also edited by the headless
-/// CLI. Reads the history files for the list of apps, so it runs off
-/// the UI thread.
+/// CLI. Reads the history files and asks the OS which apps are open
+/// for the list of apps, so that part runs off the UI thread.
 #[tauri::command]
 pub async fn modes_get(app: AppHandle) -> Result<ModesState, String> {
     let path = settings_path(&app)?;
-    let settings = load_fresh(&path);
+    let settings = read_fresh(&path);
     let refine = core_settings::load_refine_settings(&path);
-    let seen = match crate::history::history_dir(&app) {
-        Ok(dir) => tauri::async_runtime::spawn_blocking(move || history::apps(&dir))
-            .await
-            .map_err(|e| format!("modes apps: {e}"))?,
-        Err(_) => Vec::new(),
-    };
+    // History is off by default: then there is no folder to read and
+    // the open apps are the whole list.
+    let history_dir = crate::history::history_dir(&app).ok();
+    let (seen, running) = tauri::async_runtime::spawn_blocking(move || {
+        let seen = history_dir.map(|dir| history::apps(&dir)).unwrap_or_default();
+        (seen, focus::running_apps())
+    })
+    .await
+    .map_err(|e| format!("modes apps: {e}"))?;
     Ok(ModesState {
-        apps: merge_apps(seen, &settings.app_defaults),
+        apps: modes::apps_for_defaults(&settings, &seen, &running),
         now: now(settings, &refine),
     })
-}
-
-/// Save the whole block; returns what core stored (ids made, names
-/// trimmed, defaults for missing modes dropped).
-#[tauri::command]
-pub fn modes_save(app: AppHandle, settings: ModesSettings) -> Result<ModesNow, String> {
-    change(&app, false, |_| Ok(settings))
 }
 
 /// Select the mode dictations run in when the app has no default.
@@ -213,7 +226,16 @@ pub fn modes_cycle(app: AppHandle) -> Result<ModesNow, String> {
     cycle(&app)
 }
 
-/// Add a mode at the end of the list. Core makes its id from the name.
+/// The backend a model or effort picked in the mode dialog is for:
+/// the one Refine uses, since that is the backend whose models and
+/// effort levels the dialog offered.
+fn active_backend() -> RefineBackendKind {
+    core_settings::current_refine_settings().backend
+}
+
+/// Add a mode at the end of the list. Core makes its id from the name
+/// and refuses a name another mode has. A model or effort is stored
+/// as chosen for the Refine backend in use.
 #[tauri::command]
 pub fn modes_add(
     app: AppHandle,
@@ -223,12 +245,15 @@ pub fn modes_add(
     effort: Option<RefineEffort>,
 ) -> Result<ModesNow, String> {
     change(&app, false, |current| {
-        modes::add(current, &name, &instructions, model.as_deref(), effort)
+        modes::add(current, &name, &instructions, model.as_deref(), effort, Some(active_backend()))
     })
 }
 
 /// Replace a mode's name, instructions, model and effort. `None` for
 /// the model or the effort means the mode follows the Refine settings.
+/// The model and effort are for the Refine backend in use; a mode
+/// whose own ones are for the other backend keeps them unless this
+/// edit names a model or an effort (`ModeEdit::backend`).
 #[tauri::command]
 pub fn modes_edit(
     app: AppHandle,
@@ -243,6 +268,7 @@ pub fn modes_edit(
         instructions: Some(instructions),
         model: Some(model),
         effort: Some(effort),
+        backend: Some(active_backend()),
     };
     change(&app, false, |current| modes::edit(current, &id, &changes))
 }
@@ -282,10 +308,6 @@ mod tests {
         ModeApp { id: id.into(), name: name.into() }
     }
 
-    fn default_for(app_id: &str, app_name: &str, mode: &str) -> AppDefault {
-        AppDefault { app_id: app_id.into(), app_name: app_name.into(), mode: mode.into() }
-    }
-
     fn formal() -> ModesSettings {
         ModesSettings {
             active: "formal".into(),
@@ -300,37 +322,83 @@ mod tests {
     }
 
     #[test]
-    fn apps_from_history_come_first_in_their_order() {
-        let seen = vec![
-            ("com.example.chat".to_string(), "Chatter".to_string()),
-            ("com.example.mail".to_string(), "Mailbox".to_string()),
-        ];
-        let defaults = [default_for("com.example.mail", "Mail", "dictation")];
-        assert_eq!(
-            merge_apps(seen, &defaults),
-            vec![app("com.example.chat", "Chatter"), app("com.example.mail", "Mailbox")]
-        );
+    fn a_row_says_whether_the_modes_own_model_is_in_use() {
+        let mut settings = formal();
+        settings.custom[0].model = Some("opus".into());
+        settings.custom[0].backend = Some(RefineBackendKind::ClaudeCli);
+        let claude = RefineSettings::default();
+        let openai = RefineSettings { backend: RefineBackendKind::OpenaiCompatible, ..RefineSettings::default() };
+
+        let rows = now(settings.clone(), &claude).modes;
+        assert!(rows[1].overrides_apply);
+        assert_eq!(rows[1].override_backend, Some(RefineBackendKind::ClaudeCli));
+        // The built-in mode has nothing of its own.
+        assert!(!rows[0].overrides_apply);
+        assert_eq!(rows[0].override_backend, None);
+
+        // The user switched Refine to the other backend: the mode's
+        // own model is kept, and not in use.
+        let rows = now(settings, &openai).modes;
+        assert!(!rows[1].overrides_apply);
+        let json = serde_json::to_value(&rows[1]).unwrap();
+        assert_eq!(json["id"], "formal");
+        assert_eq!(json["model"], "opus");
+        assert_eq!(json["backend"], "claude-cli");
+        assert_eq!(json["override_backend"], "claude-cli");
+        assert_eq!(json["overrides_apply"], false);
     }
 
+    /// A read (the Modes pane loading) next to changes (the hotkey
+    /// cycling). Right after a change has saved, core's cache must
+    /// hold what it saved; a read that does not take the lock can
+    /// finish in between and put the block from before the change
+    /// back.
     #[test]
-    fn an_app_with_a_default_is_offered_without_any_history() {
-        let defaults = [
-            default_for("com.example.notes", "Notes", "dictation"),
-            default_for("editor.exe", " ", "dictation"),
-        ];
-        assert_eq!(
-            merge_apps(Vec::new(), &defaults),
-            // No stored name: the id stands in for it.
-            vec![app("com.example.notes", "Notes"), app("editor.exe", "editor.exe")]
-        );
+    fn a_read_cannot_put_an_older_block_in_the_cache_after_a_change() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut block = formal();
+        block.active = "dictation".into();
+        core_settings::save_modes_settings(&path, block).unwrap();
+
+        let done = AtomicBool::new(false);
+        let stale = std::thread::scope(|s| {
+            let readers: Vec<_> = (0..3)
+                .map(|_| {
+                    s.spawn(|| {
+                        while !done.load(Ordering::Relaxed) {
+                            let _ = read_fresh(&path);
+                        }
+                    })
+                })
+                .collect();
+            let mut stale = 0;
+            for _ in 0..3000 {
+                // What `change` does, step for step.
+                let held = modes_lock();
+                let current = load_fresh(&held, &path);
+                let saved = core_settings::save_modes_settings(&path, modes::cycle(&current)).unwrap();
+                if core_settings::current_modes_settings() != saved {
+                    stale += 1;
+                }
+            }
+            done.store(true, Ordering::Relaxed);
+            for reader in readers {
+                reader.join().unwrap();
+            }
+            stale
+        });
+        assert_eq!(stale, 0, "the cache held an older block right after {stale} of 3000 changes");
+        core_settings::set_modes_settings_cache(ModesSettings::default());
     }
 
     #[test]
     fn the_list_has_the_built_in_mode_first_and_names_the_selected_one() {
         let now = now(formal(), &RefineSettings::default());
-        let ids: Vec<&str> = now.modes.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = now.modes.iter().map(|m| m.view.id.as_str()).collect();
         assert_eq!(ids, ["dictation", "formal"]);
-        assert!(now.modes[0].builtin);
+        assert!(now.modes[0].view.builtin);
         assert_eq!(selected_name(&now), "Formal");
 
         let none_selected = now_with_active("gone");

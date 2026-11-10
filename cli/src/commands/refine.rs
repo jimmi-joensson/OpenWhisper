@@ -5,7 +5,9 @@
 //! Subcommands:
 //! - `run [TEXT]`: refine an argument or stdin, print the result.
 //!   `--mode <id>` runs it in one of the modes (TASK-96), `--app
-//!   <app-id>` in the mode a dictation into that app would get.
+//!   <app-id>` in the mode a dictation into that app would get, and
+//!   `--current-mode` in the mode a dictation would run in right now
+//!   (the selected mode). Without any of them: the built-in mode.
 //! - `status`: settings + whether the selected backend can run.
 //! - `test`: the connection test from the settings pane.
 //! - `config`: print the settings block, or change it with flags.
@@ -106,9 +108,15 @@ pub struct RunArgs {
     #[arg(long, value_name = "MS")]
     warm_ms: Option<u64>,
     /// Run the text in this mode (an id from `openwhisper modes
-    /// list`). Without --mode and --app: the built-in Dictation mode.
-    #[arg(long, value_name = "ID", conflicts_with = "app")]
+    /// list`). Without --mode, --app and --current-mode: the built-in
+    /// Dictation mode.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["app", "current_mode"])]
     mode: Option<String>,
+    /// Run the text the way a dictation would run right now: in the
+    /// selected mode, or with --app in that app's default mode when
+    /// it has one.
+    #[arg(long)]
+    current_mode: bool,
     /// Run the text in the mode a dictation into this app would get:
     /// the app's default mode, else the selected mode. Takes an app
     /// id as `openwhisper focus` prints it.
@@ -247,11 +255,18 @@ fn apply(mut s: RefineSettings, o: &Overrides) -> Result<RefineSettings> {
 
 /// The mode a run is made in. `--mode` names one; `--app` asks for
 /// what a dictation into that app would get (its default mode, else
-/// the selected one); neither means the built-in Dictation mode, so
+/// the selected one); `--current-mode` (`current`) for what a
+/// dictation would get right now, which without an app is the
+/// selected mode. None of them means the built-in Dictation mode, so
 /// plain `refine run` does what it always did.
-fn pick_mode(settings: &RefineSettings, mode: Option<&str>, app: Option<&str>) -> Result<ModeChoice> {
+fn pick_mode(
+    settings: &RefineSettings,
+    mode: Option<&str>,
+    app: Option<&str>,
+    current: bool,
+) -> Result<ModeChoice> {
     let saved = settings::load_modes_settings(&settings_path()?);
-    choose_mode(&saved, settings, mode, app)
+    choose_mode(&saved, settings, mode, app, current)
 }
 
 fn choose_mode(
@@ -259,6 +274,7 @@ fn choose_mode(
     settings: &RefineSettings,
     mode: Option<&str>,
     app: Option<&str>,
+    current: bool,
 ) -> Result<ModeChoice> {
     let selected = |mode: ModeView| ModeChoice {
         mode,
@@ -271,6 +287,8 @@ fn choose_mode(
             anyhow!("There is no mode with the id \"{id}\"; see `openwhisper modes list`.")
         }),
         (None, Some(app)) => Ok(modes::resolve(saved, settings, Some((app, "")))),
+        // The same call the dictation pipeline makes, with no app known.
+        (None, None) if current => Ok(modes::resolve(saved, settings, None)),
         (None, None) => Ok(selected(ModeView::builtin(settings))),
     }
 }
@@ -306,7 +324,7 @@ fn run_text(args: RunArgs, json: bool) -> Result<()> {
         transcript::process(&text)
     };
 
-    let choice = pick_mode(&settings, args.mode.as_deref(), args.app.as_deref())?;
+    let choice = pick_mode(&settings, args.mode.as_deref(), args.app.as_deref(), args.current_mode)?;
     // The same two doors the dictation pipeline uses: a backend
     // warmed ahead of the text, or a cold one.
     let outcome = match args.warm_ms {
@@ -530,7 +548,7 @@ fn mode_label(mode: &refine::ModeUse) -> String {
 fn show_prompt(args: &PromptArgs, json: bool) -> Result<()> {
     let settings = load(&args.overrides)?;
     use_dictionary();
-    let choice = pick_mode(&settings, args.mode.as_deref(), None)?;
+    let choice = pick_mode(&settings, args.mode.as_deref(), None, false)?;
     let run = refine::apply_mode(&settings, &choice);
     let prompt = &run.prompt;
     let example = prompt.user_message("what was said goes here");
@@ -822,9 +840,9 @@ mod tests {
     use openwhisper_core::settings::ModesSettings;
 
     fn saved() -> ModesSettings {
-        let m = modes::add(&ModesSettings::default(), "Formal", "Rewrite it in a formal tone.", None, None)
+        let m = modes::add(&ModesSettings::default(), "Formal", "Rewrite it in a formal tone.", None, None, None)
             .unwrap();
-        let m = modes::add(&m, "Write in English", "Write it in English.", None, None).unwrap();
+        let m = modes::add(&m, "Write in English", "Write it in English.", None, None, None).unwrap();
         let m = modes::select(&m, "formal").unwrap();
         modes::set_app_default(&m, "com.example.mail", "Mail", "write-in-english").unwrap()
     }
@@ -832,32 +850,48 @@ mod tests {
     #[test]
     fn plain_run_stays_in_the_built_in_mode_whatever_is_selected() {
         let settings = RefineSettings::default();
-        let choice = choose_mode(&saved(), &settings, None, None).unwrap();
+        let choice = choose_mode(&saved(), &settings, None, None, false).unwrap();
         assert!(choice.mode.builtin);
         assert_eq!(choice.reason, ModeReason::Selected);
     }
 
     #[test]
+    fn current_mode_runs_what_a_dictation_would_run_right_now() {
+        let settings = RefineSettings::default();
+        // No app known: the selected mode.
+        let choice = choose_mode(&saved(), &settings, None, None, true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
+        // With an app: its default when it has one, else the selected mode.
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.Mail"), true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("write-in-english", ModeReason::AppDefault));
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.notes"), true).unwrap();
+        assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
+        // Nothing selected yet: Dictation, like a fresh install.
+        let choice = choose_mode(&ModesSettings::default(), &settings, None, None, true).unwrap();
+        assert!(choice.mode.builtin);
+    }
+
+    #[test]
     fn mode_flag_names_a_mode_and_an_unknown_id_is_an_error() {
         let settings = RefineSettings::default();
-        let choice = choose_mode(&saved(), &settings, Some("write-in-english"), None).unwrap();
+        let choice = choose_mode(&saved(), &settings, Some("write-in-english"), None, false).unwrap();
         assert_eq!(choice.mode.name, "Write in English");
         assert_eq!(choice.reason, ModeReason::Selected);
-        let choice = choose_mode(&saved(), &settings, Some("dictation"), None).unwrap();
+        let choice = choose_mode(&saved(), &settings, Some("dictation"), None, false).unwrap();
         assert!(choice.mode.builtin);
-        let err = choose_mode(&saved(), &settings, Some("nope"), None).unwrap_err().to_string();
+        let err = choose_mode(&saved(), &settings, Some("nope"), None, false).unwrap_err().to_string();
         assert!(err.contains("nope") && err.contains("modes list"), "{err}");
     }
 
     #[test]
     fn app_flag_resolves_like_a_dictation_into_that_app() {
         let settings = RefineSettings::default();
-        let choice = choose_mode(&saved(), &settings, None, Some("com.example.mail")).unwrap();
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.mail"), false).unwrap();
         assert_eq!(choice.mode.id, "write-in-english");
         assert_eq!(choice.reason, ModeReason::AppDefault);
         assert_eq!(choice.app_name, "Mail");
         // An app without a default gets the selected mode.
-        let choice = choose_mode(&saved(), &settings, None, Some("com.example.notes")).unwrap();
+        let choice = choose_mode(&saved(), &settings, None, Some("com.example.notes"), false).unwrap();
         assert_eq!((choice.mode.id.as_str(), choice.reason), ("formal", ModeReason::Selected));
     }
 

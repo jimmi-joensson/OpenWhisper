@@ -1260,7 +1260,6 @@ pub fn run() {
             history::history_clear,
             history::history_reveal,
             modes::modes_get,
-            modes::modes_save,
             modes::modes_select,
             modes::modes_cycle,
             modes::modes_add,

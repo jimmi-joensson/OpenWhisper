@@ -41,6 +41,13 @@ export const EFFORT_LABELS: Record<RefineEffort, string> = {
   max: "Max",
 };
 
+// What the Refine pane calls each backend, for sentences that name
+// one ("for the Claude backend").
+export const BACKEND_LABELS: Record<RefineBackend, string> = {
+  "claude-cli": "Claude",
+  "openai-compatible": "OpenAI-compatible",
+};
+
 // The effort levels each kind of backend takes today.
 export const BACKEND_EFFORTS: Record<RefineBackend, RefineEffort[]> = {
   "claude-cli": ["low", "medium", "high", "xhigh", "max"],
@@ -101,9 +108,13 @@ export interface RefineInfo {
   instruction: string;
   backend: string;
   elapsed_ms: number;
-  // Name of the mode the dictation ran in (TASK-96). "" for the
-  // built-in Dictation mode and when Refine did not run.
+  // Name of the mode the dictation ran in (TASK-96), when there is
+  // something to say about it: a mode the user made, or any mode
+  // (Dictation too) that ran because the app has it as its default.
+  // "" for Dictation as the selected mode and when Refine did not run.
   mode: string;
+  // `mode` is the built-in Dictation mode.
+  mode_builtin: boolean;
   // Why that mode ran. "" when Refine did not run.
   mode_reason: "" | "selected" | "app-default";
   // Name of the app whose default mode it was; "" unless
@@ -119,6 +130,7 @@ export const NO_REFINE: RefineInfo = {
   backend: "",
   elapsed_ms: 0,
   mode: "",
+  mode_builtin: false,
   mode_reason: "",
   mode_app: "",
 };

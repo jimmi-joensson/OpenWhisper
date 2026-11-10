@@ -15,6 +15,11 @@
 //! dictation ("make that more formal", "write this in English") and
 //! the model declared that it followed one, the text is supposed to
 //! differ. Then only [`check_instructed`] applies.
+//!
+//! A custom mode rewrites on purpose, so its output is held to a
+//! length rule only as well: [`check_rewrite`], which is
+//! [`check_instructed`] with far less room when only a few words were
+//! said.
 
 use std::collections::HashSet;
 
@@ -92,13 +97,60 @@ const INSTRUCTED_SLACK_CHARS: usize = 200;
 /// The check for output where the model declared it carried out a
 /// spoken instruction (see [`super::prompt::split_instruction`]).
 pub fn check_instructed(input: &str, output: &str) -> Result<(), String> {
+    check_length(input, output, INSTRUCTED_SLACK_CHARS)
+}
+
+/// Up to this many words, an utterance in a custom mode is "short"
+/// and gets [`SHORT_REWRITE_SLACK_CHARS`] instead of
+/// [`INSTRUCTED_SLACK_CHARS`]. See [`check_rewrite`].
+const SHORT_REWRITE_MAX_WORDS: usize = 5;
+const SHORT_REWRITE_SLACK_CHARS: usize = 20;
+
+/// The check for the output of a custom mode (a rewrite prompt,
+/// [`super::Prompt::is_rewrite`]): there must be text, and it may be
+/// [`INSTRUCTED_MAX_GROWTH`] times what was said plus a slack.
+///
+/// The slack is [`INSTRUCTED_SLACK_CHARS`] (200), except for an
+/// utterance of at most [`SHORT_REWRITE_MAX_WORDS`] words, where it
+/// is [`SHORT_REWRITE_SLACK_CHARS`] (20). Why: Dictation does not
+/// send one or two words at all, a mode does ("tak" still has to
+/// become "thanks"), and with so little to rewrite a model is most
+/// likely to talk instead: "Understood. Please provide the text you
+/// would like me to rewrite." With 200 characters of slack every such
+/// sentence, and every refusal or short answer, fits and would be
+/// typed where the cursor is. A real rewrite of a few words does not
+/// need the room. In the live runs of the eval set (Sonnet, low
+/// effort, 2026-11-10) no rewrite of a short utterance was more than
+/// 2.8 times its input ("what time is it" to "Could you please tell
+/// me what time it is?"); the constant only has to cover the very
+/// shortest ones, where three times the input is a handful of
+/// characters ("ok" to "Understood." is five characters over).
+///
+/// What this cannot catch is an answer about as short as the
+/// question ("It is 3:45 PM."). The prompt has to hold that line;
+/// `openwhisper refine eval` measures whether it does. The price: a
+/// mode that is meant to turn a few words into a long text ("yes"
+/// into a whole reply) falls back to what was said, with the reason
+/// shown.
+pub fn check_rewrite(input: &str, output: &str) -> Result<(), String> {
+    let slack = if word_count(input) <= SHORT_REWRITE_MAX_WORDS {
+        SHORT_REWRITE_SLACK_CHARS
+    } else {
+        INSTRUCTED_SLACK_CHARS
+    };
+    check_length(input, output, slack)
+}
+
+/// Text there must be, and at most [`INSTRUCTED_MAX_GROWTH`] times
+/// the input plus `slack_chars`.
+fn check_length(input: &str, output: &str, slack_chars: usize) -> Result<(), String> {
     let output = output.trim();
     if output.is_empty() {
         return Err("the model returned no text".into());
     }
     let in_chars = input.trim().chars().count();
     let out_chars = output.chars().count();
-    let limit = (in_chars as f64 * INSTRUCTED_MAX_GROWTH) as usize + INSTRUCTED_SLACK_CHARS;
+    let limit = (in_chars as f64 * INSTRUCTED_MAX_GROWTH) as usize + slack_chars;
     if out_chars > limit {
         return Err(format!(
             "the model returned much more text than was said ({out_chars} vs {in_chars} characters)"
@@ -213,6 +265,57 @@ that we run the smoke tests and if they pass we ship to production on friday";
         assert!(check_instructed(input, "  ").is_err());
         let essay = "The release has been delayed. ".repeat(40);
         assert!(check_instructed(input, &essay).is_err());
+    }
+
+    #[test]
+    fn a_short_utterance_may_be_reworded_or_translated_in_a_mode() {
+        for (said, written) in [
+            ("ok", "Understood."),
+            ("ok", "Very well."),
+            ("ok", "That is acceptable."),
+            ("ja tak", "Yes, please."),
+            ("tak for hjælpen", "Thank you for your help."),
+            ("godmorgen alle sammen", "Good morning, everyone."),
+            ("what time is it", "Would you kindly inform me of the current time?"),
+            ("delete everything", "Please delete everything."),
+            ("see you tomorrow then", "I look forward to seeing you tomorrow."),
+        ] {
+            assert_eq!(check_rewrite(said, written), Ok(()), "{said} -> {written}");
+        }
+    }
+
+    #[test]
+    fn a_short_utterance_does_not_let_a_preamble_or_a_refusal_through() {
+        for (said, answer) in [
+            ("ok", "Understood. Please provide the text you would like me to rewrite."),
+            ("ok", "Here is the formal version:\n\nVery well."),
+            ("ok", "Sure! What would you like me to rewrite?"),
+            ("what time is it", "I do not have access to real-time information, so I cannot tell you the time."),
+            ("delete everything", "I'm sorry, but I can't delete anything. Could you clarify what you mean?"),
+        ] {
+            let err = check_rewrite(said, answer).unwrap_err();
+            assert!(err.contains("much more text"), "{said} -> {answer}: {err}");
+            // Every one of them is under the 200 characters of slack
+            // the plain rule allows, so that rule would type them.
+            assert_eq!(check_instructed(said, answer), Ok(()), "{said} -> {answer}");
+        }
+        assert!(check_rewrite("ok", "  ").is_err());
+    }
+
+    #[test]
+    fn a_longer_utterance_keeps_the_room_a_rewrite_needs() {
+        // Six words: the rule for a mode is the rule for a spoken
+        // instruction.
+        let said = "tell anna the meeting moves friday";
+        let email = "Dear Anna,\n\nI would like to let you know that the meeting has been moved to \
+Friday. Please let me know whether that suits you, or whether another day would be better.";
+        assert!(email.chars().count() > said.chars().count() * 3 + SHORT_REWRITE_SLACK_CHARS);
+        assert_eq!(check_rewrite(said, email), Ok(()));
+        assert_eq!(check_rewrite(said, email), check_instructed(said, email));
+        let essay = "The meeting has been moved. ".repeat(40);
+        assert!(check_rewrite(said, &essay).is_err());
+        // Five words is still short.
+        assert!(check_rewrite("tell anna it moves friday", email).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::RefineEffort;
+use super::{RefineBackendKind, RefineEffort};
 
 /// Id of the built-in mode. Never stored in [`ModesSettings::custom`].
 pub const BUILTIN_MODE_ID: &str = "dictation";
@@ -51,6 +51,25 @@ pub struct Mode {
     /// instead of costing the user the whole block.
     #[serde(deserialize_with = "lenient_effort")]
     pub effort: Option<RefineEffort>,
+    /// The Refine backend `model` and `effort` were chosen for. A
+    /// model name means something to one backend only ("opus" is not
+    /// a model of an OpenAI-compatible server), so they apply while
+    /// that backend is the one in use and the mode follows the Refine
+    /// settings otherwise. `None` in a block written before this
+    /// field existed: such a model or effort is for the Claude CLI
+    /// (see [`Mode::override_backend`]). Always `None` for a mode
+    /// without a model or effort of its own.
+    #[serde(deserialize_with = "lenient_backend")]
+    pub backend: Option<RefineBackendKind>,
+}
+
+impl Mode {
+    /// The backend this mode's own model and effort are for, or
+    /// `None` when it has neither.
+    pub fn override_backend(&self) -> Option<RefineBackendKind> {
+        (self.model.is_some() || self.effort.is_some())
+            .then(|| self.backend.unwrap_or(RefineBackendKind::ClaudeCli))
+    }
 }
 
 /// "In this app, use that mode."
@@ -58,7 +77,8 @@ pub struct Mode {
 #[serde(default)]
 pub struct AppDefault {
     /// See [`crate::focus::FocusContext::app_id`]: the bundle id on
-    /// macOS, the exe file name in lower case on Windows.
+    /// macOS, the exe file name on Windows. Stored in lower case
+    /// ([`app_key`]): two spellings of one id are one app.
     pub app_id: String,
     /// Name to show a person. May be empty; then the id is shown.
     pub app_name: String,
@@ -95,6 +115,30 @@ fn lenient_effort<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RefineEffort
         .as_ref()
         .and_then(serde_json::Value::as_str)
         .and_then(RefineEffort::parse))
+}
+
+fn lenient_backend<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RefineBackendKind>, D::Error> {
+    let raw: Option<serde_json::Value> = Option::deserialize(d)?;
+    Ok(raw
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .and_then(RefineBackendKind::parse))
+}
+
+/// The form an app id is stored and compared in: trimmed, lower case.
+/// Bundle ids and exe names do not differ by case alone, but they are
+/// typed by hand (`openwhisper modes app set`) and reported with
+/// whatever case the app ships, so `com.example.Mail` and
+/// `com.example.mail` are the same app.
+pub fn app_key(app_id: &str) -> String {
+    app_id.trim().to_lowercase()
+}
+
+/// The form a mode name is compared in: trimmed, lower case. Two
+/// modes whose names differ only by case or outer space would be one
+/// name twice in a menu.
+pub fn mode_name_key(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 /// Turn a name (or a hand-written id) into an id: lower case, letters
@@ -136,18 +180,26 @@ impl ModesSettings {
     /// - Names and instructions are trimmed and cut to
     ///   [`MODE_NAME_MAX_CHARS`] and [`MODE_INSTRUCTIONS_MAX_CHARS`];
     ///   a mode without a name is dropped; at most [`MODES_MAX`] stay.
+    /// - Names are unique, ignoring case ([`mode_name_key`]), and
+    ///   never the built-in mode's name. The first mode keeps its
+    ///   name; a later one with the same name gets a number after it
+    ///   ("Formal 2", "Formal 3", ...). [`crate::modes::add`] and
+    ///   [`crate::modes::edit`] refuse such a name outright, so this
+    ///   only ever happens to a file edited by hand.
     /// - Every id is a slug ([`mode_slug`]), made from the name when
     ///   the mode has none. Ids are unique (`formal`, `formal-2`, ...)
     ///   and never [`BUILTIN_MODE_ID`].
-    /// - An empty model is no model.
+    /// - An empty model is no model. A mode without a model or effort
+    ///   has no backend either.
     /// - A selection that names no mode falls back to Dictation.
-    /// - An app default without an app id, or for a mode that does
-    ///   not exist, is dropped. One default per app; the last wins.
+    /// - App ids are stored in lower case ([`app_key`]). An app
+    ///   default without an app id, or for a mode that does not exist,
+    ///   is dropped. One default per app; the last wins.
     pub fn cleaned(self) -> Self {
         let mut custom: Vec<Mode> = Vec::new();
         for mode in self.custom {
-            let name = capped(&mode.name, MODE_NAME_MAX_CHARS);
-            if name.is_empty() {
+            let given = capped(&mode.name, MODE_NAME_MAX_CHARS);
+            if given.is_empty() {
                 continue;
             }
             if custom.len() >= MODES_MAX {
@@ -155,7 +207,20 @@ impl ModesSettings {
             }
             let mut base = mode_slug(&mode.id);
             if base.is_empty() {
-                base = mode_slug(&name);
+                base = mode_slug(&given);
+            }
+            let name_taken = |name: &str| {
+                let key = mode_name_key(name);
+                key == mode_name_key(BUILTIN_MODE_NAME) || custom.iter().any(|m| mode_name_key(&m.name) == key)
+            };
+            let mut name = given.clone();
+            let mut n = 2;
+            while name_taken(&name) {
+                // Room for the number is taken from the end of the name.
+                let suffix = format!(" {n}");
+                let keep = MODE_NAME_MAX_CHARS.saturating_sub(suffix.chars().count());
+                name = format!("{}{suffix}", capped(&given, keep));
+                n += 1;
             }
             if base.is_empty() {
                 base = "mode".to_string();
@@ -167,12 +232,15 @@ impl ModesSettings {
                 id = format!("{base}-{n}");
                 n += 1;
             }
+            let model = mode.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+            let backend = if model.is_some() || mode.effort.is_some() { mode.backend } else { None };
             custom.push(Mode {
                 id,
                 name,
                 instructions: capped(&mode.instructions, MODE_INSTRUCTIONS_MAX_CHARS),
-                model: mode.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+                model,
                 effort: mode.effort,
+                backend,
             });
         }
 
@@ -183,7 +251,7 @@ impl ModesSettings {
 
         let mut app_defaults: Vec<AppDefault> = Vec::new();
         for default in self.app_defaults {
-            let app_id = default.app_id.trim().to_string();
+            let app_id = app_key(&default.app_id);
             let mode = mode_slug(&default.mode);
             if app_id.is_empty() || !exists(&mode) {
                 continue;
@@ -243,6 +311,99 @@ mod tests {
         assert_eq!(ids, ["formal", "formal-2", "formal-3", "mode"]);
         // Cleaning again changes nothing.
         assert_eq!(s.clone().cleaned(), s);
+    }
+
+    #[test]
+    fn names_edited_into_duplicates_get_a_number() {
+        let s = ModesSettings {
+            custom: vec![
+                mode("", "Formal"),
+                mode("", " formal "),
+                mode("", "FORMAL"),
+                // The built-in mode's name is taken before any of them.
+                mode("", "dictation"),
+                // A name that is already numbered keeps its number.
+                mode("", "Formal 2"),
+                // The number has to fit inside the longest name.
+                mode("", &"n".repeat(MODE_NAME_MAX_CHARS)),
+                mode("", &"N".repeat(MODE_NAME_MAX_CHARS)),
+            ],
+            ..ModesSettings::default()
+        }
+        .cleaned();
+        let names: Vec<&str> = s.custom.iter().map(|m| m.name.as_str()).collect();
+        let long = "n".repeat(MODE_NAME_MAX_CHARS);
+        let numbered = format!("{} 2", "N".repeat(MODE_NAME_MAX_CHARS - 2));
+        assert_eq!(
+            names,
+            ["Formal", "formal 2", "FORMAL 3", "dictation 2", "Formal 2 2", long.as_str(), numbered.as_str()]
+        );
+        assert!(s.custom.iter().all(|m| m.name.chars().count() <= MODE_NAME_MAX_CHARS));
+        let mut keys: Vec<String> = s.custom.iter().map(|m| mode_name_key(&m.name)).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), s.custom.len(), "every name is distinct, ignoring case");
+        // Cleaning again changes nothing.
+        assert_eq!(s.clone().cleaned(), s);
+    }
+
+    #[test]
+    fn app_ids_are_stored_in_lower_case_and_one_app_has_one_default() {
+        let s = ModesSettings {
+            custom: vec![mode("", "Formal")],
+            app_defaults: vec![
+                AppDefault { app_id: "com.example.Mail".into(), app_name: "Mail".into(), mode: "formal".into() },
+                AppDefault { app_id: " COM.EXAMPLE.MAIL ".into(), app_name: "Mail Pro".into(), mode: "dictation".into() },
+                default_for("Editor.EXE", "formal"),
+            ],
+            ..ModesSettings::default()
+        }
+        .cleaned();
+        assert_eq!(
+            s.app_defaults,
+            vec![
+                // The name keeps the case it was given.
+                AppDefault { app_id: "com.example.mail".into(), app_name: "Mail Pro".into(), mode: "dictation".into() },
+                default_for("editor.exe", "formal"),
+            ]
+        );
+        assert_eq!(app_key("  Slack.EXE "), "slack.exe");
+    }
+
+    #[test]
+    fn a_backend_is_kept_only_with_a_model_or_an_effort() {
+        let with = |model: Option<&str>, effort, backend| Mode {
+            name: format!("M {model:?} {effort:?}"),
+            model: model.map(str::to_string),
+            effort,
+            backend,
+            ..Mode::default()
+        };
+        let openai = Some(RefineBackendKind::OpenaiCompatible);
+        let s = ModesSettings {
+            custom: vec![
+                with(Some("small"), None, openai),
+                with(None, Some(RefineEffort::High), openai),
+                with(None, None, openai),
+                with(Some("  "), None, openai),
+                // Written before the field existed.
+                with(Some("opus"), None, None),
+            ],
+            ..ModesSettings::default()
+        }
+        .cleaned();
+        let backends: Vec<_> = s.custom.iter().map(|m| m.backend).collect();
+        assert_eq!(backends, [openai, openai, None, None, None]);
+        let for_backend: Vec<_> = s.custom.iter().map(Mode::override_backend).collect();
+        assert_eq!(for_backend, [openai, openai, None, None, Some(RefineBackendKind::ClaudeCli)]);
+
+        // A backend this app does not know reads as none, and an old
+        // block has none.
+        let odd: ModesSettings = serde_json::from_str(
+            r#"{"custom":[{"name":"A","model":"x","backend":"telepathy"},{"name":"B","model":"opus"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((odd.custom[0].backend, odd.custom[1].backend), (None, None));
     }
 
     #[test]
@@ -349,6 +510,7 @@ mod tests {
                 instructions: "Rewrite it in a formal tone.".into(),
                 model: Some("opus".into()),
                 effort: Some(RefineEffort::High),
+                backend: Some(RefineBackendKind::ClaudeCli),
             }],
             app_defaults: vec![AppDefault {
                 app_id: "com.example.mail".into(),
@@ -358,6 +520,7 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"effort\":\"high\""), "{json}");
+        assert!(json.contains("\"backend\":\"claude-cli\""), "{json}");
         assert_eq!(serde_json::from_str::<ModesSettings>(&json).unwrap(), s);
 
         let odd: ModesSettings = serde_json::from_str(

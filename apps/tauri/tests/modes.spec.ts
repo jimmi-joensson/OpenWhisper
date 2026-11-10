@@ -22,6 +22,8 @@ interface Mode {
   instructions: string;
   model: string | null;
   effort: string | null;
+  // The Refine backend the model and effort were picked for.
+  backend?: "claude-cli" | "openai-compatible" | null;
 }
 
 interface Seed {
@@ -32,6 +34,8 @@ interface Seed {
     app_defaults?: { app_id: string; app_name: string; mode: string }[];
   };
   history?: { enabled?: boolean };
+  // The apps that are open (what `focus::running_apps` reports).
+  running?: { id: string; name: string }[];
   // Stored dictations, newest first. Built in the page so "today"
   // follows its clock.
   entries?: {
@@ -50,6 +54,7 @@ async function seed(page: Page, data: Seed) {
     if (d.refine) w.__owRefineSettings = d.refine;
     if (d.modes) w.__owModesSettings = d.modes;
     if (d.history) w.__owHistorySettings = d.history;
+    if (d.running) w.__owRunningApps = d.running;
     const noon = new Date();
     noon.setHours(12, 0, 0, 0);
     w.__owHistoryEntries = (d.entries ?? []).map(({ hoursAgo, ...e }) => ({
@@ -187,6 +192,54 @@ test.describe("modes pane: the list", () => {
     expect(await calls(page)).toHaveLength(0);
   });
 
+  test("a name another mode has is refused, in the words Rust uses, and nothing is saved", async ({ page }) => {
+    await seed(page, { modes: { custom: [FORMAL, ENGLISH] } });
+    await page.goto("/");
+    await openModes(page);
+
+    // A new mode with a taken name, in another case and with spaces.
+    await page.getByTestId("mode-new").click();
+    const dialog = page.getByRole("dialog", { name: "New mode" });
+    await dialog.getByRole("textbox", { name: "Name" }).fill("  FORMAL ");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog.getByRole("alert")).toHaveText(
+      'There is already a mode called "Formal". Give this one another name.',
+    );
+    // The dialog stays open with what was typed, and nothing was added.
+    await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("  FORMAL ");
+    await expect(page.getByTestId("mode-row")).toHaveCount(3);
+
+    // The built-in mode's name is taken too.
+    await dialog.getByRole("textbox", { name: "Name" }).fill("dictation");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog.getByRole("alert")).toHaveText(
+      'There is already a mode called "Dictation". Give this one another name.',
+    );
+
+    // Another name goes through, and the error is gone with the dialog.
+    await dialog.getByRole("textbox", { name: "Name" }).fill("Casual");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row(page, "casual")).toBeVisible();
+
+    // Renaming onto another mode's name is refused the same way.
+    const english = row(page, "write-in-english");
+    await english.hover();
+    await english.getByRole("button", { name: "Edit Write in English" }).click();
+    const edit = page.getByRole("dialog", { name: "Edit mode" });
+    await edit.getByRole("textbox", { name: "Name" }).fill("formal");
+    await edit.getByRole("button", { name: "Save" }).click();
+    await expect(edit.getByRole("alert")).toContainText('already a mode called "Formal"');
+    // Its own name in another case is fine.
+    await edit.getByRole("textbox", { name: "Name" }).fill("WRITE IN ENGLISH");
+    await edit.getByRole("button", { name: "Save" }).click();
+    await expect(edit).toHaveCount(0);
+    await expect(english).toContainText("WRITE IN ENGLISH");
+
+    // Only the two that went through were saved.
+    expect((await calls(page)).map((c) => c.cmd)).toEqual(["modes_add", "modes_edit"]);
+  });
+
   test("creates a mode; it follows the Refine model and effort unless told otherwise", async ({ page }) => {
     await page.goto("/");
     await openModes(page);
@@ -297,6 +350,75 @@ test.describe("modes pane: the list", () => {
     ]);
   });
 
+  test("a model picked for the other Refine backend is shown as not in use, and survives a rename", async ({ page }) => {
+    // Made with a Claude model; Refine has since been switched to an
+    // OpenAI-compatible server, which does not know that model.
+    await seed(page, {
+      refine: { backend: "openai-compatible" },
+      modes: {
+        custom: [{ ...FORMAL, model: "opus", effort: "high", backend: "claude-cli" }],
+      },
+    });
+    await page.goto("/");
+    await openModes(page);
+    const formal = row(page, "formal");
+    await expect(formal.getByTestId("mode-row-own")).toHaveText(
+      "Model and effort: Same as Refine. Its own are for the Claude backend.",
+    );
+
+    await formal.hover();
+    await formal.getByRole("button", { name: "Edit Formal" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit mode" });
+    await expect(dialog.getByRole("combobox", { name: "Model" })).toContainText("Same as Refine");
+    await expect(dialog.getByRole("combobox", { name: "Effort" })).toContainText("Same as Refine");
+    await expect(dialog.getByTestId("mode-other-backend")).toContainText(
+      "a model and effort of its own for the Claude backend",
+    );
+    await expect(dialog.getByTestId("mode-other-backend")).toContainText(
+      "Refine uses the OpenAI-compatible backend now",
+    );
+
+    // A rename, with nothing picked: the Claude model stays stored.
+    await dialog.getByRole("textbox", { name: "Name" }).fill("Business tone");
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(formal).toContainText("Business tone");
+    await expect(formal.getByTestId("mode-row-own")).toContainText("Same as Refine");
+    const stored = await page.evaluate(
+      () =>
+        (window as unknown as { __owModesStored: { custom: Mode[] } }).__owModesStored.custom[0],
+    );
+    expect(stored).toMatchObject({ model: "opus", effort: "high", backend: "claude-cli" });
+
+    // Picking an effort here replaces them with one for this backend.
+    await formal.hover();
+    await formal.getByRole("button", { name: "Edit Business tone" }).click();
+    await pick(page, "Effort", "Minimal");
+    await page.getByRole("dialog", { name: "Edit mode" }).getByRole("button", { name: "Save" }).click();
+    await expect(formal.getByTestId("mode-row-own")).toHaveText("Effort: Minimal");
+    const replaced = await page.evaluate(
+      () =>
+        (window as unknown as { __owModesStored: { custom: Mode[] } }).__owModesStored.custom[0],
+    );
+    expect(replaced).toMatchObject({ model: null, effort: "minimal", backend: "openai-compatible" });
+  });
+
+  test("a model of the backend in use is shown as the mode's own", async ({ page }) => {
+    await seed(page, {
+      modes: { custom: [{ ...FORMAL, model: "opus", effort: "high", backend: "claude-cli" }] },
+    });
+    await page.goto("/");
+    await openModes(page);
+    const formal = row(page, "formal");
+    await expect(formal.getByTestId("mode-row-own")).toHaveText("Model: Opus · Effort: High");
+    await formal.hover();
+    await formal.getByRole("button", { name: "Edit Formal" }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit mode" });
+    await expect(dialog.getByRole("combobox", { name: "Model" })).toContainText("Opus");
+    await expect(dialog.getByRole("combobox", { name: "Effort" })).toContainText("High");
+    await expect(dialog.getByTestId("mode-other-backend")).toHaveCount(0);
+  });
+
   test("edits and renames a mode; its id stays", async ({ page }) => {
     await seed(page, { modes: { custom: [{ ...FORMAL, model: "opus", effort: "medium" }] } });
     await page.goto("/");
@@ -359,6 +481,64 @@ test.describe("modes pane: the list", () => {
     await expect(remove).toBeHidden();
   });
 
+  test("edit and delete are reachable with the keyboard alone", async ({ page }) => {
+    await seed(page, { modes: { custom: [FORMAL] } });
+    await page.goto("/");
+    await openModes(page);
+    const formal = row(page, "formal");
+    const edit = formal.getByRole("button", { name: "Edit Formal" });
+    const remove = formal.getByRole("button", { name: "Delete Formal" });
+    await expect(edit).toBeHidden();
+
+    // Back-tab from the button under the list. The hidden buttons
+    // are no tab stops, so focus lands on the Formal row itself,
+    // which shows them. Then Tab reaches Edit, then Delete.
+    await page.getByTestId("mode-new").focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(formal).toBeFocused();
+    await expect(edit).toBeVisible();
+    await expect(remove).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(edit).toBeFocused();
+    await expect(edit).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(remove).toBeFocused();
+    await expect(remove).toBeVisible();
+
+    // Back to Edit, and Enter opens the dialog for this mode.
+    await page.keyboard.press("Shift+Tab");
+    await expect(edit).toBeFocused();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Edit mode" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("Formal");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // Focus comes back to the row, so the keyboard is not lost, and
+    // Delete is two Tabs away. Enter asks first; Escape backs out.
+    await expect(formal).toBeFocused();
+    await expect(remove).toBeVisible();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await expect(remove).toBeFocused();
+    await page.keyboard.press("Enter");
+    const confirm = page.getByRole("alertdialog");
+    await expect(confirm).toContainText("Delete the mode “Formal”?");
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await expect(formal).toBeFocused();
+
+    // Deleting for real: the row is gone, focus moves to New mode.
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Enter");
+    await page.getByTestId("mode-delete-confirm").focus();
+    await page.keyboard.press("Enter");
+    await expect(row(page, "formal")).toHaveCount(0);
+    await expect(page.getByTestId("mode-new")).toBeFocused();
+  });
+
   test("delete asks first; apps that used the mode and the selection fall back", async ({ page }) => {
     await seed(page, {
       modes: {
@@ -409,15 +589,87 @@ test.describe("modes pane: the list", () => {
 });
 
 test.describe("modes pane: default mode per app", () => {
-  test("without apps it says where they come from", async ({ page }) => {
+  test("says where the apps come from, and what to do when there are none", async ({ page }) => {
     await page.goto("/");
     await openModes(page);
+    await expect(
+      page.getByText("The list shows the apps that are open now and the apps in your history."),
+    ).toBeVisible();
     const empty = page.getByTestId("modes-apps-empty");
-    await expect(empty).toContainText("No apps yet");
-    await expect(empty).toContainText("once your history has dictations made in them");
-    await expect(empty).toContainText("History is off until you turn it on");
+    await expect(empty).toContainText("No apps to show");
+    await expect(empty).toContainText("Open the app you want a default for");
     await expect(empty).toContainText("openwhisper modes app set");
+    // History being off is no longer the reason there are no apps.
+    await expect(empty).not.toContainText("History");
     await expect(page.getByTestId("mode-app-row")).toHaveCount(0);
+  });
+
+  test("with History off the open apps can be given a default", async ({ page }) => {
+    // The default install: no history, so no stored dictations.
+    await seed(page, {
+      modes: { custom: [FORMAL] },
+      history: { enabled: false },
+      running: [
+        { id: "com.example.Browser", name: "Browser" },
+        { id: "com.example.chat", name: "Chatter" },
+      ],
+    });
+    await page.goto("/");
+    await openModes(page);
+    await expect(page.getByTestId("modes-apps-empty")).toHaveCount(0);
+    const rows = page.getByTestId("mode-app-row");
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("Browser");
+    // The id as core stores it: lower case.
+    await expect(rows.nth(0)).toContainText("com.example.browser");
+    await expect(rows.nth(1)).toContainText("Chatter");
+
+    await pick(page, "Default mode for Browser", "Formal");
+    await expect(page.getByRole("combobox", { name: "Default mode for Browser" })).toContainText(
+      "Formal",
+    );
+    expect((await calls(page)).at(-1)).toEqual({
+      cmd: "modes_set_app_default",
+      args: { appId: "com.example.browser", appName: "Browser", modeId: "formal" },
+    });
+    // And it holds after a fresh read of the pane.
+    await page.getByRole("tab", { name: "General" }).click();
+    await page.getByRole("tab", { name: "Modes" }).click();
+    await expect(page.getByRole("combobox", { name: "Default mode for Browser" })).toContainText(
+      "Formal",
+    );
+  });
+
+  test("apps with a default come first, then history, then open apps, each once", async ({ page }) => {
+    await seed(page, {
+      modes: {
+        custom: [FORMAL],
+        // Stored by hand with capitals: the same app as the one below.
+        app_defaults: [{ app_id: "com.example.Notes", app_name: "", mode: "formal" }],
+      },
+      entries: ENTRIES,
+      running: [
+        { id: "COM.EXAMPLE.CHAT", name: "Chatter (open)" },
+        { id: "com.example.notes", name: "Notes" },
+        { id: "com.example.browser", name: "Browser" },
+      ],
+    });
+    await page.goto("/");
+    await openModes(page);
+    const rows = page.getByTestId("mode-app-row");
+    await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0)).toHaveAttribute("data-app", "com.example.notes");
+    await expect(rows.nth(1)).toHaveAttribute("data-app", "com.example.chat");
+    await expect(rows.nth(2)).toHaveAttribute("data-app", "com.example.mail");
+    await expect(rows.nth(3)).toHaveAttribute("data-app", "com.example.browser");
+    // The default had no name stored: the open app supplies it. The
+    // default is found although the id was stored with capitals.
+    await expect(page.getByRole("combobox", { name: "Default mode for Notes" })).toContainText(
+      "Formal",
+    );
+    // The name from the history wins over the open app's.
+    await expect(rows.nth(1)).toContainText("Chatter");
+    await expect(rows.nth(1)).not.toContainText("(open)");
   });
 
   test("lists the apps from the history by name, with the id underneath", async ({ page }) => {
@@ -600,7 +852,7 @@ test.describe("modes: changes made outside the window", () => {
 });
 
 test.describe("modes: which mode a dictation ran in", () => {
-  const refined = (mode: Record<string, string>) => ({
+  const refined = (mode: Record<string, string | boolean>) => ({
     raw_transcript: "can you send me the numbers before friday ",
     status: "refined",
     detail: "",
@@ -631,6 +883,27 @@ test.describe("modes: which mode a dictation ran in", () => {
       refine: refined({ mode: "Formal", mode_reason: "selected", mode_app: "" }),
     });
     await expect(marker).toHaveText("Mode: Formal");
+  });
+
+  test("Dictation is named when the app's default put it over the selected mode", async ({ page }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+    await emitTick(page, { phase: 3, status: "transcribing" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "Can you send me the numbers before Friday? ",
+      // What Rust sends for the built-in mode as an app default.
+      refine: refined({
+        mode: "Dictation",
+        mode_builtin: true,
+        mode_reason: "app-default",
+        mode_app: "Terminal",
+      }),
+    });
+    await expect(page.getByTestId("home-latest-row").getByTestId("home-latest-mode")).toHaveText(
+      "Mode: Dictation, default for Terminal",
+    );
   });
 
   test("no marker for the built-in mode or when Refine did not run", async ({ page }) => {

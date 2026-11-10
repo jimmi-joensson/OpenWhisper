@@ -16,9 +16,11 @@ export interface MockTick {
     backend: string;
     elapsed_ms: number;
     // The mode the dictation ran in (TASK-96): its name ("" for the
-    // built-in Dictation mode), why it ran and, for an app default,
-    // the app's name.
+    // built-in Dictation mode when it is simply the selected one),
+    // whether it is the built-in one, why it ran and, for an app
+    // default, the app's name.
     mode?: string;
+    mode_builtin?: boolean;
     mode_reason?: "" | "selected" | "app-default";
     mode_app?: string;
   };
@@ -45,6 +47,7 @@ export const TICK_DEFAULTS: Required<Omit<MockTick, "phase" | "status">> = {
     backend: "",
     elapsed_ms: 0,
     mode: "",
+    mode_builtin: false,
     mode_reason: "",
     mode_app: "",
   },
@@ -107,21 +110,27 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
         if (cmd === "dictation_toggle") return null;
         if (cmd === "dictation_cancel") return false;
         // Modes (TASK-96). An in-memory modes block that behaves like
-        // core: ids are slugs made from the name, the built-in
+        // core: ids are slugs made from the name, names are unique
+        // ignoring case, app ids are kept in lower case, the built-in
         // Dictation mode is listed first, deleting a mode drops the app
         // defaults that used it and moves the selection back to
-        // Dictation. `__owModesSettings` seeds the block. The apps
-        // offered for a default are the apps of the seeded history
-        // entries plus the apps that already have one. Every change is
-        // recorded in `__owModesCalls` and emits `modes_changed`, as
-        // Rust does. Keep in step with scripts/pw-shim.js.
+        // Dictation, and a mode's own model and effort belong to the
+        // Refine backend they were picked for. `__owModesSettings`
+        // seeds the block. The apps offered for a default are the apps
+        // that have one, then the apps of the seeded history entries,
+        // then the open apps seeded with `__owRunningApps`. Every
+        // change is recorded in `__owModesCalls` and emits
+        // `modes_changed`, as Rust does. Keep in step with
+        // scripts/pw-shim.js.
         if (cmd.startsWith("modes_")) {
+          type Backend = "claude-cli" | "openai-compatible";
           type Mode = {
             id: string;
             name: string;
             instructions: string;
             model: string | null;
             effort: string | null;
+            backend?: Backend | null;
           };
           type AppDefault = { app_id: string; app_name: string; mode: string };
           type ModesSettings = { active: string; custom: Mode[]; app_defaults: AppDefault[] };
@@ -131,10 +140,12 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             __owModesCalls?: { cmd: string; args: Record<string, unknown> }[];
             __owModesCycleCount?: number;
             __owHistoryEntries?: { app_id: string | null; app_name: string | null }[];
-            __owRefineSettings?: { instructions?: string };
-            __owRefineStored?: { instructions: string };
+            __owRunningApps?: { id: string; name: string }[];
+            __owRefineSettings?: { instructions?: string; backend?: Backend };
+            __owRefineStored?: { instructions: string; backend: Backend };
           };
           const BUILTIN = "dictation";
+          const BUILTIN_NAME = "Dictation";
           // `mode_slug` in core: lower case, letters and digits kept,
           // every run of anything else one hyphen.
           const slug = (text: string) =>
@@ -143,28 +154,51 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
               .toLowerCase()
               .replace(/[^\p{L}\p{N}]+/gu, "-")
               .replace(/^-+|-+$/g, "");
+          // `app_key` and `mode_name_key` in core: how app ids and mode
+          // names are compared (and app ids stored).
+          const key = (text: string) => text.trim().toLowerCase();
+          // `Mode::override_backend` in core: the backend a mode's own
+          // model and effort are for. A block from before modes stored
+          // one means the Claude CLI.
+          const overrideBackend = (m: { model: string | null; effort: string | null; backend?: Backend | null }) =>
+            m.model || m.effort ? (m.backend ?? "claude-cli") : null;
+          // The backend Refine uses: the one a model picked in the
+          // dialog is for.
+          const activeBackend = (): Backend =>
+            w.__owRefineStored?.backend ?? w.__owRefineSettings?.backend ?? "claude-cli";
           // `ModesSettings::cleaned` in core.
           const cleaned = (raw: ModesSettings): ModesSettings => {
             const custom: Mode[] = [];
             const exists = (id: string) => id === BUILTIN || custom.some((m) => m.id === id);
+            const nameTaken = (name: string) =>
+              key(name) === key(BUILTIN_NAME) || custom.some((m) => key(m.name) === key(name));
             for (const mode of raw.custom) {
-              const name = mode.name.trim().slice(0, 40).trimEnd();
-              if (!name) continue;
-              const base = slug(mode.id) || slug(name) || "mode";
+              const given = mode.name.trim().slice(0, 40).trimEnd();
+              if (!given) continue;
+              const base = slug(mode.id) || slug(given) || "mode";
               let id = base;
               for (let n = 2; exists(id); n++) id = `${base}-${n}`;
+              // A name edited into a duplicate gets a number.
+              let name = given;
+              for (let n = 2; nameTaken(name); n++) {
+                const suffix = ` ${n}`;
+                name = `${given.slice(0, 40 - suffix.length).trimEnd()}${suffix}`;
+              }
+              const model = mode.model?.trim() || null;
+              const effort = mode.effort ?? null;
               custom.push({
                 id,
                 name,
                 instructions: mode.instructions.trim(),
-                model: mode.model?.trim() || null,
-                effort: mode.effort ?? null,
+                model,
+                effort,
+                backend: model || effort ? (mode.backend ?? null) : null,
               });
             }
             const active = exists(slug(raw.active)) ? slug(raw.active) : BUILTIN;
             const app_defaults: AppDefault[] = [];
             for (const d of raw.app_defaults) {
-              const entry = { app_id: d.app_id.trim(), app_name: d.app_name.trim(), mode: slug(d.mode) };
+              const entry = { app_id: key(d.app_id), app_name: d.app_name.trim(), mode: slug(d.mode) };
               if (!entry.app_id || !exists(entry.mode)) continue;
               const at = app_defaults.findIndex((x) => x.app_id === entry.app_id);
               if (at >= 0) app_defaults[at] = entry;
@@ -178,50 +212,68 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
               custom: [],
               app_defaults: [],
               ...(w.__owModesSettings ?? {}),
-            });
+            } as ModesSettings);
           }
           const stored = w.__owModesStored;
-          // `modes::list` in core: the built-in mode, put together
-          // from the Refine instructions, then the user's own.
-          const list = (settings: ModesSettings) => [
-            {
-              id: BUILTIN,
-              name: "Dictation",
-              instructions:
-                w.__owRefineStored?.instructions ?? w.__owRefineSettings?.instructions ?? "",
-              model: null,
-              effort: null,
-              builtin: true,
-            },
-            ...settings.custom.map((m) => ({ ...m, builtin: false })),
-          ];
+          // `modes::list` in core (the built-in mode, put together from
+          // the Refine instructions, then the user's own), each with
+          // what its own model and effort mean for the backend in use,
+          // as `ModeRow` in src-tauri/src/modes.rs adds.
+          const list = (settings: ModesSettings) =>
+            [
+              {
+                id: BUILTIN,
+                name: BUILTIN_NAME,
+                instructions:
+                  w.__owRefineStored?.instructions ?? w.__owRefineSettings?.instructions ?? "",
+                model: null,
+                effort: null,
+                backend: null,
+                builtin: true,
+              },
+              ...settings.custom.map((m) => ({ ...m, builtin: false })),
+            ].map((m) => ({
+              ...m,
+              override_backend: overrideBackend(m),
+              overrides_apply: overrideBackend(m) === activeBackend(),
+            }));
           // A copy, as over real IPC.
           const now = (settings: ModesSettings) =>
             structuredClone({ settings, modes: list(settings) });
           if (cmd === "modes_get") {
+            // `modes::apps_for_defaults` in core: the apps with a
+            // default, then the apps in the history, then the apps
+            // that are open, each once whatever the case of its id.
             const apps: { id: string; name: string }[] = [];
-            for (const e of w.__owHistoryEntries ?? []) {
-              if (e.app_id && !apps.some((a) => a.id === e.app_id)) {
-                apps.push({ id: e.app_id, name: e.app_name ?? e.app_id });
-              }
-            }
-            for (const d of stored.app_defaults) {
-              if (!apps.some((a) => a.id === d.app_id)) {
-                apps.push({ id: d.app_id, name: d.app_name || d.app_id });
-              }
-            }
+            const offer = (id: string | null, name: string | null) => {
+              const appId = key(id ?? "");
+              const appName = (name ?? "").trim();
+              if (!appId) return;
+              const known = apps.find((x) => x.id === appId);
+              if (!known) apps.push({ id: appId, name: appName || appId });
+              else if (known.name === known.id && appName) known.name = appName;
+            };
+            for (const d of stored.app_defaults) offer(d.app_id, d.app_name);
+            for (const e of w.__owHistoryEntries ?? []) offer(e.app_id, e.app_name);
+            for (const r of w.__owRunningApps ?? []) offer(r.id, r.name);
             return { ...now(stored), apps };
           }
           const a = (args ?? {}) as Record<string, unknown>;
           const unknown = (id: unknown) => `There is no mode with the id "${String(id)}".`;
           const has = (id: unknown) =>
             id === BUILTIN || stored.custom.some((m) => m.id === id);
+          // `check_name_free` in core: a name another mode has, ignoring
+          // case and outer space, is refused.
+          const nameHolder = (name: string, except: string | null) =>
+            key(name) === key(BUILTIN_NAME)
+              ? BUILTIN_NAME
+              : stored.custom.find((m) => m.id !== except && key(m.name) === key(name))?.name;
+          const taken = (holder: string) =>
+            `There is already a mode called "${holder}". Give this one another name.`;
           let next: ModesSettings = structuredClone(stored);
           // The user switching mode, as opposed to editing the modes.
           let switched = false;
-          if (cmd === "modes_save") {
-            next = a.settings as ModesSettings;
-          } else if (cmd === "modes_select") {
+          if (cmd === "modes_select") {
             if (!has(a.id)) throw unknown(a.id);
             next.active = a.id as string;
             switched = true;
@@ -231,13 +283,17 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             next.active = ids[(ids.indexOf(next.active) + 1) % ids.length];
             switched = true;
           } else if (cmd === "modes_add") {
-            if (!String(a.name ?? "").trim()) throw "A mode needs a name.";
+            const name = String(a.name ?? "");
+            if (!name.trim()) throw "A mode needs a name.";
+            const holder = nameHolder(name, null);
+            if (holder) throw taken(holder);
             next.custom.push({
               id: "",
-              name: a.name as string,
+              name,
               instructions: (a.instructions as string) ?? "",
               model: (a.model as string | null) ?? null,
               effort: (a.effort as string | null) ?? null,
+              backend: activeBackend(),
             });
           } else if (cmd === "modes_edit") {
             if (a.id === BUILTIN) {
@@ -245,29 +301,44 @@ async function installTauriShim(page: Page, label: "main" | "pill" = "main") {
             }
             const mode = next.custom.find((m) => m.id === a.id);
             if (!mode) throw unknown(a.id);
-            if (!String(a.name ?? "").trim()) throw "A mode needs a name.";
-            mode.name = a.name as string;
+            const name = String(a.name ?? "");
+            if (!name.trim()) throw "A mode needs a name.";
+            const holder = nameHolder(name, mode.id);
+            if (holder) throw taken(holder);
+            mode.name = name;
             mode.instructions = (a.instructions as string) ?? "";
-            mode.model = (a.model as string | null) ?? null;
-            mode.effort = (a.effort as string | null) ?? null;
+            // `ModeEdit::backend` in core: a model and effort kept for
+            // the other backend are left alone by an edit that names
+            // neither, and replaced together by one that names either.
+            const model = (a.model as string | null) ?? null;
+            const effort = (a.effort as string | null) ?? null;
+            const storedFor = overrideBackend(mode);
+            if (storedFor === null || storedFor === activeBackend() || model || effort) {
+              mode.model = model;
+              mode.effort = effort;
+              if (model || effort) mode.backend = activeBackend();
+            }
           } else if (cmd === "modes_delete") {
             if (a.id === BUILTIN) throw "The Dictation mode is built in and cannot be deleted.";
             if (!has(a.id)) throw unknown(a.id);
             // `cleaned` drops its app defaults and the selection.
             next.custom = next.custom.filter((m) => m.id !== a.id);
           } else if (cmd === "modes_set_app_default") {
-            if (!String(a.appId ?? "").trim()) throw "An app default needs the id of the app.";
+            const appId = key(String(a.appId ?? ""));
+            if (!appId) throw "An app default needs the id of the app.";
             if (!has(a.modeId)) throw unknown(a.modeId);
+            const known = next.app_defaults.find((d) => d.app_id === appId)?.app_name ?? "";
             next.app_defaults.push({
-              app_id: a.appId as string,
-              app_name: (a.appName as string) ?? "",
+              app_id: appId,
+              app_name: String(a.appName ?? "").trim() || known,
               mode: a.modeId as string,
             });
           } else if (cmd === "modes_clear_app_default") {
-            if (!next.app_defaults.some((d) => d.app_id === a.appId)) {
-              throw `The app "${String(a.appId)}" has no default mode.`;
+            const appId = key(String(a.appId ?? ""));
+            if (!next.app_defaults.some((d) => d.app_id === appId)) {
+              throw `The app "${String(a.appId).trim()}" has no default mode.`;
             }
-            next.app_defaults = next.app_defaults.filter((d) => d.app_id !== a.appId);
+            next.app_defaults = next.app_defaults.filter((d) => d.app_id !== appId);
           } else {
             return null;
           }
@@ -1244,6 +1315,7 @@ export interface MockModesChanged {
       instructions: string;
       model: string | null;
       effort: string | null;
+      backend?: "claude-cli" | "openai-compatible" | null;
     }[];
     app_defaults: { app_id: string; app_name: string; mode: string }[];
   };
@@ -1253,7 +1325,10 @@ export interface MockModesChanged {
     instructions: string;
     model: string | null;
     effort: string | null;
+    backend?: "claude-cli" | "openai-compatible" | null;
     builtin: boolean;
+    override_backend?: "claude-cli" | "openai-compatible" | null;
+    overrides_apply?: boolean;
   }[];
   switched_to: string | null;
 }

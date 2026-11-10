@@ -30,7 +30,7 @@
 //!   dictations; switch it on or off, set the retention and the
 //!   folder.
 //! - `focus`: print which app is frontmost and its window title
-//!   (TASK-94).
+//!   (TASK-94); `--running` lists the apps that are open.
 //! - `modes`: the modes of the Refine step (TASK-96). List, add, edit
 //!   and delete your own modes, select one or cycle to the next, give
 //!   an app a default mode, and ask which mode a dictation would run

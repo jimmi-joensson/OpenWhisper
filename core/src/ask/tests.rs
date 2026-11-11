@@ -1274,6 +1274,39 @@ fn switches_changed_while_talking_are_the_ones_that_count() {
     assert!(!c.last_system.contains("Facts about the person's computer"), "{}", c.last_system);
 }
 
+/// `openwhisper ask config --context ...` from a terminal edits the
+/// file while the app runs: the facts switched off there do not go
+/// out with the next ask, although the block the app loaded has them
+/// on.
+#[test]
+fn facts_switched_off_in_the_file_do_not_go_out_with_the_next_ask() {
+    let calls = calls();
+    let _scope = scope(on(), saying(&calls, "Fire."));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    crate::settings::set_settings_file(Some(&path));
+    // The app's own block: every group of facts is on.
+    let done = submit("what is two plus two").unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    assert!(calls.lock().unwrap().last_system.contains("Facts about the person's computer"));
+
+    std::fs::write(
+        &path,
+        r#"{"ask":{"enabled":true,"context":{"date_time":false,"computer":false,"front_app":false,"locale":false,"place":""}}}"#,
+    )
+    .unwrap();
+    let id = begin_listening().unwrap();
+    let done = submit_listening(id, "what is two plus two", 800).unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    let c = calls.lock().unwrap();
+    assert!(!c.last_system.contains("Facts about the person's computer"), "{}", c.last_system);
+    // The backend was warmed with the facts of the file: it answered.
+    assert_eq!(c.warmed, 1);
+    drop(c);
+    // The switch itself stays with the cache and the shell.
+    assert!(crate::settings::current_ask_settings().context.front_app);
+}
+
 #[test]
 fn the_preview_is_the_text_an_ask_would_send() {
     let place = crate::settings::ContextSettings { place: " Aarhus,  Denmark ".into(), ..context_off() };

@@ -530,6 +530,46 @@ openwhisper ask config --web-search true, or pass --web-search";
         assert_eq!(sent["message"]["content"][0]["text"], "<question>\nwho runs bren holt\n</question>");
     }
 
+    /// The fake, with an account at its rate limit: every question is
+    /// refused the way the real CLI reports a 429. Counts the
+    /// questions it was sent (each case is a process of its own).
+    fn fake_cli_at_its_limit(cfg: &Config) -> String {
+        let limited = FAKE.replace(
+            "while read -r line; do\n",
+            "while read -r line; do\n  n=$(cat \"$here/asked.txt\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$here/asked.txt\"\n  \
+echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"API Error: 429 rate_limit_error: this request would exceed your rate limit\"}'; continue\n",
+        );
+        assert!(limited.contains("asked.txt"), "the fake changed shape");
+        script(cfg, "claude-limited", &limited)
+    }
+
+    #[test]
+    fn eval_stops_at_a_rate_limit_instead_of_counting_failures() {
+        let cfg = Config::new("eval-limit");
+        let claude = fake_cli_at_its_limit(&cfg);
+        let out = cfg.spawn(&["ask", "eval", "--claude-path", &claude]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(2), "{stdout}");
+        // The first case was refused: it is not a failed case, and
+        // not one more question was sent.
+        assert!(stdout.contains("STOP  fact-en"), "{stdout}");
+        assert!(!stdout.contains("FAIL") && !stdout.contains("PASS"), "{stdout}");
+        assert!(stdout.contains("0/0 passed"), "{stdout}");
+        assert!(stdout.contains("stopped: the backend reported a spend or rate limit at \"fact-en\""), "{stdout}");
+        assert!(stdout.contains("cases were not run, nothing more was sent."), "{stdout}");
+        assert_eq!(recorded(&cfg, "asked.txt").trim(), "1");
+
+        let out = cfg.spawn(&["--json", "ask", "eval", "--only", "fact", "--claude-path", &claude]);
+        assert_eq!(out.status.code(), Some(2));
+        let report: Value = serde_json::from_slice(&out.stdout).expect("a JSON report");
+        assert_eq!(report["stopped"]["case"], "fact-en");
+        assert_eq!(report["stopped"]["not_run"], 1);
+        assert_eq!(report["total"], 0);
+        // A run that was not stopped says so.
+        let whole = cfg.json(&["ask", "eval", "--only", "fact", "--claude-path", &fake_cli(&cfg)]);
+        assert_eq!(whole["stopped"], Value::Null);
+    }
+
     #[test]
     fn eval_runs_the_cases_it_is_asked_for_and_reports_latency() {
         let cfg = Config::new("eval");

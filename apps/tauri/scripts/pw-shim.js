@@ -156,6 +156,9 @@ async (page) => {
             elapsed_ms: 0,
             first_text_ms: null,
             usage: null,
+            // Vision (TASK-98): what became of the screen.
+            screen: "none",
+            screen_notice: "",
             version,
           });
           const snap = w.__owAskSnapshot ?? idle(0);
@@ -319,6 +322,135 @@ async (page) => {
             if (!snap.answer.trim()) return false;
             w.__owAskCopied = [...(w.__owAskCopied ?? []), snap.answer];
             return true;
+          }
+          return null;
+        }
+        // Vision (TASK-98), mirroring tests/fixtures/tauri-shim.ts:
+        // the Screen section of the Ask pane. An
+        // in-memory `vision` block that behaves like core: a list that
+        // is null is the built-in one, and every save is tidied the
+        // way `VisionSettings::cleaned` does it (one line, single
+        // spaces, empty and double entries dropped ignoring case, app
+        // ids in lower case). `__owVisionSettings` seeds the stored
+        // block, `__owVisionPermission` the permission state
+        // (granted unless set), `__owVisionPermissionAfterRequest`
+        // what a request for it answers, `__owVisionPlatform` the
+        // platform (macos unless set) and `__owRunningApps` the open
+        // apps. `__owVisionSetError` makes a save fail. Every call is
+        // recorded in `__owVisionCalls` and every save in
+        // `__owVisionSaves`; a save emits `vision_changed`, as Rust
+        // does. There is no command that takes a screenshot, here or
+        // in Rust. The built-in lists here are short stand-ins with
+        // made-up apps; the real ones are in
+        // core/src/settings/vision.rs.
+        if (cmd.startsWith("vision_")) {
+          const w = window;
+          w.__owVisionCalls = [...(w.__owVisionCalls ?? []), { cmd, args: args ?? {} }];
+          const platform = w.__owVisionPlatform ?? "macos";
+          const defaultPhrases = [
+            "look at my screen",
+            "on my screen",
+            "this error",
+            "se på min skærm",
+            "på min skærm",
+            "denne fejl",
+          ];
+          const defaultNeverCapture =
+            platform === "windows"
+              ? [
+                  { id: "vault.exe", name: "Vault" },
+                  { id: "keyring.exe", name: "Keyring" },
+                ]
+              : [
+                  { id: "com.example.vault", name: "Vault" },
+                  { id: "com.example.keyring", name: "Keyring" },
+                ];
+          // `tidy` in core: one line, single spaces, at most `max`
+          // characters.
+          const tidy = (s, max) =>
+            Array.from(s.split(/\s+/).filter(Boolean).join(" ")).slice(0, max).join("").trimEnd();
+          // `VisionSettings::cleaned` in core.
+          const cleaned = (s) => {
+            let phrases = null;
+            if (Array.isArray(s.phrases)) {
+              phrases = [];
+              for (const raw of s.phrases) {
+                const phrase = tidy(String(raw), 80);
+                const key = phrase.toLowerCase();
+                if (!phrase || phrases.some((p) => p.toLowerCase() === key)) continue;
+                phrases.push(phrase);
+                if (phrases.length === 100) break;
+              }
+            }
+            let apps = null;
+            if (Array.isArray(s.never_capture)) {
+              apps = [];
+              for (const raw of s.never_capture) {
+                const id = tidy(String(raw.id ?? ""), 200).toLowerCase();
+                if (!id || apps.some((a) => a.id === id)) continue;
+                apps.push({ id, name: tidy(String(raw.name ?? ""), 200) });
+                if (apps.length === 200) break;
+              }
+            }
+            // A trigger core does not know reads as off.
+            const trigger = ["off", "phrases", "smart", "always"].includes(s.trigger)
+              ? s.trigger
+              : "off";
+            return { trigger, phrases, never_capture: apps };
+          };
+          if (!w.__owVisionStored) {
+            w.__owVisionStored = cleaned({
+              // The trigger of someone who never chose one: off on
+              // Windows, where capture is not verified yet
+              // (`default_trigger_on` in core).
+              trigger: platform === "windows" ? "off" : "phrases",
+              phrases: null,
+              never_capture: null,
+              ...(w.__owVisionSettings ?? {}),
+            });
+          }
+          const stored = w.__owVisionStored;
+          const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+          if (cmd === "vision_get") {
+            const phrases = stored.phrases ?? defaultPhrases;
+            const neverCapture = stored.never_capture ?? defaultNeverCapture;
+            return structuredClone({
+              settings: stored,
+              phrases,
+              never_capture: neverCapture,
+              default_phrases: defaultPhrases,
+              default_never_capture: defaultNeverCapture,
+              phrases_are_default: same(phrases, defaultPhrases),
+              never_capture_is_default: same(neverCapture, defaultNeverCapture),
+              // Windows has nothing to grant.
+              permission: platform === "windows" ? "granted" : (w.__owVisionPermission ?? "granted"),
+              platform,
+              // Verified on macOS, not yet on Windows
+              // (`capture_verified_on` in src-tauri/src/vision.rs).
+              capture_verified: platform !== "windows",
+              default_trigger: platform === "windows" ? "off" : "phrases",
+            });
+          }
+          if (cmd === "vision_set") {
+            if (w.__owVisionSetError) throw w.__owVisionSetError;
+            const { settings } = args ?? {};
+            const saved = cleaned(settings);
+            w.__owVisionStored = saved;
+            w.__owVisionSaves = [...(w.__owVisionSaves ?? []), saved];
+            window.__owEmit("vision_changed", structuredClone(saved));
+            return structuredClone(saved);
+          }
+          if (cmd === "vision_request_permission") {
+            // The system's prompt is not played here: the answer is
+            // the state a test set for "after the request".
+            const next = w.__owVisionPermissionAfterRequest ?? w.__owVisionPermission ?? "granted";
+            w.__owVisionPermission = next;
+            return next;
+          }
+          // Whether a pane was opened: only macOS has one.
+          if (cmd === "vision_open_settings") return platform === "macos";
+          if (cmd === "vision_running_apps") {
+            return (w.__owRunningApps ?? []).map((a) => ({ id: a.id.toLowerCase(), name: a.name }));
           }
           return null;
         }

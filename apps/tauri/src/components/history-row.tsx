@@ -103,6 +103,13 @@ function HistoryRow({
               Ask
             </Badge>
           )}
+          {/* The ask was sent with a picture of the screen
+              (TASK-98). Only the fact is stored, never the picture. */}
+          {ask && entry.screen && (
+            <Badge variant="outline" data-testid="history-row-screen">
+              Screen
+            </Badge>
+          )}
         </div>
         <p
           className="ow-history-row__text ow-selectable"

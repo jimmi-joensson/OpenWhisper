@@ -12,7 +12,10 @@
 //!   leaves the diagnostics row an ask in the app leaves (a row in
 //!   `refine_runs`, when the app's database exists), and with
 //!   `--history` the question and answer in the transcript history,
-//!   when that is switched on.
+//!   when that is switched on. `--screen` sends a screenshot of the
+//!   display you are working on with the question, and `--vision
+//!   TRIGGER` lets the Vision trigger decide (TASK-98); without
+//!   either, a run never looks at the screen.
 //! - `status`: whether the backend can run, where questions are sent,
 //!   and the settings an ask would use.
 //! - `config`: print the `ask` settings block, or change it with
@@ -36,11 +39,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, context, eval};
+use openwhisper_core::ask::{
+    self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, ScreenState, VisionChoice, context, eval,
+};
 use openwhisper_core::refine;
-use openwhisper_core::settings::{self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings};
+use openwhisper_core::settings::{
+    self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings, VisionSettings, VisionTrigger,
+};
 use openwhisper_core::store::Store;
-use openwhisper_core::{dictionary, history, stats, transcript};
+use openwhisper_core::{dictionary, history, stats, transcript, vision};
 
 #[derive(Args, Debug)]
 pub struct AskArgs {
@@ -118,6 +125,18 @@ pub struct RunArgs {
     /// Off by default, so a script does not write into it.
     #[arg(long)]
     history: bool,
+    /// Send a screenshot of the display you are working on with the
+    /// question, whatever the Vision trigger says. Apps on the
+    /// never-capture list stay out of it, and with one of them in
+    /// front there is no screenshot.
+    #[arg(long, conflicts_with = "vision")]
+    screen: bool,
+    /// Let Vision decide for this run, with this trigger: off,
+    /// phrases, smart or always, or "saved" for the trigger in the
+    /// settings. Without this and without --screen, a run never looks
+    /// at the screen.
+    #[arg(long, value_name = "TRIGGER")]
+    vision: Option<String>,
     /// The app to name as the one in front. From a terminal the app
     /// in front is the terminal, which says nothing about what you
     /// are working on, so without this flag no app is named. Used
@@ -244,7 +263,7 @@ fn settings_path() -> Result<PathBuf> {
 
 /// The saved Ask and Refine blocks with `overrides` applied (not
 /// persisted).
-fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
+pub(super) fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
     let path = settings_path()?;
     apply(settings::load_ask_settings(&path), settings::load_refine_settings(&path), overrides)
 }
@@ -352,8 +371,60 @@ fn suggestion_line(suggestion: AskSuggestion) -> &'static str {
     }
 }
 
-fn effort_label(effort: &str) -> String {
+pub(super) fn effort_label(effort: &str) -> String {
     if effort.is_empty() { String::new() } else { format!(", {effort} effort") }
+}
+
+/// The trigger `--vision` names; "saved" is the one in the settings.
+pub(super) fn parse_trigger(id: &str, saved: VisionTrigger) -> Result<VisionTrigger> {
+    if id.trim().eq_ignore_ascii_case("saved") {
+        return Ok(saved);
+    }
+    VisionTrigger::parse(id).ok_or_else(|| anyhow!("unknown trigger \"{id}\"; use off, phrases, smart, always or saved"))
+}
+
+/// Whether and how this run may include the screen: the saved Vision
+/// settings (its phrases and its never-capture list always apply),
+/// with the trigger `--vision` names, or a forced capture with
+/// `--screen`.
+fn vision_for(screen: bool, trigger: Option<&str>) -> Result<(VisionSettings, VisionChoice)> {
+    let saved = settings::load_vision_settings(&settings_path()?);
+    if screen {
+        return Ok((saved, VisionChoice::Force));
+    }
+    match trigger {
+        Some(id) => {
+            let trigger = parse_trigger(id, saved.trigger)?;
+            Ok((VisionSettings { trigger, ..saved }, VisionChoice::Settings))
+        }
+        None => Ok((saved, VisionChoice::None)),
+    }
+}
+
+/// What will happen with the screen, said before anything is sent or
+/// captured. Empty when the run does not involve the screen at all.
+fn screen_plan(vision: &VisionSettings, choice: VisionChoice, question: &str) -> String {
+    match choice {
+        VisionChoice::None => String::new(),
+        VisionChoice::Force => "screen: a screenshot of the display you are working on goes with the question".to_string(),
+        VisionChoice::Settings => match vision::decide(vision, question) {
+            vision::Decision::Capture { phrase: Some(phrase) } => {
+                format!("screen: a screenshot goes with the question (you said \"{phrase}\")")
+            }
+            vision::Decision::Capture { phrase: None } => {
+                "screen: a screenshot goes with the question (trigger: always)".to_string()
+            }
+            vision::Decision::AskModel => {
+                "screen: the question goes as text; a screenshot follows only if the model asks for it".to_string()
+            }
+            vision::Decision::NoCapture if vision.trigger == VisionTrigger::Off => {
+                "screen: not included (trigger: off)".to_string()
+            }
+            vision::Decision::NoCapture => {
+                "screen: not included (trigger: phrases, and the question has none of them)".to_string()
+            }
+        },
+    }
 }
 
 fn run_question(args: RunArgs, json: bool) -> Result<()> {
@@ -379,15 +450,21 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         bail!("no question given: pass it as an argument or pipe it on stdin");
     }
 
+    let (vision_settings, vision_choice) = vision_for(args.screen, args.vision.as_deref())?;
     // The facts about this computer the saved settings ask for. No
     // app in front unless one was named: here that is the terminal.
-    let plan = AskPlan::for_app(&ask, &refine, args.front_app.as_deref());
+    let plan =
+        AskPlan::for_app(&ask, &refine, args.front_app.as_deref()).with_vision(&vision_settings, vision_choice);
     let destination = plan.destination();
     let recorded = use_store();
     let kept = args.history && use_history()?;
     if !json {
         // Before anything leaves the machine.
         eprintln!("question goes to: {destination}");
+        let screen = screen_plan(&vision_settings, vision_choice, &question);
+        if !screen.is_empty() {
+            eprintln!("{screen}");
+        }
         if !plan.notice.is_empty() {
             eprintln!("note: {}", plan.notice);
         }
@@ -405,7 +482,22 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
     let stream = !json && !args.no_stream;
     let mut out = std::io::stdout().lock();
     let mut last_char = '\n';
+    // What became of the screen, also when there is no answer.
+    let mut screen = (ScreenState::None, String::new());
     let mut sink = |event: AskEvent| match event {
+        AskEvent::Screen { state, notice } => {
+            if !json {
+                match state {
+                    ScreenState::Capturing => eprintln!("screen: capturing"),
+                    ScreenState::Included => eprintln!("screen: included"),
+                    ScreenState::Blocked | ScreenState::Unavailable => eprintln!("screen: not included. {notice}"),
+                    _ => {}
+                }
+            }
+            if state != ScreenState::Capturing {
+                screen = (state, notice);
+            }
+        }
         AskEvent::Text(piece) if stream => {
             if let Some(c) = piece.chars().last() {
                 last_char = c;
@@ -453,6 +545,13 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "model": plan.setup.model,
             "effort": effort,
             "web_search": plan.setup.web_search,
+            "screen": reply.map_or(screen.0, |r| r.screen).as_str(),
+            "screen_notice": reply.map_or(screen.1.as_str(), |r| r.screen_notice.as_str()),
+            "vision": match vision_choice {
+                VisionChoice::None => "none",
+                VisionChoice::Force => "screen",
+                VisionChoice::Settings => vision_settings.trigger.as_str(),
+            },
             "timeout_ms": plan.timeout.as_millis() as u64,
             "context": plan.context,
             "destination": destination,
@@ -637,7 +736,13 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     println!("place          {}", if current.context.place.is_empty() { "(none)" } else { &current.context.place });
     println!("{}  {}", if changes { "written      " } else { "settings_path" }, path.display());
     if changes {
-        eprintln!("A running OpenWhisper picks this up when its Ask settings are opened, or on restart.");
+        // The facts about the computer are read from the file by every
+        // ask (`settings::fresh_ask_context`); the rest of the block
+        // is what the app loaded.
+        eprintln!(
+            "A running OpenWhisper sends the facts about this computer as set here from its next ask on; it picks \
+up the rest when its Ask settings are opened, or on restart."
+        );
     }
     Ok(())
 }
@@ -694,7 +799,7 @@ app you are working in; try one with --front-app NAME"
 }
 
 /// An answer on one line, cut to fit a terminal row.
-fn one_line(answer: &str) -> String {
+pub(super) fn one_line(answer: &str) -> String {
     let flat = answer.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = flat.chars().take(110).collect();
     if flat.chars().count() > 110 {
@@ -722,14 +827,26 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         }
     }
     let mut results = Vec::new();
-    for case in cases() {
-        if args.only.as_deref().is_some_and(|prefix| !case.name.starts_with(prefix)) {
-            continue;
-        }
+    let mut stopped: Option<Stopped> = None;
+    let chosen: Vec<eval::EvalCase> = cases()
+        .into_iter()
+        .filter(|case| args.only.as_deref().is_none_or(|prefix| case.name.starts_with(prefix)))
+        .collect();
+    for (at, case) in chosen.iter().enumerate() {
         // A fresh conversation per case, like a fresh ask.
-        let plan = if args.no_context { plan.clone() } else { eval::plan_for(&case, &ask, &refine) };
+        let plan = if args.no_context { plan.clone() } else { eval::plan_for(case, &ask, &refine) };
         let mut backend = plan.backend();
-        let result = eval::run_case(&case, &plan, backend.as_mut());
+        let result = eval::run_case(case, &plan, backend.as_mut());
+        // A spend or rate limit: not a wrong answer, and every
+        // further question would be refused the same way.
+        if eval::limit_reached(&result.error) {
+            let stop = Stopped { case: result.name, reason: result.error, not_run: chosen.len() - at };
+            if !json {
+                println!("{}", stop.line());
+            }
+            stopped = Some(stop);
+            break;
+        }
         if !json {
             println!(
                 "{}  {:<26} {:>6} {:>6} ms  {}{}",
@@ -752,7 +869,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         }
         results.push(result);
     }
-    if results.is_empty() {
+    if chosen.is_empty() {
         bail!(
             "no eval case starts with \"{}\"; the cases are: {}",
             args.only.unwrap_or_default(),
@@ -771,6 +888,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
             "device_context": !args.no_context,
             "passed": passed,
             "total": results.len(),
+            "stopped": stopped.as_ref().map(Stopped::to_json),
             "latency_ms": { "first_text": first_text.to_json(), "total": total.to_json() },
             "results": results,
         });
@@ -791,6 +909,12 @@ median {} ms, max {} ms",
             total.median,
             total.max
         );
+        if let Some(stop) = &stopped {
+            println!("{}", stop.summary());
+        }
+    }
+    if stopped.is_some() {
+        std::process::exit(STOPPED_EXIT);
     }
     if passed == results.len() {
         Ok(())
@@ -799,22 +923,61 @@ median {} ms, max {} ms",
     }
 }
 
+/// What an eval run exits with when it stopped at a limit of the
+/// account: not 0 (the set did not pass) and not 1 (no case failed).
+pub(super) const STOPPED_EXIT: i32 = 2;
+
+/// An eval run that ended early: the backend refused a case because a
+/// spend or rate limit is reached (`eval::limit_reached`). That case
+/// is not a failed case, and nothing was sent after it.
+pub(super) struct Stopped {
+    /// The case that was refused.
+    pub case: String,
+    /// What the backend said.
+    pub reason: String,
+    /// How many cases were not judged: the refused one and every case
+    /// after it.
+    pub not_run: usize,
+}
+
+impl Stopped {
+    /// The row in the list of cases.
+    pub(super) fn line(&self) -> String {
+        format!("STOP  {:<26} {}", self.case, one_line(&self.reason))
+    }
+
+    /// The last line of the report.
+    pub(super) fn summary(&self) -> String {
+        format!(
+            "stopped: the backend reported a spend or rate limit at \"{}\" ({}). {} not run, nothing more was sent. \
+The cases above are the ones that were judged; the run is not a result for the whole set.",
+            self.case,
+            one_line(&self.reason),
+            if self.not_run == 1 { "1 case was".to_string() } else { format!("{} cases were", self.not_run) }
+        )
+    }
+
+    pub(super) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "case": self.case, "reason": self.reason, "not_run": self.not_run })
+    }
+}
+
 /// Response times over the cases that got an answer.
 #[derive(Debug, PartialEq, Eq)]
-struct Latency {
-    answers: usize,
-    min: u64,
-    median: u64,
-    max: u64,
+pub(super) struct Latency {
+    pub(super) answers: usize,
+    pub(super) min: u64,
+    pub(super) median: u64,
+    pub(super) max: u64,
 }
 
 impl Latency {
-    fn to_json(&self) -> serde_json::Value {
+    pub(super) fn to_json(&self) -> serde_json::Value {
         serde_json::json!({ "answers": self.answers, "min": self.min, "median": self.median, "max": self.max })
     }
 }
 
-fn latency(times: impl Iterator<Item = u64>) -> Latency {
+pub(super) fn latency(times: impl Iterator<Item = u64>) -> Latency {
     let mut times: Vec<u64> = times.collect();
     times.sort_unstable();
     Latency {
@@ -880,6 +1043,26 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_is_announced_before_anything_is_sent() {
+        let with = |trigger| VisionSettings { trigger, ..VisionSettings::default() };
+        // A plain run does not involve the screen and says nothing.
+        assert_eq!(screen_plan(&with(VisionTrigger::Always), VisionChoice::None, "look at my screen"), "");
+        let forced = screen_plan(&with(VisionTrigger::Off), VisionChoice::Force, "two plus two");
+        assert!(forced.contains("a screenshot of the display you are working on goes with the question"), "{forced}");
+        let said = |trigger, question| screen_plan(&with(trigger), VisionChoice::Settings, question);
+        assert_eq!(said(VisionTrigger::Off, "look at my screen"), "screen: not included (trigger: off)");
+        assert!(said(VisionTrigger::Phrases, "two plus two").contains("the question has none of them"));
+        assert!(said(VisionTrigger::Phrases, "what is on my screen").contains("(you said \"on my screen\")"));
+        assert!(said(VisionTrigger::Phrases, "hvad står der på min skærm").contains("(you said \"på min skærm\")"));
+        assert!(said(VisionTrigger::Smart, "two plus two").contains("only if the model asks for it"));
+        assert!(said(VisionTrigger::Always, "two plus two").contains("(trigger: always)"));
+
+        assert_eq!(parse_trigger(" Smart ", VisionTrigger::Off).unwrap(), VisionTrigger::Smart);
+        assert_eq!(parse_trigger("saved", VisionTrigger::Always).unwrap(), VisionTrigger::Always);
+        assert!(parse_trigger("sometimes", VisionTrigger::Off).unwrap_err().to_string().contains("sometimes"));
+    }
+
+    #[test]
     fn the_web_search_suggestion_names_both_ways_to_switch_it_on() {
         let line = suggestion_line(AskSuggestion::WebSearch);
         assert!(line.starts_with("web search is off, so this answer could not look anything up."), "{line}");
@@ -922,6 +1105,26 @@ mod tests {
         assert!(!AskPlan::for_app(&ask, &refine, None).context.contains("App in front"));
         let named = AskPlan::for_app(&ask, &refine, Some("Notes"));
         assert!(named.context.contains("\nApp in front: Notes"), "{}", named.context);
+    }
+
+    #[test]
+    fn a_stopped_run_says_where_why_and_how_much_was_left() {
+        let stop = Stopped {
+            case: "fact-en".into(),
+            reason: "Claude Code: API Error: 429\nrate_limit_error".into(),
+            not_run: 14,
+        };
+        assert!(stop.line().starts_with("STOP  fact-en"), "{}", stop.line());
+        assert!(!stop.line().contains('\n'));
+        let summary = stop.summary();
+        assert!(summary.contains("a spend or rate limit at \"fact-en\""), "{summary}");
+        assert!(summary.contains("14 cases were not run, nothing more was sent."), "{summary}");
+        assert!(Stopped { not_run: 1, ..stop }.summary().contains("1 case was not run"));
+        assert_eq!(
+            Stopped { case: "a".into(), reason: "b".into(), not_run: 2 }.to_json(),
+            serde_json::json!({ "case": "a", "reason": "b", "not_run": 2 })
+        );
+        assert_eq!(STOPPED_EXIT, 2);
     }
 
     #[test]

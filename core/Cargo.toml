@@ -24,7 +24,7 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer", "refine", "focus", "ask"]
+tauri = ["recognizer", "refine", "focus", "ask", "vision"]
 # Refine (TASK-93): optional language-model cleanup after transcription,
 # through the user's Claude Code CLI or an OpenAI-compatible endpoint.
 # Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
@@ -46,6 +46,27 @@ ask = [
     "dep:core-foundation",
     "dep:windows",
 ]
+# Vision (TASK-98): an ask can carry a screenshot of the display the
+# person is working on. Capture, the never-capture layers and the
+# in-memory PNG live in `core::vision`; nothing is ever written to
+# disk. Needs `ask` (a screenshot exists only inside an ask) and
+# `focus` (which app is in front). The settings types are not gated.
+vision = [
+    "ask",
+    "focus",
+    "dep:png",
+    "dep:block2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
+    "dep:objc2-screen-capture-kit",
+]
+# The hook of Vision's live pixel test (`vision::probe_for_test`): a
+# capture outside an ask, aimed at the test's own windows, returning a
+# few sampled pixels. NOT part of any default or shell feature set, and
+# it must stay that way: a build that ships does not contain a way to
+# capture without an ask. Only the pixel test's own command line
+# switches it on (see `cli/tests/vision_live.rs`).
+vision-live-test = ["vision"]
 # Focus context (TASK-94): which app is frontmost and its window title.
 # Its own feature so the SwiftUI staticlib flavor does not pull in the
 # platform bindings it never calls.
@@ -130,6 +151,10 @@ base64 = { version = "0.22", optional = true }
 # platform, MIT OR Apache-2.0, and already in the lockfile: chrono's
 # `clock` feature depends on it.
 iana-time-zone = { version = "0.1", optional = true }
+# Vision (feature `vision`): the screenshot is encoded as PNG in
+# memory. Pure Rust, MIT OR Apache-2.0, already in the lockfile
+# through the Tauri shell.
+png = { version = "0.18", optional = true }
 # SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
 sha2 = { version = "0.10", optional = true }
 tar = { version = "0.4", optional = true }
@@ -188,15 +213,26 @@ keyring = { version = "3", optional = true, default-features = false, features =
 # the locale, the power source and the machine's name through.
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray", "NSError", "NSDictionary", "NSValue", "NSEnumerator"] }
 core-foundation = { version = "0.10", optional = true }
+# Vision: ScreenCaptureKit for the capture (an app can be left out of
+# the image itself), CoreGraphics for the window list, the displays
+# and the Screen Recording permission. All objc2 crates are
+# Zlib OR Apache-2.0 OR MIT; block2 is MIT.
+block2 = { version = "0.6", optional = true }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2", "CFArray", "CFDictionary", "CFString", "CFNumber", "CFData", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2", "CGError", "CGImage", "CGDataProvider", "CGDirectDisplay", "CGWindow", "CGColorSpace"] }
+objc2-screen-capture-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "SCShareableContent", "SCScreenshotManager", "SCStream", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
 
 # Refine API key storage: Windows Credential Manager.
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
 # Focus context: foreground window, owning process, exe version info.
-# Device context of an ask: power status, monitors, the BIOS keys of
-# the registry, the locale, the keyboard layout, the connection state.
+# Device context of an ask: power status, monitors (Gdi), the BIOS
+# keys of the registry, the locale, the keyboard layout, the
+# connection state.
+# Vision: monitor capture (Gdi), window bounds and the cloaked flag
+# (Dwm), per-monitor DPI awareness for the capturing thread (HiDpi).
 windows = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -208,6 +244,8 @@ windows = { version = "0.61", optional = true, features = [
     "Win32_Globalization",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Networking_WinInet",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_HiDpi",
 ] }
 
 [dev-dependencies]

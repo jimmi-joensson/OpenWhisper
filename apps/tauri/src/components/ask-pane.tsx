@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { VisionSettings } from "@/components/vision-settings";
 import { askContext, type AskContextSettings } from "@/lib/ask";
 import { configToChipKeys } from "@/lib/hotkey-format";
 import {
@@ -92,7 +93,8 @@ interface AskPaneProps {
 }
 
 // Ask pane (TASK-97): the switch for the second hotkey, where
-// questions are sent, and how they are answered.
+// questions are sent, how they are answered, and (the Screen
+// section, TASK-98) when an ask includes a picture of the screen.
 //
 // A thin view over Rust (`ask_get`, `ask_set`, and `ask_status` for
 // whether the backend can run). The backend itself (which model
@@ -258,6 +260,12 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
           />
         </>
       )}
+
+      <Separator />
+
+      {/* Vision (TASK-98): when an ask includes the screen. Its own
+          section with its own data; only in use while Ask is on. */}
+      <VisionSettings askEnabled={settings?.enabled ?? false} />
     </FieldGroup>
   );
 }

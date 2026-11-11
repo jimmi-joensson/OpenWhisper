@@ -175,6 +175,11 @@ export interface RefineRun {
   // An ask: ms from sending the question to the first text of the
   // answer. null for Refine runs and for asks that got no text.
   first_text_ms: number | null;
+  // An ask: whether a screenshot was taken for it (Vision). On the
+  // row of every ask, also one that failed or was cancelled. null for
+  // Refine runs and for rows from before asks could include the
+  // screen.
+  screen: boolean | null;
 }
 
 // Mirrors `PlanEstimate` in core/src/refine/history.rs. The windows
@@ -203,6 +208,8 @@ export interface RefineSummary {
   asks_answered: number;
   ask_median_first_text_ms: number | null;
   ask_median_ms: number | null;
+  // Asks a screenshot was taken for, answered or not.
+  asks_with_screen: number;
   refined: number;
   skipped: number;
   fallbacks: number;

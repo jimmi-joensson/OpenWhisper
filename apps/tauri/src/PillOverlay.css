@@ -95,9 +95,10 @@ body,
   flex-shrink: 0;
 }
 
-/* Name of the mode, shown for a moment after the user switches mode
- * (TASK-96). PillOverlay.tsx writes the text and flips `data-visible`;
- * nothing here changes the capsule.
+/* The label above the capsule: the name of the mode, shown for a
+ * moment after the user switches mode (TASK-96), and "Screen" while an
+ * ask looks at the screen (TASK-98). PillOverlay.tsx writes the text
+ * and flips `data-visible`; nothing here changes the capsule.
  *
  * Placement: the capsule is centered in the 180x110 window and grows
  * upward from its bottom edge (transform-origin above), so at its 1.5x

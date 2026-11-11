@@ -15,6 +15,21 @@ export type AskPhase =
   | "error"
   | "cancelled";
 
+// Mirrors `ScreenState` in core/src/ask/screen.rs: what became of
+// the screen in one ask (Vision, TASK-98). It is a word, never the
+// picture: a screenshot does not reach a window.
+export type AskScreen =
+  // No screenshot in this ask (so far).
+  | "none"
+  // The screen is being captured right now.
+  | "capturing"
+  // A screenshot was sent with the question.
+  | "included"
+  // No screenshot: an app on the never-capture list is in front.
+  | "blocked"
+  // A screenshot was wanted and could not be taken.
+  | "unavailable";
+
 // Mirrors `CallUsage` in core/src/refine/mod.rs: what the call used.
 export interface AskUsage {
   // All input tokens, cached ones included.
@@ -72,6 +87,11 @@ export interface AskSnapshot {
   elapsed_ms: number;
   first_text_ms: number | null;
   usage: AskUsage | null;
+  // What became of the screen in this ask.
+  screen: AskScreen;
+  // Why there is no screenshot, as one sentence for the person; ""
+  // unless `screen` is "blocked" or "unavailable".
+  screen_notice: string;
   // Goes up on every change.
   version: number;
 }
@@ -165,6 +185,12 @@ export interface AskState {
 // (`BackendStatus` in core, the one Refine's status is). Getting it
 // starts the Claude CLI for a moment, so only the Ask pane asks.
 export type AskBackendStatus = RefineBackendStatus;
+
+// The ask is looking at the screen now, or a screenshot went out
+// with the question: what the pill and the panel show.
+export function askSawScreen(screen: AskScreen | undefined): boolean {
+  return screen === "capturing" || screen === "included";
+}
 
 // An ask is listening, thinking or answering: a cancel would stop it.
 export function askIsBusy(phase: AskPhase): boolean {

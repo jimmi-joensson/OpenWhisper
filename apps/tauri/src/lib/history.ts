@@ -41,6 +41,9 @@ export interface HistoryEntry {
   kind: "ask" | null;
   // The answer of an ask; null for anything else.
   answer: string | null;
+  // The ask was sent with a screenshot of the screen (TASK-98). The
+  // picture is not kept anywhere; this only says there was one.
+  screen: boolean;
 }
 
 // The entry is an ask: `text` is a question, `answer` its answer.

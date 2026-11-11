@@ -559,6 +559,9 @@ async function installTauriShim(
             elapsed_ms: 0,
             first_text_ms: null,
             usage: null,
+            // Vision (TASK-98): what became of the screen.
+            screen: "none",
+            screen_notice: "",
             version,
           });
           const snap = w.__owAskSnapshot ?? idle(0);
@@ -728,6 +731,152 @@ async function installTauriShim(
             if (!snap.answer.trim()) return false;
             w.__owAskCopied = [...(w.__owAskCopied ?? []), snap.answer];
             return true;
+          }
+          return null;
+        }
+        // Vision (TASK-98): the Screen section of the Ask pane. An
+        // in-memory `vision` block that behaves like core: a list that
+        // is null is the built-in one, and every save is tidied the
+        // way `VisionSettings::cleaned` does it (one line, single
+        // spaces, empty and double entries dropped ignoring case, app
+        // ids in lower case). `__owVisionSettings` seeds the stored
+        // block, `__owVisionPermission` the permission state
+        // (granted unless set), `__owVisionPermissionAfterRequest`
+        // what a request for it answers, `__owVisionPlatform` the
+        // platform (macos unless set) and `__owRunningApps` the open
+        // apps. `__owVisionSetError` makes a save fail. Every call is
+        // recorded in `__owVisionCalls` and every save in
+        // `__owVisionSaves`; a save emits `vision_changed`, as Rust
+        // does. There is no command that takes a screenshot, here or
+        // in Rust. The built-in lists here are short stand-ins with
+        // made-up apps; the real ones are in
+        // core/src/settings/vision.rs. Keep in step with
+        // scripts/pw-shim.js.
+        if (cmd.startsWith("vision_")) {
+          type App = { id: string; name: string };
+          type Settings = {
+            trigger: string;
+            phrases: string[] | null;
+            never_capture: App[] | null;
+          };
+          type Permission = "granted" | "denied" | "unknown";
+          const w = window as unknown as {
+            __owVisionSettings?: Partial<Settings>;
+            __owVisionStored?: Settings;
+            __owVisionSaves?: Settings[];
+            __owVisionSetError?: string;
+            __owVisionCalls?: { cmd: string; args: Record<string, unknown> }[];
+            __owVisionPermission?: Permission;
+            __owVisionPermissionAfterRequest?: Permission;
+            __owVisionPlatform?: "macos" | "windows";
+            __owRunningApps?: App[];
+          };
+          w.__owVisionCalls = [...(w.__owVisionCalls ?? []), { cmd, args: args ?? {} }];
+          const platform = w.__owVisionPlatform ?? "macos";
+          const defaultPhrases = [
+            "look at my screen",
+            "on my screen",
+            "this error",
+            "se på min skærm",
+            "på min skærm",
+            "denne fejl",
+          ];
+          const defaultNeverCapture: App[] =
+            platform === "windows"
+              ? [
+                  { id: "vault.exe", name: "Vault" },
+                  { id: "keyring.exe", name: "Keyring" },
+                ]
+              : [
+                  { id: "com.example.vault", name: "Vault" },
+                  { id: "com.example.keyring", name: "Keyring" },
+                ];
+          // `tidy` in core: one line, single spaces, at most `max`
+          // characters.
+          const tidy = (s: string, max: number) =>
+            Array.from(s.split(/\s+/).filter(Boolean).join(" ")).slice(0, max).join("").trimEnd();
+          // `VisionSettings::cleaned` in core.
+          const cleaned = (s: Settings): Settings => {
+            let phrases: string[] | null = null;
+            if (Array.isArray(s.phrases)) {
+              phrases = [];
+              for (const raw of s.phrases) {
+                const phrase = tidy(String(raw), 80);
+                const key = phrase.toLowerCase();
+                if (!phrase || phrases.some((p) => p.toLowerCase() === key)) continue;
+                phrases.push(phrase);
+                if (phrases.length === 100) break;
+              }
+            }
+            let apps: App[] | null = null;
+            if (Array.isArray(s.never_capture)) {
+              apps = [];
+              for (const raw of s.never_capture) {
+                const id = tidy(String(raw.id ?? ""), 200).toLowerCase();
+                if (!id || apps.some((a) => a.id === id)) continue;
+                apps.push({ id, name: tidy(String(raw.name ?? ""), 200) });
+                if (apps.length === 200) break;
+              }
+            }
+            // A trigger core does not know reads as off.
+            const trigger = ["off", "phrases", "smart", "always"].includes(s.trigger)
+              ? s.trigger
+              : "off";
+            return { trigger, phrases, never_capture: apps };
+          };
+          if (!w.__owVisionStored) {
+            w.__owVisionStored = cleaned({
+              // The trigger of someone who never chose one: off on
+              // Windows, where capture is not verified yet
+              // (`default_trigger_on` in core).
+              trigger: platform === "windows" ? "off" : "phrases",
+              phrases: null,
+              never_capture: null,
+              ...(w.__owVisionSettings ?? {}),
+            });
+          }
+          const stored = w.__owVisionStored;
+          const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+          if (cmd === "vision_get") {
+            const phrases = stored.phrases ?? defaultPhrases;
+            const neverCapture = stored.never_capture ?? defaultNeverCapture;
+            return structuredClone({
+              settings: stored,
+              phrases,
+              never_capture: neverCapture,
+              default_phrases: defaultPhrases,
+              default_never_capture: defaultNeverCapture,
+              phrases_are_default: same(phrases, defaultPhrases),
+              never_capture_is_default: same(neverCapture, defaultNeverCapture),
+              // Windows has nothing to grant.
+              permission: platform === "windows" ? "granted" : (w.__owVisionPermission ?? "granted"),
+              platform,
+              // Verified on macOS, not yet on Windows
+              // (`capture_verified_on` in src-tauri/src/vision.rs).
+              capture_verified: platform !== "windows",
+              default_trigger: platform === "windows" ? "off" : "phrases",
+            });
+          }
+          if (cmd === "vision_set") {
+            if (w.__owVisionSetError) throw w.__owVisionSetError;
+            const { settings } = (args ?? {}) as { settings: Settings };
+            const saved = cleaned(settings);
+            w.__owVisionStored = saved;
+            w.__owVisionSaves = [...(w.__owVisionSaves ?? []), saved];
+            window.__owEmit("vision_changed", structuredClone(saved));
+            return structuredClone(saved);
+          }
+          if (cmd === "vision_request_permission") {
+            // The system's prompt is not played here: the answer is
+            // the state a test set for "after the request".
+            const next = w.__owVisionPermissionAfterRequest ?? w.__owVisionPermission ?? "granted";
+            w.__owVisionPermission = next;
+            return next;
+          }
+          // Whether a pane was opened: only macOS has one.
+          if (cmd === "vision_open_settings") return platform === "macos";
+          if (cmd === "vision_running_apps") {
+            return (w.__owRunningApps ?? []).map((a) => ({ id: a.id.toLowerCase(), name: a.name }));
           }
           return null;
         }
@@ -1049,6 +1198,9 @@ async function installTauriShim(
             // list fills in null, as Rust sends it.
             kind?: "ask" | null;
             answer?: string | null;
+            // The ask was sent with a screenshot (TASK-98). Left
+            // out, the list fills in false, as Rust sends it.
+            screen?: boolean;
           };
           const w = window as unknown as {
             __owHistorySettings?: Partial<HistorySettings>;
@@ -1111,7 +1263,12 @@ async function installTauriShim(
             return {
               entries: hits
                 .slice(from, from + (limit ?? 30))
-                .map((e) => ({ ...e, kind: e.kind ?? null, answer: e.answer ?? null })),
+                .map((e) => ({
+                  ...e,
+                  kind: e.kind ?? null,
+                  answer: e.answer ?? null,
+                  screen: e.screen ?? false,
+                })),
               matched: hits.length,
               stored: entries.length,
             };
@@ -1273,6 +1430,7 @@ async function installTauriShim(
                   asks_answered: 0,
                   ask_median_first_text_ms: null,
                   ask_median_ms: null,
+                  asks_with_screen: 0,
                   refined: 0,
                   skipped: 0,
                   fallbacks: 0,
@@ -1804,6 +1962,10 @@ export interface MockAskSnapshot {
     cost_usd: number | null;
     plan: unknown;
   } | null;
+  // What became of the screen in this ask (Vision, TASK-98), and why
+  // there is no screenshot when one was wanted. Never an image.
+  screen: "none" | "capturing" | "included" | "blocked" | "unavailable";
+  screen_notice: string;
   version: number;
 }
 
@@ -1825,6 +1987,8 @@ export const ASK_SNAPSHOT_DEFAULTS: MockAskSnapshot = {
   elapsed_ms: 0,
   first_text_ms: null,
   usage: null,
+  screen: "none",
+  screen_notice: "",
   version: 0,
 };
 
@@ -1901,6 +2065,42 @@ export async function emitAskChanged(
     (window as unknown as { __owAskStored?: unknown }).__owAskStored = next;
     return window.__owEmit("ask_changed", structuredClone(next));
   }, settings);
+}
+
+// ---------------------------------------------------------------
+// Vision (TASK-98).
+// ---------------------------------------------------------------
+
+// Mirrors `VisionSettings` in core/src/settings/vision.rs: the
+// payload of `vision_changed`. A list that is null is the built-in
+// one.
+export interface MockVisionSettings {
+  trigger: "off" | "phrases" | "smart" | "always";
+  phrases: string[] | null;
+  never_capture: { id: string; name: string }[] | null;
+}
+
+// Push `vision_changed` as Rust does after the Vision settings were
+// saved somewhere else (the headless CLI). The block is stored first,
+// as in Rust, so a `vision_get` that follows the event answers with
+// it.
+export async function emitVisionChanged(
+  page: Page,
+  settings: Partial<MockVisionSettings>,
+): Promise<number> {
+  return page.evaluate((value) => {
+    const next = { trigger: "phrases", phrases: null, never_capture: null, ...value };
+    (window as unknown as { __owVisionStored?: unknown }).__owVisionStored = next;
+    return window.__owEmit("vision_changed", structuredClone(next));
+  }, settings);
+}
+
+// Wait until something listens for `vision_changed`: App in the main
+// window. Nothing is emitted.
+export async function waitForVisionListener(page: Page) {
+  await page.waitForFunction(() => window.__owListeners("vision_changed") > 0, undefined, {
+    timeout: 3000,
+  });
 }
 
 // Wait for useHotkeyStatus's listener to attach. Probe by emitting an ok=true

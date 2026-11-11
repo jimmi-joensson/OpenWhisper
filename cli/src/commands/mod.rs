@@ -9,6 +9,7 @@ pub mod recognizer_info;
 pub mod refine;
 pub mod settings;
 pub mod transcribe;
+pub mod vision;
 
 /// Bundle id of the desktop app; its config dir is where
 /// `settings.json` and `dictionary.json` live.

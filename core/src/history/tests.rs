@@ -38,6 +38,7 @@ fn add_in_mode(
             mode,
             kind: "",
             answer: None,
+            screen: false,
         },
     )
     .expect("append")
@@ -58,6 +59,7 @@ fn add_ask(dir: &Path, at_ms: i64, question: &str, answer: &str) -> HistoryEntry
             mode: "",
             kind: KIND_ASK,
             answer: Some(answer),
+            screen: false,
         },
     )
     .expect("append")
@@ -155,6 +157,7 @@ fn empty_text_is_not_stored() {
             mode: "Formal",
             kind: "",
             answer: None,
+            screen: false,
         },
     )
     .unwrap();
@@ -548,6 +551,7 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 mode: None,
                 kind: None,
                 answer: None,
+                screen: false,
             },
             HistoryEntry {
                 id: "20261110T140212".into(),
@@ -561,6 +565,7 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 mode: None,
                 kind: None,
                 answer: None,
+                screen: false,
             },
         ]
     );
@@ -901,6 +906,7 @@ fn an_answer_given_to_something_that_is_not_an_ask_is_not_stored() {
             mode: "",
             kind: "",
             answer: Some("not an answer to anything"),
+            screen: false,
         },
     )
     .unwrap()
@@ -926,6 +932,7 @@ fn an_ask_with_an_empty_answer_or_question_is_handled() {
             mode: "",
             kind: KIND_ASK,
             answer: Some("an answer"),
+            screen: false,
         },
     )
     .unwrap();
@@ -975,6 +982,7 @@ fn an_entry_can_hold_both_quotes_in_either_order() {
             mode: "",
             kind: KIND_ASK,
             answer: Some("I do not know that company.\nSorry."),
+            screen: false,
         },
     )
     .unwrap()
@@ -1225,4 +1233,226 @@ Thanks a lot.
     assert_eq!(page.entries[1].mode.as_deref(), Some("Formal"));
     assert_eq!(page.entries[1].original.as_deref(), Some("hey oskar when is the price list ready"));
     assert!(META.is_match("<!-- id: 20261110T090500 app: com.example.mail words: 12 seconds: 4.2 -->"));
+}
+
+// --- the screen marker of an ask (TASK-98) ---------------------------
+
+/// Store an ask that was sent with a screenshot.
+fn add_ask_with_screen(dir: &Path, at_ms: i64, question: &str, answer: &str) -> HistoryEntry {
+    append(
+        dir,
+        &NewEntry {
+            at_ms,
+            duration_ms: 2100,
+            text: question,
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some(answer),
+            screen: true,
+        },
+    )
+    .expect("append")
+    .expect("stored")
+}
+
+#[test]
+fn an_ask_that_included_the_screen_says_so_on_the_extra_line_and_reads_back() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    let written = add_ask_with_screen(
+        dir.path(),
+        at(date, 9, 30, 0),
+        "What does this error mean?",
+        "The build cannot find the file it was told to copy.",
+    );
+    assert!(written.is_ask());
+    assert!(written.screen);
+
+    let expected = "\
+---
+date: 2026-11-11
+entries: 1
+words: 5
+apps: []
+---
+
+## 09:30:00
+<!-- id: 20261111T093000 words: 5 seconds: 2.1 -->
+<!-- extra: kind=ask; screen=yes -->
+
+What does this error mean?
+
+> Answer: The build cannot find the file it was told to copy.
+";
+    assert_eq!(read(dir.path(), date), expected);
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written.clone()]);
+    assert_eq!(get(dir.path(), &written.id), Some(written));
+}
+
+#[test]
+fn an_ask_without_the_screen_is_written_byte_for_byte_as_before_vision() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    let written = add_ask(dir.path(), at(date, 9, 31, 0), "What is two plus two?", "Four.");
+    assert!(!written.screen);
+    let expected = "\
+---
+date: 2026-11-11
+entries: 1
+words: 5
+apps: []
+---
+
+## 09:31:00
+<!-- id: 20261111T093100 words: 5 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+What is two plus two?
+
+> Answer: Four.
+";
+    assert_eq!(read(dir.path(), date), expected);
+    // And a dictation has no extra line at all, as ever.
+    let plain = add(dir.path(), at(date, 9, 32, 0), "Thanks a lot.");
+    assert!(!plain.screen);
+    let file = read(dir.path(), date);
+    assert!(file.ends_with("## 09:32:00\n<!-- id: 20261111T093200 words: 3 seconds: 4.2 -->\n\nThanks a lot.\n"), "{file}");
+    assert!(!file.contains("screen="));
+}
+
+#[test]
+fn the_screen_marker_means_something_in_an_ask_only() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    // Asked to store it on a dictation: it is not stored.
+    let dictated = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 10, 0, 0),
+            duration_ms: 1500,
+            text: "Send the price list to Oskar.",
+            original: None,
+            app_id: "com.example.mail",
+            app_name: "Mail",
+            mode: "Formal",
+            kind: "",
+            answer: None,
+            screen: true,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!dictated.screen);
+    assert!(read(dir.path(), date).contains("<!-- extra: mode=Formal -->\n"));
+    assert!(!read(dir.path(), date).contains("screen"));
+
+    // Written by hand on a dictation, or with another value on an
+    // ask: not a screen marker. Keys stay in any order.
+    let path = day_path(dir.path(), D(2026, 11, 12));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "\
+---
+date: 2026-11-12
+entries: 4
+words: 12
+apps: []
+---
+
+## 08:00:00
+<!-- id: 20261112T080000 words: 3 seconds: 1.0 -->
+<!-- extra: screen=yes -->
+
+Thanks a lot.
+
+## 08:01:00
+<!-- id: 20261112T080100 words: 3 seconds: 1.0 -->
+<!-- extra: kind=ask; screen=no -->
+
+What is this?
+
+> Answer: I cannot see your screen.
+
+## 08:02:00
+<!-- id: 20261112T080200 words: 3 seconds: 1.0 -->
+<!-- extra: screen=yes; kind=ask; later=thing -->
+
+What is that?
+
+> Answer: A dialog asking for a file name.
+
+## 08:03:00
+<!-- id: 20261112T080300 words: 3 seconds: 1.0 -->
+<!-- extra: kind=ask; screen -->
+
+And this one?
+
+> Answer: A menu.
+",
+    )
+    .unwrap();
+    let page = list(dir.path(), "", 50, 0);
+    let by_text = |text: &str| page.entries.iter().find(|e| e.text == text).unwrap_or_else(|| panic!("no entry {text}"));
+    assert!(!by_text("Thanks a lot.").screen);
+    assert!(!by_text("What is this?").screen);
+    assert!(by_text("What is that?").screen);
+    assert_eq!(by_text("What is that?").answer.as_deref(), Some("A dialog asking for a file name."));
+    assert!(!by_text("And this one?").screen);
+}
+
+#[test]
+fn a_day_file_from_before_vision_reads_as_it_always_did_and_is_left_alone() {
+    // Written by the version with asks and without Vision.
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let before = "\
+---
+date: 2026-11-10
+entries: 2
+words: 9
+apps: [Mail]
+---
+
+## 09:05:00 · Mail
+<!-- id: 20261110T090500 app: com.example.mail words: 3 seconds: 1.2 -->
+<!-- extra: mode=Formal -->
+
+Thanks a lot.
+
+## 14:12:03
+<!-- id: 20261110T141203 words: 6 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+What is the capital of Norway?
+
+> Answer: The capital of Norway is Oslo.
+";
+    fs::write(&path, before).unwrap();
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["What is the capital of Norway?", "Thanks a lot."]);
+    assert!(page.entries.iter().all(|e| !e.screen));
+    assert!(page.entries[0].is_ask());
+    assert_eq!(page.entries[1].mode.as_deref(), Some("Formal"));
+
+    // A new ask with the screen is appended; what was there stays
+    // byte for byte.
+    add_ask_with_screen(dir.path(), at(date, 15, 0, 0), "What does this error mean?", "A file is missing.");
+    let after = read(dir.path(), date);
+    let old_body = before.split("---\n\n").nth(1).unwrap();
+    assert!(after.contains(old_body.trim_end()), "{after}");
+    assert!(after.ends_with(
+        "## 15:00:00\n<!-- id: 20261110T150000 words: 5 seconds: 2.1 -->\n<!-- extra: kind=ask; screen=yes -->\n\nWhat does this error mean?\n\n> Answer: A file is missing.\n"
+    ));
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(page.entries.iter().map(|e| e.screen).collect::<Vec<_>>(), [true, false, false]);
+
+    // The entry serializes with the flag, for the history view.
+    let json = serde_json::to_value(&page.entries[0]).unwrap();
+    assert_eq!(json["screen"], true);
 }

@@ -46,9 +46,12 @@
 //! comment line directly under the first: `<!-- extra: key=value;
 //! key=value -->`. Today that is `mode`, the name of the mode the
 //! text was rewritten in (TASK-96), written only for a mode the user
-//! made, and `kind=ask` for an ask (below). The line is left out when
-//! there is nothing to say, so a plain dictation looks exactly as it
-//! did before modes existed.
+//! made, `kind=ask` for an ask (below), and `screen=yes` for an ask
+//! that was sent with a screenshot of the screen (TASK-98; only the
+//! fact is kept, never the image). The line is left out when there is
+//! nothing to say, so a plain dictation looks exactly as it did
+//! before modes existed, and an ask without a screenshot exactly as
+//! it did before Vision.
 //!
 //! An ask (TASK-97, `crate::ask`) is kept in the same files: a
 //! question the person asked out loud and the answer they got in the
@@ -144,6 +147,10 @@ static EXTRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<!-- extra:(.*)--
 const EXTRA_MODE: &str = "mode";
 /// Key of the entry kind on the extra line.
 const EXTRA_KIND: &str = "kind";
+/// Key that says an ask was sent with a screenshot, and its one
+/// value.
+const EXTRA_SCREEN: &str = "screen";
+const EXTRA_YES: &str = "yes";
 static DAY_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
 static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
@@ -182,6 +189,9 @@ pub struct HistoryEntry {
     pub kind: Option<String>,
     /// The answer of an ask. `None` for anything else.
     pub answer: Option<String>,
+    /// The ask was sent with a screenshot of the screen. The image is
+    /// not kept anywhere; this only says that there was one.
+    pub screen: bool,
 }
 
 impl HistoryEntry {
@@ -208,6 +218,8 @@ pub struct NewEntry<'a> {
     pub kind: &'a str,
     /// The answer of an ask. Stored only for an ask.
     pub answer: Option<&'a str>,
+    /// The ask was sent with a screenshot. Stored only for an ask.
+    pub screen: bool,
 }
 
 /// A slice of the history, newest first.
@@ -401,6 +413,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     let mut text_from = meta_at + 1;
     let mut mode = None;
     let mut kind = None;
+    let mut screen = false;
     if let Some(extra) = chunk.get(text_from).and_then(|l| EXTRA.captures(bare(l))) {
         for pair in extra[1].split(';') {
             let Some((key, value)) = pair.split_once('=') else {
@@ -410,6 +423,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
             match key.trim() {
                 EXTRA_MODE => mode = value,
                 EXTRA_KIND => kind = value,
+                EXTRA_SCREEN => screen = value.as_deref() == Some(EXTRA_YES),
                 _ => {}
             }
         }
@@ -470,6 +484,9 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
         mode,
         kind,
         answer,
+        // Like the answer quote, the key means something in an ask
+        // only.
+        screen: screen && is_ask,
     })
 }
 
@@ -507,6 +524,9 @@ fn extra_pairs(entry: &HistoryEntry) -> Vec<String> {
     }
     if let Some(kind) = entry.kind.as_deref().map(extra_value).filter(|k| !k.is_empty()) {
         pairs.push(format!("{EXTRA_KIND}={kind}"));
+    }
+    if entry.screen {
+        pairs.push(format!("{EXTRA_SCREEN}={EXTRA_YES}"));
     }
     pairs
 }
@@ -701,6 +721,7 @@ pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>
         // Only an ask has an answer: in any other entry the quote
         // would not be read back as one.
         answer: new.answer.filter(|_| extra_value(new.kind) == KIND_ASK).and_then(non_empty),
+        screen: new.screen && extra_value(new.kind) == KIND_ASK,
     };
 
     let mut body = day.prefix.clone();

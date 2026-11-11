@@ -40,7 +40,16 @@
 //!   the answer to stdout; `ask status` says where questions are
 //!   sent; `ask config` switches Ask on or off and sets web search,
 //!   instructions, model, effort and timeout; `ask eval` runs the
-//!   live eval set.
+//!   live eval set. `ask run --screen` sends a screenshot of the
+//!   display you are working on with the question (TASK-98).
+//! - `vision`: the screenshot an ask can carry (TASK-98). `vision
+//!   status` shows the trigger, the phrases, the never-capture list
+//!   and the screen recording permission; `vision config`, `vision
+//!   phrases` and `vision never-capture` edit them; `vision check
+//!   TEXT` says what the trigger decides for a question without
+//!   capturing anything; `vision probe` takes one screenshot the way
+//!   an ask would and prints sizes and timings, never the image;
+//!   `vision eval` runs the eval sets with synthetic images.
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -91,6 +100,8 @@ enum Command {
     Modes(commands::modes::ModesArgs),
     /// Ask: a question for the model, answered instead of typed.
     Ask(commands::ask::AskArgs),
+    /// Vision: the screenshot an ask can carry, and when it does.
+    Vision(commands::vision::VisionArgs),
 }
 
 fn main() -> Result<()> {
@@ -107,5 +118,6 @@ fn main() -> Result<()> {
         Command::Focus(args) => commands::focus::run(args, cli.json),
         Command::Modes(args) => commands::modes::run(args, cli.json),
         Command::Ask(args) => commands::ask::run(args, cli.json),
+        Command::Vision(args) => commands::vision::run(args, cli.json),
     }
 }

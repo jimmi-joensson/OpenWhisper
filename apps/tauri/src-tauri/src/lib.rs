@@ -34,6 +34,7 @@ mod refine;
 mod settings;
 mod sibling;
 mod tray;
+mod vision;
 
 use media_control::PlatformMediaController;
 
@@ -1150,6 +1151,12 @@ pub fn run() {
             // on) before the hotkeys are installed: the ask slot is
             // only installed while Ask is on.
             ask::init(app.handle());
+            // Tell core where the settings file is (an ask reads the
+            // Vision block from it every time, so a rule set from a
+            // terminal holds for the next ask), load the block into
+            // core's cache, and on Windows keep the pill and the
+            // answer panel out of screen captures.
+            vision::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1408,6 +1415,14 @@ pub fn run() {
             modes::modes_delete,
             modes::modes_set_app_default,
             modes::modes_clear_app_default,
+            // Vision settings only. There is no command that takes a
+            // screenshot or returns one: only an ask in core captures
+            // (a test in vision.rs checks this list).
+            vision::vision_get,
+            vision::vision_set,
+            vision::vision_request_permission,
+            vision::vision_open_settings,
+            vision::vision_running_apps,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

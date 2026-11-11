@@ -1,9 +1,10 @@
 ---
 id: TASK-99.2
 title: 'Plan Task 2: CLI, fake MCP server, eval sets'
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-11-11T06:38:00Z'
+updated_date: '2026-11-11T11:48:00Z'
 labels:
   - 99-impl
 dependencies: []
@@ -17,3 +18,9 @@ ordinal: 112000
 - [ ] #2 agent connections --refresh lists connections without a tool call
 - [ ] #3 Eval sets with planted instructions in a tool result and in on-screen text, judged by the fake server log; live numbers and run times in the notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built in d394b56. openwhisper agent status, config, connections, tools, allow, disallow, apps, run, eval, and a hidden local fixture server (core/src/agent/fixture.rs) that logs every call. Orchestrator's own run 2026-11-11: CLI tests pass (10 new in cli/tests/agent.rs); agent eval --offline 103 of 103 checks; live eval (Sonnet, low effort, fixture only) 15 of 15, no leaks: read 3.5 s, draft 5.1 s, confirmed send 2.7 s. The build agent's three earlier live runs were also 15 of 15. Listing the real setup (no tool called): 34 connections, 489 tools, 3.5 s.
+<!-- SECTION:NOTES:END -->

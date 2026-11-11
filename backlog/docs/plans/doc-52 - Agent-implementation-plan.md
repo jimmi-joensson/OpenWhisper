@@ -77,3 +77,14 @@ Outcomes:
 ## Ordering
 
 1, 2, 3, 4.
+
+## Addition agreed with the user on 2026-11-11: the connection before the screen
+
+14. **When the app in front has a connection, an ask about it uses the connection and takes no screenshot.** The user's words: if it is an app I have an MCP server for, it should use the MCP connection instead of vision, otherwise vision.
+    - A mapping from app to connection: a small built-in table for common apps (matched on the app id from `focus`, to a connection by name), editable in the Agent pane (`agent.app_connections`: app id, app name, connection name).
+    - Routing, decided in core when an agent ask starts: if the frontmost app is mapped to a connection that is enabled and has at least one allowed tool, the vision step is skipped (no capture) and the prompt tells the model which app is in front and that its content is reachable through that connection's read tools. Otherwise the vision trigger applies as in TASK-98.
+    - An explicit screen phrase still takes the screenshot (the user asked for the screen in so many words); with the trigger on Always the connection still wins for a mapped app, because Always is a default and the mapping is the more specific choice.
+    - The ask snapshot says which way it went (`context_source`: `connection` with its name, `screen`, or `none`), the panel shows it, and the diagnostics row records it.
+    - Eval: with the fake server standing in for the app's connection and a fake platform for the screen, a mapped app leads to a read tool call and no capture call; an unmapped app leads to the capture path; a mapped app with an explicit screen phrase leads to both.
+
+This adds to Task 1 (routing, settings, snapshot field), Task 2 (CLI `agent apps list|set|unset`, the eval cases) and Task 3 (the mapping list in the Agent pane, the source shown in the panel).

@@ -9,8 +9,9 @@
 // This hook installs a window-level capture-phase keydown listener.
 // Capture-phase + window-level (not document, not React synthetic) so we
 // see the event before any <input>/<button> can stopPropagation. The
-// handler matches the configured chords (toggle, cancel, and the
-// optional cycle-mode slot when it is set) against the event and
+// handler matches the configured chords (toggle, cancel, the optional
+// cycle-mode slot when it is set, and the optional ask slot while Ask
+// is switched on) against the event and
 // invokes the matching command, calling preventDefault +
 // stopImmediatePropagation so Chromium's built-in shortcuts (Ctrl+J →
 // downloads, Ctrl+P → print, Ctrl+F → find, Ctrl+R → reload) don't fire
@@ -31,6 +32,8 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { useAsk } from "./use-ask";
+
 export type HotkeyKind = "modifier-tap" | "chord";
 export interface HotkeyConfig {
   kind: HotkeyKind;
@@ -42,8 +45,12 @@ export interface HotkeySettings {
   cancel: HotkeyConfig;
   /** Optional slot: left out (or null) until the user records a key. */
   cycle_mode?: HotkeyConfig | null;
+  /** Optional slot with a platform default: starts an ask instead of
+   *  a dictation. null once the user cleared it. Only active while
+   *  Ask is switched on. */
+  ask?: HotkeyConfig | null;
 }
-export type HotkeyTarget = "toggle" | "cancel" | "cycle-mode";
+export type HotkeyTarget = "toggle" | "cancel" | "cycle-mode" | "ask";
 export interface HotkeyCapturedPayload {
   target: HotkeyTarget;
   config: HotkeyConfig;
@@ -61,6 +68,8 @@ export function hotkeyFor(
       return settings.cancel;
     case "cycle-mode":
       return settings.cycle_mode ?? null;
+    case "ask":
+      return settings.ask ?? null;
   }
 }
 
@@ -79,6 +88,8 @@ export function withHotkey(
       return config ? { ...settings, cancel: config } : settings;
     case "cycle-mode":
       return { ...settings, cycle_mode: config };
+    case "ask":
+      return { ...settings, ask: config };
   }
 }
 
@@ -93,6 +104,12 @@ let fallbackBindings: HotkeySettings | null = null;
 export function syncFallbackBindings(settings: HotkeySettings) {
   fallbackBindings = settings;
 }
+
+// Whether Ask is switched on. The ask slot is only installed while it
+// is (`hotkey::effective_settings` in Rust); with Ask off its chord is
+// left to the focused control here too. Written by the hook, from the
+// Ask settings every other reader shares (`useAsk`).
+let fallbackAskEnabled = false;
 
 // ---- module-level capture state ----
 //
@@ -117,13 +134,15 @@ export function isJsCaptureActive(): boolean {
 
 interface UseGlobalHotkeyOpts {
   /** Cancel binding only fires when this is true — mirrors the Rust LL
-   *  hook's gate so Esc still works normally inside OW when idle. */
-  isRecording: boolean;
+   *  hook's gate (`dictation::cancel_would_act`: a recording, or an
+   *  ask that is being transcribed or answered) so Esc still works
+   *  normally inside OW otherwise. */
+  cancelWouldAct: boolean;
 }
 
-export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
-  const isRecordingRef = useRef(isRecording);
-  isRecordingRef.current = isRecording;
+export function useGlobalHotkey({ cancelWouldAct }: UseGlobalHotkeyOpts) {
+  const cancelWouldActRef = useRef(cancelWouldAct);
+  cancelWouldActRef.current = cancelWouldAct;
 
   // Detect platform once. Static for the lifetime of the renderer.
   const isWindows =
@@ -157,6 +176,13 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
     };
   }, [isWindows]);
 
+  // The Ask switch, and every later change of it: from the shared
+  // Ask settings, which follow `ask_changed`.
+  const askEnabled = useAsk().state?.settings.enabled ?? false;
+  useEffect(() => {
+    fallbackAskEnabled = askEnabled;
+  }, [askEnabled]);
+
   useEffect(() => {
     if (!isWindows) return;
 
@@ -187,9 +213,10 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
       }
       if (chordMatches(bindings.cancel, e)) {
         // Mirror the Rust LL hook's gate: cancel binding only fires
-        // while a recording is active. Otherwise we pass through so
-        // Esc still closes OW's own menus / browser autofill / etc.
-        if (!isRecordingRef.current) return;
+        // while there is something to cancel (a recording, a running
+        // ask). Otherwise we pass through so Esc still closes OW's
+        // own menus / browser autofill / etc.
+        if (!cancelWouldActRef.current) return;
         e.preventDefault();
         e.stopImmediatePropagation();
         void invoke("dictation_cancel");
@@ -203,6 +230,15 @@ export function useGlobalHotkey({ isRecording }: UseGlobalHotkeyOpts) {
         e.preventDefault();
         e.stopImmediatePropagation();
         if (!e.repeat) void invoke("modes_cycle");
+        return;
+      }
+      // The ask slot: bound by default, matched only while Ask is on.
+      // A toggle, so a held key must not start and stop in one press.
+      const ask = bindings.ask;
+      if (fallbackAskEnabled && ask && chordMatches(ask, e)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) void invoke("ask_toggle");
       }
     }
 

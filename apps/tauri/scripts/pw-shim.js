@@ -31,18 +31,44 @@ async (page) => {
           window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Brings the main window forward on Settings, mirroring
+        // tests/fixtures/tauri-shim.ts: with a `pane` (and a `focus`
+        // row on it) the object form of `ow_navigate`, without one
+        // the plain string.
+        if (cmd === "open_settings_window") {
+          window.__owOpenSettingsCount = (window.__owOpenSettingsCount ?? 0) + 1;
+          window.__owOpenSettingsCalls = [...(window.__owOpenSettingsCalls ?? []), args ?? {}];
+          const named = (value) =>
+            typeof value === "string" && value.trim() ? value.trim() : null;
+          const toPane = named((args ?? {}).pane);
+          const toRow = named((args ?? {}).focus);
+          window.__owEmit(
+            "ow_navigate",
+            toPane === null
+              ? "settings"
+              : toRow === null
+                ? { view: "settings", pane: toPane }
+                : { view: "settings", pane: toPane, focus: toRow },
+          );
+          return null;
+        }
         // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
         // optional `cycle_mode` slot is absent until set; its command
-        // target is "cycle-mode".
+        // target is "cycle-mode". The optional `ask` slot has a
+        // default, which a seed without the key gets too; cleared, it
+        // is null.
         if (
           cmd === "settings_get_hotkeys" ||
           cmd === "settings_set_hotkey" ||
-          cmd === "settings_reset_hotkey"
+          cmd === "settings_reset_hotkey" ||
+          cmd === "settings_clear_hotkey"
         ) {
+          const askDefault = { kind: "modifier-tap", code: "RightOption", mods: [] };
           window.__owHotkeys = window.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
+          if (!("ask" in window.__owHotkeys)) window.__owHotkeys.ask = askDefault;
           // A copy, as over real IPC.
           if (cmd === "settings_get_hotkeys") return structuredClone(window.__owHotkeys);
 
@@ -55,6 +81,16 @@ async (page) => {
             window.__owHotkeyLastConfig = config;
             return null;
           }
+          if (cmd === "settings_clear_hotkey") {
+            // Only the optional slots can be without a key.
+            if (target === "toggle" || target === "cancel") {
+              throw `The ${target} shortcut cannot be removed, only changed.`;
+            }
+            window.__owHotkeyClearCount = (window.__owHotkeyClearCount ?? 0) + 1;
+            if (target === "ask") window.__owHotkeys.ask = null;
+            else delete window.__owHotkeys[key];
+            return null;
+          }
           window.__owHotkeyResetCount = (window.__owHotkeyResetCount ?? 0) + 1;
           if (target === "cycle-mode") {
             delete window.__owHotkeys[key];
@@ -63,9 +99,228 @@ async (page) => {
           const def =
             target === "toggle"
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
-              : { kind: "chord", code: "Escape", mods: [] };
+              : target === "ask"
+                ? askDefault
+                : { kind: "chord", code: "Escape", mods: [] };
           window.__owHotkeys[key] = def;
           return def;
+        }
+        // Ask (TASK-97), mirroring tests/fixtures/tauri-shim.ts.
+        // `ask_context_preview` answers with the facts of a made-up
+        // computer for the groups the stored block switches on.
+        // `__owAskSettings` seeds the stored block; the one ask lives
+        // on `__owAskSnapshot` (set it, then
+        // `__owEmit('ask_tick', window.__owAskSnapshot)`), and cancel,
+        // dismiss, insert and copy answer from it the way core does.
+        if (cmd.startsWith("ask_")) {
+          const w = window;
+          w.__owAskCalls = [...(w.__owAskCalls ?? []), { cmd, args: args ?? {} }];
+          if (!w.__owAskStored) {
+            w.__owAskStored = {
+              enabled: false,
+              web_search: false,
+              instructions: "",
+              model: null,
+              effort: null,
+              timeout_ms: 60000,
+              ...(w.__owAskSettings ?? {}),
+              // `ContextSettings::default()` in core: every group
+              // on, no place. A seed may name only some of it.
+              context: {
+                date_time: true,
+                computer: true,
+                front_app: true,
+                locale: true,
+                place: "",
+                ...(w.__owAskSettings?.context ?? {}),
+              },
+            };
+          }
+          const stored = w.__owAskStored;
+          // `AskSnapshot::default()` in core.
+          const idle = (version) => ({
+            id: 0,
+            phase: "idle",
+            question: "",
+            answer: "",
+            notice: "",
+            suggestion: null,
+            error: "",
+            backend: "",
+            model: "",
+            effort: "",
+            web_search: false,
+            searching: false,
+            search_query: "",
+            started_at_ms: 0,
+            elapsed_ms: 0,
+            first_text_ms: null,
+            usage: null,
+            version,
+          });
+          const snap = w.__owAskSnapshot ?? idle(0);
+          const busy = ["listening", "thinking", "answering"].includes(snap.phase);
+          const change = (next) => {
+            w.__owAskSnapshot = next;
+            window.__owEmit("ask_tick", structuredClone(next));
+          };
+          // What `ask_status` answers: the state of the backend,
+          // which only the Ask pane asks for (in the app it starts
+          // the Claude CLI). `__owAskBackend` overrides it.
+          const backendStatus = {
+            backend: "claude-cli",
+            state: "ready",
+            ready: true,
+            message: "Claude Code is signed in with your Claude subscription (max).",
+            destination:
+              "Anthropic (Claude), through the Claude Code app signed in on this computer",
+            path: "/Users/test/.local/bin/claude",
+            version: "2.1.322 (Claude Code)",
+            auth_method: "claude.ai",
+            plan: "max",
+            has_api_key: false,
+            ...(w.__owAskBackend ?? {}),
+          };
+          if (cmd === "ask_status") return structuredClone(backendStatus);
+          // A cancel, close or insert that names an ask only acts on
+          // that ask (`cancel_if` and `dismiss_if` in core).
+          const meant = (args ?? {});
+          const other = meant.id != null && meant.id !== snap.id;
+          if (cmd === "ask_get") {
+            // `AskPlan::with_terms` in core: the OpenAI-compatible
+            // backend (set with `__owAskBackend`) answers with
+            // Refine's model and has no web search.
+            const openai = backendStatus.backend === "openai-compatible";
+            const webSearch = stored.web_search && !openai;
+            // No backend state in it: that is `ask_status`.
+            return structuredClone({
+              settings: stored,
+              backend_kind: backendStatus.backend,
+              destination: backendStatus.destination,
+              model: openai ? "small-model" : (stored.model ?? "sonnet"),
+              effort: openai ? "" : (stored.effort ?? "low"),
+              web_search: webSearch,
+              timeout_ms: webSearch ? stored.timeout_ms * 2 : stored.timeout_ms,
+              notice:
+                stored.web_search && openai
+                  ? "Web search is only available with the Claude backend. This answer comes from the model alone."
+                  : "",
+              limits: {
+                timeout_min_ms: 5000,
+                timeout_max_ms: 300000,
+                timeout_default_ms: 60000,
+                instructions_max_chars: 4000,
+                place_max_chars: 120,
+              },
+              default_model: "sonnet",
+            });
+          }
+          if (cmd === "ask_set") {
+            const { settings } = args ?? {};
+            // `AskSettings::cleaned` in core.
+            const saved = {
+              ...settings,
+              instructions: settings.instructions.trim().slice(0, 4000).trimEnd(),
+              model: settings.model?.trim() || null,
+              effort: settings.effort === "minimal" ? "low" : settings.effort,
+              timeout_ms: Math.min(Math.max(settings.timeout_ms, 5000), 300000),
+              // `ContextSettings::cleaned` in core: the place on one
+              // line, at most 120 characters.
+              context: {
+                ...settings.context,
+                place: settings.context.place
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .join(" ")
+                  .slice(0, 120)
+                  .trimEnd(),
+              },
+            };
+            w.__owAskStored = saved;
+            w.__owAskSaves = [...(w.__owAskSaves ?? []), saved];
+            window.__owEmit("ask_changed", structuredClone(saved));
+            return structuredClone(saved);
+          }
+          if (cmd === "ask_context_preview") {
+            // `ask::context_preview` in core: the facts the stored
+            // block switches on, as labelled lines. The computer is
+            // made up. No app in front: the window asking is
+            // OpenWhisper's own, which an ask never names.
+            if (w.__owAskContextFail) throw "ask context: not available";
+            const c = stored.context;
+            const lines = [];
+            if (c.place) lines.push(`Where the person is: ${c.place}`);
+            if (c.date_time) {
+              lines.push(
+                "Date: Wednesday 11 November 2026",
+                "Local time: 14:32",
+                "Time zone: Europe/Copenhagen (UTC+01:00)",
+              );
+            }
+            if (c.computer) {
+              lines.push(
+                "Operating system: macOS 26.0",
+                "Computer: Northwind Book Pro 14, NB14,2",
+                "Chip: Northwind N3 Pro",
+                "Memory: 32 GB",
+                "Power: on battery, 82% charged",
+                "Displays: 1 (1512 x 982)",
+                "Free disk space: about 210 GB",
+                "Internet: online",
+              );
+            }
+            if (c.locale) {
+              lines.push(
+                "Language: English (en)",
+                "Region: Denmark (DK)",
+                "Units: metric",
+                "Clock: 24-hour",
+                "Currency: DKK",
+                "Keyboard layout: Danish",
+              );
+            }
+            return lines.join("\n");
+          }
+          if (cmd === "ask_snapshot") return structuredClone(snap);
+          if (cmd === "ask_start") {
+            if (!stored.enabled) {
+              throw "Ask is switched off. Switch it on in the settings to ask questions.";
+            }
+            const next = {
+              ...idle(snap.version + 1),
+              id: snap.id + 1,
+              phase: "thinking",
+              question: ((args ?? {}).text ?? "").trim(),
+            };
+            change(next);
+            return structuredClone(next);
+          }
+          if (cmd === "ask_toggle") return null;
+          if (cmd === "ask_cancel") {
+            if (!busy || other) return false;
+            change(
+              snap.phase === "listening"
+                ? idle(snap.version + 1)
+                : { ...snap, phase: "cancelled", searching: false, version: snap.version + 1 },
+            );
+            return true;
+          }
+          if (cmd === "ask_dismiss") {
+            if (!other) change(idle(snap.version + 1));
+            return null;
+          }
+          if (cmd === "ask_insert") {
+            if (snap.phase !== "done" || other) return false;
+            w.__owAskInserted = [...(w.__owAskInserted ?? []), snap.answer];
+            change(idle(snap.version + 1));
+            return true;
+          }
+          if (cmd === "ask_copy") {
+            if (!snap.answer.trim()) return false;
+            w.__owAskCopied = [...(w.__owAskCopied ?? []), snap.answer];
+            return true;
+          }
+          return null;
         }
         if (cmd === "settings_capture_hotkey_start") {
           window.__owCaptureStartCount = (window.__owCaptureStartCount ?? 0) + 1;

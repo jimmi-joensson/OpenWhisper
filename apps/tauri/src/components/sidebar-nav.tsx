@@ -7,6 +7,7 @@ import {
   Home,
   Keyboard,
   Layers,
+  MessageCircleQuestionMark,
   Mic,
   Settings as SettingsIcon,
   SlidersHorizontal,
@@ -25,6 +26,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   dictionary: BookA,
   refine: Sparkles,
   modes: Layers,
+  ask: MessageCircleQuestionMark,
 };
 
 export type Route = "home" | "history" | "transcribe" | "settings" | "diagnostics";

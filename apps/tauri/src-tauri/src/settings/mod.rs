@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub use core::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
     PerformanceSettings, PillSettings, StatsSettings, current_pill_settings, current_settings,
-    current_stats_settings, default_cancel_hotkey, default_settings,
+    current_stats_settings, default_ask_hotkey, default_cancel_hotkey, default_settings,
     default_toggle_hotkey, follow_active_screen,
 };
 
@@ -93,19 +93,26 @@ pub fn settings_set_hotkey(
     Ok(())
 }
 
+/// The binding a slot has before the user picks one: the platform
+/// default for toggle, cancel and ask, `None` for the switch-mode
+/// slot, whose default is "not set".
+fn default_hotkey(target: HotkeyTarget) -> Option<HotkeyConfig> {
+    match target {
+        HotkeyTarget::Toggle => Some(default_toggle_hotkey()),
+        HotkeyTarget::Cancel => Some(default_cancel_hotkey()),
+        HotkeyTarget::CycleMode => None,
+        HotkeyTarget::Ask => Some(default_ask_hotkey()),
+    }
+}
+
 /// Put a slot back to its default. Returns the binding the slot now
-/// has: the platform default for toggle and cancel, `None` for an
-/// optional slot, whose default is "not set" (reset clears it).
+/// has ([`default_hotkey`]); `None` means the slot was cleared.
 #[tauri::command]
 pub fn settings_reset_hotkey(
     app: AppHandle,
     target: HotkeyTarget,
 ) -> Result<Option<HotkeyConfig>, String> {
-    let default = match target {
-        HotkeyTarget::Toggle => Some(default_toggle_hotkey()),
-        HotkeyTarget::Cancel => Some(default_cancel_hotkey()),
-        HotkeyTarget::CycleMode => None,
-    };
+    let default = default_hotkey(target);
     let path = settings_path(&app)?;
     match &default {
         Some(cfg) => core::update_hotkey_slot(&path, target, cfg.clone())?,
@@ -113,6 +120,18 @@ pub fn settings_reset_hotkey(
     }
     crate::hotkey::install(&app);
     Ok(default)
+}
+
+/// Leave an optional slot without a key: the ask slot (whose reset
+/// restores a default instead) or the switch-mode slot. Core refuses
+/// toggle and cancel: dictation could not be started or stopped from
+/// the keyboard.
+#[tauri::command]
+pub fn settings_clear_hotkey(app: AppHandle, target: HotkeyTarget) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    core::clear_hotkey_slot(&path, target)?;
+    crate::hotkey::install(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -276,4 +295,18 @@ pub fn dictionary_reveal(app: AppHandle) -> Result<(), String> {
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("reveal {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_restores_a_default_for_every_slot_but_switch_mode() {
+        assert_eq!(default_hotkey(HotkeyTarget::Toggle), Some(default_toggle_hotkey()));
+        assert_eq!(default_hotkey(HotkeyTarget::Cancel), Some(default_cancel_hotkey()));
+        assert_eq!(default_hotkey(HotkeyTarget::CycleMode), None);
+        // The ask slot is optional and still has a default to go back to.
+        assert_eq!(default_hotkey(HotkeyTarget::Ask), Some(default_ask_hotkey()));
+    }
 }

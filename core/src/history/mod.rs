@@ -46,8 +46,39 @@
 //! comment line directly under the first: `<!-- extra: key=value;
 //! key=value -->`. Today that is `mode`, the name of the mode the
 //! text was rewritten in (TASK-96), written only for a mode the user
-//! made. The line is left out when there is nothing to say, so a
-//! plain dictation looks exactly as it did before modes existed.
+//! made, and `kind=ask` for an ask (below). The line is left out when
+//! there is nothing to say, so a plain dictation looks exactly as it
+//! did before modes existed.
+//!
+//! An ask (TASK-97, `crate::ask`) is kept in the same files: a
+//! question the person asked out loud and the answer they got in the
+//! panel. The question is the entry's text, `kind=ask` on the extra
+//! line says what the entry is, and the answer is a quote under the
+//! text, shaped like the Before Refine one:
+//!
+//! ```markdown
+//! ## 14:12:03
+//! <!-- id: 20261110T141203 words: 6 seconds: 2.1 -->
+//! <!-- extra: kind=ask -->
+//!
+//! What is the capital of Norway?
+//!
+//! > Answer: The capital of Norway is Oslo.
+//! ```
+//!
+//! An ask has no app: its answer was shown, not typed anywhere. Only
+//! asks that got their whole answer are kept.
+//!
+//! The rule for the answer quote: a line that starts with `> Answer:`
+//! is the answer **only in an entry whose extra line says
+//! `kind=ask`**. In any other entry it is text, as it was before asks
+//! existed, so a dictation someone edited by hand to contain such a
+//! line reads as it always did. Inside an ask entry the quote is
+//! treated exactly like `> Before Refine:`: the first line with the
+//! label starts it, the lines after it that start with `>` belong to
+//! it (a quote ends at the first line that does not), and a later
+//! line with the same label is text. An entry can hold both quotes;
+//! each is found by its label, in either order.
 //!
 //! The first comment line is never given new fields. An entry is
 //! recognised by that line matching exactly, also by versions of the
@@ -96,6 +127,11 @@ pub const DEFAULT_FOLDER_NAME: &str = "history";
 
 /// Label of the quote that holds the text before Refine.
 const BEFORE_REFINE: &str = "> Before Refine:";
+/// Label of the quote that holds the answer of an ask.
+const ANSWER: &str = "> Answer:";
+
+/// [`HistoryEntry::kind`] of an ask.
+pub const KIND_ASK: &str = "ask";
 
 static HEADING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^## (\d{2}):(\d{2}):(\d{2})(?: · (.*))?$").unwrap());
@@ -106,13 +142,15 @@ static META: LazyLock<Regex> = LazyLock::new(|| {
 static EXTRA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^<!-- extra:(.*)-->$").unwrap());
 /// Key of the mode name on the extra line.
 const EXTRA_MODE: &str = "mode";
+/// Key of the entry kind on the extra line.
+const EXTRA_KIND: &str = "kind";
 static DAY_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
 static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
 static ENTRY_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})(\d{2})(\d{2})T\d{6}(?:-\d+)?$").unwrap());
 
-/// One stored dictation.
+/// One stored dictation, or one stored ask.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct HistoryEntry {
     /// `YYYYMMDDTHHMMSS` of the recording's start in local time, with
@@ -124,7 +162,7 @@ pub struct HistoryEntry {
     /// Voiced duration of the recording.
     pub duration_ms: i64,
     pub word_count: i64,
-    /// The text that was inserted.
+    /// The text that was inserted. For an ask: the question.
     pub text: String,
     /// The transcript before Refine, present only when Refine changed
     /// it.
@@ -138,9 +176,22 @@ pub struct HistoryEntry {
     /// for dictations Refine did not change, and for entries written
     /// before modes existed.
     pub mode: Option<String>,
+    /// What the entry is, when it is not a dictation: [`KIND_ASK`]
+    /// for an ask. `None` for a dictation and for entries written
+    /// before asks existed.
+    pub kind: Option<String>,
+    /// The answer of an ask. `None` for anything else.
+    pub answer: Option<String>,
 }
 
-/// A dictation to add.
+impl HistoryEntry {
+    /// The entry is an ask: `text` is a question, `answer` its answer.
+    pub fn is_ask(&self) -> bool {
+        self.kind.as_deref() == Some(KIND_ASK)
+    }
+}
+
+/// A dictation (or an ask) to add.
 pub struct NewEntry<'a> {
     pub at_ms: i64,
     pub duration_ms: i64,
@@ -152,6 +203,11 @@ pub struct NewEntry<'a> {
     pub app_name: &'a str,
     /// Name of the custom mode that rewrote the text. Empty for none.
     pub mode: &'a str,
+    /// Empty for a dictation, [`KIND_ASK`] for an ask (then `text` is
+    /// the question).
+    pub kind: &'a str,
+    /// The answer of an ask. Stored only for an ask.
+    pub answer: Option<&'a str>,
 }
 
 /// A slice of the history, newest first.
@@ -344,37 +400,60 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     // line. Anywhere else, a line that looks like it is text.
     let mut text_from = meta_at + 1;
     let mut mode = None;
+    let mut kind = None;
     if let Some(extra) = chunk.get(text_from).and_then(|l| EXTRA.captures(bare(l))) {
         for pair in extra[1].split(';') {
-            if let Some((key, value)) = pair.split_once('=')
-                && key.trim() == EXTRA_MODE
-            {
-                mode = Some(value.trim().to_string()).filter(|m| !m.is_empty());
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+            match key.trim() {
+                EXTRA_MODE => mode = value,
+                EXTRA_KIND => kind = value,
+                _ => {}
             }
         }
         text_from += 1;
     }
+    // The answer quote exists in an ask only; see the module docs.
+    let is_ask = kind.as_deref() == Some(KIND_ASK);
 
     let mut text_lines: Vec<String> = Vec::new();
     let mut original_lines: Vec<String> = Vec::new();
-    let mut in_quote = false;
-    let mut had_quote = false;
+    let mut answer_lines: Vec<String> = Vec::new();
+    // The quote the current line continues, if any, and which quotes
+    // were already seen (each label starts a quote once).
+    let mut in_quote: Option<&'static str> = None;
+    let mut had_original = false;
+    let mut had_answer = false;
     for line in &chunk[text_from..] {
         let line = bare(line);
-        if !had_quote && let Some(first) = line.strip_prefix(BEFORE_REFINE) {
-            in_quote = true;
-            had_quote = true;
-            original_lines.push(first.trim().to_string());
-        } else if in_quote && line.starts_with('>') {
+        // A quote runs until the first line that does not start with
+        // `>`. Inside one, a line that happens to begin with a label
+        // (an answer that says "Before Refine: ...") is just its
+        // next line.
+        if let Some(label) = in_quote
+            && line.starts_with('>')
+        {
             let rest = line.strip_prefix("> ").unwrap_or(&line[1..]);
-            original_lines.push(rest.to_string());
+            let lines = if label == ANSWER { &mut answer_lines } else { &mut original_lines };
+            lines.push(rest.to_string());
+        } else if !had_original && let Some(first) = line.strip_prefix(BEFORE_REFINE) {
+            in_quote = Some(BEFORE_REFINE);
+            had_original = true;
+            original_lines.push(first.trim().to_string());
+        } else if is_ask && !had_answer && let Some(first) = line.strip_prefix(ANSWER) {
+            in_quote = Some(ANSWER);
+            had_answer = true;
+            answer_lines.push(first.trim().to_string());
         } else {
-            in_quote = false;
+            in_quote = None;
             text_lines.push(unescape_line(line).to_string());
         }
     }
     let text = text_lines.join("\n").trim().to_string();
     let original = Some(original_lines.join("\n").trim().to_string()).filter(|o| !o.is_empty());
+    let answer = Some(answer_lines.join("\n").trim().to_string()).filter(|a| !a.is_empty());
     // The count in the comment is what was written; if the text was
     // edited by hand since, the text wins.
     let word_count = text.split_whitespace().count() as i64;
@@ -389,6 +468,8 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
         app_id,
         app_name,
         mode,
+        kind,
+        answer,
     })
 }
 
@@ -424,7 +505,23 @@ fn extra_pairs(entry: &HistoryEntry) -> Vec<String> {
     if let Some(mode) = entry.mode.as_deref().map(extra_value).filter(|m| !m.is_empty()) {
         pairs.push(format!("{EXTRA_MODE}={mode}"));
     }
+    if let Some(kind) = entry.kind.as_deref().map(extra_value).filter(|k| !k.is_empty()) {
+        pairs.push(format!("{EXTRA_KIND}={kind}"));
+    }
     pairs
+}
+
+/// A quote under the text: the label and the first line, then one
+/// `>` line per further line.
+fn render_quote(out: &mut String, label: &str, quoted: &str) {
+    out.push('\n');
+    for (n, line) in quoted.lines().enumerate() {
+        match (n, line.is_empty()) {
+            (0, _) => out.push_str(&format!("{label} {line}\n")),
+            (_, true) => out.push_str(">\n"),
+            (_, false) => out.push_str(&format!("> {line}\n")),
+        }
+    }
 }
 
 fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
@@ -453,14 +550,10 @@ fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
         out.push('\n');
     }
     if let Some(original) = &entry.original {
-        out.push('\n');
-        for (n, line) in original.lines().enumerate() {
-            match (n, line.is_empty()) {
-                (0, _) => out.push_str(&format!("{BEFORE_REFINE} {line}\n")),
-                (_, true) => out.push_str(">\n"),
-                (_, false) => out.push_str(&format!("> {line}\n")),
-            }
-        }
+        render_quote(&mut out, BEFORE_REFINE, original);
+    }
+    if let Some(answer) = &entry.answer {
+        render_quote(&mut out, ANSWER, answer);
     }
     out
 }
@@ -565,8 +658,8 @@ fn store_day(path: &Path, date: NaiveDate, front: &[String], kept: &[&HistoryEnt
     write_atomic(path, &content)
 }
 
-/// Add a dictation to its day's file. Text that is empty after
-/// trimming is not stored (`Ok(None)`).
+/// Add a dictation (or an ask) to its day's file. Text that is empty
+/// after trimming is not stored (`Ok(None)`).
 pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>> {
     let text = new.text.trim();
     if text.is_empty() {
@@ -604,6 +697,10 @@ pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>
         app_name: non_empty(new.app_name),
         // Stored the way it will read back.
         mode: Some(extra_value(new.mode)).filter(|m| !m.is_empty()),
+        kind: Some(extra_value(new.kind)).filter(|k| !k.is_empty()),
+        // Only an ask has an answer: in any other entry the quote
+        // would not be read back as one.
+        answer: new.answer.filter(|_| extra_value(new.kind) == KIND_ASK).and_then(non_empty),
     };
 
     let mut body = day.prefix.clone();
@@ -673,6 +770,7 @@ fn matches(entry: &HistoryEntry, needle: &str) -> bool {
     let has = |s: &str| s.to_lowercase().contains(needle);
     has(&entry.text)
         || entry.original.as_deref().is_some_and(has)
+        || entry.answer.as_deref().is_some_and(has)
         || entry.app_name.as_deref().is_some_and(has)
 }
 
@@ -682,7 +780,8 @@ fn matches(entry: &HistoryEntry, needle: &str) -> bool {
 
 /// Stored entries, newest first. `search` is matched without regard
 /// to case (Danish letters included) against the text, the original
-/// text and the app name; an empty search returns everything. `limit`
+/// text, the answer of an ask and the app name; an empty search
+/// returns everything. `limit`
 /// is capped at [`MAX_PAGE`].
 pub fn list(dir: &Path, search: &str, limit: u32, offset: u32) -> HistoryPage {
     let needle = search.trim().to_lowercase();

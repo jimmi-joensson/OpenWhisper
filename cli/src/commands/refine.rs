@@ -18,6 +18,8 @@
 //! - `history`: what Refine did on recent dictations in the desktop
 //!   app (status, response time, warm or cold, reason for a fallback).
 //!   The same data as the app's Diagnostics pane; no dictated text.
+//!   Asks (`openwhisper ask`, TASK-97) are rows of the same table,
+//!   listed with the source `ask` and counted on a line of their own.
 //!
 //! `run`, `test` and `eval` work whether or not Refine is enabled:
 //! invoking them is the opt-in. They send the text to the configured
@@ -144,6 +146,10 @@ pub struct ConfigArgs {
     /// Reject output that drifts from what was said (on by default).
     #[arg(long, value_parser = parse_bool)]
     drift_guard: Option<bool>,
+    /// Never write an em dash or an en dash: Refine and Ask use a
+    /// hyphen, a comma or a new sentence instead (on by default).
+    #[arg(long, value_parser = parse_bool)]
+    no_long_dashes: Option<bool>,
     /// Utterances with fewer words are not sent.
     #[arg(long)]
     min_words: Option<u32>,
@@ -408,6 +414,7 @@ fn status(overrides: &Overrides, json: bool) -> Result<()> {
     println!("timeout_ms     {}", settings.timeout_ms);
     println!("min_words      {}", settings.min_words);
     println!("drift_guard    {}", settings.drift_guard);
+    println!("no_long_dashes {}", settings.no_long_dashes);
     println!("settings_path  {}", settings_path()?.display());
     Ok(())
 }
@@ -443,6 +450,7 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     let o = &args.overrides;
     let changes = args.enabled.is_some()
         || args.drift_guard.is_some()
+        || args.no_long_dashes.is_some()
         || args.min_words.is_some()
         || o.backend.is_some()
         || o.model.is_some()
@@ -458,6 +466,9 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     }
     if let Some(v) = args.drift_guard {
         next.drift_guard = v;
+    }
+    if let Some(v) = args.no_long_dashes {
+        next.no_long_dashes = v;
     }
     if let Some(v) = args.min_words {
         next.min_words = v;
@@ -486,6 +497,7 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
         println!("timeout_ms     {}", current.timeout_ms);
         println!("min_words      {}", current.min_words);
         println!("drift_guard    {}", current.drift_guard);
+        println!("no_long_dashes {}", current.no_long_dashes);
         println!("claude model   {}", current.claude_cli.model);
         println!("claude effort  {}", current.claude_cli.effort.as_str());
         println!("claude path    {}", current.claude_cli.path.as_deref().unwrap_or("(auto)"));
@@ -607,6 +619,17 @@ fn show_history(args: HistoryArgs, json: bool) -> Result<()> {
     );
     println!("too short      {}", summary.skipped);
     println!("instructions   {}", summary.instructions);
+    if summary.asks > 0 {
+        // Asks share the table (and the plan); the numbers above are
+        // about Refine only.
+        println!(
+            "asks           {} ({} answered; median first text {}, whole answer {})",
+            summary.asks,
+            summary.asks_answered,
+            ms(summary.ask_median_first_text_ms),
+            ms(summary.ask_median_ms)
+        );
+    }
     println!(
         "response time  median {}, p90 {}, slowest {}",
         ms(summary.median_ms),

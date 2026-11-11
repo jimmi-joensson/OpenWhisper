@@ -36,6 +36,16 @@ export interface HistoryEntry {
   // Name of the mode the text was rewritten in, when it was one the
   // user made; null for the built-in Dictation mode.
   mode: string | null;
+  // What the entry is when it is not a dictation: "ask" for an ask
+  // (TASK-97), whose `text` is the question. null for a dictation.
+  kind: "ask" | null;
+  // The answer of an ask; null for anything else.
+  answer: string | null;
+}
+
+// The entry is an ask: `text` is a question, `answer` its answer.
+export function isAskEntry(entry: HistoryEntry): boolean {
+  return entry.kind === "ask";
 }
 
 export interface HistoryPage {

@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openwhisper_core::audio::{self, AudioDeviceState};
-use openwhisper_core::dictation::{self, DictationEnv};
+use openwhisper_core::dictation::{self, DictationEnv, SessionKind};
 use openwhisper_core::media_gate::{self, MediaController, PauseDiagnostic};
 use openwhisper_core::stats::{self, StatsSummary};
 use openwhisper_core::store::Store;
@@ -16,6 +16,7 @@ use tauri::LogicalPosition;
 #[cfg(not(target_os = "macos"))]
 use tauri::PhysicalPosition;
 
+mod ask;
 mod behavior;
 mod crashes;
 mod file_transcribe;
@@ -26,6 +27,7 @@ mod hotkey;
 mod injection;
 mod media_control;
 mod modes;
+mod navigate;
 mod permissions;
 mod pill_hover;
 mod refine;
@@ -98,7 +100,12 @@ fn resume_audio_after_recording() {
 // The pill needs to be a real NSPanel (not NSWindow) so it can render
 // over other apps' fullscreen Spaces on macOS Sonoma+. tauri-nspanel
 // swizzles the window's class in place; the macro below declares the
-// panel config the conversion uses.
+// panel config the conversion uses. The answer window (TASK-97) is a
+// second panel of the same kind, for the same two reasons: it has to
+// show over a fullscreen Space when the pill does, and it must never
+// take key focus, so "insert" pastes into the app the user was in.
+// Both panels are declared in one macro call: each call brings the
+// same `use` lines into this module, so two calls would collide.
 #[cfg(target_os = "macos")]
 tauri_nspanel::tauri_panel! {
     panel!(PillPanel {
@@ -106,6 +113,14 @@ tauri_nspanel::tauri_panel! {
             // Pill never takes keyboard focus — the user's typing target
             // is the app behind it. nonactivating style mask is set
             // separately at conversion time.
+            can_become_key_window: false,
+            is_floating_panel: true
+        }
+    })
+    panel!(AnswerPanel {
+        config: {
+            // Clicks reach its buttons (acceptFirstMouse in the window
+            // config), the keyboard never does.
             can_become_key_window: false,
             is_floating_panel: true
         }
@@ -131,6 +146,12 @@ pub(crate) fn product_name(app: &tauri::AppHandle) -> String {
 #[derive(Serialize, Clone)]
 struct DictationTick {
     phase: u32,
+    /// What the recording in flight is for, or what the last one was
+    /// for: `"dictation"` or `"ask"`. After an ask recording the
+    /// phase goes to DONE with the transcript of the dictation before
+    /// it still here, so the windows must not take that for a new
+    /// dictation.
+    session_kind: SessionKind,
     status: &'static str,
     status_message: String,
     transcript: String,
@@ -145,9 +166,39 @@ struct DictationTick {
     error_message: String,
     can_toggle: bool,
     is_recording: bool,
+    /// The cancel key would do something now: a recording, or an ask
+    /// that is being transcribed or answered
+    /// (`dictation::cancel_would_act`). The in-window keyboard
+    /// fallback on Windows gates Escape on it, like the hook does.
+    cancel_would_act: bool,
     level: f32,
     download_bytes_done: u64,
     download_bytes_total: u64,
+}
+
+impl DictationTick {
+    fn now() -> Self {
+        let snap = dictation::dictation_snapshot();
+        Self {
+            phase: snap.phase(),
+            session_kind: snap.session_kind(),
+            status: dictation::phase_status_label(snap.phase()),
+            status_message: snap.status_message(),
+            transcript: snap.transcript(),
+            replacements: snap.replacements(),
+            refine: snap.refine(),
+            confidence: snap.confidence(),
+            sample_count: snap.live_samples(SAMPLE_RATE_HZ),
+            elapsed_ms: snap.elapsed_ms(),
+            error_message: snap.error_message(),
+            can_toggle: snap.can_toggle(),
+            is_recording: snap.is_recording(),
+            cancel_would_act: dictation::cancel_would_act(),
+            level: audio::audio_current_level(),
+            download_bytes_done: snap.download_bytes_done(),
+            download_bytes_total: snap.download_bytes_total(),
+        }
+    }
 }
 
 #[tauri::command]
@@ -277,7 +328,16 @@ pub(crate) fn do_toggle() -> Result<(), String> {
     dictation::run_toggle(&TauriDictationEnv)
 }
 
-/// Shared cancel path. See [`do_toggle`].
+/// Shared ask path: the ask hotkey and the `ask_toggle` command.
+/// Starts an ask recording, or stops whatever recording is running;
+/// orchestration lives in [`dictation::run_toggle_kind`]. Does
+/// nothing while Ask is switched off.
+pub(crate) fn do_ask_toggle() -> Result<(), String> {
+    dictation::run_toggle_kind(&TauriDictationEnv, SessionKind::Ask)
+}
+
+/// Shared cancel path. See [`do_toggle`]. Also stops an ask that is
+/// being transcribed or answered ([`dictation::run_cancel`]).
 pub(crate) fn do_cancel() -> bool {
     dictation::run_cancel(&TauriDictationEnv)
 }
@@ -425,26 +485,7 @@ fn spawn_dictation_emitter(app: tauri::AppHandle) {
         .spawn(move || {
             loop {
                 thread::sleep(Duration::from_millis(TICK_MS));
-                let snap = dictation::dictation_snapshot();
-                let level = audio::audio_current_level();
-                let payload = DictationTick {
-                    phase: snap.phase(),
-                    status: dictation::phase_status_label(snap.phase()),
-                    status_message: snap.status_message(),
-                    transcript: snap.transcript(),
-                    replacements: snap.replacements(),
-                    refine: snap.refine(),
-                    confidence: snap.confidence(),
-                    sample_count: snap.live_samples(SAMPLE_RATE_HZ),
-                    elapsed_ms: snap.elapsed_ms(),
-                    error_message: snap.error_message(),
-                    can_toggle: snap.can_toggle(),
-                    is_recording: snap.is_recording(),
-                    level,
-                    download_bytes_done: snap.download_bytes_done(),
-                    download_bytes_total: snap.download_bytes_total(),
-                };
-                if app.emit("dictation_tick", payload).is_err() {
+                if app.emit("dictation_tick", DictationTick::now()).is_err() {
                     break;
                 }
             }
@@ -535,7 +576,7 @@ fn center_main_on_pill_monitor(app: &tauri::AppHandle) {
 ///   factor, which is the *source* monitor's scale on a cross-DPI move.
 ///   Pre-multiplying by the *destination* scale and passing
 ///   `PhysicalPosition` sidesteps that.
-fn set_window_at_logical(
+pub(crate) fn set_window_at_logical(
     window: &tauri::WebviewWindow,
     x_log: f64,
     y_log: f64,
@@ -579,8 +620,18 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// Navigate to the Settings view. Settings is now an in-window route
 /// rather than a separate window — bring the main window forward and
 /// emit `ow_navigate` so the React tree swaps to the Settings shell.
+///
+/// `pane` opens Settings on that pane ("ask") and `focus` brings one
+/// row of it into view ("web-search"); both are optional, and without
+/// them the call does what it always did. This is how the answer
+/// window of Ask leads to the web search switch: that window never
+/// takes focus itself, the main window is what comes forward.
 #[tauri::command]
-async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_settings_window(
+    app: tauri::AppHandle,
+    pane: Option<String>,
+    focus: Option<String>,
+) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -591,8 +642,11 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
     main.set_focus().map_err(|e| e.to_string())?;
-    app.emit("ow_navigate", "settings")
-        .map_err(|e| e.to_string())?;
+    app.emit(
+        navigate::NAVIGATE_EVENT,
+        navigate::settings_payload(pane.as_deref(), focus.as_deref()),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -614,12 +668,31 @@ async fn set_pill_click_through(
 /// units passed to Tauri).
 static LAST_PILL_POSITION: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 
-/// Place the pill bottom-center of a chosen monitor, anchored 24 px
-/// above the bottom edge of that monitor's *work area* — the top of
-/// the Dock on Mac, the top of the taskbar on Windows, or the screen's
-/// bottom edge when neither is on this monitor. Tracks Dock/taskbar
-/// resize via `fullscreen::work_area_bottom_y` (NSScreen.visibleFrame
-/// on Mac, MONITORINFO.rcWork on Windows).
+/// Where the pill goes on a monitor, in unified logical points
+/// (primary's top-left = origin, Y-down). The answer window is placed
+/// from the same numbers ([`ask::place_window`]), so the two cannot
+/// disagree about the monitor, the Dock or the taskbar.
+pub(crate) struct PillSpot {
+    /// Top-left of the pill window.
+    pub x: f64,
+    pub y: f64,
+    /// Scale factor of the monitor, for [`set_window_at_logical`].
+    pub scale: f64,
+    /// Left edge, top edge and width of the monitor.
+    pub mon_x: f64,
+    pub mon_y: f64,
+    pub mon_w: f64,
+    /// Top edge of the idle capsule.
+    pub capsule_top: f64,
+}
+
+/// Work out where the pill sits: bottom-center of a chosen monitor,
+/// anchored 24 px above the bottom edge of that monitor's *work
+/// area*: the top of the Dock on Mac, the top of the taskbar on
+/// Windows, or the screen's bottom edge when neither is on this
+/// monitor. Tracks Dock/taskbar resize via
+/// `fullscreen::work_area_bottom_y` (NSScreen.visibleFrame on Mac,
+/// MONITORINFO.rcWork on Windows).
 ///
 /// `monitor_origin` is opaque to this function: when `Some`, it gets
 /// passed straight to `fullscreen::find_tauri_monitor` which knows how
@@ -629,16 +702,12 @@ static LAST_PILL_POSITION: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 /// the watcher tick and this call — falls back to `current_monitor()`,
 /// then `primary_monitor()`, so the pill always lands somewhere.
 ///
-/// Self-dedupes via `LAST_PILL_POSITION`: skips the `set_position`
-/// call when the computed target equals the last one we set. The
-/// periodic refresh task in `setup()` therefore costs nothing while
-/// the user isn't moving the cursor or resizing the Dock.
-///
 /// MUST be called on the main thread: `available_monitors()` and
-/// `NSScreen.visibleFrame` are main-thread-only on macOS. Both the
-/// Tauri command wrapper and the watcher / refresh callbacks dispatch
-/// via `app.run_on_main_thread`.
-fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Result<(), String> {
+/// `NSScreen.visibleFrame` are main-thread-only on macOS.
+pub(crate) fn pill_spot(
+    app: &tauri::AppHandle,
+    monitor_origin: Option<(i32, i32)>,
+) -> Result<PillSpot, String> {
     let pill = app
         .get_webview_window("pill")
         .ok_or_else(|| "pill window not found".to_string())?;
@@ -691,6 +760,37 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
     // Solve: window_y + (PILL_WIN_H - CAPSULE_BELOW_PAD) = work_area_bottom - gap
     let y = work_area_bottom - gap - PILL_WIN_H + CAPSULE_BELOW_PAD;
 
+    Ok(PillSpot {
+        x,
+        y,
+        scale,
+        mon_x,
+        mon_y,
+        mon_w,
+        capsule_top: y + CAPSULE_BELOW_PAD,
+    })
+}
+
+/// Place the pill where [`pill_spot`] says, and the answer window
+/// above it on the same monitor.
+///
+/// Self-dedupes via `LAST_PILL_POSITION`: skips the `set_position`
+/// call when the computed target equals the last one we set. The
+/// periodic refresh task in `setup()` therefore costs nothing while
+/// the user isn't moving the cursor or resizing the Dock. The answer
+/// window dedupes the same way on its own.
+///
+/// MUST be called on the main thread, like [`pill_spot`]. Both the
+/// Tauri command wrapper and the watcher / refresh callbacks dispatch
+/// via `app.run_on_main_thread`.
+fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Result<(), String> {
+    let pill = app
+        .get_webview_window("pill")
+        .ok_or_else(|| "pill window not found".to_string())?;
+    let spot = pill_spot(app, monitor_origin)?;
+    ask::place_window(app, &spot);
+    let (x, y) = (spot.x, spot.y);
+
     {
         let mut last = LAST_PILL_POSITION.lock().unwrap();
         // Sub-pixel jitter would otherwise cause needless `set_position`
@@ -703,7 +803,7 @@ fn place_pill(app: &tauri::AppHandle, monitor_origin: Option<(i32, i32)>) -> Res
         *last = Some((x, y));
     }
 
-    set_window_at_logical(&pill, x, y, scale)
+    set_window_at_logical(&pill, x, y, spot.scale)
         .map_err(|e| e.to_string())
 }
 
@@ -727,6 +827,9 @@ fn apply_fullscreen_state(app: &tauri::AppHandle, is_fullscreen: bool) {
     if action.cancel_recording {
         let _ = do_cancel();
     }
+    // The answer window is hidden together with the pill, and comes
+    // back with it when an ask is still on its snapshot.
+    ask::set_suppressed(app, action.hide_pill);
     let Some(pill) = app.get_webview_window("pill") else {
         return;
     };
@@ -920,6 +1023,7 @@ pub fn run() {
             }
 
             spawn_dictation_emitter(app.handle().clone());
+            ask::spawn_emitter(app.handle().clone());
             spawn_audio_device_poller(app.handle().clone());
             spawn_recognizer_warmup();
 
@@ -1042,6 +1146,10 @@ pub fn run() {
             // its switch (off unless the user turned it on) and drop
             // text that aged out while the app was closed.
             history::init(app.handle());
+            // Hydrate the Ask switch (off unless the user turned it
+            // on) before the hotkeys are installed: the ask slot is
+            // only installed while Ask is on.
+            ask::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1074,6 +1182,27 @@ pub fn run() {
                         panel.set_style_mask(
                             StyleMask::empty().nonactivating_panel().into(),
                         );
+                    }
+                }
+                // The answer window, exactly like the pill: its own
+                // non-activating floating panel. Converted while it is
+                // still hidden; `ask` shows it with
+                // `orderFrontRegardless`, which neither activates the
+                // app nor makes the panel key.
+                if let Some(answer_win) = app.get_webview_window(ask::ANSWER_LABEL) {
+                    match answer_win.to_panel::<AnswerPanel>() {
+                        Ok(panel) => {
+                            panel.set_level(PanelLevel::Floating.value());
+                            panel.set_style_mask(
+                                StyleMask::empty().nonactivating_panel().into(),
+                            );
+                            // A panel hides when its app is not the
+                            // active one unless told otherwise, and
+                            // this app never is while the user types
+                            // elsewhere.
+                            panel.set_hides_on_deactivate(false);
+                        }
+                        Err(e) => eprintln!("[ask] answer panel conversion failed: {e}"),
                     }
                 }
             }
@@ -1224,6 +1353,17 @@ pub fn run() {
             core_version,
             dictation_toggle,
             dictation_cancel,
+            ask::ask_get,
+            ask::ask_status,
+            ask::ask_set,
+            ask::ask_context_preview,
+            ask::ask_start,
+            ask::ask_toggle,
+            ask::ask_cancel,
+            ask::ask_dismiss,
+            ask::ask_insert,
+            ask::ask_copy,
+            ask::ask_snapshot,
             set_pill_click_through,
             reposition_pill,
             show_main_window,
@@ -1234,6 +1374,7 @@ pub fn run() {
             settings::settings_get_hotkeys,
             settings::settings_set_hotkey,
             settings::settings_reset_hotkey,
+            settings::settings_clear_hotkey,
             settings::settings_capture_hotkey_start,
             settings::settings_capture_hotkey_cancel,
             settings::audio_set_device,

@@ -6,6 +6,8 @@
 //! the prelude just re-exports the canonical types most consumers
 //! need together. Modules covered today:
 //!
+//! - `ask`: a spoken question, answered by a language model and
+//!   shown in a panel (feature `ask`)
 //! - `audio` — capture + device enumeration
 //! - `dictation` — phase machine + snapshot
 //! - `diagnostics` — recognizer info + crash-dump trait surface
@@ -43,7 +45,12 @@ pub use crate::diagnostics::{
 };
 #[cfg(feature = "recognizer")]
 pub use crate::diagnostics::recognizer_info;
-pub use crate::dictation::{DictationSnapshot, Injector, RefineInfo};
+#[cfg(feature = "ask")]
+pub use crate::ask::{
+    AskBackend, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup, AskSnapshot,
+    AskStatus, AskSuggestion, CancelFlag,
+};
+pub use crate::dictation::{DictationSnapshot, Injector, RefineInfo, SessionKind};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};
 pub use crate::model_lifecycle::{
     LifecycleState, ModelHandle, StateChangeCallback, apply_keep_warm, on_state_change,
@@ -51,7 +58,7 @@ pub use crate::model_lifecycle::{
 };
 pub use crate::modes::{ModeApp, ModeChoice, ModeEdit, ModeReason, ModeView};
 pub use crate::settings::{
-    AppDefault, AudioSettings, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, BehaviorSettings,
+    AppDefault, AskSettings, AudioSettings, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, BehaviorSettings,
     ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, Mode, ModesSettings,
     OpenAiSettings, PerformanceSettings, PillSettings, RefineBackendKind, RefineEffort,
     RefineSettings, StatsSettings, keep_models_warm,

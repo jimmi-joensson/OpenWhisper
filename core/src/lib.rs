@@ -1,5 +1,8 @@
+#[cfg(feature = "ask")]
+pub mod ask;
 pub mod audio;
 pub mod crashes;
+pub mod dashes;
 pub mod diagnostics;
 pub mod dictionary;
 pub mod dictation;

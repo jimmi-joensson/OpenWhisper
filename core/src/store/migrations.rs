@@ -76,6 +76,13 @@ ALTER TABLE refine_runs ADD COLUMN mode TEXT;";
 const MIGRATION_6_ASK_FIRST_TEXT: &str = "\
 ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;";
 
+/// Vision (TASK-98): whether a screenshot was taken for an ask. 1 or
+/// 0 on the row of every ask written from here on, also of one that
+/// failed or was cancelled, so a capture always leaves a record. NULL
+/// for Refine runs and on rows written before this migration.
+const MIGRATION_7_ASK_SCREEN: &str = "\
+ALTER TABLE refine_runs ADD COLUMN screen INTEGER;";
+
 fn specs() -> Vec<M<'static>> {
     vec![
         M::up(MIGRATION_1_DICTATIONS),
@@ -84,6 +91,7 @@ fn specs() -> Vec<M<'static>> {
         M::up(MIGRATION_4_REFINE_USAGE),
         M::up(MIGRATION_5_REFINE_MODE),
         M::up(MIGRATION_6_ASK_FIRST_TEXT),
+        M::up(MIGRATION_7_ASK_SCREEN),
     ]
 }
 

@@ -29,6 +29,13 @@
 //!   tool stops and reports an error.
 //! - **The answer is never typed by itself.** See above.
 //!
+//! An ask also tells the model a few facts about the computer it was
+//! asked on ([`context`]: the date and time, the machine, the app in
+//! front, the language and region, and where the person says they
+//! are), each group behind its own switch, and its answers hold no
+//! em dash and no en dash while that is switched on
+//! ([`crate::settings::RefineSettings::no_long_dashes`], [`crate::dashes`]).
+//!
 //! This is a separate pipeline from [`crate::refine::Refiner`], which
 //! is text in, text out within a few seconds. An answer is long, so
 //! it streams ([`AskEvent`]); it can be cancelled ([`CancelFlag`]);
@@ -49,7 +56,11 @@
 //!   the screen is needed. Only then is the screen captured and sent
 //!   as a second turn of the same conversation. That marker never
 //!   reaches the panel: text is held back until it is clear that the
-//!   reply is not it.
+//!   reply is not it. A model does not always reply with the bare
+//!   word, so the marker is also recognised dressed up, and after one
+//!   short sentence of preamble ([`hint`] has the rules); for that,
+//!   the first line of an answer is held back in this mode until it
+//!   is clear that it is not such a preamble.
 //!
 //! When a screenshot was wanted and could not be taken (an app on the
 //! never-capture list is in front, no permission, no display), the
@@ -98,10 +109,13 @@ use crate::settings::{
 };
 
 pub mod claude_cli;
+pub mod context;
 pub mod eval;
+pub mod hint;
 pub mod openai_compat;
 pub mod prompt;
 mod screen;
+pub(crate) mod wipe;
 
 pub use crate::refine::CallUsage;
 pub use prompt::ScreenPrompt;
@@ -115,6 +129,20 @@ use screen::{Shot, Step};
 /// An image sent along with a question: the screenshot of an ask
 /// that includes the screen (TASK-98). It lives until the backend
 /// call that sends it returns.
+///
+/// **What is wiped, and what is not.** The bytes in `data` are
+/// overwritten with zeros when the image is dropped, and so is every
+/// copy this crate makes of them on the way out: a clone of the image,
+/// the base64 text of the Claude CLI's input line
+/// ([`claude_cli::user_line`]) once it is written to the process, and
+/// the `data:` URL of an OpenAI-compatible request
+/// ([`openai_compat`]) once the request has returned, where the image
+/// is also taken out of the kept conversation. What this crate
+/// cannot reach is not wiped: the copy inside the HTTP client and the
+/// TLS layer while a request is on its way, the pipe and the memory
+/// of the Claude CLI process the line was written to, and whatever
+/// the allocator did with a buffer that grew. Those end with the
+/// request and with that process.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AskImage {
     /// MIME type, e.g. `image/png`.
@@ -127,6 +155,12 @@ pub struct AskImage {
 impl fmt::Debug for AskImage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AskImage({}, {} bytes)", self.media_type, self.data.len())
+    }
+}
+
+impl Drop for AskImage {
+    fn drop(&mut self) {
+        wipe::bytes(&mut self.data);
     }
 }
 
@@ -159,6 +193,33 @@ pub enum AskEvent {
     /// `notice` says why (one sentence for the person). Never carries
     /// the image.
     Screen { state: ScreenState, notice: String },
+    /// The answer comes with a suggestion for the person
+    /// ([`AskReply::suggestion`]). Sent once, as soon as it is known,
+    /// which is before the text of the answer.
+    Suggestion(AskSuggestion),
+}
+
+/// Something the person could do to get a better answer next time.
+/// The model decides when it applies (it marks its answer, see
+/// [`hint`]); the app says it in its own words and never shows
+/// anything the model wrote for it.
+#[non_exhaustive]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskSuggestion {
+    /// The question needed current information from the web, and web
+    /// search is switched off
+    /// ([`crate::settings::AskSettings::web_search`]).
+    WebSearch,
+}
+
+impl AskSuggestion {
+    /// Stable id, same as the serialized form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSearch => "web-search",
+        }
+    }
 }
 
 /// A finished answer.
@@ -190,6 +251,8 @@ pub struct AskReply {
     /// Why there is no screenshot, for the person. Empty unless
     /// `screen` is `blocked` or `unavailable`.
     pub screen_notice: String,
+    /// See [`AskSuggestion`]. `None` most of the time.
+    pub suggestion: Option<AskSuggestion>,
 }
 
 /// Why there is no answer.
@@ -367,6 +430,7 @@ impl<'a> Turn<'a> {
             notice: notice.to_string(),
             screen: ScreenState::None,
             screen_notice: String::new(),
+            suggestion: None,
         }
     }
 }
@@ -383,6 +447,10 @@ const NO_QUESTION: &str = "There was no question to answer.";
 const NO_ANSWER: &str = "The model returned no answer.";
 const STOPPED: &str = "The ask stopped on an internal error. Ask again.";
 
+/// The answer when the model wrote the web search marker and nothing
+/// else.
+pub const NEEDS_THE_WEB: &str = "This needs current information from the web.";
+
 /// Everything one ask is made with, worked out from the two settings
 /// blocks: which backend, the conversation setup, the timeout. The
 /// app and the CLI go through the same type, so `openwhisper ask run`
@@ -397,6 +465,21 @@ pub struct AskPlan {
     pub timeout: Duration,
     /// See [`AskReply::notice`].
     pub notice: String,
+    /// Web search is off and the backend has one to switch on (the
+    /// Claude backend). The prompt then asks the model to mark an
+    /// answer that needed the web ([`prompt::WebAccess::SwitchedOff`]);
+    /// [`AskPlan::send`] takes the mark off the answer and turns it
+    /// into [`AskReply::suggestion`].
+    pub web_hint: bool,
+    /// The facts about the computer the prompt carries, as rendered
+    /// ([`context::DeviceContext::render`]). Empty = none. It is part
+    /// of [`AskSetup::system`]; kept here as well so the ask that was
+    /// warmed with it can be sent with the same one.
+    pub context: String,
+    /// Em dashes and en dashes are taken out of the answer, as it
+    /// streams and at the end
+    /// ([`crate::settings::RefineSettings::no_long_dashes`]).
+    pub no_long_dashes: bool,
     claude_cli: ClaudeCliSettings,
     openai: OpenAiSettings,
     /// What the system prompt is made of, to make it again once it is
@@ -406,6 +489,55 @@ pub struct AskPlan {
     today: String,
     /// Whether and when this ask includes the screen.
     vision: screen::AskVision,
+    /// The model may be told which app is in front: the person has
+    /// that fact switched on ([`crate::settings::ContextSettings::front_app`]).
+    /// When it is off, the reason for a missing screenshot does not
+    /// name the protected app that is in front either.
+    names_front_app: bool,
+}
+
+/// The markers one turn of an ask looks for in the reply.
+#[derive(Clone, Copy, Debug)]
+struct Watch {
+    /// [`NEED_SCREEN`]: the prompt has the rule of the smart trigger.
+    screen: bool,
+    /// [`prompt::NEEDS_WEB_SEARCH`]: the prompt has the rule for web
+    /// search that is switched off ([`AskPlan::web_hint`]).
+    web: bool,
+    /// Tell the sink when the web search marker is found
+    /// ([`AskEvent::Suggestion`]).
+    announce_web: bool,
+}
+
+impl Watch {
+    fn markers(self) -> Vec<hint::Marker> {
+        let mut markers = Vec::new();
+        if self.screen {
+            markers.push(hint::Marker::reply(NEED_SCREEN));
+        }
+        if self.web {
+            markers.push(hint::Marker::line(prompt::NEEDS_WEB_SEARCH));
+        }
+        markers
+    }
+
+    /// A whole reply, read for these markers the way a stream is.
+    fn read(self, reply: &str) -> Read {
+        let (found, text) = hint::split(&self.markers(), reply);
+        Read {
+            wants_screen: found.contains(&NEED_SCREEN),
+            web: found.contains(&prompt::NEEDS_WEB_SEARCH).then(|| prompt::clean_answer(&text)),
+        }
+    }
+}
+
+/// What a whole reply is, for the markers of one turn ([`Watch::read`]).
+struct Read {
+    /// The reply is the screen marker.
+    wants_screen: bool,
+    /// The reply began with the web search marker: the answer that
+    /// follows it, tidied. Empty when nothing follows.
+    web: Option<String>,
 }
 
 /// What an ask has learned about the screen so far.
@@ -420,33 +552,59 @@ struct ScreenSeen {
 
 impl AskPlan {
     /// The plan for these settings, with the dictionary terms given
-    /// instead of read from the user's dictionary. For the eval set
-    /// and tests.
+    /// instead of read from the user's dictionary, and without any
+    /// facts about the computer: the prompt only says what day it is.
+    /// For tests, and for the eval set run without a device context.
     pub fn with_terms(ask: &AskSettings, refine: &RefineSettings, terms: &[String]) -> Self {
+        let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
+        Self::assemble(ask, refine, terms, &today, "")
+    }
+
+    /// The plan for these settings with the dictionary terms and the
+    /// rendered device context given ([`context::DeviceContext::render`]).
+    /// The context carries the date when its date group is on, so the
+    /// prompt does not say it a second time; with an empty context the
+    /// prompt has neither.
+    pub fn with_context(ask: &AskSettings, refine: &RefineSettings, terms: &[String], context: &str) -> Self {
+        Self::assemble(ask, refine, terms, "", context)
+    }
+
+    fn assemble(ask: &AskSettings, refine: &RefineSettings, terms: &[String], today: &str, context: &str) -> Self {
         let ask = ask.clone().cleaned();
         let openai = refine.backend == RefineBackendKind::OpenaiCompatible;
         // Only the Claude CLI has a web search to switch on.
         let web_search = ask.web_search && !openai;
         let notice = if ask.web_search && openai { WEB_SEARCH_UNAVAILABLE } else { "" };
         let timeout_ms = if web_search { ask.timeout_ms.saturating_mul(2) } else { ask.timeout_ms };
-        let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
-        Self {
+        let web = match (web_search, openai) {
+            (true, _) => prompt::WebAccess::Search,
+            (false, true) => prompt::WebAccess::Unavailable,
+            (false, false) => prompt::WebAccess::SwitchedOff,
+        };
+        let mut plan = Self {
             backend: refine.backend,
             setup: AskSetup {
-                system: prompt::system_prompt(&ask.instructions, terms, web_search, &today),
+                // Made below, from the finished plan.
+                system: String::new(),
                 model: ask.model_for(refine),
                 effort: ask.effort_for(refine),
                 web_search,
             },
             timeout: Duration::from_millis(timeout_ms.min(ASK_TIMEOUT_MAX_MS * 2)),
             notice: notice.to_string(),
+            web_hint: web == prompt::WebAccess::SwitchedOff,
+            context: context.trim().to_string(),
+            no_long_dashes: refine.no_long_dashes,
             claude_cli: refine.claude_cli.clone(),
             openai: refine.openai.clone(),
             instructions: ask.instructions.clone(),
             terms: terms.to_vec(),
-            today,
+            today: today.to_string(),
             vision: screen::AskVision::default(),
-        }
+            names_front_app: ask.context.front_app,
+        };
+        plan.setup.system = plan.system_for(plan.screen_prompt(false));
+        plan
     }
 
     /// The same plan with the screen in play (TASK-98). A plan starts
@@ -492,14 +650,86 @@ impl AskPlan {
         self.vision.prompt(has_image)
     }
 
-    fn system_for(&self, screen: ScreenPrompt) -> String {
-        prompt::system_prompt_for(&self.instructions, &self.terms, self.setup.web_search, &self.today, screen)
+    /// What this ask can do about the web, as the prompt says it.
+    fn web_access(&self) -> prompt::WebAccess {
+        match (self.setup.web_search, self.web_hint) {
+            (true, _) => prompt::WebAccess::Search,
+            (false, true) => prompt::WebAccess::SwitchedOff,
+            (false, false) => prompt::WebAccess::Unavailable,
+        }
     }
 
-    /// The plan for these settings and the current dictionary.
+    /// The system prompt of this plan with `screen` for what it says
+    /// about the screen: the one place the prompt of a plan is put
+    /// together, so the web access, the device context and the dash
+    /// rule are the same in the prompt a backend is warmed with and
+    /// in the prompt the question goes out with.
+    fn system_for(&self, screen: ScreenPrompt) -> String {
+        let extras = prompt::Extras { context: &self.context, no_long_dashes: self.no_long_dashes, screen };
+        prompt::system_prompt_with(&self.instructions, &self.terms, self.web_access(), &self.today, extras)
+    }
+
+    /// The setup of this plan with `screen` for what its prompt says
+    /// about the screen, everything else as it is. For the Vision
+    /// eval set ([`crate::vision::eval`]), which sends its cases to a
+    /// backend itself, so that no eval can reach a capture, and still
+    /// has to send the prompt an ask would. Makes a string and
+    /// nothing else.
+    #[cfg_attr(not(feature = "vision"), allow(dead_code))]
+    pub(crate) fn setup_for_screen(&self, screen: ScreenPrompt) -> AskSetup {
+        AskSetup { system: self.system_for(screen), ..self.setup.clone() }
+    }
+
+    /// The markers a turn under the screen prompt `kind` looks for.
+    /// Only where the prompt taught the model a marker can the reply
+    /// hold one: the screen marker with the smart trigger, the web
+    /// search marker while web search could be switched on. Both can
+    /// be in one prompt.
+    fn watch_for(&self, kind: ScreenPrompt) -> Watch {
+        Watch { screen: kind == ScreenPrompt::OnRequest, web: self.web_hint, announce_web: self.web_hint }
+    }
+
+    /// What the app makes of a whole reply to this plan's prompt with
+    /// `screen` for what it says about the screen, when the reply
+    /// came straight from a backend. Read by the same code as a turn
+    /// of an ask ([`Watch::read`]), so the Vision eval set
+    /// ([`crate::vision::eval`]) judges exactly what the app would do:
+    ///
+    /// - a reply the app would take as a request for the screen comes
+    ///   back as the bare marker, [`NEED_SCREEN`], however the model
+    ///   wrote it;
+    /// - any other reply comes back as the person would be shown it:
+    ///   without the web search marker, where the prompt asks for
+    ///   one, and without long dashes, where those are taken out.
+    #[cfg_attr(not(feature = "vision"), allow(dead_code))]
+    pub(crate) fn shown(&self, screen: ScreenPrompt, reply: &str) -> String {
+        let read = self.watch_for(screen).read(reply);
+        if read.wants_screen {
+            return NEED_SCREEN.to_string();
+        }
+        let text = match read.web {
+            Some(rest) if rest.is_empty() => NEEDS_THE_WEB.to_string(),
+            Some(rest) => rest,
+            None => reply.to_string(),
+        };
+        if self.no_long_dashes { crate::dashes::normalize(&text) } else { text }
+    }
+
+    /// The plan for these settings, the current dictionary and the
+    /// facts about this computer the settings ask for, read now
+    /// ([`context::gather`]). No app in front: for a caller that has
+    /// none to name (a terminal is not where the person is working).
     pub fn new(ask: &AskSettings, refine: &RefineSettings) -> Self {
+        Self::for_app(ask, refine, None)
+    }
+
+    /// [`AskPlan::new`] with the name of the app the person is
+    /// working in, when the caller knows it. It reaches the prompt
+    /// only while that group of facts is switched on.
+    pub fn for_app(ask: &AskSettings, refine: &RefineSettings, front_app: Option<&str>) -> Self {
+        let facts = context::gather(&ask.context, front_app).render();
         let matcher = crate::dictionary::current_matcher();
-        Self::with_terms(ask, refine, matcher.prompt_terms())
+        Self::with_context(ask, refine, matcher.prompt_terms(), &facts)
     }
 
     /// A backend for this plan. Cheap: nothing is started until
@@ -543,6 +773,11 @@ impl AskPlan {
     /// Images the caller puts in `question.images` are sent as they
     /// are and stand for the screen: the prompt is the one for an ask
     /// with a screenshot, and nothing is captured on top.
+    ///
+    /// With [`AskPlan::web_hint`], an answer the model marked as
+    /// needing the web comes back with [`AskReply::suggestion`] set.
+    /// The mark itself reaches neither `sink` nor the reply; the sink
+    /// gets [`AskEvent::Suggestion`] in its place.
     pub fn send(
         &self,
         backend: &mut dyn AskBackend,
@@ -552,12 +787,17 @@ impl AskPlan {
     ) -> Result<AskReply, AskError> {
         // A screenshot may only be taken while this guard lives.
         let _ask = screen::OneShot::begin();
-        self.converse(None, backend, question, sink, cancel)
+        self.converse(None, backend, question, sink, cancel).0
     }
 
     /// One ask from the question to the answer: one turn, or two when
     /// the model asked for the screen. `session` is the id of the
     /// app's ask this is, `None` outside the app's session.
+    ///
+    /// Next to the result: what became of the screen. It is known
+    /// also when there is no answer, and that is the point: an ask
+    /// that took a screenshot and then failed or was cancelled still
+    /// says so on its diagnostics row ([`Outcome::record`]).
     fn converse(
         &self,
         session: Option<u64>,
@@ -565,59 +805,39 @@ impl AskPlan {
         question: &AskInput,
         sink: &mut dyn FnMut(AskEvent),
         cancel: &CancelFlag,
-    ) -> Result<AskReply, AskError> {
+    ) -> (Result<AskReply, AskError>, ScreenState) {
         if question.text.trim().is_empty() && question.images.is_empty() {
-            return Err(AskError::Backend(NO_QUESTION.to_string()));
+            return (Err(AskError::Backend(NO_QUESTION.to_string())), ScreenState::None);
         }
-        let started = Instant::now();
         let mut seen = ScreenSeen::default();
-        let mut images = question.images.clone();
-        let step = if images.is_empty() { self.vision.decide(&question.text) } else { Step::NoCapture };
-        if step == Step::Capture {
-            images.extend(self.capture(session, &mut seen, sink));
-            if cancel.is_cancelled() {
-                return Err(AskError::Cancelled);
-            }
-        }
-        let had_image = !images.is_empty();
-        let kind = self.screen_prompt(had_image);
-        let setup = AskSetup { system: self.system_for(kind), ..self.setup.clone() };
-        // Only where the prompt taught the model the marker can the
-        // reply be one.
-        let gated = kind == ScreenPrompt::OnRequest;
-        let text = match &seen.for_model {
-            Some(why) => prompt::user_message_with_note(&question.text, &prompt::no_screenshot_note(why)),
-            None => prompt::user_message(&question.text),
-        };
-        let first = self.turn(backend, &setup, AskInput { text, images }, sink, cancel, gated);
         let mut turns = 1;
-        let result = first.and_then(|(reply, wants_screen)| {
-            if !wants_screen {
-                return Ok(reply);
-            }
-            // The model cannot answer without the screen. Capture it
-            // now, unless that was already tried for this ask.
-            let follow_up = if had_image {
-                AskInput::text(prompt::SCREEN_ALREADY_SENT)
-            } else if let Some(why) = &seen.for_model {
-                AskInput::text(prompt::no_screen_follow_up(why))
-            } else {
-                match self.capture(session, &mut seen, sink) {
-                    Some(image) => AskInput { text: prompt::SCREEN_FOLLOWS.to_string(), images: vec![image] },
-                    None => AskInput::text(prompt::no_screen_follow_up(seen.for_model.as_deref().unwrap_or_default())),
+        // The net under the dash rule of the prompt: text passes
+        // through it on its way to the sink, so the panel never shows
+        // a dash that the finished answer then has not. It sits after
+        // the markers are taken off: they are looked for in the text
+        // as the model wrote it.
+        let mut dashes = self.no_long_dashes.then(crate::dashes::Normalizer::new);
+        let result = {
+            let mut out = |event: AskEvent| match (dashes.as_mut(), event) {
+                (Some(dashes), AskEvent::Text(piece)) => {
+                    let piece = dashes.push(&piece);
+                    if !piece.is_empty() {
+                        sink(AskEvent::Text(piece));
+                    }
                 }
+                (_, event) => sink(event),
             };
-            if cancel.is_cancelled() {
-                return Err(AskError::Cancelled);
+            self.exchange(session, backend, question, &mut out, cancel, &mut seen, &mut turns)
+        };
+        // A dash the text ended on, also when the ask failed midway.
+        if let Some(rest) = dashes.as_mut().map(crate::dashes::Normalizer::finish).filter(|rest| !rest.is_empty()) {
+            sink(AskEvent::Text(rest));
+        }
+        let result = result.map(|mut reply| {
+            if self.no_long_dashes {
+                reply.text = crate::dashes::normalize(&reply.text);
             }
-            turns = 2;
-            let before = started.elapsed();
-            let (second, again) = self.turn(backend, &setup, follow_up, sink, cancel, true)?;
-            if again {
-                // Asked for the screen twice: there is no answer.
-                return Err(AskError::Backend(NO_ANSWER.to_string()));
-            }
-            Ok(both_turns(reply, second, before, started.elapsed()))
+            reply
         });
         // Lengths only, never the text: verbose logs end up in bug
         // reports.
@@ -632,16 +852,84 @@ impl AskPlan {
             turns,
             seen.state.as_str()
         );
-        let mut reply = result?;
-        if reply.text.is_empty() {
+        let screen = seen.state;
+        let result = result.and_then(|mut reply| {
+            if reply.text.is_empty() {
+                return Err(AskError::Backend(NO_ANSWER.to_string()));
+            }
+            if reply.notice.is_empty() {
+                reply.notice = self.notice.clone();
+            }
+            reply.screen = seen.state;
+            reply.screen_notice = seen.notice;
+            Ok(reply)
+        });
+        (result, screen)
+    }
+
+    /// The turns of one ask: the question, and when the model asked
+    /// for the screen, the screenshot after it. `seen` and `turns`
+    /// are filled in for the caller also when there is no answer.
+    #[allow(clippy::too_many_arguments)]
+    fn exchange(
+        &self,
+        session: Option<u64>,
+        backend: &mut dyn AskBackend,
+        question: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+        seen: &mut ScreenSeen,
+        turns: &mut usize,
+    ) -> Result<AskReply, AskError> {
+        let started = Instant::now();
+        let mut images = question.images.clone();
+        let step = if images.is_empty() { self.vision.decide(&question.text) } else { Step::NoCapture };
+        if step == Step::Capture {
+            images.extend(self.capture(session, seen, sink));
+            if cancel.is_cancelled() {
+                return Err(AskError::Cancelled);
+            }
+        }
+        let had_image = !images.is_empty();
+        let kind = self.screen_prompt(had_image);
+        let setup = AskSetup { system: self.system_for(kind), ..self.setup.clone() };
+        let watch = self.watch_for(kind);
+        let text = match &seen.for_model {
+            Some(why) => prompt::user_message_with_note(&question.text, &prompt::no_screenshot_note(why)),
+            None => prompt::user_message(&question.text),
+        };
+        let (reply, wants_screen) = self.turn(backend, &setup, AskInput { text, images }, sink, cancel, watch)?;
+        if !wants_screen {
+            return Ok(reply);
+        }
+        // The model cannot answer without the screen. Capture it now,
+        // unless that was already tried for this ask.
+        let follow_up = if had_image {
+            AskInput::text(prompt::SCREEN_ALREADY_SENT)
+        } else if let Some(why) = &seen.for_model {
+            AskInput::text(prompt::no_screen_follow_up(why))
+        } else {
+            match self.capture(session, seen, sink) {
+                Some(image) => AskInput { text: prompt::SCREEN_FOLLOWS.to_string(), images: vec![image] },
+                None => AskInput::text(prompt::no_screen_follow_up(seen.for_model.as_deref().unwrap_or_default())),
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(AskError::Cancelled);
+        }
+        *turns = 2;
+        let before = started.elapsed();
+        // The answer to the second message can be marked as needing
+        // the web like any other. The sink hears of that once, also
+        // when the first reply already said so before it asked for
+        // the screen.
+        let watch = Watch { announce_web: watch.announce_web && reply.suggestion.is_none(), ..watch };
+        let (second, again) = self.turn(backend, &setup, follow_up, sink, cancel, watch)?;
+        if again {
+            // Asked for the screen twice: there is no answer.
             return Err(AskError::Backend(NO_ANSWER.to_string()));
         }
-        if reply.notice.is_empty() {
-            reply.notice = self.notice.clone();
-        }
-        reply.screen = seen.state;
-        reply.screen_notice = seen.notice;
-        Ok(reply)
+        Ok(both_turns(reply, second, before, started.elapsed()))
     }
 
     /// Take the screenshot for this ask and say on the sink what is
@@ -658,7 +946,7 @@ impl AskPlan {
             Some(id) => AskCaptureToken::for_session(id),
             None => AskCaptureToken::for_one_shot(),
         };
-        let (image, state, notice, for_model) = match screen::take(&token, &self.vision.settings) {
+        let (image, state, notice, for_model) = match screen::take(&token, &self.vision.settings, self.names_front_app) {
             Shot::Image(image) => (Some(image), ScreenState::Included, String::new(), None),
             Shot::Missing { state, notice, for_model } => (None, state, notice, Some(for_model)),
         };
@@ -671,9 +959,15 @@ impl AskPlan {
 
     /// One turn. `input` is taken by value and dropped the moment the
     /// backend call returns: a screenshot in it does not outlive the
-    /// request that sent it. With `gated`, the marker is kept from the
-    /// sink; the flag in the result says that the reply was the
-    /// marker.
+    /// request that sent it.
+    ///
+    /// The markers `watch` names are kept from the sink and taken off
+    /// the reply ([`hint`]): one filter for both, because the two
+    /// words begin alike. The flag in the result says that the reply
+    /// was the screen marker ([`NEED_SCREEN`]); an answer that began
+    /// with the web search marker comes back with
+    /// [`AskReply::suggestion`] set, and the sink gets
+    /// [`AskEvent::Suggestion`] in the marker's place.
     fn turn(
         &self,
         backend: &mut dyn AskBackend,
@@ -681,34 +975,41 @@ impl AskPlan {
         input: AskInput,
         sink: &mut dyn FnMut(AskEvent),
         cancel: &CancelFlag,
-        gated: bool,
+        watch: Watch,
     ) -> Result<(AskReply, bool), AskError> {
-        if !gated {
+        let markers = watch.markers();
+        if markers.is_empty() {
             let result = backend.send(setup, &input, sink, cancel, self.timeout);
             drop(input);
             return result.map(|reply| (reply, false));
         }
-        let mut gate = screen::MarkerGate::new();
-        let result = backend.send(
-            setup,
-            &input,
-            &mut |event| {
-                if let Some(event) = gate.pass(event) {
-                    sink(event);
-                }
-            },
-            cancel,
-            self.timeout,
-        );
+        let mut filter = hint::MarkerSink::new(&markers, sink);
+        if watch.announce_web {
+            filter = filter.announce(prompt::NEEDS_WEB_SEARCH, AskEvent::Suggestion(AskSuggestion::WebSearch));
+        }
+        let result = backend.send(setup, &input, &mut |event| filter.event(event), cancel, self.timeout);
         drop(input);
-        let reply = result?;
-        if gate.saw_marker() || screen::is_marker(&reply.text) {
-            return Ok((reply, true));
+        // A turn that failed or was cancelled midway ends here, and
+        // the filter with it: what it still holds is at most the
+        // start of a marker, which is not shown either. Everything it
+        // passed on before stays where it is.
+        let mut reply = result?;
+        // The turn is complete: what was held back and is no marker.
+        let streamed = filter.finish();
+        // The reply as a whole is read the same way. It is what
+        // counts for a backend that does not stream.
+        let read = watch.read(&reply.text);
+        let wants_screen = read.wants_screen || streamed.contains(&NEED_SCREEN);
+        if let Some(text) = read.web {
+            reply.suggestion = Some(AskSuggestion::WebSearch);
+            reply.text = text;
+            if reply.text.is_empty() && !wants_screen {
+                // The marker and nothing after it.
+                reply.text = NEEDS_THE_WEB.to_string();
+                sink(AskEvent::Text(reply.text.clone()));
+            }
         }
-        if let Some(event) = gate.flush() {
-            sink(event);
-        }
-        Ok((reply, false))
+        Ok((reply, wants_screen))
     }
 
     /// [`AskPlan::send`], and then what the app keeps of an ask: its
@@ -727,12 +1028,17 @@ impl AskPlan {
     ) -> Result<AskReply, AskError> {
         let at_ms = now_ms();
         let sent = Instant::now();
-        let result = self.send(backend, question, sink, cancel);
+        let (result, screen) = {
+            // A screenshot may only be taken while this guard lives.
+            let _ask = screen::OneShot::begin();
+            self.converse(None, backend, question, sink, cancel)
+        };
         let outcome = Outcome {
             plan: self,
             backend_id: backend.id(),
             question: &question.text,
             result: &result,
+            screen,
             accepted: result.is_ok(),
             at_ms,
             elapsed_ms: sent.elapsed().as_millis() as u64,
@@ -770,6 +1076,9 @@ fn both_turns(first: AskReply, second: AskReply, before: Duration, total: Durati
         usage,
         warm_lead_ms: first.warm_lead_ms,
         notice: if second.notice.is_empty() { first.notice } else { second.notice },
+        // The first reply can have said that the web is needed before
+        // it asked for the screen.
+        suggestion: second.suggestion.or(first.suggestion),
         screen: ScreenState::None,
         screen_notice: String::new(),
     }
@@ -854,6 +1163,22 @@ impl std::ops::Deref for AskStatus {
     }
 }
 
+/// The facts about this computer an ask would send along if it
+/// started now, as the model would get them
+/// ([`context::DeviceContext::render`]): what `ask` switches on, read
+/// this moment, with the app in front as an ask would name it. Empty
+/// when there is nothing to tell. For a settings screen that shows
+/// the person what leaves the machine; nothing is sent anywhere.
+///
+/// Asked from one of OpenWhisper's own windows, the app in front is
+/// OpenWhisper itself, which an ask never names, so the text then
+/// has no such line.
+pub fn context_preview(ask: &AskSettings) -> String {
+    let ask = ask.clone().cleaned();
+    let front_app = ask.context.front_app.then(front_app_name).flatten();
+    context::gather(&ask.context, front_app.as_deref()).render()
+}
+
 /// Check whether an ask can run with these settings. Makes no model
 /// call; for the Claude CLI it runs `claude auth status`, which takes
 /// a moment: call [`outline`] when the backend's state is not needed.
@@ -918,6 +1243,10 @@ pub struct AskSnapshot {
     pub answer: String,
     /// See [`AskReply::notice`].
     pub notice: String,
+    /// See [`AskSuggestion`]. Set as soon as the model marked its
+    /// answer, so it is there while the answer streams. Not kept in
+    /// the history.
+    pub suggestion: Option<AskSuggestion>,
     /// Why there is no answer; empty unless the phase is `error`.
     pub error: String,
     /// Backend id, model and effort (`""` when none is sent).
@@ -956,6 +1285,23 @@ pub struct AskSnapshot {
 struct Warm {
     plan: AskPlan,
     backend: Box<dyn AskBackend>,
+    /// The context settings the facts in `plan` were read with.
+    context_settings: crate::settings::ContextSettings,
+}
+
+/// The name of the app the person is working in, for the device
+/// context: `None` when it cannot be read or when it is OpenWhisper
+/// itself. The name only, never the title of the window.
+#[cfg(feature = "focus")]
+fn front_app_name() -> Option<String> {
+    let focus = crate::focus::current_app();
+    let name = focus.app_name.trim();
+    (!focus.is_self && !name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(not(feature = "focus"))]
+fn front_app_name() -> Option<String> {
+    None
 }
 
 struct Session {
@@ -1076,7 +1422,13 @@ pub fn warm_listening(id: u64) {
         return;
     }
     let started = Instant::now();
-    let plan = session_plan();
+    let ask = session_ask_settings();
+    // The facts about the computer are read here, when the person
+    // starts to talk: the answer panel never takes focus, so the app
+    // in front is the one they are working in.
+    let front_app = ask.context.front_app.then(front_app_name).flatten();
+    let plan =
+        with_session_vision(AskPlan::for_app(&ask, &crate::settings::current_refine_settings(), front_app.as_deref()));
     let mut backend = plan.backend();
     backend.warm(&plan.setup);
     crate::verbose_log!(
@@ -1085,7 +1437,7 @@ pub fn warm_listening(id: u64) {
         started.elapsed().as_millis(),
         plan.setup.web_search
     );
-    let mut slot = Some(Warm { plan, backend });
+    let mut slot = Some(Warm { plan, backend, context_settings: ask.cleaned().context });
     read(|s| {
         if s.listening(id) {
             s.warm = slot.take();
@@ -1094,11 +1446,28 @@ pub fn warm_listening(id: u64) {
     drop(slot);
 }
 
-/// The plan of the app's ask as the settings are right now, the
-/// Vision settings included.
-fn session_plan() -> AskPlan {
-    AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings())
-        .with_vision(&crate::settings::current_vision_settings(), VisionChoice::Settings)
+/// `plan` as the app's ask uses it: with the Vision settings as they
+/// are **on disk** right now ([`crate::settings::fresh_vision_settings`]).
+///
+/// Not the cache: `openwhisper vision config --trigger off` or
+/// `never-capture add` from a terminal changes the file while the app
+/// runs, and the rule a person just set has to hold for the ask that
+/// comes next. Called twice per ask, when the backend is warmed and
+/// when the question is known, both off the hotkey thread; the second
+/// read is the one the capture is decided and taken with.
+fn with_session_vision(plan: AskPlan) -> AskPlan {
+    plan.with_vision(&crate::settings::fresh_vision_settings(), VisionChoice::Settings)
+}
+
+/// The Ask settings the app's ask runs on: the block this process
+/// loaded, with what it tells the model about the computer as the
+/// file says right now ([`crate::settings::fresh_ask_context`]), for
+/// the same reason as [`with_session_vision`]. Reads a file: not for
+/// the hotkey thread.
+fn session_ask_settings() -> AskSettings {
+    let mut ask = crate::settings::current_ask_settings();
+    ask.context = crate::settings::fresh_ask_context();
+    ask
 }
 
 /// The app's ask `id` is with the model right now. What a capture
@@ -1221,7 +1590,19 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         drop(late);
         return;
     }
-    let plan = session_plan();
+    let ask = session_ask_settings().cleaned();
+    let refine = crate::settings::current_refine_settings();
+    // The facts about the computer are the ones read when the
+    // recording started (the time then, the app in front then), as
+    // long as the switches are what they were: the backend was warmed
+    // with a prompt that holds them. A typed question, or a recording
+    // too short for the warm-up to finish, reads them now.
+    let facts = match &warm {
+        Some(warm) if warm.context_settings == ask.context => warm.plan.context.clone(),
+        _ => context_preview(&ask),
+    };
+    let terms = crate::dictionary::current_matcher();
+    let plan = with_session_vision(AskPlan::with_context(&ask, &refine, terms.prompt_terms(), &facts));
     // The backend warmed while the person talked is used when it was
     // warmed for exactly this plan, which is every ask where no
     // setting or dictionary term changed meanwhile.
@@ -1272,10 +1653,11 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     s.snap.screen = state;
                     s.snap.screen_notice = notice;
                 }
+                AskEvent::Suggestion(suggestion) => s.snap.suggestion = Some(suggestion),
             }
         });
     };
-    let result = plan.converse(Some(id), backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
+    let (result, screen) = plan.converse(Some(id), backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
     // One ask is one conversation: the process goes with the answer.
     drop(backend);
     let elapsed_ms = sent.elapsed().as_millis() as u64;
@@ -1295,6 +1677,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     Ok(reply) => {
                         s.snap.answer = reply.text.clone();
                         s.snap.notice = reply.notice.clone();
+                        s.snap.suggestion = reply.suggestion;
                         s.snap.first_text_ms = s.snap.first_text_ms.or(reply.first_text_ms);
                         s.snap.usage = reply.usage.clone();
                         s.snap.screen = reply.screen;
@@ -1330,6 +1713,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         backend_id,
         question,
         result: &result,
+        screen,
         accepted,
         at_ms: started_at_ms,
         elapsed_ms,
@@ -1346,6 +1730,8 @@ struct Outcome<'a> {
     /// As it was sent, before the fence.
     question: &'a str,
     result: &'a Result<AskReply, AskError>,
+    /// What became of the screen, known also when there is no reply.
+    screen: ScreenState,
     /// The answer counted: it was not cancelled, dismissed or
     /// replaced in its last moment.
     accepted: bool,
@@ -1373,6 +1759,7 @@ impl Outcome<'_> {
             self.backend_id,
             self.question,
             self.result,
+            self.screen,
             self.at_ms,
             self.elapsed_ms,
         ));
@@ -1394,12 +1781,19 @@ fn error_text(e: &AskError, plan: &AskPlan) -> String {
 /// The diagnostics row of one ask: a row in `refine_runs` with source
 /// [`runs::SOURCE_ASK`], so the plan usage estimate covers asks too.
 /// Lengths, timings and tokens; never the question or the answer.
+///
+/// And whether a screenshot was taken (`screen`): that is on the row
+/// of every ask, also one that failed or was cancelled after the
+/// capture. The transcript history only keeps asks that finished, so
+/// this row is the record that a screenshot existed at all.
+#[allow(clippy::too_many_arguments)]
 fn run_record(
     status: &str,
     plan: &AskPlan,
     backend_id: &str,
     question: &str,
     result: &Result<AskReply, AskError>,
+    screen: ScreenState,
     at_ms: i64,
     elapsed_ms: u64,
 ) -> RefineRun {
@@ -1432,6 +1826,7 @@ fn run_record(
         window_7d_resets_at: windows.and_then(|p| p.seven_day_resets_at),
         mode: None,
         first_text_ms: reply.and_then(|r| r.first_text_ms).map(|ms| ms as i64),
+        screen: Some(screen == ScreenState::Included),
     }
 }
 
@@ -1618,6 +2013,7 @@ pub(crate) mod test_support {
             crate::settings::set_ask_settings_cache(AskSettings::default());
             crate::settings::set_refine_settings_cache(RefineSettings::default());
             crate::settings::set_vision_settings_cache(VisionSettings::default());
+            crate::settings::set_settings_file(None);
         }
     }
 
@@ -1639,6 +2035,8 @@ pub(crate) mod test_support {
         crate::settings::set_ask_settings_cache(settings);
         crate::settings::set_refine_settings_cache(RefineSettings::default());
         crate::settings::set_vision_settings_cache(VisionSettings::default());
+        // No settings file: the asks of a test run on the caches.
+        crate::settings::set_settings_file(None);
         Scope { _guard: guard }
     }
 

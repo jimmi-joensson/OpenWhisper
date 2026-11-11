@@ -87,6 +87,12 @@ pub struct RefineRun {
     /// answer. `None` for Refine runs (they do not stream), for asks
     /// that got no text, and for rows written before asks existed.
     pub first_text_ms: Option<i64>,
+    /// An ask: whether a screenshot of the screen was taken for it
+    /// (TASK-98). Written for every ask, also one that failed or was
+    /// cancelled after the capture, so that a screenshot never leaves
+    /// the machine without a record. `None` for Refine runs and for
+    /// rows written before asks could include the screen.
+    pub screen: Option<bool>,
 }
 
 impl RefineRun {
@@ -121,6 +127,7 @@ impl RefineRun {
             window_7d_resets_at: plan.and_then(|p| p.seven_day_resets_at),
             mode: (!outcome.mode.is_builtin()).then(|| outcome.mode.name.clone()),
             first_text_ms: None,
+            screen: None,
         })
     }
 
@@ -152,8 +159,8 @@ pub fn record(store: &Store, run: &RefineRun) {
              (at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
               chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, tokens_out, \
               cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-              window_7d_resets_at, mode, first_text_ms) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              window_7d_resets_at, mode, first_text_ms, screen) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.at_ms,
                 run.source,
@@ -177,6 +184,7 @@ pub fn record(store: &Store, run: &RefineRun) {
                 run.window_7d_resets_at,
                 run.mode,
                 run.first_text_ms,
+                run.screen,
             ],
         )?;
         c.execute(
@@ -222,7 +230,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
             "SELECT at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
                     chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, \
                     tokens_out, cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-                    window_7d_resets_at, mode, first_text_ms \
+                    window_7d_resets_at, mode, first_text_ms, screen \
              FROM refine_runs ORDER BY id DESC LIMIT ?",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
@@ -249,6 +257,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
                 window_7d_resets_at: r.get(19)?,
                 mode: r.get(20)?,
                 first_text_ms: r.get(21)?,
+                screen: r.get(22)?,
             })
         })?;
         let mut out = Vec::new();
@@ -286,6 +295,9 @@ pub struct RefineSummary {
     /// answer, and to its end.
     pub ask_median_first_text_ms: Option<i64>,
     pub ask_median_ms: Option<i64>,
+    /// Asks a screenshot was taken for, whether or not they got an
+    /// answer.
+    pub asks_with_screen: i64,
     /// The model's text was used.
     pub refined: i64,
     /// Too short to send.
@@ -405,6 +417,7 @@ pub fn summarize(all_runs: &[RefineRun]) -> RefineSummary {
         asks_answered: answered_asks.len() as i64,
         ask_median_first_text_ms: percentile(&ask_first_text, 50),
         ask_median_ms: percentile(&ask_times, 50),
+        asks_with_screen: all_runs.iter().filter(|r| r.is_ask() && r.screen == Some(true)).count() as i64,
         refined: count("refined"),
         skipped: count("skipped-short"),
         fallbacks: runs.iter().filter(|r| r.fell_back()).count() as i64,
@@ -536,6 +549,7 @@ mod tests {
             window_7d_resets_at: None,
             mode: None,
             first_text_ms: None,
+            screen: None,
         }
     }
 
@@ -549,6 +563,7 @@ mod tests {
             chars_in: 30,
             chars_out: 400,
             first_text_ms: first_ms,
+            screen: Some(false),
             detail: if status == "answered" { String::new() } else { format!("{status} reason") },
             ..run(status, elapsed_ms, Some(2000))
         }
@@ -697,7 +712,8 @@ mod tests {
                 chars_in, chars_out, instruction, detail)
              VALUES (5, 'dictation', 'refined', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '');
              ALTER TABLE refine_runs ADD COLUMN mode TEXT;
-             ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;",
+             ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;
+             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
         )
         .unwrap();
         let store = Store::from_connection_for_test(conn);
@@ -705,8 +721,57 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].mode, None);
         assert_eq!(got[0].elapsed_ms, 900);
-        // The same goes for the column asks brought (migration 6).
+        // The same goes for the columns asks brought (migrations 6
+        // and 7).
         assert_eq!(got[0].first_text_ms, None);
+        assert_eq!(got[0].screen, None);
+    }
+
+    #[test]
+    fn an_ask_records_whether_a_screenshot_was_taken_and_old_rows_read_as_unknown() {
+        // The table as migration 6 left it, with an ask in it, then
+        // the screen column added the way migration 7 adds it.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE refine_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                status TEXT NOT NULL, backend TEXT NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
+                elapsed_ms INTEGER NOT NULL, warm_lead_ms INTEGER, chars_in INTEGER NOT NULL,
+                chars_out INTEGER NOT NULL, instruction INTEGER NOT NULL, detail TEXT NOT NULL,
+                tokens_in INTEGER, tokens_cached INTEGER, tokens_out INTEGER, cost_usd REAL,
+                window_5h_used REAL, window_5h_resets_at INTEGER, window_7d_used REAL,
+                window_7d_resets_at INTEGER, mode TEXT, first_text_ms INTEGER);
+             INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
+                chars_in, chars_out, instruction, detail, first_text_ms)
+             VALUES (5, 'ask', 'answered', 'claude-cli', 'sonnet', 'low', 2400, 30, 400, 0, '', 620);
+             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
+        )
+        .unwrap();
+        let store = Store::from_connection_for_test(conn);
+        // An ask from before the column: not known.
+        assert_eq!(recent(&store, 10).unwrap()[0].screen, None);
+
+        // From here on every ask says it, whatever became of it.
+        let failed_with_screen = RefineRun { screen: Some(true), ..ask("failed", None, 900) };
+        let cancelled_with_screen = RefineRun { screen: Some(true), ..ask("cancelled", None, 300) };
+        let answered_without = ask("answered", Some(500), 2000);
+        record(&store, &failed_with_screen);
+        record(&store, &cancelled_with_screen);
+        record(&store, &answered_without);
+        record(&store, &run("refined", 700, None));
+        let got = recent(&store, 10).unwrap();
+        assert_eq!(got[0].screen, None, "a Refine run has no screen");
+        assert_eq!(got[1], answered_without);
+        assert_eq!(got[2], cancelled_with_screen);
+        assert_eq!(got[3], failed_with_screen);
+        assert_eq!(got[1].screen, Some(false));
+        // Counted over every ask, answered or not.
+        let s = summarize(&got);
+        assert_eq!((s.asks, s.asks_answered, s.asks_with_screen), (4, 2, 2));
+        // And the row says it as a word a program can read.
+        let json = serde_json::to_value(&got[3]).unwrap();
+        assert_eq!(json["screen"], true);
+        assert_eq!(serde_json::to_value(&got[0]).unwrap()["screen"], serde_json::Value::Null);
     }
 
     #[test]

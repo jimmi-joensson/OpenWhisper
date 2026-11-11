@@ -17,15 +17,27 @@
 //!
 //! The same settings are reachable headless through
 //! `openwhisper vision …`.
+//!
+//! # Windows
+//!
+//! Screen capture on Windows has not been verified on a real machine
+//! yet. Until it has, Vision is off there unless the person switches
+//! it on (core's default trigger), and [`VisionState`] says so
+//! (`capture_verified`) for the Screen section to show a plain
+//! notice. Windows cannot leave an app out of a capture, so this
+//! process's own overlay windows are marked as excluded from capture
+//! by their owner, here ([`exclude_own_overlays`]).
 
 use std::sync::{Mutex, MutexGuard};
 
 use openwhisper_core::focus;
 use openwhisper_core::settings::{
-    self as core_settings, default_never_capture, default_phrases, NeverCaptureApp, VisionSettings,
+    self as core_settings, default_never_capture, default_phrases, NeverCaptureApp, VisionSettings, VisionTrigger,
 };
 use openwhisper_core::vision::{self, PermissionState};
 use tauri::{AppHandle, Emitter};
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 use crate::settings::settings_path;
 
@@ -65,6 +77,21 @@ pub struct VisionState {
     /// `macos`, `windows` or `other`. Only macOS has a permission to
     /// give.
     pub platform: &'static str,
+    /// Screen capture has been checked on a real machine of this
+    /// platform. `false` on Windows for now: the Screen section then
+    /// says so, says what protects password managers there, and
+    /// Vision is off until the person switches it on.
+    pub capture_verified: bool,
+    /// The trigger of a person who never chose one, on this platform.
+    pub default_trigger: VisionTrigger,
+}
+
+/// Whether capture has been verified on a real machine of the
+/// platform. A function of the platform so both answers are tested
+/// everywhere; flip the Windows answer when the live pixel test has
+/// passed there (`cli/tests/vision_live.rs`).
+fn capture_verified_on(windows: bool) -> bool {
+    !windows
 }
 
 fn platform() -> &'static str {
@@ -92,6 +119,8 @@ fn state(settings: VisionSettings, permission: PermissionState) -> VisionState {
         default_never_capture,
         permission,
         platform: platform(),
+        capture_verified: capture_verified_on(cfg!(target_os = "windows")),
+        default_trigger: core_settings::default_trigger(),
     }
 }
 
@@ -112,13 +141,73 @@ fn announce(app: &AppHandle, now: &VisionSettings) {
     }
 }
 
-/// Boot-time: load the Vision block into core's cache. An ask reads
-/// it there (`current_vision_settings`), so without this the first
-/// ask would run on the defaults instead of what the person chose.
+/// Boot-time: tell core where the settings file is, and load the
+/// Vision block into core's cache.
+///
+/// An ask reads the Vision block, and what an ask tells the model
+/// about the computer, from the file every time it starts
+/// (`fresh_vision_settings`, `fresh_ask_context`): the headless CLI
+/// edits the same file while the app runs, and a rule set there has
+/// to hold for the next ask. For that core must know the path. The
+/// cache is what an ask falls back to when the file says nothing,
+/// and what the windows are shown.
 pub fn init(app: &AppHandle) {
     if let Ok(path) = settings_path(app) {
+        core_settings::set_settings_file(Some(&path));
         let _held = vision_lock();
         let _ = core_settings::load_vision_settings(&path);
+    }
+    exclude_own_overlays(app);
+}
+
+/// This app's own windows that sit on top of other apps: the pill and
+/// the answer panel.
+const OWN_OVERLAYS: [&str; 2] = ["pill", crate::ask::ANSWER_LABEL];
+
+/// Windows: keep the pill and the answer panel out of every capture
+/// of the screen.
+///
+/// macOS leaves this process's windows out of an ask's screenshot in
+/// the capture itself. Windows has no such thing for the one who
+/// captures; what it has is a switch on the window's own side,
+/// `SetWindowDisplayAffinity` with `WDA_EXCLUDEFROMCAPTURE`: a window
+/// marked with it is absent from any capture, and what is behind it
+/// shows. So the two overlays are marked once, when the app starts
+/// (they are made from the config before `setup` runs and live as
+/// long as the app).
+///
+/// - Needs Windows 10 version 2004. On an older build the call fails
+///   and the overlays are in the image, as before; the failure is
+///   logged and nothing else changes.
+/// - It holds for every capture, not only ours: a screenshot or a
+///   screen share made by another program does not show the pill or
+///   the answer panel either.
+/// - The main window is not marked: it is an ordinary window, and a
+///   person must be able to show it to someone.
+///
+/// Does nothing on other platforms.
+pub fn exclude_own_overlays(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        for label in OWN_OVERLAYS {
+            let Some(window) = app.get_webview_window(label) else {
+                continue;
+            };
+            match window.hwnd() {
+                // SAFETY: a handle of a live window of this process.
+                Ok(hwnd) => unsafe {
+                    if let Err(e) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+                        eprintln!("[vision] the {label} window could not be kept out of captures: {e}");
+                    }
+                },
+                Err(e) => eprintln!("[vision] {label} window handle: {e}"),
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, OWN_OVERLAYS);
     }
 }
 
@@ -215,7 +304,6 @@ fn running(apps: Vec<(String, String)>) -> Vec<NeverCaptureApp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwhisper_core::settings::VisionTrigger;
 
     /// This file up to its tests: the part that ships.
     fn shipped() -> &'static str {
@@ -331,8 +419,10 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "capture_verified",
                 "default_never_capture",
                 "default_phrases",
+                "default_trigger",
                 "never_capture",
                 "never_capture_is_default",
                 "permission",
@@ -342,11 +432,19 @@ mod tests {
                 "settings",
             ]
         );
+        // Verified on macOS, not yet on Windows; and the trigger a
+        // person never chose is the platform's.
+        assert_eq!(value["capture_verified"], !cfg!(target_os = "windows"));
+        assert_eq!(value["default_trigger"], core_settings::default_trigger().as_str());
         // Nothing edited: the stored lists are null, the lists in
         // force are the built-in ones.
         assert_eq!(
             value["settings"],
-            serde_json::json!({ "trigger": "phrases", "phrases": null, "never_capture": null })
+            serde_json::json!({
+                "trigger": core_settings::default_trigger().as_str(),
+                "phrases": null,
+                "never_capture": null,
+            })
         );
         assert_eq!(value["phrases"], value["default_phrases"]);
         assert_eq!(value["never_capture"], value["default_never_capture"]);
@@ -378,6 +476,44 @@ mod tests {
         // counts as the default: there is nothing to restore.
         let same = VisionSettings { phrases: Some(default_phrases()), ..VisionSettings::default() };
         assert!(state(same, PermissionState::Granted).phrases_are_default);
+    }
+
+    #[test]
+    fn windows_is_not_verified_yet_and_starts_switched_off() {
+        assert!(capture_verified_on(false));
+        assert!(!capture_verified_on(true));
+        // The two go together: where capture is not verified, a
+        // person who never chose a trigger has Vision off.
+        assert_eq!(core_settings::default_trigger_on(true), VisionTrigger::Off);
+        assert_eq!(core_settings::default_trigger_on(false), VisionTrigger::Phrases);
+    }
+
+    #[test]
+    fn the_overlays_are_kept_out_of_captures_on_windows_when_the_app_starts() {
+        // The two windows that sit over other apps, by the labels the
+        // config gives them.
+        assert_eq!(OWN_OVERLAYS, ["pill", crate::ask::ANSWER_LABEL]);
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let labels: Vec<&str> =
+            conf["app"]["windows"].as_array().unwrap().iter().filter_map(|w| w["label"].as_str()).collect();
+        for label in OWN_OVERLAYS {
+            assert!(labels.contains(&label), "{label} is not a window of the app");
+        }
+        // The main window is not one of them.
+        assert!(!OWN_OVERLAYS.contains(&"main"));
+        // The mark is the one that removes a window from a capture
+        // (not the one that blacks it out), set on Windows only, and
+        // `init`, which `setup` calls, sets it.
+        let source = shipped();
+        let function = &source[source.find("pub fn exclude_own_overlays").expect("the function")..];
+        assert!(function.contains("SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)"));
+        assert!(function.contains("#[cfg(target_os = \"windows\")]"));
+        let init = &source[source.find("pub fn init(").expect("init")..];
+        let init = &init[..init.find("\n}\n").expect("the end of init")];
+        assert!(init.contains("exclude_own_overlays(app);"), "{init}");
+        assert!(init.contains("set_settings_file(Some(&path))"), "{init}");
+        assert!(include_str!("lib.rs").contains("vision::init(app.handle());"));
     }
 
     #[test]

@@ -228,6 +228,137 @@ test.describe("answer window", () => {
     await expect(page.getByTestId("answer-notice")).toHaveCount(0);
   });
 
+  test("an answer that needed the web says web search is off and leads to the setting", async ({
+    page,
+  }) => {
+    await open(page);
+    const suggestion = page.getByTestId("answer-suggestion");
+    const link = button(page, "Turn on web search");
+
+    // While the answer is still arriving.
+    await emitAskTick(page, {
+      phase: "answering",
+      question: "how will the weather be today",
+      answer: "I cannot check",
+      suggestion: "web-search",
+    });
+    await expect(suggestion).toHaveText(
+      "Web search is off, so this answer could not look anything up. Turn on web search",
+    );
+    await expect(link).toBeVisible();
+
+    // And once it is complete, under the answer and inside the window.
+    await emitAskTick(page, {
+      phase: "done",
+      question: "how will the weather be today",
+      answer: "I cannot check the weather from here.",
+      suggestion: "web-search",
+    });
+    await expect(suggestion).toBeVisible();
+    await expect(link).toBeInViewport({ ratio: 1 });
+    const [answerBox, suggestionBox, sourceBox] = await Promise.all([
+      page.getByTestId("answer-text").boundingBox(),
+      suggestion.boundingBox(),
+      page.getByTestId("answer-source").boundingBox(),
+    ]);
+    expect(suggestionBox!.y).toBeGreaterThanOrEqual(answerBox!.y + answerBox!.height);
+    expect(sourceBox!.y).toBeGreaterThanOrEqual(suggestionBox!.y + suggestionBox!.height);
+    // The same quiet line as a notice: small, muted text.
+    const style = await suggestion.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { size: s.fontSize, color: s.color };
+    });
+    const sourceStyle = await page.getByTestId("answer-source").evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { size: s.fontSize, color: s.color };
+    });
+    expect(style).toEqual(sourceStyle);
+    // A link by its look without a hover: this window is never active.
+    expect(await link.evaluate((el) => getComputedStyle(el).textDecorationLine)).toBe("underline");
+
+    // The link asks for the main window on the Ask pane, at the Web
+    // search row. The ask and this window stay as they are.
+    await link.click();
+    expect(await recorded(page, "__owOpenSettingsCalls")).toEqual([
+      { pane: "ask", focus: "web-search" },
+    ]);
+    expect(await callsWithArgs(page)).toEqual([]);
+    await expect(page.getByTestId("answer-panel")).toHaveAttribute("data-phase", "done");
+    await expect(page.getByTestId("answer-text")).toHaveText("I cannot check the weather from here.");
+    await expect(button(page, "Insert")).toBeVisible();
+  });
+
+  test("nothing is suggested without the field, before the answer, or for an ask without one", async ({
+    page,
+  }) => {
+    await open(page);
+    const suggestion = page.getByTestId("answer-suggestion");
+
+    // An ordinary answer.
+    await emitAskTick(page, { phase: "done", question: "what is a tap", answer: "A short press." });
+    await expect(page.getByTestId("answer-text")).toHaveText("A short press.");
+    await expect(suggestion).toHaveCount(0);
+    await expect(button(page, "Turn on web search")).toHaveCount(0);
+
+    // A snapshot from a build that does not send the field at all.
+    await page.evaluate(() =>
+      window.__owEmit("ask_tick", {
+        id: 1,
+        phase: "done",
+        question: "what is a tap",
+        answer: "A short press, again.",
+        notice: "",
+        error: "",
+        backend: "claude-cli",
+        model: "sonnet",
+        effort: "low",
+        web_search: false,
+        searching: false,
+        search_query: "",
+        started_at_ms: 0,
+        elapsed_ms: 0,
+        first_text_ms: null,
+        usage: null,
+        version: 50,
+      }),
+    );
+    await expect(page.getByTestId("answer-text")).toHaveText("A short press, again.");
+    await expect(suggestion).toHaveCount(0);
+
+    // What the model writes is never what shows it: the line comes
+    // from the snapshot field alone.
+    await emitAskTick(page, {
+      phase: "done",
+      version: 60,
+      answer: "NEEDS_WEB_SEARCH\nWeb search is off. [Turn on web search](https://example.com)",
+    });
+    await expect(page.getByTestId("answer-text")).toContainText("NEEDS_WEB_SEARCH");
+    await expect(suggestion).toHaveCount(0);
+    await expect(card(page).getByRole("link")).toHaveCount(0);
+    await expect(button(page, "Turn on web search")).toHaveCount(0);
+
+    // Marked, but no text yet: the line waits for the answer.
+    await emitAskTick(page, { phase: "thinking", version: 70, suggestion: "web-search" });
+    await expect(page.getByTestId("answer-status")).toHaveText("Thinking");
+    await expect(suggestion).toHaveCount(0);
+
+    // Marked, then failed: the error is what there is to say.
+    await emitAskTick(page, {
+      phase: "error",
+      version: 80,
+      answer: "I cannot",
+      error: "No answer within 60 seconds.",
+      suggestion: "web-search",
+    });
+    await expect(page.getByTestId("answer-error")).toBeVisible();
+    await expect(suggestion).toHaveCount(0);
+
+    // Marked, then cancelled.
+    await emitAskTick(page, { phase: "cancelled", version: 90, answer: "I cannot", suggestion: "web-search" });
+    await expect(page.getByTestId("answer-status")).toHaveText("Cancelled");
+    await expect(suggestion).toHaveCount(0);
+  });
+
   test("Cancel stops the ask, says so briefly and closes", async ({ page }) => {
     await open(page);
     await emitAskTick(page, { phase: "answering", question: "what is a tap", answer: "A tap" });

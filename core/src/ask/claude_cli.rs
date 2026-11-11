@@ -151,6 +151,11 @@ pub fn spawn_args(setup: &AskSetup, system_prompt_file: &Path) -> Vec<String> {
 
 /// The user line of one turn, in the CLI's stream-json input format:
 /// images first (as base64 blocks), then the text.
+///
+/// The line holds every image of the turn as base64 text. The JSON
+/// value it is made from is wiped before this returns; the line
+/// itself is the caller's to wipe once it is written
+/// ([`super::wipe::Text`], as [`Process::turn`] does).
 pub fn user_line(input: &AskInput) -> String {
     let mut content: Vec<Value> = input
         .images
@@ -167,7 +172,12 @@ pub fn user_line(input: &AskInput) -> String {
         })
         .collect();
     content.push(json!({ "type": "text", "text": input.text }));
-    json!({ "type": "user", "message": { "role": "user", "content": content } }).to_string()
+    let mut message = json!({ "type": "user", "message": { "role": "user", "content": content } });
+    let line = message.to_string();
+    if !input.images.is_empty() {
+        super::wipe::json(&mut message);
+    }
+    line
 }
 
 /// One spawned CLI process: one conversation.
@@ -272,13 +282,20 @@ impl Process {
         // thread keeps its eye on the cancel flag and the clock
         // meanwhile. When the turn is given up, the process is killed
         // (on drop), which ends a write that is still waiting.
-        let line = user_line(input);
+        //
+        // The line holds the screenshot as base64 text when the turn
+        // has one. It is wiped when the write is over, however that
+        // ended: the guard goes with the thread's closure. The copy
+        // in the pipe and in the CLI's own memory is not ours to
+        // wipe; it ends with that process.
+        let line = super::wipe::Text(user_line(input));
         let (wrote_tx, wrote) = mpsc::channel();
         thread::spawn(move || {
             let result = stdin
-                .write_all(line.as_bytes())
+                .write_all(line.0.as_bytes())
                 .and_then(|()| stdin.write_all(b"\n"))
                 .and_then(|()| stdin.flush());
+            drop(line);
             // stdin goes back for a further turn. When nobody waits
             // for it any more, it closes here.
             let _ = wrote_tx.send((result, stdin));

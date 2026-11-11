@@ -89,8 +89,38 @@ impl OpenAiAsk {
     }
 }
 
+/// What stands in a kept conversation where an image was, once the
+/// request that carried it has returned ([`forget_images`]).
+pub const IMAGE_NOT_KEPT: &str = "(A screenshot was attached to this message when it was sent. It is not kept.)";
+
+/// Take the images out of a conversation: every image part is wiped
+/// (its `data:` URL holds the whole image as text) and replaced by a
+/// line that says an image was there.
+///
+/// Called as soon as the request that carried the image has returned.
+/// The model has seen the image by then and its answer is in the
+/// conversation; a later turn of the same conversation is sent
+/// without the image and with that line in its place. An ask has at
+/// most one turn after the one with the screenshot, and only when
+/// the model asked for a screen it had already been sent.
+fn forget_images(messages: &mut [Value]) {
+    for message in messages {
+        let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut().filter(|part| part["type"] == "image_url") {
+            super::wipe::json(part);
+            *part = json!({ "type": "text", "text": IMAGE_NOT_KEPT });
+        }
+    }
+}
+
 /// The user message of one turn: plain text, or text and images as
 /// content parts (each image a `data:` URL).
+///
+/// With images, the returned value holds each of them as base64 text.
+/// [`OpenAiAsk::send`] keeps it in the conversation only until the
+/// request has returned ([`forget_images`]).
 pub fn user_message(input: &AskInput) -> Value {
     if input.images.is_empty() {
         return json!({ "role": "user", "content": input.text });
@@ -172,6 +202,10 @@ impl AskBackend for OpenAiAsk {
             let settings = settings.clone();
             let api_key = self.api_key.clone();
             let wire = wire.clone();
+            // The body is a copy of the conversation, image included.
+            // The request thread owns it and wipes it when the
+            // request has been sent, or when it gives up.
+            let body = super::wipe::Json(body);
             thread::spawn(move || request(&settings, api_key.as_deref(), body, timeout, &wire, &tx));
         }
 
@@ -219,6 +253,11 @@ impl AskBackend for OpenAiAsk {
         // and what ends the request thread's blocked read.
         wire.cut();
         drop(rx);
+        // The request that carried the image has returned, whichever
+        // way: the image leaves the conversation now. What is left of
+        // it is the copy inside the HTTP client, which ends with the
+        // connection that was just closed.
+        forget_images(&mut self.messages);
         if let Err(e) = result {
             // The turn did not happen: a retry must not find the
             // question in the conversation twice.
@@ -239,7 +278,7 @@ impl AskBackend for OpenAiAsk {
 fn request(
     settings: &OpenAiSettings,
     api_key: Option<&str>,
-    mut body: Value,
+    mut body: super::wipe::Json,
     silence: Duration,
     wire: &Wire,
     tx: &Sender<Msg>,
@@ -272,12 +311,17 @@ fn request(
         if let Some(key) = api_key {
             request = request.set("Authorization", &format!("Bearer {}", key.trim()));
         }
-        match request.send_string(&body.to_string()) {
+        // The request as text: one more copy of an image in it, wiped
+        // as soon as the client has sent it.
+        let text = super::wipe::Text(body.0.to_string());
+        let sent = request.send_string(&text.0);
+        drop(text);
+        match sent {
             Ok(response) => break response,
             Err(ureq::Error::Status(400, response)) if attempts_left > 0 => {
                 let message = refine_api::error_message(&response.into_string().unwrap_or_default());
                 let dropped = refused_param(&message)
-                    .filter(|param| body.as_object_mut().is_some_and(|map| map.remove(*param).is_some()));
+                    .filter(|param| body.0.as_object_mut().is_some_and(|map| map.remove(*param).is_some()));
                 match dropped {
                     Some(param) => refine_api::remember_refused(&url, &settings.model, param),
                     None => {
@@ -297,6 +341,10 @@ fn request(
             }
         }
     };
+
+    // The request is out: this thread's copy of the conversation, and
+    // of an image in it, is not needed while the answer streams.
+    drop(body);
 
     // Lines that are not events, in case the server answered with a
     // plain JSON body instead of a stream.
@@ -1134,6 +1182,69 @@ mod tests {
         // Without images the content is a plain string, which every
         // server takes.
         assert_eq!(user_message(&AskInput::text("hi")), json!({ "role": "user", "content": "hi" }));
+    }
+
+    /// The image is sent once and then leaves the conversation the
+    /// backend keeps: the kept messages hold no base64 of it, and a
+    /// further turn goes out with a line in its place.
+    #[test]
+    fn the_image_leaves_the_conversation_when_its_request_has_returned() {
+        let with_image = AskInput {
+            text: "what is this".into(),
+            images: vec![AskImage { media_type: "image/png".into(), data: vec![0x89, b'P', b'N', b'G'] }],
+        };
+        let (url, seen) = serve(vec![Answer::Stream(stream_of(&["A PNG."])), Answer::Stream(stream_of(&["Still a PNG."]))]);
+        let mut b = backend(&url, None);
+        assert_eq!(send(&mut b, &setup(), &with_image, LONG).0.unwrap().text, "A PNG.");
+        // The request carried it.
+        let first = seen.recv().unwrap().body;
+        assert_eq!(first["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,iVBORw==");
+        // What the backend keeps does not.
+        let kept = serde_json::to_string(&b.messages).unwrap();
+        assert!(!kept.contains("iVBORw") && !kept.contains("image_url") && !kept.contains("base64"), "{kept}");
+        assert_eq!(
+            b.messages[1]["content"],
+            json!([{ "type": "text", "text": "what is this" }, { "type": "text", "text": IMAGE_NOT_KEPT }])
+        );
+        assert_eq!(b.messages[2], json!({ "role": "assistant", "content": "A PNG." }));
+        // A further turn is sent without the image.
+        assert_eq!(send(&mut b, &setup(), &AskInput::text("are you sure"), LONG).0.unwrap().text, "Still a PNG.");
+        let second = serde_json::to_string(&seen.recv().unwrap().body).unwrap();
+        assert!(!second.contains("iVBORw") && second.contains(IMAGE_NOT_KEPT), "{second}");
+
+        // A turn that fails takes its image with it too.
+        let (url, _seen) = serve(vec![Answer::Body(500, r#"{"error":{"message":"the model is busy"}}"#.into())]);
+        let mut b = backend(&url, None);
+        assert!(send(&mut b, &setup(), &with_image, LONG).0.is_err());
+        let kept = serde_json::to_string(&b.messages).unwrap();
+        assert!(!kept.contains("iVBORw") && !kept.contains("what is this"), "{kept}");
+    }
+
+    #[test]
+    fn forgetting_images_touches_nothing_else() {
+        let mut messages = vec![
+            json!({ "role": "system", "content": "You answer questions." }),
+            json!({ "role": "user", "content": "plain text" }),
+            json!({ "role": "user", "content": [
+                { "type": "text", "text": "what is this" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw==" } },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+            ] }),
+            json!({ "role": "assistant", "content": "A PNG." }),
+        ];
+        forget_images(&mut messages);
+        assert_eq!(messages[0], json!({ "role": "system", "content": "You answer questions." }));
+        assert_eq!(messages[1], json!({ "role": "user", "content": "plain text" }));
+        assert_eq!(
+            messages[2]["content"],
+            json!([
+                { "type": "text", "text": "what is this" },
+                { "type": "text", "text": IMAGE_NOT_KEPT },
+                { "type": "text", "text": IMAGE_NOT_KEPT },
+            ])
+        );
+        assert_eq!(messages[3], json!({ "role": "assistant", "content": "A PNG." }));
+        assert!(!IMAGE_NOT_KEPT.contains('\u{2014}') && !IMAGE_NOT_KEPT.contains('\u{2013}'));
     }
 
     #[test]

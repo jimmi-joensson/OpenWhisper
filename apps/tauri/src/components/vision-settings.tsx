@@ -56,7 +56,11 @@ export function VisionSettings({ askEnabled }: VisionSettingsProps) {
   const disabled = !state || !askEnabled;
   const trigger = state?.settings.trigger ?? "phrases";
   const mac = state?.platform === "macos";
+  const windows = state?.platform === "windows";
   const allowed = state?.permission === "granted";
+  // Nothing is on the never-capture list in force: no app is kept
+  // out of the picture.
+  const unprotected = !!state && state.never_capture.length === 0;
   // An ask that wants the screen would go out without it.
   const missingPermission = askEnabled && !!state && mac && !allowed && trigger !== "off";
 
@@ -102,6 +106,48 @@ export function VisionSettings({ askEnabled }: VisionSettingsProps) {
             it does, an ask goes out without the picture and the answer
             says so. Allow it under Screen recording permission below,
             then restart OpenWhisper.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {state && windows && !state.capture_verified && (
+        // `note`: a standing statement about this platform, not
+        // something that just went wrong.
+        <Alert role="note" data-testid="vision-windows-notice">
+          <CircleAlert />
+          <AlertTitle>Not verified on Windows yet</AlertTitle>
+          <AlertDescription>
+            <p>
+              Including the screen has not been tested on a real Windows
+              computer yet. That is why it is off until you switch it on
+              here, and switching it on is your own choice.
+            </p>
+            <p>
+              On Windows nothing can be left out of the picture itself.
+              What protects a password manager is that the windows of
+              the apps on your never-capture list are painted over
+              before the picture is sent anywhere, and that no picture
+              is taken at all while one of them is in front.
+            </p>
+            <p>
+              Not painted over: the small live previews Windows shows in
+              Alt+Tab, in Task View and over a taskbar button. They are
+              drawn by Windows, not by the app they show. Close them
+              before you ask about your screen.
+            </p>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {unprotected && (
+        <Alert variant="destructive" role="note" data-testid="vision-unprotected-warning">
+          <ShieldAlert />
+          <AlertTitle>No app is protected</AlertTitle>
+          <AlertDescription>
+            Your never-capture list is empty, so every app that is open
+            can end up in the picture, password managers included. Add
+            the apps that must stay out, or restore the defaults under
+            Never in a screenshot.
           </AlertDescription>
         </Alert>
       )}

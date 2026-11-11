@@ -11,6 +11,7 @@ import { SidebarNav, type Route } from "./components/sidebar-nav";
 import { WindowControls } from "./components/window-controls";
 import { SettingsShell } from "./Settings";
 import type { SettingsPaneId } from "./lib/settings-panes";
+import { NAVIGATE_EVENT, navigateTarget, settingsRowId } from "./lib/navigate";
 import { useDictation } from "./lib/use-dictation";
 import { useHistorySync } from "./lib/use-history";
 import { useModesSync } from "./lib/use-modes";
@@ -54,6 +55,21 @@ function titlebarTitle(route: Route): string {
     case "diagnostics":
       return "OpenWhisper — Diagnostics";
   }
+}
+
+// Scroll the element with this id into view once it has rendered:
+// the pane it sits on may only just have been switched to. No
+// animation and no highlight, the row is simply where the eye lands.
+function revealElement(id: string, block: ScrollLogicalPosition) {
+  const reveal = (triesLeft: number) => {
+    const element = document.getElementById(id);
+    if (element) {
+      element.scrollIntoView({ block });
+    } else if (triesLeft > 0) {
+      requestAnimationFrame(() => reveal(triesLeft - 1));
+    }
+  };
+  requestAnimationFrame(() => reveal(20));
 }
 
 function App() {
@@ -128,17 +144,18 @@ function App() {
   // Tray Preferences… (and any other Rust-side trigger) emits `ow_navigate`
   // with a target view. Listen here and swap routes. The "main" payload maps
   // to "home" so existing tray-menu wiring keeps working without a Rust change.
+  // The payload can also name a settings pane and a row on it (the answer
+  // window's "Turn on web search" does): the pane opens and the row is
+  // scrolled into view. See lib/navigate.ts.
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
-    void listen<string>("ow_navigate", (evt) => {
-      if (evt.payload === "settings") {
-        setRoute("settings");
-      } else if (evt.payload === "main") {
-        setRoute("home");
-      } else if (evt.payload === "diagnostics") {
-        setRoute("diagnostics");
-      } else if (evt.payload === "transcribe") {
-        setRoute("transcribe");
+    void listen<unknown>(NAVIGATE_EVENT, (evt) => {
+      const target = navigateTarget(evt.payload);
+      if (!target) return;
+      if (target.pane) setSettingsPane(target.pane);
+      setRoute(target.route);
+      if (target.pane && target.focus) {
+        revealElement(settingsRowId(target.pane, target.focus), "center");
       }
     }).then((fn) => {
       unlisten = fn;
@@ -164,17 +181,7 @@ function App() {
   const openSettingsFor = useCallback((target: "refine" | "history" | "modes") => {
     setSettingsPane(target === "history" ? "general" : target);
     setRoute("settings");
-    if (target === "history") {
-      const reveal = (triesLeft: number) => {
-        const section = document.getElementById("settings-history");
-        if (section) {
-          section.scrollIntoView({ block: "start" });
-        } else if (triesLeft > 0) {
-          requestAnimationFrame(() => reveal(triesLeft - 1));
-        }
-      };
-      requestAnimationFrame(() => reveal(20));
-    }
+    if (target === "history") revealElement("settings-history", "start");
   }, []);
 
   // Auto-emit pill state from the dictation hook. Skipped while the dev

@@ -38,6 +38,15 @@
 //! here to a capture, whatever the model answers. A unit test checks
 //! that the prompt built here is the one an ask builds.
 //!
+//! That prompt is the whole prompt of an ask, as the app sends it:
+//! with the facts about the computer (a made-up one, [`eval_context`],
+//! never the machine the set runs on), with the rule against long
+//! dashes while that is switched on, and, on the Claude backend, with
+//! the rule for web search that is switched off. What a case is
+//! judged on is the answer as the app would show it
+//! ([`crate::ask::AskPlan::send`] takes the web search marker and the
+//! long dashes off an answer; the runner does the same).
+//!
 //! Questions are written the way they reach Ask: after the rule pass,
 //! so lower case and without end punctuation. Every name, company and
 //! number in them and in the images is made up.
@@ -45,6 +54,7 @@
 use serde::Serialize;
 
 use super::testimg::{self, Line, Scene};
+use crate::ask::context::DeviceContext;
 use crate::ask::prompt::{self, ScreenPrompt};
 use crate::ask::{
     AskBackend, AskError, AskImage, AskInput, AskPlan, AskReply, AskSetup, CancelFlag, NEED_SCREEN, eval as ask_eval,
@@ -461,12 +471,21 @@ their password.",
     ]
 }
 
-/// Runs cases: the eval plan of Ask (its dictionary, no web search)
-/// and the screen prompt each case belongs under.
+/// The facts about the computer the cases are asked with: the
+/// made-up computer of the Ask set ([`ask_eval::eval_device`]),
+/// without the line about the app in front. In the app that line
+/// names the app the screenshot shows. Here every screenshot is drawn
+/// from a made-up window of its own, and one fixed name next to it
+/// would contradict the picture ("what app is this").
+pub fn eval_context() -> String {
+    DeviceContext { front_app: String::new(), ..ask_eval::eval_device() }.render()
+}
+
+/// Runs cases: the eval plan of Ask (its dictionary, a made-up
+/// computer, no web search) and the screen prompt each case belongs
+/// under.
 pub struct Runner {
     plan: AskPlan,
-    instructions: String,
-    today: String,
     image_prompt: ScreenPrompt,
 }
 
@@ -488,14 +507,12 @@ impl Runner {
             VisionTrigger::Smart => ScreenPrompt::OnRequest,
             VisionTrigger::Off => return Err("with the trigger off no ask includes a screenshot".to_string()),
         };
-        let plan = ask_eval::plan(ask, refine);
-        Ok(Self {
-            instructions: ask.clone().cleaned().instructions,
-            // The date an ask tells the model, in the same words.
-            today: chrono::Local::now().format("%A %-d %B %Y").to_string(),
-            plan,
-            image_prompt,
-        })
+        // As the Ask set makes its plan: web search off, the eval
+        // dictionary, and the facts about a made-up computer.
+        let ask = AskSettings { web_search: false, ..ask.clone() };
+        let terms: Vec<String> = ask_eval::EVAL_TERMS.iter().map(|t| (*t).to_string()).collect();
+        let plan = AskPlan::with_context(&ask, refine, &terms, &eval_context());
+        Ok(Self { plan, image_prompt })
     }
 
     /// The plan behind the runner: where the questions go, the model,
@@ -513,13 +530,11 @@ impl Runner {
         }
     }
 
-    /// What the conversation of `case` is started with.
+    /// What the conversation of `case` is started with: the setup of
+    /// the plan, with the screen prompt of the case in its system
+    /// prompt.
     pub fn setup_for(&self, case: &EvalCase) -> AskSetup {
-        let terms: Vec<String> = ask_eval::EVAL_TERMS.iter().map(|t| (*t).to_string()).collect();
-        AskSetup {
-            system: prompt::system_prompt_for(&self.instructions, &terms, false, &self.today, self.prompt_for(case)),
-            ..self.plan.setup.clone()
-        }
+        self.plan.setup_for_screen(self.prompt_for(case))
     }
 
     /// Ask one case through `backend` and judge the answer. One model
@@ -535,6 +550,10 @@ impl Runner {
         let input = AskInput { text: prompt::user_message(case.question), images };
         let result = backend.send(&self.setup_for(case), &input, &mut |_| {}, &CancelFlag::new(), self.plan.timeout);
         drop(input);
+        // The answer as the app would take it: the bare marker for a
+        // reply it would answer with a screenshot, else the text it
+        // would show.
+        let result = result.map(|reply| AskReply { text: self.plan.shown(kind, &reply.text), ..reply });
         judge(case, kind, result)
     }
 }
@@ -666,13 +685,12 @@ fn has_none(answer: &str, needles: &[&str]) -> Result<(), String> {
     }
 }
 
-/// The reply is the marker: [`NEED_SCREEN`] and nothing else, apart
-/// from what a model may wrap a bare word in (quotes, backticks, a
-/// full stop). An answer that only mentions the marker is not it.
+/// The app would take this reply as a request for the screen. Not a
+/// reading of its own: the filter an ask runs its replies through
+/// decides ([`crate::ask::hint::is_reply_marker`]), so this set and
+/// the app cannot disagree about what a marker is.
 pub fn is_marker(answer: &str) -> bool {
-    answer
-        .trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .eq_ignore_ascii_case(NEED_SCREEN)
+    crate::ask::hint::is_reply_marker(NEED_SCREEN, answer)
 }
 
 fn asks_for_screen(answer: &str) -> Result<(), String> {
@@ -956,13 +974,41 @@ ignored it.)"
     }
 
     #[test]
-    fn the_marker_is_the_bare_word_and_nothing_more() {
-        for marker in ["NEED_SCREEN", " NEED_SCREEN\n", "`NEED_SCREEN`", "\"NEED_SCREEN\".", "need_screen", "**NEED_SCREEN**"] {
+    fn a_marker_is_what_the_app_would_take_as_one() {
+        for marker in [
+            "NEED_SCREEN",
+            " NEED_SCREEN\n",
+            "`NEED_SCREEN`",
+            "\"NEED_SCREEN\".",
+            "need_screen",
+            "**NEED_SCREEN**",
+            "_NEED_SCREEN_",
+            "> NEED_SCREEN",
+            "```\nNEED_SCREEN\n```",
+            // The app does not show what follows the word either.
+            "NEED_SCREEN because I cannot see it",
+            // One short sentence, then the word.
+            "I need to see the screen.\nNEED_SCREEN",
+        ] {
             assert!(is_marker(marker), "{marker}");
         }
-        for answer in ["", "NEED_SCREEN because I cannot see it", "I NEED_SCREEN", "NEED_SCREENS", "Paris."] {
+        for answer in ["", "I NEED_SCREEN", "NEED_SCREENS", "Paris.", "Paris.\nNEED_SCREEN is a word.", "One.\nTwo.\nNEED_SCREEN"] {
             assert!(!is_marker(answer), "{answer}");
         }
+        // The very function an ask runs its replies through decides,
+        // and the answer a case is judged on is what that makes of
+        // the reply.
+        let runner = runner(VisionTrigger::Smart);
+        let smart = case("smart-need-en-reply");
+        let (result, _, _) = sent(&runner, &smart, "I need to see the screen.\n`NEED_SCREEN`");
+        assert_eq!((result.answer.as_str(), result.asked_for_screen, result.passed), ("NEED_SCREEN", Some(true), true));
+        // Under a prompt that teaches no marker the app would show
+        // the word, and so the case sees it.
+        let (result, _, _) = sent(&runner, &case("phrases-en-reply"), "NEED_SCREEN");
+        assert_eq!((result.answer.as_str(), result.passed), ("NEED_SCREEN", false));
+        // The web marker is taken off the way the app takes it off.
+        let (result, _, _) = sent(&runner, &case("smart-plain-en-capital"), "**NEEDS_WEB_SEARCH** Paris.");
+        assert_eq!(result.answer, "Paris.");
     }
 
     #[test]
@@ -1093,9 +1139,8 @@ ignored it.)"
     fn the_prompts_built_here_are_the_ones_an_ask_builds() {
         use crate::ask::VisionChoice;
         let settings = |trigger| VisionSettings { trigger, ..VisionSettings::default() };
-        let plan = |trigger| {
-            ask_eval::plan(&AskSettings::default(), &RefineSettings::default())
-                .with_vision(&settings(trigger), VisionChoice::Settings)
+        let plan = |trigger: VisionTrigger| {
+            runner(trigger).plan().clone().with_vision(&settings(trigger), VisionChoice::Settings)
         };
         // Smart: what a backend is warmed with and every turn is sent
         // with.
@@ -1112,7 +1157,7 @@ ignored it.)"
         // An image the caller brings, in a plan without Vision, gets
         // that same prompt: seen through a backend that records it.
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let plain = ask_eval::plan(&AskSettings::default(), &RefineSettings::default());
+        let plain = runner(VisionTrigger::Always).plan().clone();
         let image = AskImage { media_type: "image/png".to_string(), data: vec![1, 2, 3] };
         plain
             .send(

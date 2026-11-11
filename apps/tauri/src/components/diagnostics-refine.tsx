@@ -258,6 +258,11 @@ function AskLine({ summary }: { summary: RefineSummary }) {
     <p className="ow-diag-refine__note" data-testid="diagnostics-refine-asks">
       Asks: {summary.asks_answered} of {summary.asks} answered
       {times.length > 0 && `. Median: ${times.join(", ")}`}
+      {/* Counted over every ask, also the ones that failed or were
+          cancelled: the picture is kept nowhere, this is the record
+          that there was one. Older data has no such count. */}
+      {(summary.asks_with_screen ?? 0) > 0 &&
+        `. With a screenshot: ${summary.asks_with_screen}`}
     </p>
   );
 }
@@ -410,6 +415,9 @@ function runNote(run: RefineRun): string {
     if (run.first_text_ms != null) {
       parts.push(`first text after ${formatMs(run.first_text_ms)}`);
     }
+    // Said for every ask a screenshot was taken for, whatever became
+    // of the ask.
+    if (run.screen === true) parts.push("screenshot sent");
   }
   // Set when the run was made in one of the user's own modes.
   if (run.mode) parts.push(`Mode: ${run.mode}`);

@@ -27,6 +27,7 @@ mod hotkey;
 mod injection;
 mod media_control;
 mod modes;
+mod navigate;
 mod permissions;
 mod pill_hover;
 mod refine;
@@ -620,8 +621,18 @@ async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// Navigate to the Settings view. Settings is now an in-window route
 /// rather than a separate window — bring the main window forward and
 /// emit `ow_navigate` so the React tree swaps to the Settings shell.
+///
+/// `pane` opens Settings on that pane ("ask") and `focus` brings one
+/// row of it into view ("web-search"); both are optional, and without
+/// them the call does what it always did. This is how the answer
+/// window of Ask leads to the web search switch: that window never
+/// takes focus itself, the main window is what comes forward.
 #[tauri::command]
-async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_settings_window(
+    app: tauri::AppHandle,
+    pane: Option<String>,
+    focus: Option<String>,
+) -> Result<(), String> {
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -632,8 +643,11 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     main.show().map_err(|e| e.to_string())?;
     main.unminimize().map_err(|e| e.to_string())?;
     main.set_focus().map_err(|e| e.to_string())?;
-    app.emit("ow_navigate", "settings")
-        .map_err(|e| e.to_string())?;
+    app.emit(
+        navigate::NAVIGATE_EVENT,
+        navigate::settings_payload(pane.as_deref(), focus.as_deref()),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1137,10 +1151,11 @@ pub fn run() {
             // on) before the hotkeys are installed: the ask slot is
             // only installed while Ask is on.
             ask::init(app.handle());
-            // Load the Vision block (when an ask includes the screen,
-            // and which apps are never in a screenshot) into core's
-            // cache: an ask reads it there, so the first ask must not
-            // run on the defaults.
+            // Tell core where the settings file is (an ask reads the
+            // Vision block from it every time, so a rule set from a
+            // terminal holds for the next ask), load the block into
+            // core's cache, and on Windows keep the pill and the
+            // answer panel out of screen captures.
             vision::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
@@ -1348,6 +1363,7 @@ pub fn run() {
             ask::ask_get,
             ask::ask_status,
             ask::ask_set,
+            ask::ask_context_preview,
             ask::ask_start,
             ask::ask_toggle,
             ask::ask_cancel,

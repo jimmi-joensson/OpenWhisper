@@ -18,7 +18,13 @@
 //!   one, so the dictation pipeline, a timer or a shell command has
 //!   nothing to call this module with. That is a fact the compiler
 //!   keeps. On top of it the token is checked when it is used: the ask
-//!   it was made for must still be running.
+//!   it was made for must still be running. Everything else this
+//!   module offers looks without capturing: [`permission`], and
+//!   [`dry_run`], which says what a capture would do right now. (The
+//!   live pixel test needs a capture outside an ask, aimed at its own
+//!   test windows. Its hook, `probe_for_test`, is compiled only with
+//!   the cargo feature `vision-live-test`, which nothing switches on
+//!   by default: a build that ships does not contain it.)
 //! - **In memory only.** The capture is a pixel buffer, then a PNG in
 //!   a `Vec<u8>`, handed to the ask backend as an
 //!   [`crate::ask::AskImage`] and dropped when that request returns.
@@ -35,7 +41,10 @@
 //!   3. their window rectangles, read before *and* after the capture,
 //!      are painted black in the buffer at its native size, before it
 //!      is scaled down ([`paint`]). On Windows this is the only layer
-//!      for a window that is not in front.
+//!      for a window that is not in front, and none of it has run on
+//!      a real machine yet, which is why Vision is off there until a
+//!      person switches it on
+//!      ([`crate::settings::default_trigger_on`]).
 //! - **Fail closed.** If any of these steps cannot be carried out
 //!   (no permission, the app in front or the window list cannot be
 //!   read, an app could not be left out, no display), there is no
@@ -82,7 +91,26 @@
 //!
 //! **App ids** are the ones [`crate::focus`] reports: the bundle id on
 //! macOS, the exe file name on Windows. Compare with [`id_matches`]
-//! (case is ignored; on macOS an id also covers its helper apps).
+//! (case is ignored; an id also covers the app's helpers).
+//!
+//! **A window whose owner cannot be named** is treated differently on
+//! the two platforms, on purpose:
+//!
+//! - Windows refuses: with a never-capture list in force, a window on
+//!   screen whose program cannot be identified means no screenshot
+//!   (`windows.rs` has the reasons). Painting is the only layer
+//!   there, so a window that cannot be told from a listed one cannot
+//!   be allowed into the image.
+//! - macOS counts it as not listed and goes on. Windows that belong
+//!   to no app are everywhere on a Mac (the menu bar, the Dock, the
+//!   wallpaper, system overlays), so refusing would mean no
+//!   screenshot ever. And the layer that matters does not depend on
+//!   that lookup: ScreenCaptureKit leaves a listed app out by the
+//!   app's own identity, whichever of its processes drew the window,
+//!   and the capture is refused when a listed app with a window on
+//!   screen is not among the apps it can leave out. What the lookup
+//!   decides on macOS is only which rectangles get the extra coat of
+//!   paint.
 //!
 //! **Errors are refusals.** A method that cannot do its whole job
 //! returns `Err`; it never returns a partial answer (half a window
@@ -92,6 +120,7 @@
 use serde::Serialize;
 
 mod capture;
+mod dry_run;
 pub mod eval;
 pub mod paint;
 pub mod testimg;
@@ -106,8 +135,11 @@ mod windows;
 
 pub use crate::ask::AskCaptureToken;
 pub use capture::{NoScreenshot, Screenshot, capture_for_ask};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+// The hook of the live pixel test. Not in a build without the
+// feature: see the module docs.
+#[cfg(all(feature = "vision-live-test", any(target_os = "macos", target_os = "windows")))]
 pub use capture::{PROBE_MAX_SAMPLES, ProbeOptions, ProbeResult, probe_for_test};
+pub use dry_run::{DryRun, FrontSeen, ListedApp, dry_run};
 pub use trigger::{Decision, decide, matched_phrase};
 
 /// Whether this process may record the screen.
@@ -176,8 +208,24 @@ pub enum AppSelector<'a> {
     /// uses: the ids of the never-capture list.
     Ids(&'a [String]),
     /// Processes by id. Only the pixel test uses this
-    /// ([`probe_for_test`]), to aim at its own helper window.
+    /// (`probe_for_test`, feature `vision-live-test`), to aim at its
+    /// own helper window.
     Pids(&'a [u32]),
+}
+
+/// A display, without a pixel of what it shows.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct DisplayInfo {
+    /// Where it is in the global coordinate space, in points.
+    pub x: f64,
+    pub y: f64,
+    /// Its size in points.
+    pub point_width: f64,
+    pub point_height: f64,
+    /// Its native size in pixels: the size a capture of it has before
+    /// it is scaled down.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// One captured display, as the platform delivers it. See the module
@@ -254,19 +302,41 @@ pub trait Platform {
     /// - The mouse pointer is not part of the image.
     /// - No display at all is [`PlatformError::NoDisplay`].
     fn capture(&self, exclude: AppSelector<'_>, at: Option<(f64, f64)>) -> Result<RawCapture, PlatformError>;
+
+    /// The display [`Platform::capture`] would take right now (the
+    /// rule without `at`), measured and not captured. Must not read a
+    /// pixel, must not prompt, and must work without the permission.
+    /// For [`dry_run`].
+    fn target_display(&self) -> Result<DisplayInfo, PlatformError>;
 }
 
 /// Whether the app `app_id` is the listed app `listed_id`: the same
-/// id ignoring case, or (bundle ids) one of its helper apps, whose
-/// ids extend the app's own with a dot (`com.example.vault.helper`
-/// for `com.example.vault`).
+/// id ignoring case, or one of that app's helpers.
+///
+/// A helper's id is the app's own id and then more, behind a dot or
+/// a hyphen:
+///
+/// - `com.example.vault.helper`, `com.example.vault.helper.gpu`: the
+///   usual shape of the helper processes an app bundles (an Electron
+///   app's GPU and renderer helpers, an autofill extension);
+/// - `com.example.vault-launcher`: the other shape vendors use, for
+///   example 1Password's `com.1password.1password-launcher`;
+/// - on Windows, `vault.exe` for a list entry written without the
+///   ending (`vault`), and `vault-helper.exe` for the same entry.
+///
+/// An id that merely begins with the same letters is another app
+/// (`com.example.vaulted`), and so is an id that ends in the sign
+/// with nothing behind it.
 pub fn id_matches(app_id: &str, listed_id: &str) -> bool {
     let app = app_id.trim().to_lowercase();
     let listed = listed_id.trim().to_lowercase();
     if app.is_empty() || listed.is_empty() {
         return false;
     }
-    app == listed || (app.len() > listed.len() + 1 && app.starts_with(&listed) && app.as_bytes()[listed.len()] == b'.')
+    if app == listed {
+        return true;
+    }
+    app.len() > listed.len() + 1 && app.starts_with(&listed) && matches!(app.as_bytes()[listed.len()], b'.' | b'-')
 }
 
 /// Whether the app is any of the listed ones ([`id_matches`]).
@@ -292,10 +362,13 @@ impl Platform for Unsupported {
     fn capture(&self, _exclude: AppSelector<'_>, _at: Option<(f64, f64)>) -> Result<RawCapture, PlatformError> {
         Err(PlatformError::Failed(capture::NOT_HERE.to_string()))
     }
+    fn target_display(&self) -> Result<DisplayInfo, PlatformError> {
+        Err(PlatformError::Failed(capture::NOT_HERE.to_string()))
+    }
 }
 
-/// The platform of this build. Not used by unit tests, which never
-/// touch the real screen (see [`capture_for_ask`]).
+/// The platform of this build. Unit tests never capture from it (see
+/// [`capture_for_ask`]).
 #[cfg_attr(test, allow(dead_code))]
 fn system() -> impl Platform {
     #[cfg(target_os = "macos")]
@@ -358,7 +431,7 @@ pub(crate) mod test_support {
     pub(crate) const MAGENTA: [u8; 4] = [255, 0, 255, 255];
 
     /// What the fake was asked, in order: `"permission"`, `"front"`,
-    /// `"rects"`, `"capture"`.
+    /// `"rects"`, `"capture"`, `"display"`.
     #[derive(Default, Debug)]
     pub(crate) struct Seen {
         pub calls: Vec<&'static str>,
@@ -489,6 +562,19 @@ pub(crate) mod test_support {
             }
             Ok(RawCapture { rgba, width, height, bounds: self.bounds, excluded_apps: excluded.len() })
         }
+
+        fn target_display(&self) -> Result<DisplayInfo, PlatformError> {
+            self.seen.lock().unwrap().calls.push("display");
+            self.capture.clone()?;
+            Ok(DisplayInfo {
+                x: self.bounds.x,
+                y: self.bounds.y,
+                point_width: self.bounds.width,
+                point_height: self.bounds.height,
+                width: (self.bounds.width * self.scale).round() as u32,
+                height: (self.bounds.height * self.scale).round() as u32,
+            })
+        }
     }
 
     static PLATFORM: Mutex<Option<Arc<Fake>>> = Mutex::new(None);
@@ -529,9 +615,21 @@ mod tests {
         assert!(id_matches(" 1Password.exe ", "1password.exe"));
         assert!(id_matches("com.example.vault.helper", "com.example.vault"));
         assert!(id_matches("com.example.vault.helper.gpu", "com.example.vault"));
+        // The other shape of a helper's id: behind a hyphen.
+        assert!(id_matches("com.example.vault-launcher", "com.example.vault"));
+        assert!(id_matches("COM.Example.Vault-Helper.Renderer", "com.example.vault"));
+        assert!(id_matches("com.1password.1password-launcher", "com.1password.1password"));
+        // On Windows: an entry without the ending, and its helper.
+        assert!(id_matches("Vault.exe", "vault"));
+        assert!(id_matches("vault-helper.exe", "vault"));
+        assert!(!id_matches("vault-helper.exe", "vault.exe"));
         // Not a helper: another app whose id merely starts the same.
         assert!(!id_matches("com.example.vaulted", "com.example.vault"));
+        assert!(!id_matches("com.example.vault_x", "com.example.vault"));
+        assert!(!id_matches("keepassxc.exe", "keepass.exe"));
+        assert!(!id_matches("keepassxc.exe", "keepass"));
         assert!(!id_matches("com.example.vault.", "com.example.vault"));
+        assert!(!id_matches("com.example.vault-", "com.example.vault"));
         assert!(!id_matches("com.example", "com.example.vault"));
         assert!(!id_matches("", "com.example.vault"));
         assert!(!id_matches("com.example.vault", ""));
@@ -578,6 +676,7 @@ mod tests {
         let sources = [
             ("mod.rs", include_str!("mod.rs")),
             ("capture.rs", include_str!("capture.rs")),
+            ("dry_run.rs", include_str!("dry_run.rs")),
             ("paint.rs", include_str!("paint.rs")),
             ("trigger.rs", include_str!("trigger.rs")),
             ("mac.rs", include_str!("mac.rs")),

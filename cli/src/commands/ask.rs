@@ -10,7 +10,10 @@
 //!   leaves the diagnostics row an ask in the app leaves (a row in
 //!   `refine_runs`, when the app's database exists), and with
 //!   `--history` the question and answer in the transcript history,
-//!   when that is switched on.
+//!   when that is switched on. `--screen` sends a screenshot of the
+//!   display you are working on with the question, and `--vision
+//!   TRIGGER` lets the Vision trigger decide (TASK-98); without
+//!   either, a run never looks at the screen.
 //! - `status`: whether the backend can run, where questions are sent,
 //!   and the settings an ask would use.
 //! - `config`: print the `ask` settings block, or change it with
@@ -31,11 +34,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, CancelFlag, eval};
+use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, CancelFlag, ScreenState, VisionChoice, eval};
 use openwhisper_core::refine;
-use openwhisper_core::settings::{self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings};
+use openwhisper_core::settings::{
+    self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings, VisionSettings, VisionTrigger,
+};
 use openwhisper_core::store::Store;
-use openwhisper_core::{dictionary, history, stats, transcript};
+use openwhisper_core::{dictionary, history, stats, transcript, vision};
 
 #[derive(Args, Debug)]
 pub struct AskArgs {
@@ -111,6 +116,18 @@ pub struct RunArgs {
     /// Off by default, so a script does not write into it.
     #[arg(long)]
     history: bool,
+    /// Send a screenshot of the display you are working on with the
+    /// question, whatever the Vision trigger says. Apps on the
+    /// never-capture list stay out of it, and with one of them in
+    /// front there is no screenshot.
+    #[arg(long, conflicts_with = "vision")]
+    screen: bool,
+    /// Let Vision decide for this run, with this trigger: off,
+    /// phrases, smart or always, or "saved" for the trigger in the
+    /// settings. Without this and without --screen, a run never looks
+    /// at the screen.
+    #[arg(long, value_name = "TRIGGER")]
+    vision: Option<String>,
     #[command(flatten)]
     overrides: Overrides,
 }
@@ -176,7 +193,7 @@ fn settings_path() -> Result<PathBuf> {
 
 /// The saved Ask and Refine blocks with `overrides` applied (not
 /// persisted).
-fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
+pub(super) fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
     let path = settings_path()?;
     apply(settings::load_ask_settings(&path), settings::load_refine_settings(&path), overrides)
 }
@@ -270,8 +287,60 @@ fn use_history() -> Result<bool> {
     Ok(settings::load_history_settings(&dir.join("settings.json")).enabled)
 }
 
-fn effort_label(effort: &str) -> String {
+pub(super) fn effort_label(effort: &str) -> String {
     if effort.is_empty() { String::new() } else { format!(", {effort} effort") }
+}
+
+/// The trigger `--vision` names; "saved" is the one in the settings.
+pub(super) fn parse_trigger(id: &str, saved: VisionTrigger) -> Result<VisionTrigger> {
+    if id.trim().eq_ignore_ascii_case("saved") {
+        return Ok(saved);
+    }
+    VisionTrigger::parse(id).ok_or_else(|| anyhow!("unknown trigger \"{id}\"; use off, phrases, smart, always or saved"))
+}
+
+/// Whether and how this run may include the screen: the saved Vision
+/// settings (its phrases and its never-capture list always apply),
+/// with the trigger `--vision` names, or a forced capture with
+/// `--screen`.
+fn vision_for(screen: bool, trigger: Option<&str>) -> Result<(VisionSettings, VisionChoice)> {
+    let saved = settings::load_vision_settings(&settings_path()?);
+    if screen {
+        return Ok((saved, VisionChoice::Force));
+    }
+    match trigger {
+        Some(id) => {
+            let trigger = parse_trigger(id, saved.trigger)?;
+            Ok((VisionSettings { trigger, ..saved }, VisionChoice::Settings))
+        }
+        None => Ok((saved, VisionChoice::None)),
+    }
+}
+
+/// What will happen with the screen, said before anything is sent or
+/// captured. Empty when the run does not involve the screen at all.
+fn screen_plan(vision: &VisionSettings, choice: VisionChoice, question: &str) -> String {
+    match choice {
+        VisionChoice::None => String::new(),
+        VisionChoice::Force => "screen: a screenshot of the display you are working on goes with the question".to_string(),
+        VisionChoice::Settings => match vision::decide(vision, question) {
+            vision::Decision::Capture { phrase: Some(phrase) } => {
+                format!("screen: a screenshot goes with the question (you said \"{phrase}\")")
+            }
+            vision::Decision::Capture { phrase: None } => {
+                "screen: a screenshot goes with the question (trigger: always)".to_string()
+            }
+            vision::Decision::AskModel => {
+                "screen: the question goes as text; a screenshot follows only if the model asks for it".to_string()
+            }
+            vision::Decision::NoCapture if vision.trigger == VisionTrigger::Off => {
+                "screen: not included (trigger: off)".to_string()
+            }
+            vision::Decision::NoCapture => {
+                "screen: not included (trigger: phrases, and the question has none of them)".to_string()
+            }
+        },
+    }
 }
 
 fn run_question(args: RunArgs, json: bool) -> Result<()> {
@@ -297,13 +366,18 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         bail!("no question given: pass it as an argument or pipe it on stdin");
     }
 
-    let plan = AskPlan::new(&ask, &refine);
+    let (vision_settings, vision_choice) = vision_for(args.screen, args.vision.as_deref())?;
+    let plan = AskPlan::new(&ask, &refine).with_vision(&vision_settings, vision_choice);
     let destination = plan.destination();
     let recorded = use_store();
     let kept = args.history && use_history()?;
     if !json {
         // Before anything leaves the machine.
         eprintln!("question goes to: {destination}");
+        let screen = screen_plan(&vision_settings, vision_choice, &question);
+        if !screen.is_empty() {
+            eprintln!("{screen}");
+        }
         if !plan.notice.is_empty() {
             eprintln!("note: {}", plan.notice);
         }
@@ -315,7 +389,22 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
     let stream = !json && !args.no_stream;
     let mut out = std::io::stdout().lock();
     let mut last_char = '\n';
+    // What became of the screen, also when there is no answer.
+    let mut screen = (ScreenState::None, String::new());
     let mut sink = |event: AskEvent| match event {
+        AskEvent::Screen { state, notice } => {
+            if !json {
+                match state {
+                    ScreenState::Capturing => eprintln!("screen: capturing"),
+                    ScreenState::Included => eprintln!("screen: included"),
+                    ScreenState::Blocked | ScreenState::Unavailable => eprintln!("screen: not included. {notice}"),
+                    _ => {}
+                }
+            }
+            if state != ScreenState::Capturing {
+                screen = (state, notice);
+            }
+        }
         AskEvent::Text(piece) if stream => {
             if let Some(c) = piece.chars().last() {
                 last_char = c;
@@ -362,6 +451,13 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "model": plan.setup.model,
             "effort": effort,
             "web_search": plan.setup.web_search,
+            "screen": reply.map_or(screen.0, |r| r.screen).as_str(),
+            "screen_notice": reply.map_or(screen.1.as_str(), |r| r.screen_notice.as_str()),
+            "vision": match vision_choice {
+                VisionChoice::None => "none",
+                VisionChoice::Force => "screen",
+                VisionChoice::Settings => vision_settings.trigger.as_str(),
+            },
             "timeout_ms": plan.timeout.as_millis() as u64,
             "destination": destination,
             "recorded": recorded,
@@ -520,7 +616,7 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
 }
 
 /// An answer on one line, cut to fit a terminal row.
-fn one_line(answer: &str) -> String {
+pub(super) fn one_line(answer: &str) -> String {
     let flat = answer.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out: String = flat.chars().take(110).collect();
     if flat.chars().count() > 110 {
@@ -615,20 +711,20 @@ median {} ms, max {} ms",
 
 /// Response times over the cases that got an answer.
 #[derive(Debug, PartialEq, Eq)]
-struct Latency {
-    answers: usize,
-    min: u64,
-    median: u64,
-    max: u64,
+pub(super) struct Latency {
+    pub(super) answers: usize,
+    pub(super) min: u64,
+    pub(super) median: u64,
+    pub(super) max: u64,
 }
 
 impl Latency {
-    fn to_json(&self) -> serde_json::Value {
+    pub(super) fn to_json(&self) -> serde_json::Value {
         serde_json::json!({ "answers": self.answers, "min": self.min, "median": self.median, "max": self.max })
     }
 }
 
-fn latency(times: impl Iterator<Item = u64>) -> Latency {
+pub(super) fn latency(times: impl Iterator<Item = u64>) -> Latency {
     let mut times: Vec<u64> = times.collect();
     times.sort_unstable();
     Latency {
@@ -691,6 +787,26 @@ mod tests {
         assert_eq!(refine.claude_cli.path.as_deref(), Some("/opt/claude"));
         // Nothing here switches Ask on: running is the opt-in.
         assert!(!ask.enabled);
+    }
+
+    #[test]
+    fn the_screen_is_announced_before_anything_is_sent() {
+        let with = |trigger| VisionSettings { trigger, ..VisionSettings::default() };
+        // A plain run does not involve the screen and says nothing.
+        assert_eq!(screen_plan(&with(VisionTrigger::Always), VisionChoice::None, "look at my screen"), "");
+        let forced = screen_plan(&with(VisionTrigger::Off), VisionChoice::Force, "two plus two");
+        assert!(forced.contains("a screenshot of the display you are working on goes with the question"), "{forced}");
+        let said = |trigger, question| screen_plan(&with(trigger), VisionChoice::Settings, question);
+        assert_eq!(said(VisionTrigger::Off, "look at my screen"), "screen: not included (trigger: off)");
+        assert!(said(VisionTrigger::Phrases, "two plus two").contains("the question has none of them"));
+        assert!(said(VisionTrigger::Phrases, "what is on my screen").contains("(you said \"on my screen\")"));
+        assert!(said(VisionTrigger::Phrases, "hvad står der på min skærm").contains("(you said \"på min skærm\")"));
+        assert!(said(VisionTrigger::Smart, "two plus two").contains("only if the model asks for it"));
+        assert!(said(VisionTrigger::Always, "two plus two").contains("(trigger: always)"));
+
+        assert_eq!(parse_trigger(" Smart ", VisionTrigger::Off).unwrap(), VisionTrigger::Smart);
+        assert_eq!(parse_trigger("saved", VisionTrigger::Always).unwrap(), VisionTrigger::Always);
+        assert!(parse_trigger("sometimes", VisionTrigger::Off).unwrap_err().to_string().contains("sometimes"));
     }
 
     #[test]

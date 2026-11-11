@@ -465,10 +465,12 @@ impl AskPlan {
     ///
     /// [`AskPlan::setup`] becomes the setup a backend is best warmed
     /// with: the prompt for what the settings alone say will happen.
-    /// When a question turns out otherwise (a phrase matched, so a
-    /// screenshot goes along after all), [`AskPlan::send`] uses the
-    /// prompt for that, and a backend warmed for the other one starts
-    /// over by itself.
+    /// With the phrases trigger that is one prompt for an ask with
+    /// and without a screenshot, so the warmed backend answers
+    /// whether or not a phrase matched. Only an image the caller
+    /// brings to a plan that expected none changes the prompt at
+    /// [`AskPlan::send`], and a backend warmed for the other one then
+    /// starts over by itself.
     ///
     /// Without the cargo feature `vision` the settings never capture,
     /// and a forced capture ends as "no screenshot" with a reason.
@@ -484,16 +486,10 @@ impl AskPlan {
         self.vision.choice
     }
 
-    /// What the prompt says about the screen: by what the settings
-    /// alone say will happen, or, when they expect no screenshot and
-    /// there is one after all, the prompt for a screenshot.
+    /// What the prompt says about the screen
+    /// ([`screen::AskVision::prompt`]).
     fn screen_prompt(&self, has_image: bool) -> ScreenPrompt {
-        match self.vision.expected() {
-            Step::AskModel => ScreenPrompt::OnRequest,
-            Step::Capture => ScreenPrompt::Attached,
-            Step::NoCapture if has_image => ScreenPrompt::Attached,
-            Step::NoCapture => ScreenPrompt::None,
-        }
+        self.vision.prompt(has_image)
     }
 
     fn system_for(&self, screen: ScreenPrompt) -> String {

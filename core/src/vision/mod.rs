@@ -56,7 +56,8 @@
 //!
 //! Everything above is written against [`Platform`], so the rules run
 //! in unit tests against a fake with no screen. `mac.rs` implements it
-//! with ScreenCaptureKit; `windows.rs` is a stub until TASK-98.2. The
+//! with ScreenCaptureKit, `windows.rs` with a GDI capture of the
+//! foreground window's monitor (no exclusion exists there). The
 //! contract, for whoever implements a platform:
 //!
 //! **Coordinates.** Rectangles ([`PointRect`]) are in the desktop's
@@ -91,12 +92,16 @@
 use serde::Serialize;
 
 mod capture;
+pub mod eval;
 pub mod paint;
+pub mod testimg;
 pub mod trigger;
 
 #[cfg(target_os = "macos")]
 mod mac;
-#[cfg(target_os = "windows")]
+// Also compiled for tests on other platforms: its pure helpers
+// (rectangle maths, exe-name matching) are unit tested everywhere.
+#[cfg(any(target_os = "windows", test))]
 mod windows;
 
 pub use crate::ask::AskCaptureToken;

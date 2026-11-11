@@ -15,7 +15,7 @@ path = "src/main.rs"
 # Same library the Tauri shell consumes. `recognizer` enables the
 # in-core ASR path (FluidAudio on Mac via the Swift bridge,
 # ort + Parakeet ONNX on Win/Linux).
-openwhisper-core = { path = "../core", default-features = false, features = ["recognizer", "refine", "focus", "ask"] }
+openwhisper-core = { path = "../core", default-features = false, features = ["recognizer", "refine", "focus", "ask", "vision"] }
 # clap derive keeps the parser definition close to the subcommand
 # handlers and gives us --help + shell completion for free.
 clap = { version = "4", features = ["derive"] }
@@ -33,6 +33,14 @@ dirs = "5"
 # Local-time stamps in `openwhisper history`. Same version and
 # features as core.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# `openwhisper vision test-window` (hidden): the helper window of the
+# live pixel test (`cli/tests/vision_live.rs`), a borderless window of
+# one solid colour, shown with AppKit. Same versions as core.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow", "NSColor", "NSGraphics", "NSScreen", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "objc2-core-foundation"] }
 
 [dev-dependencies]
 # JSON parsing for the smoke test that asserts on `cli --json

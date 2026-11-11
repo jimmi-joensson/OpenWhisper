@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::Serialize;
 
+use super::prompt::ScreenPrompt;
 use super::{AskEvent, AskImage};
 use crate::settings::VisionSettings;
 
@@ -109,6 +110,40 @@ impl AskVision {
                 VisionTrigger::Smart => Step::AskModel,
                 VisionTrigger::Always => Step::Capture,
             },
+        }
+    }
+
+    /// What the system prompt says about the screen, for an ask that
+    /// does (`has_image`) or does not go out with a screenshot.
+    ///
+    /// For every trigger but one this follows [`AskVision::expected`]:
+    /// the prompt for what the settings alone say will happen, and
+    /// the prompt for a screenshot when there is one after all (the
+    /// caller brought an image).
+    ///
+    /// The phrases trigger is the exception, because there the answer
+    /// to "will there be a screenshot" is only known once the
+    /// question is. It gets one prompt for both outcomes
+    /// ([`ScreenPrompt::IfAttached`]), so the prompt a backend is
+    /// warmed with (`has_image` false, before the question) is the
+    /// prompt the question is sent with (`has_image` true when a
+    /// phrase matched), and the warmed backend is the one that
+    /// answers. With two prompts, the asks that include the screen in
+    /// the default setting were exactly the ones that paid for a cold
+    /// start.
+    pub(super) fn prompt(&self, has_image: bool) -> ScreenPrompt {
+        use crate::settings::VisionTrigger;
+        let phrases = self.choice == VisionChoice::Settings
+            && cfg!(feature = "vision")
+            && self.settings.trigger == VisionTrigger::Phrases;
+        if phrases {
+            return ScreenPrompt::IfAttached;
+        }
+        match self.expected() {
+            Step::AskModel => ScreenPrompt::OnRequest,
+            Step::Capture => ScreenPrompt::Attached,
+            Step::NoCapture if has_image => ScreenPrompt::Attached,
+            Step::NoCapture => ScreenPrompt::None,
         }
     }
 }
@@ -464,6 +499,46 @@ mod tests {
         }
         assert_eq!(ScreenState::default(), ScreenState::None);
         assert_eq!(VisionChoice::default(), VisionChoice::None);
+    }
+
+    #[test]
+    fn the_prompt_follows_the_trigger_and_phrases_has_one_for_both_outcomes() {
+        use crate::settings::VisionTrigger;
+        let with = |trigger: VisionTrigger, choice: VisionChoice| AskVision {
+            choice,
+            settings: VisionSettings { trigger, ..VisionSettings::default() },
+        };
+        // (without an image, with one)
+        let both = |vision: &AskVision| (vision.prompt(false), vision.prompt(true));
+        // No Vision for this plan, or switched off: the prompt from
+        // before Vision, and the screenshot prompt for an image the
+        // caller brought.
+        for trigger in VisionTrigger::ALL {
+            assert_eq!(both(&with(trigger, VisionChoice::None)), (ScreenPrompt::None, ScreenPrompt::Attached));
+            // A forced capture is expected, whatever the trigger.
+            assert_eq!(both(&with(trigger, VisionChoice::Force)), (ScreenPrompt::Attached, ScreenPrompt::Attached));
+        }
+        let follow = |trigger: VisionTrigger| both(&with(trigger, VisionChoice::Settings));
+        assert_eq!(follow(VisionTrigger::Off), (ScreenPrompt::None, ScreenPrompt::Attached));
+        #[cfg(feature = "vision")]
+        {
+            assert_eq!(follow(VisionTrigger::Always), (ScreenPrompt::Attached, ScreenPrompt::Attached));
+            assert_eq!(follow(VisionTrigger::Smart), (ScreenPrompt::OnRequest, ScreenPrompt::OnRequest));
+            // Phrases: the same prompt before the question is known,
+            // without a match and with one. That is what lets the
+            // warmed backend answer.
+            assert_eq!(follow(VisionTrigger::Phrases), (ScreenPrompt::IfAttached, ScreenPrompt::IfAttached));
+            // The decision per question is untouched by this.
+            let phrases = with(VisionTrigger::Phrases, VisionChoice::Settings);
+            assert_eq!(phrases.decide("what is on my screen"), Step::Capture);
+            assert_eq!(phrases.decide("two plus two"), Step::NoCapture);
+            assert_eq!(phrases.expected(), Step::NoCapture);
+        }
+        // A build that cannot capture never promises a screenshot.
+        #[cfg(not(feature = "vision"))]
+        for trigger in VisionTrigger::ALL {
+            assert_eq!(follow(trigger), (ScreenPrompt::None, ScreenPrompt::Attached));
+        }
     }
 
     #[test]

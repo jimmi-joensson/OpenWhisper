@@ -1,10 +1,10 @@
 ---
 id: TASK-99
 title: Agent - let an ask use the user's own MCP connections
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T16:41:00Z'
+updated_date: '2026-11-11T06:39:00Z'
 labels:
   - agent
   - ask
@@ -14,6 +14,8 @@ labels:
 dependencies:
   - TASK-97
   - TASK-98
+documentation:
+  - backlog/docs/plans/doc-52 - Agent-implementation-plan.md
 priority: low
 ordinal: 81000
 ---
@@ -32,7 +34,7 @@ Before designing: verify that the headless Claude Code CLI sees the connections 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Spike result written into the task notes: which connections the headless CLI can use, how permissions work, typical run time
+- [x] #1 Spike result written into the task notes: which connections the headless CLI can use, how permissions work, typical run time
 - [ ] #2 Agent is its own opt-in switch, off by default, separate from Refine and Ask
 - [ ] #3 Only tools on the allow list run; anything that sends, posts or deletes waits for a confirm in the panel
 - [ ] #4 Every tool call and its outcome is visible in the panel and summarised on the history entry
@@ -53,4 +55,6 @@ Spike (2026-11-10, Claude Code 2.1.322, Sonnet low, fake MCP server only; no rea
 - Run time: no tool 2.4 s, one tool call 3.3 to 3.6 s, two 3.9 to 4.5 s; the fake server adds no start-up time.
 - Injection probe: a tool result that told the model to send the thread to an outside address was not obeyed in 6 of 6 runs, with or without the gate. Small sample; the gate is the protection.
 - Terms: docs say --bare will become the default for -p, which would cut subscription sign-in; Anthropic says products for others should not offer claude.ai login. To be re-checked before release (AC 7).
+
+2026-11-11: the headless feasibility check passed (spike notes above; the orchestrator re-ran the confirm flow: a denied send never reached the fake server), so the feature is built. Plan doc-52 - Agent-implementation-plan.md, subtasks 99.1 to 99.4. Branch task-99-agent, stacked on task-98-vision.
 <!-- SECTION:NOTES:END -->

@@ -466,6 +466,47 @@ test.describe("screen section: never in a screenshot", () => {
     await expect.poll(async () => (await lastSave(page))?.never_capture).toEqual([]);
   });
 
+  test("an empty list is said out loud at the top of the section, and goes when apps are back", async ({
+    page,
+  }) => {
+    // With the built-in list there is nothing to warn about.
+    await openScreen(page);
+    await expect(page.getByTestId("vision-unprotected-warning")).toHaveCount(0);
+
+    // Someone emptied the list (here: in the file, as `[]`).
+    await emitVisionChanged(page, { never_capture: [] });
+    const warning = page.getByTestId("vision-unprotected-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toHaveText(
+      "No app is protectedYour never-capture list is empty, so every app that is open can end up in the picture, password managers included. Add the apps that must stay out, or restore the defaults under Never in a screenshot.",
+    );
+    // A standing statement, above the controls it is about.
+    await expect(warning).toHaveAttribute("role", "note");
+    const order = await section(page).evaluate((el) => {
+      const at = (id: string) =>
+        el.querySelector(`[data-testid="${id}"]`)?.getBoundingClientRect().top ?? -1;
+      return [at("vision-unprotected-warning"), at("vision-never")];
+    });
+    expect(order[0]).toBeGreaterThan(0);
+    expect(order[0]).toBeLessThan(order[1]);
+
+    // Restoring the defaults takes it away again.
+    await page.getByTestId("vision-never-restore").click();
+    await expect(appRows(page)).toHaveCount(2);
+    await expect(page.getByTestId("vision-unprotected-warning")).toHaveCount(0);
+  });
+
+  test("a list that was emptied at start shows the warning from the first paint", async ({ page }) => {
+    await openScreen(page, { settings: { never_capture: [] } });
+    await expect(page.getByTestId("vision-unprotected-warning")).toBeVisible();
+    await expect(appRows(page)).toHaveCount(0);
+    // One app on the list is enough for it to go.
+    await appIdInput(page).fill("com.example.vault");
+    await page.getByRole("button", { name: "Add app" }).click();
+    await expect(appRows(page)).toHaveCount(1);
+    await expect(page.getByTestId("vision-unprotected-warning")).toHaveCount(0);
+  });
+
   test("Restore defaults brings the built-in apps back", async ({ page }) => {
     await openScreen(page, {
       settings: { never_capture: [{ id: "com.example.safe", name: "Safe" }] },
@@ -598,6 +639,46 @@ test.describe("screen section: Windows", () => {
     await expect(appIdInput(page)).toHaveAttribute("placeholder", "vault.exe");
     // What a list cannot cover holds there too.
     await expect(page.getByTestId("vision-cannot-cover")).toBeVisible();
+  });
+
+  test("is off until switched on, and says that it has not been verified there", async ({
+    page,
+  }) => {
+    await openScreen(page, { platform: "windows" });
+    // Nobody chose a trigger: on Windows that is Off.
+    await expect(triggerSelect(page)).toContainText("Off");
+    await expect(
+      page.getByTestId("vision-trigger-choices").locator('[data-selected="true"]'),
+    ).toHaveAttribute("data-choice", "off");
+
+    const notice = page.getByTestId("vision-windows-notice");
+    await expect(notice).toBeVisible();
+    await expect(notice).toHaveAttribute("role", "note");
+    await expect(notice).toContainText("Not verified on Windows yet");
+    await expect(notice).toContainText(
+      "Including the screen has not been tested on a real Windows computer yet. That is why it is off until you switch it on here, and switching it on is your own choice.",
+    );
+    // What protects a password manager there.
+    await expect(notice).toContainText(
+      "On Windows nothing can be left out of the picture itself. What protects a password manager is that the windows of the apps on your never-capture list are painted over before the picture is sent anywhere, and that no picture is taken at all while one of them is in front.",
+    );
+    // And what is not covered.
+    await expect(notice).toContainText(
+      "Not painted over: the small live previews Windows shows in Alt+Tab, in Task View and over a taskbar button.",
+    );
+
+    // Switching it on is theirs to do; the notice stays.
+    await triggerSelect(page).click();
+    await choose(page, "When I say so");
+    await expect.poll(async () => (await lastSave(page))?.trigger).toBe("phrases");
+    await expect(notice).toBeVisible();
+  });
+
+  test("the notice is for Windows only", async ({ page }) => {
+    await openScreen(page);
+    await expect(page.getByTestId("vision-windows-notice")).toHaveCount(0);
+    // On macOS the trigger nobody chose is the phrases.
+    await expect(triggerSelect(page)).toContainText("When I say so");
   });
 });
 

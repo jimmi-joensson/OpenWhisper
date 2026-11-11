@@ -34,13 +34,43 @@ dirs = "5"
 # features as core.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-# `openwhisper vision test-window` (hidden): the helper window of the
-# live pixel test (`cli/tests/vision_live.rs`), a borderless window of
-# one solid colour, shown with AppKit. Same versions as core.
+# The live pixel test of Vision (`cli/tests/vision_live.rs`) and its
+# helper window, the hidden `openwhisper vision test-window`. The test
+# captures the real screen outside an ask (through core's hook of the
+# same feature) and reads a few pixels inside its own two windows. NOT
+# a default feature, and it must stay that way: a build that ships has
+# neither the hook nor the helper. Switched on only by the test's own
+# command line:
+#
+#   OPENWHISPER_VISION_LIVE=1 cargo test -p openwhisper-cli --features vision-live-test --test vision_live -- --ignored --nocapture
+[features]
+vision-live-test = [
+    "openwhisper-core/vision-live-test",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+    "dep:windows",
+]
+
+# `openwhisper vision test-window` (feature `vision-live-test` only): a
+# borderless window of one solid colour, shown with AppKit. Same
+# versions as core.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow", "NSColor", "NSGraphics", "NSScreen", "objc2-core-foundation"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "objc2-core-foundation"] }
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow", "NSColor", "NSGraphics", "NSScreen", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSArray", "NSGeometry", "objc2-core-foundation"] }
+
+# The same helper window on Windows (feature `vision-live-test` only):
+# a borderless topmost popup of one solid colour, through Win32. Same
+# version as core.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 # JSON parsing for the smoke test that asserts on `cli --json

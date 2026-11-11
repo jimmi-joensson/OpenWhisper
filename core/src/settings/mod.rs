@@ -68,6 +68,15 @@
 //! in this or another process (the headless CLI) sees the old file or
 //! the new one, never a half-written one.
 //!
+//! Readers that must not be stale: the caches hold what this process
+//! last loaded or saved, and the headless CLI edits the same file from
+//! another process. For the blocks that decide what leaves the machine
+//! with an ask (the Vision block, and the Ask block's list of facts
+//! about the computer), an ask does not trust the cache: it reads the
+//! file again when it starts ([`fresh_vision_settings`],
+//! [`fresh_ask_context`]), once the shell has said where the file is
+//! ([`set_settings_file`]).
+//!
 //! Cache hydration order (typical):
 //!   1. Shell resolves config-dir path at boot.
 //!   2. Shell calls [`load_settings`] / [`load_audio_settings`] /
@@ -81,7 +90,7 @@
 //!      explicit entry point for shells that want to bypass disk IO.)
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -105,7 +114,8 @@ pub use modes::{
 mod vision;
 pub use vision::{
     NeverCaptureApp, VISION_APP_FIELD_MAX_CHARS, VISION_NEVER_CAPTURE_MAX, VISION_PHRASE_MAX_CHARS,
-    VISION_PHRASES_MAX, VisionSettings, VisionTrigger, default_never_capture, default_phrases,
+    VISION_PHRASES_MAX, VisionSettings, VisionTrigger, default_never_capture, default_phrases, default_trigger,
+    default_trigger_on,
 };
 
 mod refine;
@@ -536,6 +546,92 @@ fn read_file(path: &Path) -> SettingsFile {
         return SettingsFile::default();
     };
     serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// The settings file of this process, once the shell has said where
+/// it is ([`set_settings_file`]).
+static SETTINGS_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Tell core where this process's `settings.json` is, so that an ask
+/// can read the blocks it must not have stale straight from the file
+/// ([`fresh_vision_settings`], [`fresh_ask_context`]). The desktop
+/// shell calls it once at boot. `None` takes it back; the fresh reads
+/// then answer from the caches.
+pub fn set_settings_file(path: Option<&Path>) {
+    if let Ok(mut g) = SETTINGS_FILE.lock() {
+        *g = path.map(Path::to_path_buf);
+    }
+}
+
+/// The file given to [`set_settings_file`], if any.
+pub fn settings_file() -> Option<PathBuf> {
+    SETTINGS_FILE.lock().ok().and_then(|g| g.clone())
+}
+
+/// The registered settings file as it is on disk right now. `None`
+/// when no file is registered, when there is no such file, or when it
+/// cannot be read or is not JSON: in each of those cases the file
+/// says nothing, and the caller keeps what it had.
+fn fresh_file() -> Option<SettingsFile> {
+    let path = settings_file()?;
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// The Vision block of a settings file: the defaults without one, and
+/// Vision **off** for a block that is not an object at all (what the
+/// person chose cannot be told, so nothing is captured until they
+/// choose again).
+fn vision_of(block: Option<serde_json::Value>) -> VisionSettings {
+    match block {
+        None => VisionSettings::default(),
+        Some(v) => serde_json::from_value::<VisionSettings>(v)
+            .unwrap_or(VisionSettings { trigger: VisionTrigger::Off, ..VisionSettings::default() }),
+    }
+    .cleaned()
+}
+
+/// The Vision block as it is on disk right now, for the ask that is
+/// about to decide whether to look at the screen.
+///
+/// The cache ([`current_vision_settings`]) holds what this process
+/// last loaded or saved. `openwhisper vision config --trigger off` or
+/// `never-capture add` from a terminal changes the file behind its
+/// back, and a rule the person just set must hold for the very next
+/// ask. So this reads the file ([`set_settings_file`]): one small
+/// read, a few hundred microseconds, never on the hotkey thread.
+///
+/// The cache is not touched: the shell still sees, the next time a
+/// window asks, that the file changed, and tells its windows.
+///
+/// Without a registered file, or when the file is missing or cannot
+/// be read, this is the cache: the last block this process knew.
+pub fn fresh_vision_settings() -> VisionSettings {
+    match fresh_file() {
+        Some(file) => vision_of(file.vision),
+        None => current_vision_settings(),
+    }
+}
+
+/// What an ask tells the model about this computer, as the Ask block
+/// on disk says right now. Same reason and same rules as
+/// [`fresh_vision_settings`]: `openwhisper ask config --context ...`
+/// edits the file from another process, and a fact the person just
+/// switched off must not go out with the next ask.
+///
+/// Only this part of the Ask block is read fresh. Whether Ask is on
+/// decides which hotkeys are installed, so that stays with the cache
+/// and the shell, which re-installs them when it sees a change.
+pub fn fresh_ask_context() -> ContextSettings {
+    let from_file = fresh_file().and_then(|file| {
+        // A file without an Ask block has the defaults; a block that
+        // cannot be read says nothing.
+        match file.ask {
+            None => Some(AskSettings::default()),
+            Some(v) => serde_json::from_value::<AskSettings>(v).ok(),
+        }
+    });
+    from_file.unwrap_or_else(current_ask_settings).cleaned().context
 }
 
 /// Held by every `save_*` fn (and the hotkey-slot helpers) from its
@@ -1162,9 +1258,10 @@ pub fn save_ask_settings(path: &Path, settings: AskSettings) -> Result<AskSettin
 }
 
 /// The Vision block as last loaded or saved in this process; the
-/// defaults (phrases, built-in lists) when nothing was loaded yet.
-/// Read when an ask is sent, so the shell loads it at boot and again
-/// after every change, whoever made it.
+/// defaults (the platform's trigger, built-in lists) when nothing was
+/// loaded yet. An ask does not decide on this: it reads the file
+/// ([`fresh_vision_settings`]) and falls back to this cache only when
+/// the file says nothing.
 pub fn current_vision_settings() -> VisionSettings {
     VISION_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
 }
@@ -1189,13 +1286,7 @@ fn current_vision_json() -> Option<serde_json::Value> {
 /// **off**: what the person chose cannot be told, so nothing is
 /// captured until they choose again.
 pub fn load_vision_settings(path: &Path) -> VisionSettings {
-    let file = read_file(path);
-    let settings = match file.vision {
-        None => VisionSettings::default(),
-        Some(v) => serde_json::from_value::<VisionSettings>(v)
-            .unwrap_or(VisionSettings { trigger: VisionTrigger::Off, ..VisionSettings::default() }),
-    }
-    .cleaned();
+    let settings = vision_of(read_file(path).vision);
     if let Ok(mut g) = VISION_CURRENT.lock() {
         *g = Some(settings.clone());
     }
@@ -1276,8 +1367,16 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
     save_settings_locked(path, current)
 }
 
-/// Serializes the tests, in any module, that set the process-wide
-/// Refine, modes, Ask or Vision cache and then rely on what is in it.
+/// Serializes the tests, in any module, that set a process-wide
+/// settings cache (Refine, modes, Ask, Vision, history, performance)
+/// or the registered settings file, and then rely on what is in it.
+///
+/// Every `save_*` writes the blocks the file does not have from these
+/// caches, so a test that sets one while another test saves changes
+/// what that other test finds on disk. A test that touches any of
+/// them holds this lock; the hotkey cache has its own
+/// (`HOTKEY_LOCK` in the tests below), taken first where both are
+/// needed.
 #[cfg(test)]
 pub(crate) static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1364,6 +1463,11 @@ mod tests {
 
     #[test]
     fn performance_save_load_round_trip_via_disk() {
+        // The performance cache is process-wide, and every save of
+        // another block writes it out when the file has none: without
+        // this lock a test that saves in a loop saw its file grow
+        // while this one ran.
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Use a real temp dir so we exercise the same write_file
         // codepath the Tauri shell hits. tempfile is already a
         // dev-dep used elsewhere in core::store tests.
@@ -1494,6 +1598,67 @@ mod tests {
         if let Ok(mut g) = CURRENT.lock() {
             *g = None;
         }
+    }
+
+    /// What the headless CLI does from another process: the file
+    /// changes, and no cache of this process hears of it.
+    #[test]
+    fn a_fresh_read_follows_the_file_and_the_cache_does_not() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let booted = VisionSettings { trigger: VisionTrigger::Always, ..VisionSettings::default() };
+        set_vision_settings_cache(booted.clone());
+        let facts_on = AskSettings { enabled: true, ..AskSettings::default() };
+        set_ask_settings_cache(facts_on.clone());
+        assert!(facts_on.context.front_app, "the test needs a fact that is on by default");
+
+        // No file registered: the caches are all there is.
+        set_settings_file(None);
+        assert_eq!(fresh_vision_settings(), booted);
+        assert_eq!(fresh_ask_context(), facts_on.context);
+
+        // Registered, but not there yet: still the caches.
+        set_settings_file(Some(&path));
+        assert_eq!(settings_file().as_deref(), Some(path.as_path()));
+        assert_eq!(fresh_vision_settings(), booted);
+        assert_eq!(fresh_ask_context(), facts_on.context);
+
+        // Another process switches Vision off, adds an app and
+        // switches a fact off.
+        std::fs::write(
+            &path,
+            r#"{"vision":{"trigger":"off","never_capture":["com.example.vault"]},
+                "ask":{"enabled":true,"context":{"front_app":false}}}"#,
+        )
+        .unwrap();
+        let fresh = fresh_vision_settings();
+        assert_eq!(fresh.trigger, VisionTrigger::Off);
+        assert_eq!(fresh.effective_never_capture(), [NeverCaptureApp::new("com.example.vault", "")]);
+        assert!(!fresh_ask_context().front_app);
+        // The caches still hold what this process loaded: the shell
+        // notices the change the next time a window asks.
+        assert_eq!(current_vision_settings(), booted);
+        assert_eq!(current_ask_settings(), facts_on);
+
+        // A file without the blocks: their defaults, like a load.
+        std::fs::write(&path, r#"{"stats":{"user_wpm":70}}"#).unwrap();
+        assert_eq!(fresh_vision_settings(), VisionSettings::default());
+        assert_eq!(fresh_ask_context(), AskSettings::default().context);
+        // A Vision block nobody can read: nothing is captured.
+        std::fs::write(&path, r#"{"vision":"always"}"#).unwrap();
+        assert_eq!(fresh_vision_settings().trigger, VisionTrigger::Off);
+        // An Ask block nobody can read says nothing: the cache.
+        std::fs::write(&path, r#"{"ask":{"enabled":"yes please"}}"#).unwrap();
+        assert_eq!(fresh_ask_context(), facts_on.context);
+        // A file that is not JSON says nothing either.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(fresh_vision_settings(), booted);
+        assert_eq!(fresh_ask_context(), facts_on.context);
+
+        set_settings_file(None);
+        set_vision_settings_cache(VisionSettings::default());
+        set_ask_settings_cache(AskSettings::default());
     }
 
     #[test]
@@ -1796,6 +1961,10 @@ mod tests {
     /// moment on every save, and a read in that moment does not parse.
     #[test]
     fn a_reader_never_sees_a_half_written_settings_file() {
+        // Both locks: the file's size must not change between rounds,
+        // and it holds every cache a save writes out, the hotkeys
+        // included.
+        let _hotkeys = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");

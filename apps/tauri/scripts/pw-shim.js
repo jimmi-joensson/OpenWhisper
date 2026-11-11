@@ -400,7 +400,10 @@ async (page) => {
           };
           if (!w.__owVisionStored) {
             w.__owVisionStored = cleaned({
-              trigger: "phrases",
+              // The trigger of someone who never chose one: off on
+              // Windows, where capture is not verified yet
+              // (`default_trigger_on` in core).
+              trigger: platform === "windows" ? "off" : "phrases",
               phrases: null,
               never_capture: null,
               ...(w.__owVisionSettings ?? {}),
@@ -422,6 +425,10 @@ async (page) => {
               // Windows has nothing to grant.
               permission: platform === "windows" ? "granted" : (w.__owVisionPermission ?? "granted"),
               platform,
+              // Verified on macOS, not yet on Windows
+              // (`capture_verified_on` in src-tauri/src/vision.rs).
+              capture_verified: platform !== "windows",
+              default_trigger: platform === "windows" ? "off" : "phrases",
             });
           }
           if (cmd === "vision_set") {

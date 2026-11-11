@@ -618,18 +618,64 @@ pub fn run_case(case: &EvalCase, plan: &AskPlan, backend: &mut dyn AskBackend) -
 /// Run every case these settings can be judged with ([`cases_for`]),
 /// each with the plan of its own ([`plan_for`]) and in a conversation
 /// of its own, like a fresh ask.
+///
+/// Stops at the first case the backend refuses because a limit of
+/// the account is reached ([`limit_reached`]): that case is not among
+/// the results, and no further question is sent.
 pub fn run(
     ask: &AskSettings,
     refine: &RefineSettings,
     mut backend: impl FnMut() -> Box<dyn AskBackend>,
 ) -> Vec<EvalResult> {
-    cases_for(&plan(ask, refine))
-        .iter()
-        .map(|case| {
-            let mut backend = backend();
-            run_case(case, &plan_for(case, ask, refine), backend.as_mut())
-        })
-        .collect()
+    let mut results = Vec::new();
+    for case in cases_for(&plan(ask, refine)) {
+        let mut backend = backend();
+        let result = run_case(&case, &plan_for(&case, ask, refine), backend.as_mut());
+        if limit_reached(&result.error) {
+            break;
+        }
+        results.push(result);
+    }
+    results
+}
+
+/// What a backend says, in one form or another, when the account
+/// behind it has reached a limit: a rate limit, the usage limit of a
+/// plan, a spending cap, an empty balance. Lower case.
+const LIMIT_WORDS: &[&str] = &[
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "429",
+    "usage limit",
+    "limit reached",
+    "hit your limit",
+    "reached your limit",
+    "session limit",
+    "weekly limit",
+    "out of extra usage",
+    "spend",
+    "quota",
+    "credit balance",
+    "insufficient credit",
+    "billing",
+    "payment required",
+];
+
+/// Whether `error` (why a case got no answer, [`EvalResult::error`])
+/// says that a limit of the account is reached: a rate limit, a usage
+/// or spend limit.
+///
+/// An eval set that runs into one stops there. Such an error is not
+/// a wrong answer, so the case is not a failed case, and every
+/// further question would only be refused the same way while still
+/// counting against the limit. The words are matched loosely on
+/// purpose (a backend's wording is not a contract); the price of a
+/// false match is a run that stops early and says why.
+pub fn limit_reached(error: &str) -> bool {
+    let text = error.to_lowercase();
+    !text.is_empty() && LIMIT_WORDS.iter().any(|word| text.contains(word))
 }
 
 /// Turn the outcome of an ask into an [`EvalResult`].
@@ -1323,6 +1369,67 @@ Practise.** Out loud.",
         let case = &cases()[0];
         let r = run_case(case, &eval_plan(), &mut Echo);
         assert_eq!(r.answer, "<question>\nwhat is the capital of norway\n</question>");
+    }
+
+    #[test]
+    fn a_limit_of_the_account_is_told_from_any_other_error() {
+        for error in [
+            "Claude Code: API Error: 429 rate_limit_error",
+            "Claude AI usage limit reached",
+            "You've hit your limit. It resets at 3pm.",
+            "Rate limit reached for requests",
+            "api.example.com: 429 Too Many Requests",
+            "You exceeded your current quota, please check your plan and billing details",
+            "Your credit balance is too low to access the API",
+            "The spend limit of this workspace has been reached",
+        ] {
+            assert!(limit_reached(error), "{error}");
+        }
+        for error in [
+            "",
+            "No answer within 20 seconds.",
+            "Claude Code: API Error: 529 overloaded",
+            "the connection dropped",
+            "no scripted answer",
+            "Claude Code is not installed",
+        ] {
+            assert!(!limit_reached(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_run_stops_at_a_limit_and_sends_nothing_after_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        /// Answers the first questions, then is refused for good.
+        struct Limited(Arc<AtomicUsize>, usize);
+        impl AskBackend for Limited {
+            fn id(&self) -> &'static str {
+                "limited"
+            }
+            fn warm(&mut self, _setup: &AskSetup) {}
+            fn send(
+                &mut self,
+                _setup: &AskSetup,
+                _input: &AskInput,
+                _sink: &mut dyn FnMut(AskEvent),
+                _cancel: &CancelFlag,
+                _timeout: Duration,
+            ) -> Result<AskReply, AskError> {
+                if self.0.fetch_add(1, Ordering::SeqCst) < self.1 {
+                    return Ok(AskReply { text: "Oslo.".into(), ..AskReply::default() });
+                }
+                Err(AskError::Backend("Claude Code: API Error: 429 rate_limit_error".into()))
+            }
+        }
+        let asked = Arc::new(AtomicUsize::new(0));
+        let results = run(&AskSettings::default(), &RefineSettings::default(), || Box::new(Limited(asked.clone(), 2)));
+        // Two answers were judged; the third question was refused and
+        // is not a failed case; the rest of the set was never sent.
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.error.is_empty()));
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        assert!(cases().len() > 3);
     }
 
     #[test]

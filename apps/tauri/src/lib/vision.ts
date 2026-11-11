@@ -45,6 +45,12 @@ export interface VisionState {
   permission: VisionPermission;
   // Only macOS has a permission to give.
   platform: "macos" | "windows" | "other";
+  // Screen capture has been checked on a real machine of this
+  // platform. false on Windows for now: the Screen section says so.
+  capture_verified: boolean;
+  // The trigger of someone who never chose one, on this platform:
+  // "phrases" on macOS, "off" where capture is not verified yet.
+  default_trigger: VisionTrigger;
 }
 
 // Emitted after the Vision settings changed. Payload: `VisionSettings`.

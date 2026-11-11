@@ -60,6 +60,13 @@ vision = [
     "dep:objc2-core-graphics",
     "dep:objc2-screen-capture-kit",
 ]
+# The hook of Vision's live pixel test (`vision::probe_for_test`): a
+# capture outside an ask, aimed at the test's own windows, returning a
+# few sampled pixels. NOT part of any default or shell feature set, and
+# it must stay that way: a build that ships does not contain a way to
+# capture without an ask. Only the pixel test's own command line
+# switches it on (see `cli/tests/vision_live.rs`).
+vision-live-test = ["vision"]
 # Focus context (TASK-94): which app is frontmost and its window title.
 # Its own feature so the SwiftUI staticlib flavor does not pull in the
 # platform bindings it never calls.

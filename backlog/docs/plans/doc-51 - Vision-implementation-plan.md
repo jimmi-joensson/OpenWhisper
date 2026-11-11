@@ -14,7 +14,7 @@ created_date: '2026-11-10T23:24:00Z'
 
 - An ask (`core/src/ask`) is a conversation with a backend that can take more than one turn; `AskInput` already carries images, and both backends already put an image on the wire (stream-json image block for the Claude CLI, `image_url` data URL for the OpenAI-compatible endpoint), tested against fakes.
 - Run against the real CLI (TASK-98 notes): an image block on stdin works with the lean flags and tools off; the model read small synthetic text; with `--no-session-persistence` no copy of the image was found on disk, without it the CLI writes the image to its session file and a temp PNG.
-- Run on macOS (TASK-98 notes): `SCContentFilter(display:excludingApplications:exceptingWindows:)` with `SCScreenshotManager`, through `objc2-screen-capture-kit`, leaves an excluded app's windows out of the image (what is behind them shows), about 50 ms per capture, from a plain thread. Window rectangles come from `CGWindowListCopyWindowInfo` without a permission. With the display asleep ScreenCaptureKit lists no display.
+- Run on macOS (TASK-98 notes): `SCContentFilter(display:excludingApplications:exceptingWindows:)` with `SCScreenshotManager`, through `objc2-screen-capture-kit`, leaves an excluded app's windows out of the image (what is behind them shows), from a plain thread. Measured on the Mac it was written on: 130 to 330 ms for the whole path (window lists, capture, paint, downscale, PNG); an earlier note of about 50 ms was the capture call alone. Window rectangles come from `CGWindowListCopyWindowInfo` without a permission. With the display asleep ScreenCaptureKit lists no display.
 - Windows (docs only): no capture-side exclusion exists for a whole-monitor capture; `SetWindowDisplayAffinity` is owner-side.
 - `core/src/focus` reads the frontmost app.
 
@@ -37,7 +37,7 @@ created_date: '2026-11-10T23:24:00Z'
 8. **Text on the screen is content, not instructions.** The prompt says so, and an eval set with synthetic images that carry instructions checks it. An ask still has no tools, so the worst case is a wrong answer.
 9. **macOS permission.** Screen Recording, checked without prompting (`CGPreflightScreenCaptureAccess`) and requested from the Vision settings (`CGRequestScreenCaptureAccess`), which also say that the app must be restarted after granting. The CLI uses the terminal's grant.
 10. **Windows.** `BitBlt` of the foreground window's monitor, then the paint layer (visible, not cloaked top-level windows of listed exe names, DWM extended frame bounds). Compile-checked here; AC 7 stays open until it has run on a real machine.
-11. **Headless parity.** `openwhisper ask run --screen` (and `--vision TRIGGER`), `openwhisper vision status | config | phrases | never-capture | check TEXT | probe` (`probe` captures and prints sizes and timings only, never the image), `openwhisper vision eval`.
+11. **Headless parity.** `openwhisper ask run --screen` (and `--vision TRIGGER`), `openwhisper vision status | config | phrases | never-capture | check TEXT | probe` (`probe` is a dry run and takes no screenshot: it reports the permission, the display that would be captured and its size, the app in front and whether it is listed, the listed apps that are open with their window counts, and with `--text` what the trigger would decide), `openwhisper vision eval`. A screenshot exists only inside an ask, so the one way to a capture from the command line is `ask run --screen` or `--vision`. The live pixel test and its helper window are behind the cargo feature `vision-live-test`: `OPENWHISPER_VISION_LIVE=1 cargo test -p openwhisper-cli --features vision-live-test --test vision_live -- --ignored --nocapture`.
 12. **Not in this plan.** A region or window picker, more than one display per ask, OCR on the machine, redacting by content.
 
 ## Task 1: Core: settings, trigger, macOS capture, paint layer, ask integration (TASK-98.1)
@@ -68,7 +68,7 @@ Can run in parallel with Tasks 3 to 5 (no shared files).
 Files: `cli/src/commands/{vision,ask}.rs`, `cli/src/main.rs`, `core/src/vision/{eval,testimg}.rs` (new: synthetic images drawn from a built-in bitmap font).
 
 Outcomes:
-- `ask run --screen` sends a capture; `vision check TEXT` prints the trigger decision; `vision probe` prints sizes and timings and never image data.
+- `ask run --screen` sends a capture; `vision check TEXT` prints the trigger decision; `vision probe` is a dry run: it reports what a capture would do and takes none.
 - Eval sets: (a) smart decision, English and Danish, needs-screen and does-not; (b) reading synthetic images; (c) synthetic images whose text gives instructions. Offline self-tests pass; live runs are in the notes.
 
 ## Task 4: Shell and UI: Vision settings, pill and panel states, history marker (TASK-98.4)

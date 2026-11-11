@@ -177,21 +177,24 @@ pub(super) enum Shot {
     },
 }
 
-/// Take the screenshot for the ask `token` belongs to.
+/// Take the screenshot for the ask `token` belongs to. `name_app`:
+/// the line for the model may name a protected app that is in front
+/// ([`crate::vision::NoScreenshot::for_model_with`]); the sentence for
+/// the person always does.
 #[cfg(feature = "vision")]
-pub(super) fn take(token: &AskCaptureToken, settings: &VisionSettings) -> Shot {
+pub(super) fn take(token: &AskCaptureToken, settings: &VisionSettings, name_app: bool) -> Shot {
     match crate::vision::capture_for_ask(token, settings) {
         Ok(shot) => Shot::Image(shot.into_ask_image()),
         Err(no) => Shot::Missing {
             state: if no.is_blocked() { ScreenState::Blocked } else { ScreenState::Unavailable },
             notice: no.message(),
-            for_model: no.for_model(),
+            for_model: no.for_model_with(name_app),
         },
     }
 }
 
 #[cfg(not(feature = "vision"))]
-pub(super) fn take(_token: &AskCaptureToken, _settings: &VisionSettings) -> Shot {
+pub(super) fn take(_token: &AskCaptureToken, _settings: &VisionSettings, _name_app: bool) -> Shot {
     Shot::Missing {
         state: ScreenState::Unavailable,
         notice: "No screenshot was taken: this build cannot capture the screen.".to_string(),
@@ -380,7 +383,9 @@ mod tests {
             let follow = |settings: &VisionSettings| AskVision { choice: VisionChoice::Settings, settings: settings.clone() };
             assert_eq!(follow(&off).decide("look at my screen"), Step::NoCapture);
             assert_eq!(follow(&always).decide("two plus two"), Step::Capture);
-            let phrases = VisionSettings::default();
+            // Named, not the default: the trigger nobody chose is
+            // another one on Windows.
+            let phrases = VisionSettings { trigger: VisionTrigger::Phrases, ..VisionSettings::default() };
             assert_eq!(follow(&phrases).decide("what is on my screen"), Step::Capture);
             assert_eq!(follow(&phrases).decide("two plus two"), Step::NoCapture);
             // Before the question is known, a phrase is not expected.

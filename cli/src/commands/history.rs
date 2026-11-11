@@ -124,7 +124,7 @@ pub(super) fn history_dir() -> Result<PathBuf> {
     Ok(history::resolve_dir(&saved, &default_dir()?))
 }
 
-fn local_time(at_ms: i64) -> String {
+pub(super) fn local_time(at_ms: i64) -> String {
     Local
         .timestamp_millis_opt(at_ms)
         .single()

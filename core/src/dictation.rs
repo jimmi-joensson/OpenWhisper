@@ -1557,6 +1557,10 @@ mod tests {
     /// return the stored entry. `refine` is what the Refine stage
     /// reported, if it ran.
     fn deliver_with_history(dir: &std::path::Path, refine: Option<RefineInfo>) -> crate::history::HistoryEntry {
+        // The history cache is process-wide and every settings save
+        // writes it out: hold the lock the other tests that set a
+        // settings cache hold (after this module's own, as everywhere).
+        let _caches = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         crate::settings::set_history_settings_cache(crate::settings::HistorySettings {
             enabled: true,
             retention_days: 0,

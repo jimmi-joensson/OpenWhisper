@@ -3039,6 +3039,7 @@ dependencies = [
  "objc2-foundation",
  "openwhisper-core",
  "serde_json",
+ "windows 0.61.3",
 ]
 
 [[package]]

@@ -127,18 +127,40 @@ under Privacy & Security, Screen & System Audio Recording, then restart the app.
     }
 
     /// One short line that tells the model why it got no screenshot,
-    /// so its answer says so instead of guessing.
+    /// so its answer says so instead of guessing. Names the protected
+    /// app that is in front; see [`NoScreenshot::for_model_with`] for
+    /// an ask that must not.
     pub fn for_model(&self) -> String {
+        self.for_model_with(true)
+    }
+
+    /// [`NoScreenshot::for_model`], with a say in whether the line may
+    /// name the app that is in front.
+    ///
+    /// Which app a person has in front is one of the facts an ask may
+    /// tell the model, and a person can switch that fact off
+    /// ([`crate::settings::ContextSettings::front_app`]). With it off,
+    /// `name_app` is `false`, and the line says that a protected app
+    /// is in front without saying which: the reason for the missing
+    /// screenshot must not carry the fact the person withheld. The
+    /// sentence for the person ([`NoScreenshot::message`]) names the
+    /// app either way; it never leaves the machine.
+    pub fn for_model_with(&self, name_app: bool) -> String {
         match self {
             Self::NoAsk => "No screenshot was taken.".to_string(),
             Self::NoPermission => {
                 "No screenshot was taken, because the app does not have the permission to record the screen yet."
                     .to_string()
             }
-            Self::ProtectedAppInFront { name } => format!(
+            Self::ProtectedAppInFront { name } if name_app => format!(
                 "An app the person has marked as never to be captured ({name}, for example a password manager) \
 is in front, so no screenshot was taken."
             ),
+            Self::ProtectedAppInFront { .. } => {
+                "An app the person has marked as never to be captured (for example a password manager) is in \
+front, so no screenshot was taken."
+                    .to_string()
+            }
             Self::FrontAppUnknown | Self::ProtectionFailed { .. } => {
                 "No screenshot was taken, because it could not be made sure that protected apps (password \
 managers) stay out of it."
@@ -179,8 +201,12 @@ impl std::fmt::Display for NoScreenshot {
 ///    [`paint::MAX_SIDE`].
 /// 8. It is encoded as PNG, in memory.
 ///
-/// Blocks for the time of the capture (around 50 ms on macOS, plus
-/// the pixel work); call it off the UI thread.
+/// Blocks for all of it; call it off the UI thread. Measured on the
+/// Mac this was written on (Apple Silicon, one Retina display,
+/// 3024 x 1964 pixels): 130 to 330 ms from the first step to the PNG,
+/// of which the capture itself is the smaller part and the window
+/// lists, the downscale and the PNG the larger. An earlier note said
+/// "about 50 ms"; that was the capture call alone, on a good run.
 pub fn capture_for_ask(token: &AskCaptureToken, settings: &VisionSettings) -> Result<Screenshot, NoScreenshot> {
     // Unit tests never see the real screen: they capture from the
     // fake a test installed, or not at all.
@@ -204,7 +230,7 @@ pub fn capture_for_ask(token: &AskCaptureToken, settings: &VisionSettings) -> Re
 
 /// The name to use for a listed app that is in front: the one on the
 /// list, else the app's own, else its id.
-fn label(listed: &NeverCaptureApp, app_name: &str) -> String {
+pub(super) fn label(listed: &NeverCaptureApp, app_name: &str) -> String {
     if !listed.name.trim().is_empty() {
         listed.name.trim().to_string()
     } else if !app_name.trim().is_empty() {
@@ -236,7 +262,9 @@ struct Finished {
     excluded_apps: usize,
     painted_rects: usize,
     capture_ms: u64,
-    /// The captured display, for mapping a point to a pixel.
+    /// The captured display, for mapping a point to a pixel. Only
+    /// the pixel test's probe reads it.
+    #[cfg_attr(not(any(feature = "vision-live-test", test)), allow(dead_code))]
     bounds: PointRect,
 }
 
@@ -350,7 +378,7 @@ pub(crate) fn capture_with(
 }
 
 /// What [`probe_for_test`] captures and where it looks.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(feature = "vision-live-test", test))]
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct ProbeOptions {
@@ -367,7 +395,7 @@ pub struct ProbeOptions {
 
 /// What [`probe_for_test`] saw: sizes, timings and the few pixels it
 /// was asked for.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(feature = "vision-live-test", test))]
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeResult {
@@ -386,11 +414,11 @@ pub struct ProbeResult {
 
 /// Most sample points one probe returns: enough to check a test
 /// window's corners and centre, far too few to carry an image.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(feature = "vision-live-test", test))]
 pub const PROBE_MAX_SAMPLES: usize = 32;
 
 /// [`probe_for_test`] against a given platform.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(feature = "vision-live-test", test))]
 pub(crate) fn probe_with(platform: &dyn Platform, opts: &ProbeOptions) -> Result<ProbeResult, String> {
     if opts.sample_points.len() > PROBE_MAX_SAMPLES {
         return Err(format!("at most {PROBE_MAX_SAMPLES} sample points"));
@@ -428,11 +456,18 @@ pub(crate) fn probe_with(platform: &dyn Platform, opts: &ProbeOptions) -> Result
 
 /// A hook for the live pixel test, and for nothing else.
 ///
+/// **Not in a build that ships.** It is compiled only with the cargo
+/// feature `vision-live-test`, which no default feature set and no
+/// shell switches on; the pixel test's command line does
+/// (`cli/tests/vision_live.rs`). Without the feature this function,
+/// its types and the path from a pid to a capture do not exist in the
+/// binary, and a test in this crate holds that line
+/// (`the_probe_hook_is_behind_its_feature`).
+///
 /// The claim "a never-capture app is not in the image" can only be
-/// checked against a real screen: the test (`openwhisper vision
-/// probe` and its helper) puts a window of one solid colour on
-/// screen from a helper process, then captures three ways and looks
-/// at a few pixels where that window is: not excluded (the colour is
+/// checked against a real screen: the test puts a window of one solid
+/// colour on screen from a helper process, then captures and looks at
+/// a few pixels where that window is: not excluded (the colour is
 /// there), excluded (what is behind it shows), painted only (black).
 /// To do that it has to aim at a process of its own instead of the
 /// never-capture list, which is what this function allows, and it
@@ -443,7 +478,7 @@ pub(crate) fn probe_with(platform: &dyn Platform, opts: &ProbeOptions) -> Result
 /// [`PROBE_MAX_SAMPLES`]), never the image. It does not look at the
 /// never-capture list, so it is not for product code: hidden from the
 /// docs and named for what it is.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(all(feature = "vision-live-test", any(target_os = "macos", target_os = "windows")))]
 #[doc(hidden)]
 pub fn probe_for_test(opts: ProbeOptions) -> Result<ProbeResult, String> {
     probe_with(&super::system(), &opts)
@@ -769,6 +804,22 @@ mod tests {
         }
         assert!(all[2].message().contains("Vault is in front"));
         assert!(all[2].for_model().contains("(Vault, for example a password manager) is in front, so no screenshot was taken."));
+        // An ask that does not tell the model which app is in front
+        // does not tell it through this line either. Every other
+        // reason reads the same both ways.
+        let unnamed = all[2].for_model_with(false);
+        assert!(!unnamed.contains("Vault"), "{unnamed}");
+        assert!(unnamed.contains("(for example a password manager) is in front, so no screenshot was taken."), "{unnamed}");
+        assert_eq!(all[2].for_model_with(true), all[2].for_model());
+        for no in &all {
+            if !no.is_blocked() {
+                assert_eq!(no.for_model_with(false), no.for_model());
+            }
+            let text = no.for_model_with(false);
+            assert!(text.ends_with('.') && !text.contains('\u{2014}') && !text.contains('\u{2013}'), "{text}");
+        }
+        // The person is told which app, always.
+        assert!(all[2].message().contains("Vault"));
         assert!(all[5].message().contains("no display is on"));
         // Technical detail is for the person, not for the model.
         assert!(all[6].message().contains("timed out"));
@@ -777,6 +828,31 @@ mod tests {
             serde_json::to_string(&all[2]).unwrap(),
             r#"{"reason":"protected-app-in-front","name":"Vault"}"#
         );
+    }
+
+    /// The hook that captures outside an ask must not be in a build
+    /// nobody asked to have it in. Checked on the source, the blunt
+    /// way: the function and its re-export sit behind the feature,
+    /// and no feature set that ships switches the feature on.
+    #[test]
+    fn the_probe_hook_is_behind_its_feature() {
+        let gate = "#[cfg(all(feature = \"vision-live-test\", any(target_os = \"macos\", target_os = \"windows\")))]";
+        let source = include_str!("capture.rs");
+        let hook = source.find("pub fn probe_for_test(").expect("the hook");
+        let before = &source[..hook];
+        // The attribute stands right in front of it (one more
+        // attribute, `doc(hidden)`, in between).
+        let attr = before.rfind(gate).expect("the feature gate in front of the hook");
+        assert_eq!(before[attr + gate.len()..].trim(), "#[doc(hidden)]");
+        let module = include_str!("mod.rs");
+        let export = module.find("ProbeOptions, ProbeResult, probe_for_test}").expect("the re-export");
+        assert!(module[..export].trim_end().ends_with(&format!("{gate}\npub use capture::{{PROBE_MAX_SAMPLES,")));
+        // The feature exists, enables nothing else, and is in no
+        // other feature's list.
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(manifest.contains("\nvision-live-test = [\"vision\"]\n"), "the feature is declared as itself");
+        assert_eq!(manifest.matches("\"vision-live-test\"").count(), 0, "another feature switches it on");
+        assert_eq!(cfg!(feature = "vision-live-test"), false, "this test run has the hook compiled in");
     }
 
     #[test]

@@ -8,9 +8,18 @@
 //!   caller's paint over [`Platform::window_rects`], read before and
 //!   after the capture. That is the design (TASK-98, decision 10), and
 //!   it covers more than needed when a listed window is partly hidden
-//!   behind another one, which is the safe side. For the same reason
-//!   this process's own windows (the pill, the answer panel) are in
-//!   the image.
+//!   behind another one, which is the safe side. This process's own
+//!   windows cannot be left out here either; the desktop shell marks
+//!   its pill and its answer panel as excluded from capture when it
+//!   makes them (`SetWindowDisplayAffinity` with
+//!   `WDA_EXCLUDEFROMCAPTURE`, Windows 10 version 2004 and later), so
+//!   on those systems they are not in the image, and on older ones
+//!   they are.
+//! - **Not verified yet.** None of this has run on a real Windows
+//!   machine. Until it has, Vision is off by default on Windows
+//!   ([`crate::settings::default_trigger_on`]) and the settings say
+//!   so; the live pixel test (`cli/tests/vision_live.rs`) is ready to
+//!   be run there.
 //! - **Which windows count.** Every top-level window (`EnumWindows`:
 //!   popups, menus and floating panels are top-level windows too) that
 //!   is visible, not minimised and not cloaked. Cloaked (`DWMWA_CLOAKED`)
@@ -63,6 +72,16 @@
 //!
 //! Known limits:
 //!
+//! - **Previews that Explorer draws are not painted.** The Alt+Tab
+//!   switcher, Task View and the thumbnail that appears over a
+//!   taskbar button show a live, scaled-down picture of an app's
+//!   window. That picture is drawn inside a window that belongs to
+//!   Explorer (`explorer.exe`), not to the listed app, so the paint
+//!   layer does not know it is there. A capture taken while one of
+//!   them is open on a listed app shows that small preview. An ask is
+//!   started with a key, so the switcher is rarely open at that
+//!   moment, but nothing rules it out. The settings say this on
+//!   Windows.
 //! - A packaged (UWP) app's window belongs to
 //!   `ApplicationFrameHost.exe`, not to the app's own exe. Listing the
 //!   app's exe name neither recognises it as being in front nor paints
@@ -81,7 +100,7 @@
 //! `windows_tests` module at the end is for the first run on a real
 //! one.
 
-use super::{AppSelector, FrontApp, PointRect, id_listed};
+use super::{AppSelector, DisplayInfo, FrontApp, PointRect, id_listed};
 #[cfg(target_os = "windows")]
 use super::{PermissionState, Platform, PlatformError, RawCapture};
 
@@ -130,6 +149,16 @@ impl Edges {
             return None;
         }
         Some((width as u32, height as u32))
+    }
+
+    /// A monitor with these edges, as a dry run reports it. For a
+    /// thread that is per-monitor DPI aware the virtual desktop is in
+    /// real pixels, so the two sizes are the same number. `None` for
+    /// edges that are no monitor.
+    fn to_display(self) -> Option<DisplayInfo> {
+        let (width, height) = self.pixel_size()?;
+        let rect = self.to_rect()?;
+        Some(DisplayInfo { x: rect.x, y: rect.y, point_width: rect.width, point_height: rect.height, width, height })
     }
 }
 
@@ -251,6 +280,10 @@ impl Platform for Windows {
         // `_exclude`: nothing can be left out here (module docs). The
         // caller paints `window_rects` instead.
         sys::capture(at)
+    }
+
+    fn target_display(&self) -> Result<DisplayInfo, PlatformError> {
+        sys::target_display()
     }
 }
 
@@ -487,6 +520,28 @@ mod sys {
         }
     }
 
+    /// The monitor a capture without a point would copy (the one with
+    /// the foreground window, else the primary one), measured and not
+    /// copied.
+    pub(super) fn target_display() -> Result<super::DisplayInfo, PlatformError> {
+        let _dpi = PerMonitorDpi::enter().map_err(PlatformError::Failed)?;
+        // SAFETY: Win32 reads with a struct of ours of the size given.
+        unsafe {
+            let monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+            if monitor.is_invalid() {
+                return Err(PlatformError::NoDisplay);
+            }
+            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return Err(PlatformError::Failed("the display could not be measured".to_string()));
+            }
+            let m = info.rcMonitor;
+            Edges { left: m.left, top: m.top, right: m.right, bottom: m.bottom }
+                .to_display()
+                .ok_or(PlatformError::NoDisplay)
+        }
+    }
+
     /// Copy one whole monitor. See [`super::Platform::capture`] for
     /// which one.
     pub(super) fn capture(at: Option<(f64, f64)>) -> Result<RawCapture, PlatformError> {
@@ -630,6 +685,15 @@ mod tests {
         let all = edges(i32::MIN, i32::MIN, i32::MAX, i32::MAX).to_rect().unwrap();
         assert_eq!(all.width, u32::MAX as f64);
         assert!(all.is_finite());
+    }
+
+    #[test]
+    fn a_monitor_is_reported_with_its_place_and_its_size() {
+        let left = edges(-1920, -200, 0, 880).to_display().unwrap();
+        assert_eq!((left.x, left.y, left.point_width, left.point_height), (-1920.0, -200.0, 1920.0, 1080.0));
+        assert_eq!((left.width, left.height), (1920, 1080));
+        assert_eq!(edges(0, 0, 0, 0).to_display(), None);
+        assert_eq!(edges(0, 0, 40_000, 1080).to_display(), None);
     }
 
     #[test]

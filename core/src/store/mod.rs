@@ -139,8 +139,9 @@ mod tests {
         // Bumps as new migrations append: 1 (dictations table) +
         // 2 (wall_clock_ms column) + 3 (refine_runs table) +
         // 4 (refine_runs usage columns) + 5 (refine_runs mode column) +
-        // 6 (refine_runs first_text_ms column, for asks).
-        assert_eq!(user_version(&store), 6, "all migrations should be applied");
+        // 6 (refine_runs first_text_ms column, for asks) +
+        // 7 (refine_runs screen column, for asks with a screenshot).
+        assert_eq!(user_version(&store), 7, "all migrations should be applied");
     }
 
     #[test]
@@ -201,10 +202,10 @@ mod tests {
         let path = dir.path().join("openwhisper.db");
         {
             let store = Store::open_or_init(&path).expect("first open");
-            assert_eq!(user_version(&store), 6);
+            assert_eq!(user_version(&store), 7);
         }
         let store = Store::open_or_init(&path).expect("second open");
-        assert_eq!(user_version(&store), 6, "second open is no-op");
+        assert_eq!(user_version(&store), 7, "second open is no-op");
     }
 
     #[test]

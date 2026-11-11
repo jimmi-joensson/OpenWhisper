@@ -17,6 +17,9 @@
 //! | painted over                 | black                           |
 //! | left out and painted over    | black                           |
 //!
+//! (The two rows with "left out" are macOS only; see "On Windows"
+//! below.)
+//!
 //! and, every time, at a point of the green window that the magenta
 //! one does not cover: green, so nothing else was touched.
 //!
@@ -32,16 +35,41 @@
 //! It needs a display that is on and the Screen Recording permission
 //! for the terminal, and it puts two coloured rectangles near the top
 //! left of the main display for a few seconds. So it does not run by
-//! itself:
+//! itself, and it is not even compiled by itself: both the hook it
+//! captures through and its helper window exist only with the cargo
+//! feature `vision-live-test`, which no build that ships has. On
+//! macOS:
 //!
 //! ```text
-//! OPENWHISPER_VISION_LIVE=1 cargo test -p openwhisper-cli --test vision_live -- --ignored --nocapture
+//! OPENWHISPER_VISION_LIVE=1 cargo test -p openwhisper-cli --features vision-live-test --test vision_live -- --ignored --nocapture
 //! ```
 //!
 //! Without a display or without the permission it fails and says
 //! which; it never passes without having looked.
+//!
+//! # On Windows
+//!
+//! Windows has no way to leave an app out of a capture: a listed
+//! app's windows are painted over, and that is the only layer. So the
+//! test has two cases there, the control (the magenta window is in
+//! the image) and painted (black where it is, green beside it). The
+//! helper window is a borderless topmost Win32 popup. None of this
+//! has run on a real Windows machine yet; this is the command for the
+//! first run, from the repository root, in PowerShell:
+//!
+//! ```text
+//! $env:OPENWHISPER_VISION_LIVE = "1"
+//! cargo test -p openwhisper-cli --features vision-live-test --test vision_live -- --ignored --nocapture
+//! ```
+//!
+//! (`cmd.exe`: `set OPENWHISPER_VISION_LIVE=1` first, then the same
+//! `cargo test` line.) Run it with the display on and unlocked, at any
+//! display scaling; two rectangles appear near the top left of the
+//! primary monitor for a few seconds. A pass prints the two cases
+//! with the colours it saw. If it fails, the message says at which
+//! point which colour was found, and that is what to report.
 
-#![cfg(target_os = "macos")]
+#![cfg(all(feature = "vision-live-test", any(target_os = "macos", target_os = "windows")))]
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -50,8 +78,9 @@ use std::time::{Duration, Instant};
 
 use openwhisper_core::vision::{ProbeOptions, ProbeResult, probe_for_test};
 
-/// A rectangle in global display points (origin top left of the main
-/// display, y downward).
+/// A rectangle in the coordinates Vision uses (origin top left of the
+/// main display, y downward): global display points on macOS,
+/// virtual-desktop pixels on Windows.
 #[derive(Clone, Copy)]
 struct Rect {
     x: f64,
@@ -238,19 +267,26 @@ fn a_window_of_a_never_capture_app_is_not_in_the_image() {
     let control = expect("control", &[], &[], Colour::Magenta);
     assert_eq!((control.excluded, control.painted), (0, 0));
 
-    // (b) Left out of the capture: what is behind it shows.
-    let excluded = expect("excluded", &hidden, &[], Colour::Green);
-    assert_eq!(excluded.excluded, 1, "one process was to be left out");
-    assert_eq!(excluded.painted, 0);
+    // (b) Left out of the capture: what is behind it shows. Only
+    // where the platform can leave an app out.
+    #[cfg(target_os = "macos")]
+    {
+        let excluded = expect("excluded", &hidden, &[], Colour::Green);
+        assert_eq!(excluded.excluded, 1, "one process was to be left out");
+        assert_eq!(excluded.painted, 0);
+    }
 
-    // (c) Not left out, painted over: black, and only there.
+    // (c) Not left out, painted over: black, and only there. On
+    // Windows this is the one layer there is.
     let painted = expect("painted", &[], &hidden, Colour::Black);
     assert_eq!(painted.excluded, 0);
     assert!(painted.painted >= 1, "no rectangle was painted");
 
-    // (d) Both, as in a real capture.
+    // (d) Both, as in a real capture. On Windows asking to leave the
+    // process out changes nothing: it is painted, and none is counted
+    // as left out.
     let both = expect("excluded and painted", &hidden, &hidden, Colour::Black);
-    assert_eq!(both.excluded, 1);
+    assert_eq!(both.excluded, if cfg!(target_os = "macos") { 1 } else { 0 });
     assert!(both.painted >= 1);
 
     // The green helper was never aimed at and is still there.

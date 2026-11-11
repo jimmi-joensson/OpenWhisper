@@ -1151,10 +1151,11 @@ pub fn run() {
             // on) before the hotkeys are installed: the ask slot is
             // only installed while Ask is on.
             ask::init(app.handle());
-            // Load the Vision block (when an ask includes the screen,
-            // and which apps are never in a screenshot) into core's
-            // cache: an ask reads it there, so the first ask must not
-            // run on the defaults.
+            // Tell core where the settings file is (an ask reads the
+            // Vision block from it every time, so a rule set from a
+            // terminal holds for the next ask), load the block into
+            // core's cache, and on Windows keep the pill and the
+            // answer panel out of screen captures.
             vision::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the

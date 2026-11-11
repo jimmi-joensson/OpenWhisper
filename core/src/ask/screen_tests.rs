@@ -367,8 +367,9 @@ fn outside_the_app_the_marker_is_kept_from_the_sink_too_and_both_turns_are_timed
         vec![
             screen_event(ScreenState::Capturing),
             screen_event(ScreenState::Included),
-            AskEvent::Text("The build cann".into()),
-            AskEvent::Text("ot find a file.".into()),
+            // One short line: with the smart trigger it is held until
+            // it is clear that no marker follows it, here the end.
+            AskEvent::Text("The build cannot find a file.".into()),
         ]
     );
     assert!(!shown(&events).contains("NEED"));
@@ -792,8 +793,9 @@ fn the_model_asks_for_the_screen_and_then_marks_its_answer_for_the_web() {
             screen_event(ScreenState::Capturing),
             screen_event(ScreenState::Included),
             WEB,
-            AskEvent::Text("The rate on your screen is from ".into()),
-            AskEvent::Text("last week - it may have moved.".into()),
+            // One short line, held until the reply ends (see
+            // `hint`): the marker could still follow it.
+            AskEvent::Text("The rate on your screen is from last week - it may have moved.".into()),
         ]
     );
     assert_eq!(screen.0.captures(), 1);
@@ -812,10 +814,7 @@ fn an_answer_marked_for_the_web_in_the_first_turn_takes_no_screenshot() {
     let reply = reply.unwrap();
     assert_eq!(reply.text, "I cannot check the weather from here.");
     assert_eq!((reply.suggestion, reply.screen), (Some(AskSuggestion::WebSearch), ScreenState::None));
-    assert_eq!(
-        events,
-        vec![WEB, AskEvent::Text("I cannot check ".into()), AskEvent::Text("the weather from here.".into())]
-    );
+    assert_eq!(events, vec![WEB, AskEvent::Text("I cannot check the weather from here.".into())]);
     assert!(screen.0.calls().is_empty());
     assert_eq!(calls.lock().unwrap().sent.len(), 1);
 }
@@ -896,7 +895,7 @@ fn neither_marker_reaches_the_sink_however_the_two_replies_are_cut() {
 }
 
 #[test]
-fn an_answer_that_only_begins_like_the_markers_is_shown_as_soon_as_it_is_neither() {
+fn an_answer_that_only_begins_like_the_markers_is_shown_once_its_first_line_is_no_preamble() {
     let calls = calls();
     let during: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let _scope = scope(on(), {
@@ -904,11 +903,11 @@ fn an_answer_that_only_begins_like_the_markers_is_shown_as_soon_as_it_is_neither
         move |_| {
             let during = during.clone();
             Box::new(Stub::new(calls.clone(), move |_, sink, _| {
-                for piece in ["NEED", "S", " more ", "salt."] {
+                for piece in ["NEED", "S", " more ", "salt.\n", "And ", "pepper."] {
                     sink(AskEvent::Text(piece.into()));
                     during.lock().unwrap().push(snapshot().answer);
                 }
-                Ok("NEEDS more salt.".into())
+                Ok("NEEDS more salt.\nAnd pepper.".into())
             }))
         }
     });
@@ -916,11 +915,16 @@ fn an_answer_that_only_begins_like_the_markers_is_shown_as_soon_as_it_is_neither
     let screen = install(Fake::default());
     let id = begin_listening().unwrap();
     let done = submit_listening(id, "what does the soup need", 600).unwrap();
-    assert_eq!((done.phase, done.answer.as_str()), (AskPhase::Done, "NEEDS more salt."));
+    assert_eq!((done.phase, done.answer.as_str()), (AskPhase::Done, "NEEDS more salt.\nAnd pepper."));
     assert_eq!((done.suggestion, done.screen), (None, ScreenState::None));
-    // "NEED" could be either word and "NEEDS" the web one. With the
-    // blank after it, it is neither.
-    assert_eq!(*during.lock().unwrap(), ["", "", "NEEDS more ", "NEEDS more salt."]);
+    // "NEED" could be either word and "NEEDS" the web one; with the
+    // blank after it, it is neither. But a short first line could
+    // still be followed by the screen marker, so it waits for its
+    // line break and the first character behind it.
+    assert_eq!(
+        *during.lock().unwrap(),
+        ["", "", "", "", "NEEDS more salt.\nAnd ", "NEEDS more salt.\nAnd pepper."]
+    );
     assert!(screen.0.calls().is_empty());
     // The app's ask was warmed with the prompt it was sent with: the
     // facts about the computer, both marker rules, the dash rule.
@@ -992,4 +996,286 @@ fn a_marker_the_prompt_did_not_teach_is_ordinary_text() {
     assert_eq!((reply.text.as_str(), reply.suggestion), ("NEEDS_WEB_SEARCH\nIt is sunny.", None));
     assert_eq!(shown(&events), "NEEDS_WEB_SEARCH\nIt is sunny.");
     assert!(screen.0.calls().is_empty());
+}
+
+// --- the rules on disk are the rules in force ------------------------------
+
+/// Write `vision` to `path` the way another process would (the
+/// headless CLI): no cache of this process hears of it.
+fn write_vision_block(path: &std::path::Path, vision: &str) {
+    std::fs::write(path, format!(r#"{{"vision":{vision}}}"#)).unwrap();
+}
+
+#[test]
+fn a_trigger_switched_off_in_the_file_holds_for_the_next_ask_of_the_running_app() {
+    let calls = calls();
+    let _scope = scope(on(), backend(&calls, "Four.", false));
+    // What the app loaded when it started: every ask looks.
+    set_vision(VisionTrigger::Always);
+    let screen = install(Fake::default());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    crate::settings::set_settings_file(Some(&path));
+
+    // No file yet: the block the app loaded is all there is.
+    let done = submit("what is two plus two").unwrap();
+    assert_eq!((done.phase, done.screen), (AskPhase::Done, ScreenState::Included));
+    assert_eq!(screen.0.captures(), 1);
+
+    // `openwhisper vision config --trigger off`, from a terminal.
+    write_vision_block(&path, r#"{"trigger":"off"}"#);
+    let id = begin_listening().unwrap();
+    let done = submit_listening(id, "what is on my screen", 900).unwrap();
+    assert_eq!((done.phase, done.screen), (AskPhase::Done, ScreenState::None));
+    // Not one more call reached the screen, and the prompt is the
+    // one of an ask that cannot see it.
+    assert_eq!(screen.0.captures(), 1);
+    let c = calls.lock().unwrap();
+    assert!(!c.last_system.contains(ATTACHED) && !c.last_system.contains(MAY_BE_ATTACHED), "{}", c.last_system);
+    // The backend was warmed with the rules of the file too, so the
+    // warmed one answered.
+    assert_eq!(c.images.last().unwrap(), &Vec::<usize>::new());
+    drop(c);
+    // The cache was not rewritten behind the shell's back.
+    assert_eq!(crate::settings::current_vision_settings().trigger, VisionTrigger::Always);
+}
+
+#[test]
+fn an_app_added_to_the_list_in_the_file_is_protected_in_the_next_ask() {
+    let calls = calls();
+    let _scope = scope(on(), backend(&calls, "I could not see your screen.", false));
+    set_vision(VisionTrigger::Always);
+    // An app the loaded list does not know is in front.
+    let screen = install(Fake { front: vec![Fake::front_app("com.example.bank", "Bank")], ..Fake::default() });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    crate::settings::set_settings_file(Some(&path));
+    // `openwhisper vision never-capture add com.example.bank`.
+    write_vision_block(&path, r#"{"trigger":"always","never_capture":[{"id":"com.example.bank","name":"Bank"}]}"#);
+
+    let done = submit("what does this say").unwrap();
+    assert_eq!((done.phase, done.screen), (AskPhase::Done, ScreenState::Blocked));
+    assert!(done.screen_notice.contains("Bank is in front"), "{}", done.screen_notice);
+    assert_eq!(screen.0.captures(), 0);
+}
+
+// --- a marker that is not the bare word -------------------------------------
+
+#[test]
+fn a_sentence_and_then_the_marker_is_a_request_for_the_screen_and_none_of_it_is_shown() {
+    let calls = calls();
+    let during: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let _scope = scope(on(), {
+        let (calls, during) = (calls.clone(), during.clone());
+        move |_| {
+            let during = during.clone();
+            Box::new(Stub::new(calls.clone(), move |input, sink, _| {
+                if input.text.contains("<question>") {
+                    // A model that does not reply with the bare word.
+                    for piece in ["I need to see ", "the screen.\n", "**NEED_", "SCREEN**\n"] {
+                        sink(AskEvent::Text(piece.into()));
+                        during.lock().unwrap().push(snapshot().answer);
+                    }
+                    return Ok("I need to see the screen.\n**NEED_SCREEN**\n".into());
+                }
+                sink(AskEvent::Text("A build error in line 12 of the file that is open.\nThe name is misspelled.".into()));
+                Ok("A build error in line 12 of the file that is open.\nThe name is misspelled.".into())
+            }))
+        }
+    });
+    set_vision(VisionTrigger::Smart);
+    let screen = install(Fake::default());
+    let done = submit("why is this red").unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    assert_eq!(done.answer, "A build error in line 12 of the file that is open.\nThe name is misspelled.");
+    assert_eq!(done.screen, ScreenState::Included);
+    // The panel never showed the sentence: nothing appears and then
+    // goes away again.
+    assert_eq!(*during.lock().unwrap(), ["", "", "", ""]);
+    assert_eq!(screen.0.captures(), 1);
+    let c = calls.lock().unwrap();
+    assert_eq!(c.sent.len(), 2);
+    assert_eq!(c.images[1].len(), 1);
+}
+
+#[test]
+fn dressed_up_markers_are_read_like_bare_ones() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // The screen marker in forms a model has been seen to write.
+    for first in [
+        vec!["`NEED_SCREEN`"],
+        vec!["__NEED", "_SCREEN__"],
+        vec!["\u{201c}NEED_SCREEN\u{201d}"],
+        vec!["> NEED_SCREEN"],
+        vec!["```\n", "NEED_SCREEN", "\n```"],
+        vec!["```text\nNEED_SCREEN\n```\n"],
+        vec!["\u{feff}need_screen."],
+        vec!["I can't tell without a look.\n\n", "NEED_SCREEN"],
+    ] {
+        let calls = calls();
+        let screen = install(Fake::default());
+        let backend = scripted(&calls, &first, &["It says the build failed."]);
+        let (reply, events) = ask_through(&smart_plan(), backend, "why is this red");
+        let reply = reply.unwrap();
+        assert_eq!((reply.text.as_str(), reply.screen), ("It says the build failed.", ScreenState::Included), "{first:?}");
+        assert_eq!(shown(&events), "It says the build failed.", "{first:?}");
+        assert_eq!(screen.0.captures(), 1, "{first:?}");
+    }
+    // The web marker, on its own line and on the answer's line.
+    for first in [
+        vec!["**NEEDS_WEB_SEARCH**\n", "I cannot check that from here."],
+        vec!["needs_web_search: ", "I cannot check that from here."],
+        vec!["NEEDS_WEB_SEARCH I cannot ", "check that from here."],
+        vec!["`NEEDS_WEB_SEARCH`\nNEEDS_WEB_SEARCH\nI cannot check that from here."],
+        vec!["```\nNEEDS_WEB_SEARCH\n```\n", "I cannot check that from here."],
+    ] {
+        let calls = calls();
+        let screen = install(Fake::default());
+        let backend = scripted(&calls, &first, &[]);
+        let (reply, events) = ask_through(&smart_plan(), backend, "how will the weather be today");
+        let reply = reply.unwrap();
+        assert_eq!(reply.text, "I cannot check that from here.", "{first:?}");
+        assert_eq!(reply.suggestion, Some(AskSuggestion::WebSearch), "{first:?}");
+        assert_eq!(shown(&events), "I cannot check that from here.", "{first:?}");
+        assert_eq!(events.iter().filter(|e| **e == WEB).count(), 1, "{first:?}");
+        assert!(screen.0.calls().is_empty());
+    }
+}
+
+// --- what is kept of a screenshot --------------------------------------------
+
+/// The screen of the newest diagnostics row, and its status.
+fn newest_row(store: &crate::store::Store) -> (String, Option<bool>) {
+    let row = runs::recent(store, 1).unwrap().remove(0);
+    assert_eq!(row.source, "ask");
+    (row.status, row.screen)
+}
+
+#[test]
+fn a_screenshot_is_on_the_diagnostics_row_also_when_the_ask_fails_or_is_cancelled() {
+    let _dictation = crate::dictation::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    // The backend is handed the screenshot and then, per question:
+    // fails, is cancelled, or answers.
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), move |input, sink, _| {
+                assert_eq!(input.images.len(), 1, "the screenshot was sent");
+                if input.text.contains("fail") {
+                    return Err(AskError::Backend("the connection dropped".into()));
+                }
+                if input.text.contains("stop") {
+                    super::cancel();
+                    return Err(AskError::Cancelled);
+                }
+                sink(AskEvent::Text("A build error.".into()));
+                Ok("A build error.".into())
+            }))
+        }
+    });
+    set_vision(VisionTrigger::Always);
+    let screen = install(Fake::default());
+    let store = super::test_support::store();
+    let dir = tempfile::tempdir().unwrap();
+    crate::settings::set_history_settings_cache(HistorySettings {
+        enabled: true,
+        retention_days: 0,
+        folder: Some(dir.path().to_string_lossy().into_owned()),
+    });
+
+    // Failed after the screenshot went out: no history entry (only
+    // finished asks have one), and still a record of the screenshot.
+    let failed = submit("this will fail").unwrap();
+    assert_eq!(failed.phase, AskPhase::Error);
+    assert_eq!(newest_row(store), ("failed".to_string(), Some(true)));
+    assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 0);
+
+    // Cancelled after the screenshot went out.
+    let cancelled = submit("please stop").unwrap();
+    assert_eq!(cancelled.phase, AskPhase::Cancelled);
+    assert_eq!(newest_row(store), ("cancelled".to_string(), Some(true)));
+    assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 0);
+
+    // Answered: on the row and in the history.
+    let done = submit("what does it say").unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    assert_eq!(newest_row(store), ("answered".to_string(), Some(true)));
+    assert!(crate::history::list(dir.path(), "", 10, 0).entries[0].screen);
+    assert_eq!(screen.0.captures(), 3);
+    crate::settings::set_history_settings_cache(HistorySettings::default());
+}
+
+#[test]
+fn an_ask_without_a_screenshot_says_so_on_its_row_too() {
+    let calls = calls();
+    let _scope = scope(on(), backend(&calls, "Four.", false));
+    let store = super::test_support::store();
+    // Vision off: nothing was captured.
+    set_vision(VisionTrigger::Off);
+    let screen = install(Fake::default());
+    assert_eq!(submit("what is two plus two").unwrap().phase, AskPhase::Done);
+    assert_eq!(newest_row(store), ("answered".to_string(), Some(false)));
+    drop(screen);
+    // A capture that was refused is not a screenshot either.
+    set_vision(VisionTrigger::Always);
+    let screen = blocked();
+    let done = submit("what is on my screen").unwrap();
+    assert_eq!((done.phase, done.screen), (AskPhase::Done, ScreenState::Blocked));
+    assert_eq!(newest_row(store), ("answered".to_string(), Some(false)));
+    assert_eq!(screen.0.captures(), 0);
+    // And an ask outside the app that records leaves the same mark.
+    drop(screen);
+    let _screen = install(Fake::default());
+    let plan = plan_with(VisionTrigger::Always, VisionChoice::Settings);
+    let mut stub = scripted(&calls, &["It says hello."], &[]);
+    let reply = plan.send_and_record(&mut stub, &AskInput::text("what does it say"), &mut |_| {}, &CancelFlag::new(), false);
+    assert_eq!(reply.unwrap().screen, ScreenState::Included);
+    assert_eq!(newest_row(store), ("answered".to_string(), Some(true)));
+}
+
+// --- the fact a person switched off -------------------------------------------
+
+#[test]
+fn with_the_app_in_front_switched_off_the_model_is_not_told_which_protected_app_it_is() {
+    let calls = calls();
+    let facts_off = crate::settings::ContextSettings { front_app: false, ..Default::default() };
+    let _scope = scope(AskSettings { context: facts_off, ..on() }, backend(&calls, "I could not see your screen.", false));
+    set_vision(VisionTrigger::Always);
+    let screen = blocked();
+    let done = submit("what is on my screen").unwrap();
+    assert_eq!((done.phase, done.screen), (AskPhase::Done, ScreenState::Blocked));
+    // The person is told which app, on their own machine.
+    assert_eq!(done.screen_notice, "No screenshot was taken: Vault is in front, and it is on your never-capture list.");
+    assert_eq!(screen.0.captures(), 0);
+    let c = calls.lock().unwrap();
+    // Nothing that left the machine names it: not the note under the
+    // question, not the prompt.
+    assert!(c.sent[0].contains("Note from the app: no screenshot is attached."), "{}", c.sent[0]);
+    assert!(c.sent[0].contains("(for example a password manager) is in front, so no screenshot was taken."), "{}", c.sent[0]);
+    assert!(!c.sent[0].contains("Vault") && !c.systems[0].contains("Vault"), "{} {}", c.sent[0], c.systems[0]);
+    drop(c);
+
+    // The same in the smart flow, where the reason goes out with the
+    // second turn.
+    let calls = self::calls();
+    drop(screen);
+    let _screen = blocked();
+    let off = AskSettings { context: crate::settings::ContextSettings { front_app: false, ..Default::default() }, ..on() };
+    let plan = AskPlan::with_context(&off, &RefineSettings::default(), &[], "Date: Wednesday 11 November 2026")
+        .with_vision(&vision(VisionTrigger::Smart), VisionChoice::Settings);
+    let backend = scripted(&calls, &["NEED_SCREEN"], &["I could not see your screen."]);
+    let (reply, _) = ask_through(&plan, backend, "why is this red");
+    assert_eq!(reply.unwrap().screen, ScreenState::Blocked);
+    let c = calls.lock().unwrap();
+    assert_eq!(c.sent.len(), 2);
+    assert!(c.sent[1].contains("(for example a password manager) is in front"), "{}", c.sent[1]);
+    assert!(!c.sent.iter().any(|m| m.contains("Vault")), "{:?}", c.sent);
+    // With the fact on, the name is in the note as before.
+    drop(c);
+    let calls = self::calls();
+    let backend = scripted(&calls, &["NEED_SCREEN"], &["I could not see your screen."]);
+    let (reply, _) = ask_through(&smart_plan(), backend, "why is this red");
+    assert_eq!(reply.unwrap().screen, ScreenState::Blocked);
+    assert!(calls.lock().unwrap().sent[1].contains("(Vault, for example a password manager) is in front"));
 }

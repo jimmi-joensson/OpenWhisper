@@ -550,8 +550,10 @@ impl Runner {
         let input = AskInput { text: prompt::user_message(case.question), images };
         let result = backend.send(&self.setup_for(case), &input, &mut |_| {}, &CancelFlag::new(), self.plan.timeout);
         drop(input);
-        // The answer as the app would show it.
-        let result = result.map(|reply| AskReply { text: self.plan.shown(&reply.text), ..reply });
+        // The answer as the app would take it: the bare marker for a
+        // reply it would answer with a screenshot, else the text it
+        // would show.
+        let result = result.map(|reply| AskReply { text: self.plan.shown(kind, &reply.text), ..reply });
         judge(case, kind, result)
     }
 }
@@ -683,13 +685,12 @@ fn has_none(answer: &str, needles: &[&str]) -> Result<(), String> {
     }
 }
 
-/// The reply is the marker: [`NEED_SCREEN`] and nothing else, apart
-/// from what a model may wrap a bare word in (quotes, backticks, a
-/// full stop). An answer that only mentions the marker is not it.
+/// The app would take this reply as a request for the screen. Not a
+/// reading of its own: the filter an ask runs its replies through
+/// decides ([`crate::ask::hint::is_reply_marker`]), so this set and
+/// the app cannot disagree about what a marker is.
 pub fn is_marker(answer: &str) -> bool {
-    answer
-        .trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .eq_ignore_ascii_case(NEED_SCREEN)
+    crate::ask::hint::is_reply_marker(NEED_SCREEN, answer)
 }
 
 fn asks_for_screen(answer: &str) -> Result<(), String> {
@@ -973,13 +974,41 @@ ignored it.)"
     }
 
     #[test]
-    fn the_marker_is_the_bare_word_and_nothing_more() {
-        for marker in ["NEED_SCREEN", " NEED_SCREEN\n", "`NEED_SCREEN`", "\"NEED_SCREEN\".", "need_screen", "**NEED_SCREEN**"] {
+    fn a_marker_is_what_the_app_would_take_as_one() {
+        for marker in [
+            "NEED_SCREEN",
+            " NEED_SCREEN\n",
+            "`NEED_SCREEN`",
+            "\"NEED_SCREEN\".",
+            "need_screen",
+            "**NEED_SCREEN**",
+            "_NEED_SCREEN_",
+            "> NEED_SCREEN",
+            "```\nNEED_SCREEN\n```",
+            // The app does not show what follows the word either.
+            "NEED_SCREEN because I cannot see it",
+            // One short sentence, then the word.
+            "I need to see the screen.\nNEED_SCREEN",
+        ] {
             assert!(is_marker(marker), "{marker}");
         }
-        for answer in ["", "NEED_SCREEN because I cannot see it", "I NEED_SCREEN", "NEED_SCREENS", "Paris."] {
+        for answer in ["", "I NEED_SCREEN", "NEED_SCREENS", "Paris.", "Paris.\nNEED_SCREEN is a word.", "One.\nTwo.\nNEED_SCREEN"] {
             assert!(!is_marker(answer), "{answer}");
         }
+        // The very function an ask runs its replies through decides,
+        // and the answer a case is judged on is what that makes of
+        // the reply.
+        let runner = runner(VisionTrigger::Smart);
+        let smart = case("smart-need-en-reply");
+        let (result, _, _) = sent(&runner, &smart, "I need to see the screen.\n`NEED_SCREEN`");
+        assert_eq!((result.answer.as_str(), result.asked_for_screen, result.passed), ("NEED_SCREEN", Some(true), true));
+        // Under a prompt that teaches no marker the app would show
+        // the word, and so the case sees it.
+        let (result, _, _) = sent(&runner, &case("phrases-en-reply"), "NEED_SCREEN");
+        assert_eq!((result.answer.as_str(), result.passed), ("NEED_SCREEN", false));
+        // The web marker is taken off the way the app takes it off.
+        let (result, _, _) = sent(&runner, &case("smart-plain-en-capital"), "**NEEDS_WEB_SEARCH** Paris.");
+        assert_eq!(result.answer, "Paris.");
     }
 
     #[test]

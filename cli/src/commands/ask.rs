@@ -736,7 +736,13 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     println!("place          {}", if current.context.place.is_empty() { "(none)" } else { &current.context.place });
     println!("{}  {}", if changes { "written      " } else { "settings_path" }, path.display());
     if changes {
-        eprintln!("A running OpenWhisper picks this up when its Ask settings are opened, or on restart.");
+        // The facts about the computer are read from the file by every
+        // ask (`settings::fresh_ask_context`); the rest of the block
+        // is what the app loaded.
+        eprintln!(
+            "A running OpenWhisper sends the facts about this computer as set here from its next ask on; it picks \
+up the rest when its Ask settings are opened, or on restart."
+        );
     }
     Ok(())
 }
@@ -821,14 +827,26 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         }
     }
     let mut results = Vec::new();
-    for case in cases() {
-        if args.only.as_deref().is_some_and(|prefix| !case.name.starts_with(prefix)) {
-            continue;
-        }
+    let mut stopped: Option<Stopped> = None;
+    let chosen: Vec<eval::EvalCase> = cases()
+        .into_iter()
+        .filter(|case| args.only.as_deref().is_none_or(|prefix| case.name.starts_with(prefix)))
+        .collect();
+    for (at, case) in chosen.iter().enumerate() {
         // A fresh conversation per case, like a fresh ask.
-        let plan = if args.no_context { plan.clone() } else { eval::plan_for(&case, &ask, &refine) };
+        let plan = if args.no_context { plan.clone() } else { eval::plan_for(case, &ask, &refine) };
         let mut backend = plan.backend();
-        let result = eval::run_case(&case, &plan, backend.as_mut());
+        let result = eval::run_case(case, &plan, backend.as_mut());
+        // A spend or rate limit: not a wrong answer, and every
+        // further question would be refused the same way.
+        if eval::limit_reached(&result.error) {
+            let stop = Stopped { case: result.name, reason: result.error, not_run: chosen.len() - at };
+            if !json {
+                println!("{}", stop.line());
+            }
+            stopped = Some(stop);
+            break;
+        }
         if !json {
             println!(
                 "{}  {:<26} {:>6} {:>6} ms  {}{}",
@@ -851,7 +869,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         }
         results.push(result);
     }
-    if results.is_empty() {
+    if chosen.is_empty() {
         bail!(
             "no eval case starts with \"{}\"; the cases are: {}",
             args.only.unwrap_or_default(),
@@ -870,6 +888,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
             "device_context": !args.no_context,
             "passed": passed,
             "total": results.len(),
+            "stopped": stopped.as_ref().map(Stopped::to_json),
             "latency_ms": { "first_text": first_text.to_json(), "total": total.to_json() },
             "results": results,
         });
@@ -890,11 +909,56 @@ median {} ms, max {} ms",
             total.median,
             total.max
         );
+        if let Some(stop) = &stopped {
+            println!("{}", stop.summary());
+        }
+    }
+    if stopped.is_some() {
+        std::process::exit(STOPPED_EXIT);
     }
     if passed == results.len() {
         Ok(())
     } else {
         std::process::exit(1);
+    }
+}
+
+/// What an eval run exits with when it stopped at a limit of the
+/// account: not 0 (the set did not pass) and not 1 (no case failed).
+pub(super) const STOPPED_EXIT: i32 = 2;
+
+/// An eval run that ended early: the backend refused a case because a
+/// spend or rate limit is reached (`eval::limit_reached`). That case
+/// is not a failed case, and nothing was sent after it.
+pub(super) struct Stopped {
+    /// The case that was refused.
+    pub case: String,
+    /// What the backend said.
+    pub reason: String,
+    /// How many cases were not judged: the refused one and every case
+    /// after it.
+    pub not_run: usize,
+}
+
+impl Stopped {
+    /// The row in the list of cases.
+    pub(super) fn line(&self) -> String {
+        format!("STOP  {:<26} {}", self.case, one_line(&self.reason))
+    }
+
+    /// The last line of the report.
+    pub(super) fn summary(&self) -> String {
+        format!(
+            "stopped: the backend reported a spend or rate limit at \"{}\" ({}). {} not run, nothing more was sent. \
+The cases above are the ones that were judged; the run is not a result for the whole set.",
+            self.case,
+            one_line(&self.reason),
+            if self.not_run == 1 { "1 case was".to_string() } else { format!("{} cases were", self.not_run) }
+        )
+    }
+
+    pub(super) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "case": self.case, "reason": self.reason, "not_run": self.not_run })
     }
 }
 
@@ -1041,6 +1105,26 @@ mod tests {
         assert!(!AskPlan::for_app(&ask, &refine, None).context.contains("App in front"));
         let named = AskPlan::for_app(&ask, &refine, Some("Notes"));
         assert!(named.context.contains("\nApp in front: Notes"), "{}", named.context);
+    }
+
+    #[test]
+    fn a_stopped_run_says_where_why_and_how_much_was_left() {
+        let stop = Stopped {
+            case: "fact-en".into(),
+            reason: "Claude Code: API Error: 429\nrate_limit_error".into(),
+            not_run: 14,
+        };
+        assert!(stop.line().starts_with("STOP  fact-en"), "{}", stop.line());
+        assert!(!stop.line().contains('\n'));
+        let summary = stop.summary();
+        assert!(summary.contains("a spend or rate limit at \"fact-en\""), "{summary}");
+        assert!(summary.contains("14 cases were not run, nothing more was sent."), "{summary}");
+        assert!(Stopped { not_run: 1, ..stop }.summary().contains("1 case was not run"));
+        assert_eq!(
+            Stopped { case: "a".into(), reason: "b".into(), not_run: 2 }.to_json(),
+            serde_json::json!({ "case": "a", "reason": "b", "not_run": 2 })
+        );
+        assert_eq!(STOPPED_EXIT, 2);
     }
 
     #[test]

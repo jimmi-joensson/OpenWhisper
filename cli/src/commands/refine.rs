@@ -629,6 +629,13 @@ fn show_history(args: HistoryArgs, json: bool) -> Result<()> {
             ms(summary.ask_median_first_text_ms),
             ms(summary.ask_median_ms)
         );
+        // Every ask a screenshot was taken for is counted, also one
+        // that failed or was cancelled: the image is kept nowhere,
+        // this is the record that there was one.
+        println!("with a screen  {} of them had a screenshot taken (the image is kept nowhere)", summary.asks_with_screen);
+        for run in runs.iter().filter(|r| r.is_ask() && r.screen == Some(true)) {
+            println!("               {}  {}", super::history::local_time(run.at_ms), run.status);
+        }
     }
     println!(
         "response time  median {}, p90 {}, slowest {}",

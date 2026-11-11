@@ -6,14 +6,17 @@
 //! of its own under cargo's test tmp dir, so nothing here can read or
 //! write a real `settings.json`.
 //!
-//! **No test in this file captures the screen.** `vision probe`, `ask
-//! run --screen` and any `--vision` run whose question would trigger
-//! a capture are not run here: what they would capture is the screen
-//! of whoever runs the tests. The capture layers are tested in core
-//! against a fake screen, and against the real one, on pixels of the
-//! test's own windows only, in `vision_live.rs`. No command here calls
-//! a model either: where an answer is needed, `--claude-path` points
-//! at a shell script that prints what the real CLI would stream.
+//! **No test in this file captures the screen.** `ask run --screen`
+//! and any `--vision` run whose question would trigger a capture are
+//! not run here: what they would capture is the screen of whoever
+//! runs the tests. `vision probe` is run: it is a dry run that takes
+//! no screenshot, and the tests assert on the shape of its report,
+//! never on what is in front on this machine. The capture layers are
+//! tested in core against a fake screen, and against the real one, on
+//! pixels of the test's own windows only, in `vision_live.rs` (cargo
+//! feature `vision-live-test`). No command here calls a model either:
+//! where an answer is needed, `--claude-path` points at a shell
+//! script that prints what the real CLI would stream.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -83,6 +86,9 @@ impl Drop for Config {
     }
 }
 
+/// The trigger of a config nobody touched.
+const DEFAULT_TRIGGER: &str = if cfg!(target_os = "windows") { "off" } else { "phrases" };
+
 fn strings(value: &Value) -> Vec<String> {
     value.as_array().expect("an array").iter().map(|v| v.as_str().expect("a string").to_string()).collect()
 }
@@ -92,10 +98,12 @@ fn app_ids(value: &Value) -> Vec<String> {
 }
 
 #[test]
-fn a_fresh_config_has_the_phrases_trigger_and_the_built_in_lists() {
+fn a_fresh_config_has_the_platforms_trigger_and_the_built_in_lists() {
     let cfg = Config::new("fresh");
     let status = cfg.json(&["vision", "status"]);
-    assert_eq!(status["trigger"], "phrases");
+    // Phrases on macOS; off on Windows until capture has been
+    // verified on a real machine there.
+    assert_eq!(status["trigger"], DEFAULT_TRIGGER);
     assert_eq!(status["phrases_are_default"], true);
     assert_eq!(status["never_capture_is_default"], true);
     let phrases = strings(&status["phrases"]);
@@ -120,7 +128,7 @@ fn a_fresh_config_has_the_phrases_trigger_and_the_built_in_lists() {
     // For people: the same, as lines.
     let out = cfg.spawn(&["vision", "status"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("trigger        phrases ("), "{stdout}");
+    assert!(stdout.contains(&format!("trigger        {DEFAULT_TRIGGER} (")), "{stdout}");
     assert!(stdout.contains(&format!("phrases        {} (the built-in list)", phrases.len())), "{stdout}");
     assert!(stdout.contains("(the built-in list)\n"), "{stdout}");
     assert!(stdout.contains("for this process"), "{stdout}");
@@ -140,7 +148,7 @@ fn config_sets_the_trigger_and_nothing_else() {
     cfg.json(&["ask", "config", "--instructions", "Answer in Danish."]);
 
     let shown = cfg.json(&["vision", "config"]);
-    assert_eq!(shown["trigger"], "phrases");
+    assert_eq!(shown["trigger"], DEFAULT_TRIGGER);
     assert_eq!((&shown["phrases"], &shown["never_capture"]), (&Value::Null, &Value::Null));
     assert!(cfg.settings_file().get("vision").is_none_or(Value::is_null), "printing the block wrote it");
 
@@ -311,14 +319,99 @@ fn check_decides_in_english_and_danish_without_capturing() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("nothing was captured and nothing was sent"));
 }
 
+/// `vision probe` is a dry run. It reports what a capture would look
+/// at and takes none, so it can run here. The assertions are on the
+/// shape of the report: what is in front on the machine that runs the
+/// tests is nobody's business, and is not printed on a failure.
+#[test]
+fn probe_is_a_dry_run_that_reports_and_captures_nothing() {
+    let cfg = Config::new("probe");
+    cfg.json(&["vision", "never-capture", "add", "com.example.vault", "--name", "Vault"]);
+    let seen = cfg.json(&["vision", "probe"]);
+    assert_eq!(seen["captured"], false);
+    assert_eq!(seen["dry_run"], true);
+    let permission = seen["permission"].as_str().expect("permission");
+    assert!(["granted", "denied", "unknown"].contains(&permission), "{permission}");
+    // The display: measured, or a reason why not.
+    match &seen["display"] {
+        Value::Null => assert!(seen["display_problem"].as_str().is_some_and(|p| !p.is_empty())),
+        display => {
+            assert!(display["width"].as_u64().is_some_and(|w| w >= 1));
+            assert!(display["height"].as_u64().is_some_and(|h| h >= 1));
+            assert!(display["point_width"].as_f64().is_some_and(|w| w > 0.0));
+        }
+    }
+    // The apps in front, each with whether it is on the list; or a
+    // reason.
+    let front = seen["front"].as_array().expect("front");
+    assert!(!front.is_empty() || seen["front_problem"].as_str().is_some_and(|p| !p.is_empty()));
+    assert!(front.iter().all(|app| app["listed"].is_boolean() && app["id"].is_string()));
+    // Every app on the list in force, the added one last, with
+    // whether it is open and how many windows it has on screen.
+    let listed = seen["listed"].as_array().expect("listed");
+    assert_eq!(listed.len(), app_ids(&cfg.json(&["vision", "never-capture", "list"])["never_capture"]).len());
+    let vault = listed.last().unwrap();
+    assert_eq!((vault["id"].as_str(), vault["name"].as_str()), (Some("com.example.vault"), Some("Vault")));
+    // An app that does not exist is not open and has no window.
+    assert_eq!(vault["running"], false);
+    assert!(vault["windows"].is_null() || vault["windows"] == 0, "{}", vault["windows"]);
+    assert_eq!(seen["never_capture_is_default"], false);
+    // Whether a capture would go ahead, and why not when not.
+    assert_eq!(seen["would_capture"].as_bool(), Some(seen["refusal"].is_null()));
+    assert_eq!(seen["refusal_message"].is_null(), seen["refusal"].is_null());
+    // No question was given.
+    assert_eq!(seen["decision"], Value::Null);
+    assert_eq!(seen["trigger"], DEFAULT_TRIGGER);
+    // Nothing of an image: no key of the report sounds like one.
+    for key in seen.as_object().unwrap().keys() {
+        for word in ["png", "image", "pixel", "bytes", "capture_ms"] {
+            assert!(!key.contains(word), "the report has a field \"{key}\"");
+        }
+    }
+
+    // With a question: what the trigger would decide for it.
+    let seen = cfg.json(&["vision", "probe", "--text", "what does it say on my screen", "--trigger", "phrases"]);
+    assert_eq!(seen["captured"], false);
+    assert_eq!(seen["trigger"], "phrases");
+    assert_eq!(seen["decision"]["decision"], "capture");
+    assert_eq!(seen["decision"]["phrase"], "on my screen");
+    let seen = cfg.json(&["vision", "probe", "--text", "two plus two", "--trigger", "smart"]);
+    assert_eq!(seen["decision"]["decision"], "ask-model");
+    assert_eq!(seen["decision"]["phrase"], Value::Null);
+    assert!(cfg.fails(&["vision", "probe", "--trigger", "sometimes"]).contains("sometimes"));
+
+    // For people: it says first that nothing was captured.
+    let out = cfg.spawn(&["vision", "probe", "--text", "two plus two", "--trigger", "off"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "captured       nothing: this is a dry run, it takes no screenshot");
+    for start in ["permission     ", "display        ", "never capture  ", "would capture  ", "trigger        off ("] {
+        assert!(lines.iter().any(|l| l.starts_with(start)), "no line starts with {start:?}");
+    }
+    assert!(lines.iter().any(|l| l.starts_with("in front       ")), "no line about the app in front");
+    assert!(lines.iter().any(|l| l.trim() == "no-capture: no screenshot for this question"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing was captured and nothing was sent"));
+    // The old way in, a capture in a copy of the program, is gone.
+    assert!(cfg.fails(&["vision", "probe", "--inner"]).contains("--inner"));
+    // And a dry run wrote nothing but what `never-capture add` did.
+    assert_eq!(cfg.settings_file()["vision"]["never_capture"].as_array().unwrap().len(), listed.len());
+}
+
 #[test]
 fn the_helper_window_and_the_eval_refuse_what_they_cannot_do() {
     let cfg = Config::new("refusals");
-    // A colour that is none: refused before any window exists.
+    // The helper window of the pixel test: this program does not
+    // have it unless it was built with the feature for that test.
     let err = cfg.fails(&[
         "vision", "test-window", "--color", "pink", "--x", "0", "--y", "0", "--width", "10", "--height", "10",
     ]);
-    assert!(err.contains("six hex digits"), "{err}");
+    if cfg!(feature = "vision-live-test") {
+        // A colour that is none: refused before any window exists.
+        assert!(err.contains("six hex digits"), "{err}");
+    } else {
+        assert!(err.contains("unrecognized subcommand"), "{err}");
+    }
     // The eval: a prefix that matches nothing lists the sets, a
     // trigger without screenshots is refused, and no case runs
     // without a backend that is ready.
@@ -454,6 +547,59 @@ done
         assert!(err.contains("sometimes") && !err.contains("question goes to"), "{err}");
         let err = cfg.fails(&["ask", "run", "hi", "--screen", "--vision", "off", "--claude-path", &claude]);
         assert!(err.contains("cannot be used with"), "{err}");
+    }
+
+    /// The fake, with an account that runs into its rate limit: it
+    /// answers two questions (each case is a process of its own, so
+    /// the count is kept in a file) and refuses every one after that
+    /// the way the real CLI reports a 429.
+    fn fake_cli_with_a_limit(cfg: &Config) -> String {
+        let limited = FAKE.replace(
+            "while read -r line; do\n",
+            "while read -r line; do\n  n=$(cat \"$here/asked.txt\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$here/asked.txt\"\n  \
+if [ \"$n\" -gt 2 ]; then echo '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"API Error: 429 rate_limit_error: this request would exceed your rate limit\"}'; continue; fi\n",
+        );
+        assert!(limited.contains("asked.txt"), "the fake changed shape");
+        let path = cfg.dir.join("bin").join("claude-limited");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, limited).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    #[test]
+    fn eval_stops_at_a_rate_limit_instead_of_counting_failures() {
+        let cfg = Config::new("eval-limit");
+        let claude = fake_cli_with_a_limit(&cfg);
+        // Ten cases; the third question is refused.
+        let out = cfg.spawn(&["vision", "eval", "--only", "smart-plain", "--claude-path", &claude]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(2), "{stdout}");
+        assert!(stdout.contains("PASS  smart-plain-en-capital"), "{stdout}");
+        assert!(stdout.contains("PASS  smart-plain-en-haiku"), "{stdout}");
+        // The refused case is not a failed case, and nothing after it
+        // was sent.
+        assert!(stdout.contains("STOP  smart-plain-en-http-404"), "{stdout}");
+        assert!(!stdout.contains("FAIL"), "{stdout}");
+        assert!(!stdout.contains("smart-plain-en-translate"), "{stdout}");
+        assert!(stdout.contains("2/2 passed"), "{stdout}");
+        assert!(stdout.contains("stopped: the backend reported a spend or rate limit at \"smart-plain-en-http-404\""), "{stdout}");
+        assert!(stdout.contains("8 cases were not run, nothing more was sent."), "{stdout}");
+        assert_eq!(recorded(&cfg, "asked.txt").trim(), "3");
+
+        // The same as a record.
+        std::fs::remove_file(cfg.dir.join("bin").join("asked.txt")).unwrap();
+        let out = cfg.spawn(&["--json", "vision", "eval", "--only", "smart-plain", "--claude-path", &claude]);
+        assert_eq!(out.status.code(), Some(2));
+        let report: Value = serde_json::from_slice(&out.stdout).expect("a JSON report");
+        assert_eq!((report["passed"].as_u64(), report["total"].as_u64()), (Some(2), Some(2)));
+        assert_eq!(report["stopped"]["case"], "smart-plain-en-http-404");
+        assert_eq!(report["stopped"]["not_run"], 8);
+        assert!(report["stopped"]["reason"].as_str().is_some_and(|r| r.contains("429")), "{report}");
+        assert_eq!(recorded(&cfg, "asked.txt").trim(), "3");
+        // A run that was not stopped says so.
+        let whole = cfg.json(&["vision", "eval", "--only", "read-table", "--claude-path", &fake_cli(&cfg)]);
+        assert_eq!(whole["stopped"], Value::Null);
     }
 
     #[test]

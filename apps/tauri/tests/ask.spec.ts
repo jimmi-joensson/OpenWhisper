@@ -1017,16 +1017,25 @@ test.describe("diagnostics: asks among the Refine runs", () => {
     window_7d_resets_at: null,
     mode: null,
     first_text_ms: null,
+    screen: null,
     ...over,
   });
   const ask = (over: Record<string, unknown>) =>
-    run({ source: "ask", status: "answered", tokens_in: 900, tokens_out: 180, ...over });
+    run({
+      source: "ask",
+      status: "answered",
+      tokens_in: 900,
+      tokens_out: 180,
+      screen: false,
+      ...over,
+    });
   const summary = (over: Record<string, unknown>) => ({
     total: 0,
     asks: 0,
     asks_answered: 0,
     ask_median_first_text_ms: null,
     ask_median_ms: null,
+    asks_with_screen: 0,
     refined: 0,
     skipped: 0,
     fallbacks: 0,
@@ -1137,6 +1146,58 @@ test.describe("diagnostics: asks among the Refine runs", () => {
     // 5 rows, 3 of them asks: 2 of 2 dictations refined.
     await expect(page.getByTestId("diagnostics-refine-refined")).toHaveText("2 of 2");
     await expect(page.getByTestId("diagnostics-refine-median")).toHaveText("1.40 s");
+  });
+
+  test("an ask a screenshot was taken for says so, also when it failed or was cancelled", async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      (history) => {
+        (window as unknown as Record<string, unknown>).__owRefineHistory = history;
+      },
+      {
+        summary: summary({ total: 4, asks: 4, asks_answered: 2, asks_with_screen: 3 }),
+        runs: [
+          ask({ at_ms: now - 10_000, elapsed_ms: 2400, first_text_ms: 620, screen: true }),
+          ask({
+            at_ms: now - 20_000,
+            status: "failed",
+            elapsed_ms: 900,
+            detail: "the connection dropped",
+            tokens_in: null,
+            tokens_out: null,
+            screen: true,
+          }),
+          ask({
+            at_ms: now - 30_000,
+            status: "cancelled",
+            elapsed_ms: 300,
+            tokens_in: null,
+            tokens_out: null,
+            screen: true,
+          }),
+          // No screenshot, and a row from before the column existed.
+          ask({ at_ms: now - 40_000, elapsed_ms: 2000, first_text_ms: 500 }),
+          ask({ at_ms: now - 50_000, elapsed_ms: 2000, screen: null }),
+        ],
+      },
+    );
+    await page.goto("/");
+    await openDiagnostics(page);
+    const rows = page.getByRole("table", { name: "Recent Refine runs" }).locator("tbody tr");
+    await expect(rows).toHaveCount(5);
+    await expect(rows.nth(0).locator("td").last()).toHaveText(
+      "Ask · first text after 620 ms · screenshot sent",
+    );
+    await expect(rows.nth(1).locator("td").last()).toHaveText(
+      "Ask · screenshot sent · the connection dropped",
+    );
+    await expect(rows.nth(2).locator("td").last()).toHaveText("Ask · screenshot sent");
+    await expect(rows.nth(3).locator("td").last()).toHaveText("Ask · first text after 500 ms");
+    await expect(rows.nth(4).locator("td").last()).toHaveText("Ask");
+    await expect(page.getByTestId("diagnostics-refine-asks")).toContainText(
+      "With a screenshot: 3",
+    );
   });
 
   test("with only asks there are no Refine numbers, just the asks", async ({ page }) => {

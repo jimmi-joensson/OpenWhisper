@@ -1325,7 +1325,10 @@ fn the_snapshot_does_not_carry_the_facts() {
     let _scope = scope(AskSettings { context: place, ..on() }, saying(&calls, "Mild."));
     let done = submit("how is the weather today").unwrap();
     let json = serde_json::to_string(&done).unwrap();
-    assert!(!json.contains("Aarhus") && !json.contains("context"), "{json}");
+    // (`context_source` says where an ask looked, not what the
+    // facts are.)
+    assert!(!json.contains("Aarhus") && !json.contains("\"context\""), "{json}");
+    assert!(json.contains("\"context_source\":{\"kind\":\"none\"}"), "{json}");
 }
 
 // --- no long dashes ---------------------------------------------------------

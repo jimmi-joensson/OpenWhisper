@@ -239,7 +239,7 @@ pub struct EvalArgs {
     overrides: Overrides,
 }
 
-fn parse_bool(s: &str) -> Result<bool, String> {
+pub(super) fn parse_bool(s: &str) -> Result<bool, String> {
     match s.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
@@ -316,7 +316,7 @@ fn claude_effort(effort: &str) -> Result<RefineEffort> {
 
 /// Point core at the user's dictionary so its terms reach the prompt
 /// and the rule pass, like in the app.
-fn use_dictionary() {
+pub(super) fn use_dictionary() {
     if let Ok(dir) = super::config_dir() {
         let path = dir.join(dictionary::FILE_NAME);
         if path.is_file() {
@@ -329,7 +329,7 @@ fn use_dictionary() {
 /// one, so the run leaves its diagnostics row there (the place
 /// `openwhisper refine history` reads). Without one, nothing is
 /// recorded: the CLI does not create the app's database.
-fn use_store() -> bool {
+pub(super) fn use_store() -> bool {
     let Ok(path) = super::database_path() else {
         return false;
     };
@@ -351,7 +351,7 @@ fn use_store() -> bool {
 /// Point core at the transcript history of this config: its settings
 /// and the folder the app writes to. Returns whether history is
 /// switched on.
-fn use_history() -> Result<bool> {
+pub(super) fn use_history() -> Result<bool> {
     let dir = super::config_dir()?;
     history::set_default_dir(dir.join(history::DEFAULT_FOLDER_NAME));
     Ok(settings::load_history_settings(&dir.join("settings.json")).enabled)
@@ -387,7 +387,7 @@ pub(super) fn parse_trigger(id: &str, saved: VisionTrigger) -> Result<VisionTrig
 /// settings (its phrases and its never-capture list always apply),
 /// with the trigger `--vision` names, or a forced capture with
 /// `--screen`.
-fn vision_for(screen: bool, trigger: Option<&str>) -> Result<(VisionSettings, VisionChoice)> {
+pub(super) fn vision_for(screen: bool, trigger: Option<&str>) -> Result<(VisionSettings, VisionChoice)> {
     let saved = settings::load_vision_settings(&settings_path()?);
     if screen {
         return Ok((saved, VisionChoice::Force));

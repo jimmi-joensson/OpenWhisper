@@ -770,10 +770,13 @@ mod tests {
     /// CLI cannot call it at all. What the CLI can do is make a plan
     /// that may capture (`with_vision` with a choice other than
     /// `None`) and send a question through it. This test holds that
-    /// to one place: the words that make such a plan are in
-    /// `commands/ask.rs`, inside the code of `ask run`, and in no
-    /// other file of the CLI; and no file names core's capture entry
-    /// point or the pixel test's hook.
+    /// to the two commands that ask a question: the words that make
+    /// such a plan are in `commands/ask.rs`, inside the code of `ask
+    /// run`, and in `commands/agent.rs`, inside the code of `agent
+    /// run` (an ask with tools, TASK-99, which takes `--screen` and
+    /// `--vision` like `ask run`), once each, and in no other file
+    /// of the CLI; and no file names core's capture entry point or
+    /// the pixel test's hook.
     ///
     /// (The words are put together here so this test does not find
     /// itself.)
@@ -792,21 +795,33 @@ mod tests {
                 plan_makers.push(name);
             }
         }
-        assert_eq!(plan_makers, ["commands/ask.rs"], "only `ask run` may make a plan that can capture");
-
-        // In that file: one call, and it is in the function that runs
-        // `ask run`.
-        let ask = sources().into_iter().find(|(name, _)| name == "commands/ask.rs").unwrap().1;
-        let shipped = &ask[..ask.find("#[cfg(test)]\nmod tests").expect("the tests of ask.rs")];
-        let call = join("with_", "vision(");
-        assert_eq!(shipped.matches(call.as_str()).count(), 1, "one place makes a plan that can capture");
-        let at = shipped.find(call.as_str()).unwrap();
-        let function = shipped[..at].rfind("\nfn ").map(|i| &shipped[i + 1..at]).expect("a function around the call");
-        assert!(
-            function.starts_with("fn run_question("),
-            "the call is in: {}",
-            function.lines().next().unwrap_or_default()
+        plan_makers.sort();
+        assert_eq!(
+            plan_makers,
+            ["commands/agent.rs", "commands/ask.rs"],
+            "only `ask run` and `agent run` may make a plan that can capture"
         );
+
+        // In each of those files: one call, and it is in the function
+        // that runs the question.
+        let call = join("with_", "vision(");
+        for file in ["commands/ask.rs", "commands/agent.rs"] {
+            let text = sources().into_iter().find(|(name, _)| name == file).unwrap().1;
+            // `agent.rs` has its tests in `cli/tests`, so all of it
+            // is shipped code.
+            let shipped = &text[..text.find("#[cfg(test)]\nmod tests").unwrap_or(text.len())];
+            assert_eq!(shipped.matches(call.as_str()).count(), 1, "{file}: one place makes a plan that can capture");
+            let at = shipped.find(call.as_str()).unwrap();
+            let function = shipped[..at].rfind("\nfn ").map(|i| &shipped[i + 1..at]).expect("a function around the call");
+            assert!(
+                function.starts_with("fn run_question("),
+                "{file}: the call is in: {}",
+                function.lines().next().unwrap_or_default()
+            );
+        }
+        // The eval set of Agent is started from the CLI and never
+        // captures: core gives each of its plans a synthetic image
+        // to take in place of the screen.
 
         // And this file, the Vision commands, sends no question at
         // all through a plan: its eval hands its cases to a backend

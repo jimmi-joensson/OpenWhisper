@@ -31,6 +31,17 @@
 //!   cancelled or timing out. On Windows the kill takes the whole
 //!   process tree, see [`refine_cli::end_process`].
 //!
+//! **Shared with Agent.** An ask with tools (`crate::agent::claude`,
+//! TASK-99) is the same kind of process: the same spawn, the same
+//! question on stdin, the same polling loop, cancel and timeout. What
+//! differs is the argument list and what the lines mean, so those two
+//! are handed in ([`Process::spawn`] takes the arguments and a
+//! [`Reader`]), and the loop here also knows the one thing only an
+//! ask with tools needs: a question from the CLI that waits for an
+//! answer ([`Line::Permission`]). The plain ask below never gets
+//! one; its arguments and its reading of the lines are exactly what
+//! they were before Agent existed, and a test pins that.
+//!
 //! Measured with Claude Code 2.1.322, Sonnet at low effort
 //! (2026-11-10): cold, the first text is back after 1.3 to 2.3 s;
 //! with the process spawned at record start, after 0.5 to 0.7 s.
@@ -47,6 +58,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+use super::steps::{AskConfirm, ConfirmDecision, ConfirmOutcome, Waiting};
 use super::{AskBackend, AskError, AskEvent, AskInput, AskReply, AskSetup, CancelFlag, POLL, Turn};
 use crate::refine::claude_cli as refine_cli;
 use crate::refine::{CallUsage, PlanWindows};
@@ -56,7 +68,7 @@ use crate::settings::{ClaudeCliSettings, RefineEffort};
 pub const ID: &str = refine_cli::ID;
 
 /// The one tool an ask may have, and only with web search on.
-const WEB_SEARCH_TOOL: &str = "WebSearch";
+pub(crate) const WEB_SEARCH_TOOL: &str = "WebSearch";
 
 /// The Claude Code CLI as an [`AskBackend`].
 pub struct ClaudeCliAsk {
@@ -72,10 +84,51 @@ impl ClaudeCliAsk {
     }
 
     fn spawn(&self, setup: &AskSetup) -> Result<Process, AskError> {
-        let bin = refine_cli::find_binary(&self.settings)
-            .ok_or_else(|| AskError::Unavailable(refine_cli::NOT_INSTALLED.to_string()))?;
-        Process::spawn(&bin, setup)
+        let bin = find_binary(&self.settings)?;
+        let reader = Box::new(PlainReader { web_search: setup.web_search });
+        Process::spawn(&bin, setup, |prompt_file| spawn_args(setup, prompt_file), reader, None)
     }
+}
+
+/// The `claude` binary these settings point at, or the reason an ask
+/// cannot run. Shared with the agent backend.
+pub(crate) fn find_binary(settings: &ClaudeCliSettings) -> Result<PathBuf, AskError> {
+    refine_cli::find_binary(settings).ok_or_else(|| AskError::Unavailable(refine_cli::NOT_INSTALLED.to_string()))
+}
+
+/// One turn through the process in `slot`: the process that is there
+/// when it was started with this very setup (a warmed one, or the
+/// one of the turn before), a new one from `spawn` otherwise. The
+/// process is kept for a further turn after an answer and dropped,
+/// which kills it, after an error. The one path for the plain ask
+/// and the ask with tools.
+pub(crate) fn send_through(
+    slot: &mut Option<Process>,
+    setup: &AskSetup,
+    spawn: impl FnOnce() -> Result<Process, AskError>,
+    input: &AskInput,
+    sink: &mut dyn FnMut(AskEvent),
+    cancel: &CancelFlag,
+    timeout: Duration,
+) -> Result<AskReply, AskError> {
+    let started = Instant::now();
+    let mut warm_lead = None;
+    let mut process = match slot.take() {
+        // The setup is fixed at spawn. If it changed since
+        // (dictionary edited mid-recording), start over.
+        Some(p) if p.setup == *setup => {
+            if p.turns == 0 {
+                warm_lead = Some(p.spawned_at.elapsed());
+            }
+            p
+        }
+        _ => spawn()?,
+    };
+    let reply = process.turn(input, sink, cancel, started, timeout, warm_lead)?;
+    // Kept for a further turn. On any error above the process was
+    // dropped instead, which kills it.
+    *slot = Some(process);
+    Ok(reply)
 }
 
 impl AskBackend for ClaudeCliAsk {
@@ -96,24 +149,10 @@ impl AskBackend for ClaudeCliAsk {
         cancel: &CancelFlag,
         timeout: Duration,
     ) -> Result<AskReply, AskError> {
-        let started = Instant::now();
-        let mut warm_lead = None;
-        let mut process = match self.process.take() {
-            // The setup is fixed at spawn. If it changed since
-            // (dictionary edited mid-recording), start over.
-            Some(p) if p.setup == *setup => {
-                if p.turns == 0 {
-                    warm_lead = Some(p.spawned_at.elapsed());
-                }
-                p
-            }
-            _ => self.spawn(setup)?,
-        };
-        let reply = process.turn(input, sink, cancel, started, timeout, warm_lead)?;
-        // Kept for a further turn. On any error above the process was
-        // dropped instead, which kills it.
-        self.process = Some(process);
-        Ok(reply)
+        let mut slot = self.process.take();
+        let reply = send_through(&mut slot, setup, || self.spawn(setup), input, sink, cancel, timeout);
+        self.process = slot;
+        reply
     }
 }
 
@@ -180,8 +219,63 @@ pub fn user_line(input: &AskInput) -> String {
     line
 }
 
+/// What the lines of one kind of conversation mean. The plain ask
+/// has [`PlainReader`]; an ask with tools brings its own
+/// (`crate::agent::claude`), which also keeps track of its steps.
+pub(crate) trait Reader: Send {
+    /// Read one stdout line. An error ends the turn.
+    fn read(&mut self, line: &str) -> Result<Line, AskError>;
+
+    /// A confirm this reader asked for ([`Verdict::Confirm`]) has
+    /// ended. Returns what to tell the sink about it.
+    fn decided(&mut self, _request_id: &str, _outcome: ConfirmOutcome) -> Vec<AskEvent> {
+        Vec::new()
+    }
+}
+
+/// The reader of an ask without tools: [`read_line`].
+struct PlainReader {
+    web_search: bool,
+}
+
+impl Reader for PlainReader {
+    fn read(&mut self, line: &str) -> Result<Line, AskError> {
+        read_line(line, self.web_search)
+    }
+}
+
+/// A question from the CLI that it waits on: may this tool run?
+#[derive(Debug, PartialEq)]
+pub(crate) struct Permission {
+    /// The CLI's id of the question; the answer names it.
+    pub request_id: String,
+    pub verdict: Verdict,
+}
+
+/// What to do about a [`Permission`]. Only an ask with tools makes
+/// one (`crate::agent::claude`, cargo feature `agent`).
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(feature = "agent"), allow(dead_code))]
+pub(crate) enum Verdict {
+    /// Say no at once, with `message` for the model. `events` go to
+    /// the sink.
+    Deny { message: String, events: Vec<AskEvent> },
+    /// Ask the person and wait: `events` go to the sink first (the
+    /// step that waits), then the confirm. On a yes the tool gets
+    /// `input` back exactly as it came.
+    Confirm { confirm: AskConfirm, input: Value, events: Vec<AskEvent> },
+    /// Not a question this app knows how to answer: the CLI is told
+    /// so, and nothing runs because of it.
+    Unsupported,
+}
+
+/// What the model is told when the person said no.
+pub(crate) const DENIED_BY_PERSON: &str = "The person declined this action in the panel, so it was not carried out. Do not try it again or in another way. Tell them that it was not done.";
+/// What the model is told when nobody answered the confirm in time.
+pub(crate) const DENIED_BY_TIMEOUT: &str = "The person did not answer the confirmation in time, so the action was not carried out. Do not try it again or in another way. Tell them that it was not done.";
+
 /// One spawned CLI process: one conversation.
-struct Process {
+pub(crate) struct Process {
     child: Child,
     stdin: Option<ChildStdin>,
     /// stdout, line by line. Disconnects when the process ends.
@@ -198,13 +292,29 @@ struct Process {
     /// A question was sent and its result has not come back: the
     /// model may be working on it.
     mid_turn: bool,
+    /// What the lines mean for this kind of conversation.
+    reader: Box<dyn Reader>,
+    /// Something that has to live exactly as long as the process and
+    /// cleans up after itself when dropped (an ask with tools keeps
+    /// its private connection file here).
+    _keep: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl Process {
-    fn spawn(bin: &Path, setup: &AskSetup) -> Result<Self, AskError> {
+    /// Start the CLI at `bin` for one conversation. `args` makes the
+    /// argument list, given the file the system prompt was written
+    /// to; `reader` says what the lines mean; `keep` is dropped with
+    /// the process.
+    pub(crate) fn spawn(
+        bin: &Path,
+        setup: &AskSetup,
+        args: impl FnOnce(&Path) -> Vec<String>,
+        reader: Box<dyn Reader>,
+        keep: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<Self, AskError> {
         let prompt_file = refine_cli::write_prompt_file("Ask", &setup.system)?;
         let mut cmd = refine_cli::command(bin);
-        cmd.args(spawn_args(setup, &prompt_file))
+        cmd.args(args(&prompt_file))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -261,6 +371,8 @@ impl Process {
             spawned_at: Instant::now(),
             turns: 0,
             mid_turn: false,
+            reader,
+            _keep: keep,
         })
     }
 
@@ -303,9 +415,10 @@ impl Process {
         self.mid_turn = true;
         let mut writing = true;
 
-        let deadline = started + timeout;
+        let mut deadline = started + timeout;
         let mut turn = Turn::new(sink, started);
         let mut plan: Option<PlanWindows> = None;
+        let mut notice = String::new();
         loop {
             if cancel.is_cancelled() {
                 return Err(AskError::Cancelled);
@@ -336,7 +449,28 @@ impl Process {
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return Err(self.exit_error()),
             };
-            match read_line(&line, self.setup.web_search)? {
+            match self.reader.read(&line)? {
+                Line::Events(events) => events.into_iter().for_each(|event| turn.event(event)),
+                Line::Notice(text) => {
+                    if notice.is_empty() {
+                        notice = text;
+                    }
+                }
+                Line::Permission(permission) => {
+                    // The CLI waits for this answer, so the question
+                    // is long written and stdin is back. Should the
+                    // writer still hold it, wait for it.
+                    if writing {
+                        if let Ok((Ok(()), stdin)) = wrote.recv_timeout(Duration::from_secs(2)) {
+                            self.stdin = Some(stdin);
+                        }
+                        writing = false;
+                    }
+                    let waited = self.decide(permission, &mut turn, cancel, deadline)?;
+                    // The clock of the turn does not run while the
+                    // person reads a confirm.
+                    deadline += waited;
+                }
                 Line::Text(delta) => turn.text(&delta),
                 Line::NewMessage => turn.new_message(),
                 Line::Searching(query) => turn.event(AskEvent::Searching { query }),
@@ -353,7 +487,7 @@ impl Process {
                     });
                     self.turns += 1;
                     self.mid_turn = false;
-                    return Ok(turn.finish(usage, warm_lead, ""));
+                    return Ok(turn.finish(usage, warm_lead, &notice));
                 }
                 Line::Other => {}
             }
@@ -364,6 +498,113 @@ impl Process {
         let said = self.errors.lock().map(|e| e.clone()).unwrap_or_default();
         refine_cli::exit_error(&said).into()
     }
+
+    /// Answer one [`Permission`]: at once, or after the person did.
+    /// Returns how long the person was waited on.
+    ///
+    /// While a confirm waits, this looks at the cancel flag and the
+    /// confirm's own clock every [`POLL`]. A cancel is a no: the CLI
+    /// is told so, and then the turn ends as cancelled, which kills
+    /// the process. The tool cannot have run in between: the CLI
+    /// does not start it before it has an answer.
+    fn decide(
+        &mut self,
+        permission: Permission,
+        turn: &mut Turn<'_>,
+        cancel: &CancelFlag,
+        deadline: Instant,
+    ) -> Result<Duration, AskError> {
+        let Permission { request_id, verdict } = permission;
+        match verdict {
+            Verdict::Unsupported => {
+                self.respond(&json!({
+                    "type": "control_response",
+                    "response": { "subtype": "error", "request_id": request_id, "error": "This request is not supported." },
+                }))?;
+                Ok(Duration::ZERO)
+            }
+            Verdict::Deny { message, events } => {
+                self.respond(&deny(&request_id, &message))?;
+                events.into_iter().for_each(|event| turn.event(event));
+                Ok(Duration::ZERO)
+            }
+            Verdict::Confirm { confirm, input, events } => {
+                let asked = Instant::now();
+                let patience = Duration::from_secs(confirm.timeout_s);
+                // Open before the sink hears of it: an answer given
+                // from inside the sink must find the gate.
+                let waiting = Waiting::open(&request_id);
+                events.into_iter().for_each(|event| turn.event(event));
+                turn.event(AskEvent::Confirm(confirm));
+                let outcome = loop {
+                    if cancel.is_cancelled() {
+                        break ConfirmOutcome::Cancelled;
+                    }
+                    match waiting.answer() {
+                        Some(ConfirmDecision::Allow) => break ConfirmOutcome::Allowed,
+                        Some(ConfirmDecision::Deny) => break ConfirmOutcome::Denied,
+                        None => {}
+                    }
+                    // The turn's own clock stands still meanwhile,
+                    // but an ask that was out of time before the
+                    // confirm does not get more through it.
+                    if asked.elapsed() >= patience || asked >= deadline {
+                        break ConfirmOutcome::TimedOut;
+                    }
+                    thread::sleep(POLL);
+                };
+                drop(waiting);
+                let response = match outcome {
+                    ConfirmOutcome::Allowed => json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            // Exactly what the person was shown.
+                            "response": { "behavior": "allow", "updatedInput": input },
+                        },
+                    }),
+                    ConfirmOutcome::TimedOut => deny(&request_id, DENIED_BY_TIMEOUT),
+                    ConfirmOutcome::Denied | ConfirmOutcome::Cancelled => deny(&request_id, DENIED_BY_PERSON),
+                };
+                let written = self.respond(&response);
+                turn.event(AskEvent::ConfirmClosed { request_id: request_id.clone(), outcome });
+                self.reader.decided(&request_id, outcome).into_iter().for_each(|event| turn.event(event));
+                if outcome == ConfirmOutcome::Cancelled {
+                    return Err(AskError::Cancelled);
+                }
+                written?;
+                Ok(asked.elapsed())
+            }
+        }
+    }
+
+    /// Write one line to the CLI's stdin: the answer to a question
+    /// it is waiting on, so it is reading.
+    fn respond(&mut self, message: &Value) -> Result<(), AskError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(AskError::Backend("Claude Code has no input channel".into()));
+        };
+        let mut line = message.to_string();
+        line.push('\n');
+        stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|e| AskError::Backend(format!("Could not answer Claude Code: {e}")))
+    }
+}
+
+/// The answer "no" to the CLI's question `request_id`, with `message`
+/// for the model.
+fn deny(request_id: &str, message: &str) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": { "behavior": "deny", "message": message },
+        },
+    })
 }
 
 impl Drop for Process {
@@ -379,9 +620,11 @@ impl Drop for Process {
     }
 }
 
-/// What one line of the CLI's output means for an ask.
+/// What one line of the CLI's output means for an ask. The last
+/// three only come from the reader of an ask with tools.
 #[derive(Debug, PartialEq)]
-enum Line {
+#[cfg_attr(not(feature = "agent"), allow(dead_code))]
+pub(crate) enum Line {
     /// A piece of the answer.
     Text(String),
     /// The model started a new message (after a search).
@@ -396,11 +639,19 @@ enum Line {
     Result(String),
     /// Nothing an ask acts on (init, thinking, block boundaries).
     Other,
+    /// Events for the sink, as they are: the steps of an ask with
+    /// tools.
+    Events(Vec<AskEvent>),
+    /// Something the person should know about how the answer was
+    /// made ([`AskReply::notice`]). The first one counts.
+    Notice(String),
+    /// The CLI asks whether a tool may run, and waits.
+    Permission(Permission),
 }
 
 /// Read one stdout line. An error ends the turn: the CLI reported a
 /// failure, or the model reached for a tool an ask may not use.
-fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> {
+pub(crate) fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
         return Ok(Line::Other);
     };
@@ -452,7 +703,7 @@ fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> {
 /// `Ok(true)` when `block` is the web search and web search is on,
 /// `Ok(false)` when it is not a tool call at all. Any other tool is an
 /// error: an ask may not use tools.
-fn check_tool(block: &Value, web_search: bool) -> Result<bool, AskError> {
+pub(crate) fn check_tool(block: &Value, web_search: bool) -> Result<bool, AskError> {
     let kind = block["type"].as_str().unwrap_or("");
     if !kind.ends_with("tool_use") {
         return Ok(false);

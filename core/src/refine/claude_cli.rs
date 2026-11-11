@@ -222,7 +222,7 @@ fn candidate_paths(home: Option<&Path>, path_var: Option<&OsStr>, windows: bool)
     out
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
         .filter(|v| !v.is_empty())
@@ -375,13 +375,18 @@ pub fn spawn_args(model: &str, effort: RefineEffort, system_prompt_file: &Path) 
 /// and the error; Ask starts its CLI processes through the same
 /// helpers (see `crate::ask::claude_cli`).
 pub(crate) fn write_prompt_file(feature: &str, system: &str) -> Result<PathBuf, RefineError> {
+    write_private_file(&feature.to_lowercase(), "txt", system.as_bytes())
+        .map_err(|e| RefineError::Backend(format!("Could not write the {feature} prompt file: {e}")))
+}
+
+/// Write `contents` to a new file in the temp folder that only this
+/// user can read (mode 0600 on unix), named
+/// `openwhisper-<stem>-<pid>-<n>.<ext>`. The caller removes it. Used
+/// for what a CLI process is handed in a file: the system prompt,
+/// and the connections of an ask with tools (`crate::agent`).
+pub(crate) fn write_private_file(stem: &str, ext: &str, contents: &[u8]) -> std::io::Result<PathBuf> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = format!(
-        "openwhisper-{}-{}-{}.txt",
-        feature.to_lowercase(),
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
+    let name = format!("openwhisper-{stem}-{}-{}.{ext}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
     let path = std::env::temp_dir().join(name);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -390,10 +395,14 @@ pub(crate) fn write_prompt_file(feature: &str, system: &str) -> Result<PathBuf, 
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options
-        .open(&path)
-        .and_then(|mut f| f.write_all(system.as_bytes()))
-        .map_err(|e| RefineError::Backend(format!("Could not write the {feature} prompt file: {e}")))?;
+    options.open(&path).and_then(|mut f| f.write_all(contents))?;
+    // A file of that name left behind by an earlier process with the
+    // same id keeps the mode it was made with: set it again.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(path)
 }
 

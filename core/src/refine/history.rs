@@ -93,6 +93,17 @@ pub struct RefineRun {
     /// the machine without a record. `None` for Refine runs and for
     /// rows written before asks could include the screen.
     pub screen: Option<bool>,
+    /// An ask: where it looked for what the question is about
+    /// (Agent, TASK-99): `none`, `screen`, or `connection:` and the
+    /// connection's name. `None` for Refine runs and for rows
+    /// written before this was recorded.
+    pub context_source: Option<String>,
+    /// An ask: how many tool calls it made, 0 for an ask without
+    /// tools. Written for every ask, also one that failed or was
+    /// cancelled after a call. Only the number: never which tools,
+    /// what they were given or what they returned. `None` for Refine
+    /// runs and for rows written before asks could have tools.
+    pub tool_calls: Option<i64>,
 }
 
 impl RefineRun {
@@ -128,6 +139,8 @@ impl RefineRun {
             mode: (!outcome.mode.is_builtin()).then(|| outcome.mode.name.clone()),
             first_text_ms: None,
             screen: None,
+            context_source: None,
+            tool_calls: None,
         })
     }
 
@@ -159,8 +172,8 @@ pub fn record(store: &Store, run: &RefineRun) {
              (at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
               chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, tokens_out, \
               cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-              window_7d_resets_at, mode, first_text_ms, screen) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              window_7d_resets_at, mode, first_text_ms, screen, context_source, tool_calls) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.at_ms,
                 run.source,
@@ -185,6 +198,8 @@ pub fn record(store: &Store, run: &RefineRun) {
                 run.mode,
                 run.first_text_ms,
                 run.screen,
+                run.context_source,
+                run.tool_calls,
             ],
         )?;
         c.execute(
@@ -230,7 +245,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
             "SELECT at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
                     chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, \
                     tokens_out, cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-                    window_7d_resets_at, mode, first_text_ms, screen \
+                    window_7d_resets_at, mode, first_text_ms, screen, context_source, tool_calls \
              FROM refine_runs ORDER BY id DESC LIMIT ?",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
@@ -258,6 +273,8 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
                 mode: r.get(20)?,
                 first_text_ms: r.get(21)?,
                 screen: r.get(22)?,
+                context_source: r.get(23)?,
+                tool_calls: r.get(24)?,
             })
         })?;
         let mut out = Vec::new();
@@ -550,6 +567,8 @@ mod tests {
             mode: None,
             first_text_ms: None,
             screen: None,
+            context_source: None,
+            tool_calls: None,
         }
     }
 
@@ -564,6 +583,8 @@ mod tests {
             chars_out: 400,
             first_text_ms: first_ms,
             screen: Some(false),
+            context_source: Some("none".to_string()),
+            tool_calls: Some(0),
             detail: if status == "answered" { String::new() } else { format!("{status} reason") },
             ..run(status, elapsed_ms, Some(2000))
         }
@@ -713,7 +734,9 @@ mod tests {
              VALUES (5, 'dictation', 'refined', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '');
              ALTER TABLE refine_runs ADD COLUMN mode TEXT;
              ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;
-             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
+             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;
+             ALTER TABLE refine_runs ADD COLUMN context_source TEXT;
+             ALTER TABLE refine_runs ADD COLUMN tool_calls INTEGER;",
         )
         .unwrap();
         let store = Store::from_connection_for_test(conn);
@@ -725,6 +748,54 @@ mod tests {
         // and 7).
         assert_eq!(got[0].first_text_ms, None);
         assert_eq!(got[0].screen, None);
+    }
+
+    #[test]
+    fn an_ask_records_where_it_looked_and_how_many_tools_it_called_and_old_rows_read_as_unknown() {
+        // A database from before Agent: every column up to `screen`,
+        // then the two columns added the way migration 8 adds them.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE refine_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                status TEXT NOT NULL, backend TEXT NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
+                elapsed_ms INTEGER NOT NULL, warm_lead_ms INTEGER, chars_in INTEGER NOT NULL,
+                chars_out INTEGER NOT NULL, instruction INTEGER NOT NULL, detail TEXT NOT NULL,
+                tokens_in INTEGER, tokens_cached INTEGER, tokens_out INTEGER, cost_usd REAL,
+                window_5h_used REAL, window_5h_resets_at INTEGER, window_7d_used REAL,
+                window_7d_resets_at INTEGER, mode TEXT, first_text_ms INTEGER, screen INTEGER);
+             INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
+                chars_in, chars_out, instruction, detail, first_text_ms, screen)
+             VALUES (5, 'ask', 'answered', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '', 400, 1);
+             ALTER TABLE refine_runs ADD COLUMN context_source TEXT;
+             ALTER TABLE refine_runs ADD COLUMN tool_calls INTEGER;",
+        )
+        .unwrap();
+        let store = Store::from_connection_for_test(conn);
+        let old = recent(&store, 10).unwrap().remove(0);
+        assert_eq!((old.screen, old.context_source.clone(), old.tool_calls), (Some(true), None, None));
+
+        // A Refine run has neither; an ask has both, also when it
+        // failed after a call.
+        record(&store, &run("refined", 800, None));
+        let routed = RefineRun {
+            context_source: Some("connection:Team chat".to_string()),
+            tool_calls: Some(2),
+            ..ask("answered", Some(700), 3500)
+        };
+        let failed = RefineRun { context_source: Some("screen".to_string()), tool_calls: Some(1), ..ask("failed", None, 900) };
+        record(&store, &routed);
+        record(&store, &failed);
+        record(&store, &ask("answered", Some(300), 1200));
+        let got = recent(&store, 10).unwrap();
+        assert_eq!((got[0].context_source.as_deref(), got[0].tool_calls), (Some("none"), Some(0)));
+        assert_eq!(got[1], failed);
+        assert_eq!(got[2], routed);
+        assert_eq!((got[3].context_source.clone(), got[3].tool_calls), (None, None), "a Refine run has neither");
+        assert_eq!(got[4], old);
+        let json = serde_json::to_value(&got[2]).unwrap();
+        assert_eq!((json["context_source"].as_str(), json["tool_calls"].as_i64()), (Some("connection:Team chat"), Some(2)));
+        assert_eq!(serde_json::to_value(&got[3]).unwrap()["tool_calls"], serde_json::Value::Null);
     }
 
     #[test]
@@ -744,7 +815,9 @@ mod tests {
              INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
                 chars_in, chars_out, instruction, detail, first_text_ms)
              VALUES (5, 'ask', 'answered', 'claude-cli', 'sonnet', 'low', 2400, 30, 400, 0, '', 620);
-             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
+             ALTER TABLE refine_runs ADD COLUMN screen INTEGER;
+             ALTER TABLE refine_runs ADD COLUMN context_source TEXT;
+             ALTER TABLE refine_runs ADD COLUMN tool_calls INTEGER;",
         )
         .unwrap();
         let store = Store::from_connection_for_test(conn);

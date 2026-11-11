@@ -53,6 +53,13 @@
 //!   ([`VisionSettings`], TASK-98). Raw JSON in the envelope for the
 //!   same reason as `refine`; the block itself is read field by field
 //!   and settles every doubt on the careful side.
+//! - `agent`: whether an ask may use tool connections, which ones,
+//!   which of their tools, and which app belongs to which connection
+//!   ([`AgentSettings`], TASK-99). Off by default, drafts only by
+//!   default. Raw JSON in the envelope for the same reason as
+//!   `refine`; a block that cannot be read is Agent off. How a
+//!   connection of the person's Claude Code is reached is never in
+//!   this file.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
 //!  load after upgrade and folded into the current `hotkeys` shape;
@@ -75,7 +82,8 @@
 //! about the computer), an ask does not trust the cache: it reads the
 //! file again when it starts ([`fresh_vision_settings`],
 //! [`fresh_ask_context`]), once the shell has said where the file is
-//! ([`set_settings_file`]).
+//! ([`set_settings_file`]). The Agent block is read the same way
+//! ([`fresh_agent_settings`]): it decides which tools an ask has.
 //!
 //! Cache hydration order (typical):
 //!   1. Shell resolves config-dir path at boot.
@@ -109,6 +117,15 @@ mod modes;
 pub use modes::{
     AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODE_INSTRUCTIONS_MAX_CHARS, MODE_NAME_MAX_CHARS,
     MODES_MAX, Mode, ModesSettings, app_key, mode_name_key, mode_slug,
+};
+
+mod agent;
+pub use agent::{
+    AGENT_APP_CONNECTIONS_MAX, AGENT_CONFIRM_TIMEOUT_DEFAULT_S, AGENT_CONFIRM_TIMEOUT_MAX_S,
+    AGENT_CONFIRM_TIMEOUT_MIN_S, AGENT_CONNECTIONS_MAX, AGENT_CUSTOM_FIELD_MAX_CHARS, AGENT_CUSTOM_ITEMS_MAX,
+    AGENT_MAX_TURNS_DEFAULT, AGENT_MAX_TURNS_MAX, AGENT_MAX_TURNS_MIN, AGENT_NAME_MAX_CHARS, AGENT_TOOLS_MAX,
+    AgentConnection, AgentConnectionKind, AgentSettings, AppConnection, CustomServer, ToolInfo,
+    connection_name_matches, default_app_connections,
 };
 
 mod vision;
@@ -294,6 +311,8 @@ struct SettingsFile {
     ask: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     vision: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,6 +470,7 @@ static HISTORY_CURRENT: Mutex<Option<HistorySettings>> = Mutex::new(None);
 static MODES_CURRENT: Mutex<Option<ModesSettings>> = Mutex::new(None);
 static ASK_CURRENT: Mutex<Option<AskSettings>> = Mutex::new(None);
 static VISION_CURRENT: Mutex<Option<VisionSettings>> = Mutex::new(None);
+static AGENT_CURRENT: Mutex<Option<AgentSettings>> = Mutex::new(None);
 
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
@@ -613,6 +633,30 @@ pub fn fresh_vision_settings() -> VisionSettings {
     }
 }
 
+/// The Agent block of a settings file: the defaults without one, and
+/// the defaults as well for a block that cannot be read. The defaults
+/// are Agent **off** and drafts only **on**, so a block nobody can
+/// read gives an ask no tools.
+fn agent_of(block: Option<serde_json::Value>) -> AgentSettings {
+    block.and_then(|v| serde_json::from_value::<AgentSettings>(v).ok()).unwrap_or_default().cleaned()
+}
+
+/// The Agent block as it is on disk right now, for the ask that is
+/// about to decide which tools it has. Same reason and same rules as
+/// [`fresh_vision_settings`]: `openwhisper agent config --enabled
+/// false`, `agent disallow` or `agent connections disable` from a
+/// terminal changes the file while the app runs, and a tool the
+/// person just took away must be gone for the very next ask.
+///
+/// The cache is not touched. Without a registered file, or when the
+/// file is missing or cannot be read, this is the cache.
+pub fn fresh_agent_settings() -> AgentSettings {
+    match fresh_file() {
+        Some(file) => agent_of(file.agent),
+        None => current_agent_settings(),
+    }
+}
+
 /// What an ask tells the model about this computer, as the Ask block
 /// on disk says right now. Same reason and same rules as
 /// [`fresh_vision_settings`]: `openwhisper ask config --context ...`
@@ -739,6 +783,7 @@ fn save_settings_locked(path: &Path, settings: HotkeySettings) -> Result<(), Str
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -785,6 +830,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = STATS_CURRENT.lock() {
@@ -833,6 +879,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -881,6 +928,7 @@ pub fn save_behavior_settings(
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -910,6 +958,7 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
@@ -961,6 +1010,7 @@ pub fn save_performance_settings(
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
@@ -1037,6 +1087,7 @@ pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<Ref
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = REFINE_CURRENT.lock() {
@@ -1107,6 +1158,7 @@ pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<H
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = HISTORY_CURRENT.lock() {
@@ -1178,6 +1230,7 @@ pub fn save_modes_settings(path: &Path, settings: ModesSettings) -> Result<Modes
         modes: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
         ask: file.ask.or_else(current_ask_json),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = MODES_CURRENT.lock() {
@@ -1249,6 +1302,7 @@ pub fn save_ask_settings(path: &Path, settings: AskSettings) -> Result<AskSettin
         modes: file.modes.or_else(current_modes_json),
         ask: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
         vision: file.vision.or_else(current_vision_json),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = ASK_CURRENT.lock() {
@@ -1318,9 +1372,80 @@ pub fn save_vision_settings(path: &Path, settings: VisionSettings) -> Result<Vis
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
         vision: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+        agent: file.agent.or_else(current_agent_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = VISION_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    Ok(settings)
+}
+
+/// The Agent block as last loaded or saved in this process; the
+/// defaults (off, drafts only, no connection) when nothing was loaded
+/// yet. An ask does not decide on this: it reads the file
+/// ([`fresh_agent_settings`]) and falls back to this cache only when
+/// the file says nothing.
+pub fn current_agent_settings() -> AgentSettings {
+    AGENT_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+}
+
+/// Seed the Agent cache without touching disk. For shells that
+/// resolve settings some other way, and for tests.
+pub fn set_agent_settings_cache(settings: AgentSettings) {
+    if let Ok(mut g) = AGENT_CURRENT.lock() {
+        *g = Some(settings.cleaned());
+    }
+}
+
+fn current_agent_json() -> Option<serde_json::Value> {
+    let current = AGENT_CURRENT.lock().ok().and_then(|g| g.clone())?;
+    serde_json::to_value(current).ok()
+}
+
+/// Read the Agent block from disk and cache it. Always re-reads, like
+/// [`load_vision_settings`]: the headless CLI (`openwhisper agent`)
+/// edits the same block. A missing block, and a block that cannot be
+/// read, yield the defaults: Agent off, drafts only.
+pub fn load_agent_settings(path: &Path) -> AgentSettings {
+    let settings = agent_of(read_file(path).agent);
+    if let Ok(mut g) = AGENT_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+/// Persist the Agent block (cleaned, see [`AgentSettings::cleaned`])
+/// and update the cache. Returns what was written. A connection of
+/// the person's Claude Code is written by name only: cleaning takes
+/// any details off it.
+pub fn save_agent_settings(path: &Path, settings: AgentSettings) -> Result<AgentSettings, String> {
+    let settings = settings.cleaned();
+    let _saving = saving();
+    let file = read_file(path);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill,
+        stats,
+        performance,
+        refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
+        ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
+        agent: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+    };
+    write_file(path, &merged)?;
+    if let Ok(mut g) = AGENT_CURRENT.lock() {
         *g = Some(settings.clone());
     }
     Ok(settings)
@@ -1368,7 +1493,7 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
 }
 
 /// Serializes the tests, in any module, that set a process-wide
-/// settings cache (Refine, modes, Ask, Vision, history, performance)
+/// settings cache (Refine, modes, Ask, Vision, Agent, history, performance)
 /// or the registered settings file, and then rely on what is in it.
 ///
 /// Every `save_*` writes the blocks the file does not have from these
@@ -1659,6 +1784,109 @@ mod tests {
         set_settings_file(None);
         set_vision_settings_cache(VisionSettings::default());
         set_ask_settings_cache(AskSettings::default());
+    }
+
+    #[test]
+    fn agent_block_saves_loads_rides_through_other_saves_and_is_read_fresh() {
+        let _hotkeys = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        // A file from before Agent existed: off, drafts only.
+        std::fs::write(&path, r#"{"stats":{"user_wpm":70},"ask":{"enabled":true}}"#).unwrap();
+        assert_eq!(load_agent_settings(&path), AgentSettings::default());
+
+        let secret = "tok-made-up-456";
+        let agent = AgentSettings {
+            enabled: true,
+            drafts_only: false,
+            max_turns: 900,
+            connections: vec![
+                // A connection of the person's Claude Code that
+                // somebody handed details: they are not written.
+                AgentConnection {
+                    name: "Team chat".into(),
+                    enabled: true,
+                    allowed_tools: vec!["read_thread".into()],
+                    tools: vec![ToolInfo::new("read_thread"), ToolInfo::new("send_message")],
+                    custom: Some(CustomServer {
+                        command: "chat-server".into(),
+                        env: std::collections::BTreeMap::from([("CHAT_TOKEN".to_string(), secret.to_string())]),
+                        ..CustomServer::default()
+                    }),
+                    ..AgentConnection::default()
+                },
+            ],
+            ..AgentSettings::default()
+        };
+        let written = save_agent_settings(&path, agent).unwrap();
+        assert_eq!(written.max_turns, AGENT_MAX_TURNS_MAX);
+        assert_eq!(written.connections[0].custom, None);
+        assert_eq!(current_agent_settings(), written);
+        assert_eq!(load_agent_settings(&path), written);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("Team chat") && raw.contains("read_thread"), "{raw}");
+        assert!(!raw.contains(secret) && !raw.contains("chat-server") && !raw.contains("CHAT_TOKEN"), "{raw}");
+
+        // Saves of other blocks keep it, and it keeps theirs.
+        save_stats_settings(&path, StatsSettings { user_wpm: 55 }).unwrap();
+        save_modes_settings(&path, ModesSettings::default()).unwrap();
+        save_refine_settings(&path, RefineSettings::default()).unwrap();
+        save_ask_settings(&path, AskSettings::default()).unwrap();
+        save_vision_settings(&path, VisionSettings::default()).unwrap();
+        save_history_settings(&path, HistorySettings::default()).unwrap();
+        update_hotkey_slot(&path, HotkeyTarget::Cancel, default_cancel_hotkey()).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let kept: AgentSettings = serde_json::from_value(on_disk.agent.unwrap()).unwrap();
+        assert_eq!(kept, written);
+        assert_eq!(on_disk.stats.unwrap().user_wpm, 55);
+        save_agent_settings(&path, written.clone()).unwrap();
+        assert_eq!(read_file(&path).stats.unwrap().user_wpm, 55);
+        assert!(read_file(&path).vision.is_some());
+
+        // Another process (the CLI) switches Agent off: the next ask
+        // reads the file, the cache still holds what was loaded.
+        set_settings_file(Some(&path));
+        assert_eq!(fresh_agent_settings(), written);
+        let mut off = written.clone();
+        off.enabled = false;
+        let mut file: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file["agent"] = serde_json::to_value(&off).unwrap();
+        std::fs::write(&path, file.to_string()).unwrap();
+        assert!(!fresh_agent_settings().enabled);
+        assert!(current_agent_settings().enabled);
+
+        // A block nobody can read: Agent is off and drafts only is
+        // on, and the siblings are left alone.
+        for raw in [
+            r#"{"agent":"on","stats":{"user_wpm":70}}"#,
+            r#"{"agent":{"enabled":true,"drafts_only":"no"},"stats":{"user_wpm":70}}"#,
+            r#"{"agent":{"enabled":true,"drafts_only":false,"connections":"all"},"stats":{"user_wpm":70}}"#,
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            let loaded = load_agent_settings(&path);
+            assert_eq!((loaded.enabled, loaded.drafts_only), (false, true), "{raw}");
+            assert_eq!(fresh_agent_settings(), AgentSettings::default(), "{raw}");
+            assert_eq!(read_file(&path).stats.unwrap().user_wpm, 70);
+        }
+        // A file that is not JSON says nothing: the cache.
+        set_agent_settings_cache(written.clone());
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(fresh_agent_settings(), written);
+
+        set_settings_file(None);
+        set_agent_settings_cache(AgentSettings::default());
+        set_vision_settings_cache(VisionSettings::default());
+        set_ask_settings_cache(AskSettings::default());
+        set_modes_settings_cache(ModesSettings::default());
+        set_refine_settings_cache(RefineSettings::default());
+        set_history_settings_cache(HistorySettings::default());
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
     }
 
     #[test]

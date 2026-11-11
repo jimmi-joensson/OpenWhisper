@@ -148,6 +148,96 @@ impl AskVision {
     }
 }
 
+impl AskVision {
+    /// [`AskVision::decide`] for an ask that is pointed at the
+    /// connection of the app in front (Agent, TASK-99): the content
+    /// is read through the connection, so the screen is captured
+    /// only when the person asked for it in so many words (a Vision
+    /// phrase, with Vision on), or the caller forces it. The smart
+    /// trigger and "every ask" do not apply: they are defaults, and
+    /// the app's own connection is the more specific choice.
+    pub(super) fn decide_routed(&self, question: &str) -> Step {
+        match self.choice {
+            VisionChoice::None => Step::NoCapture,
+            VisionChoice::Force => Step::Capture,
+            VisionChoice::Settings => said_a_phrase(&self.settings, question),
+        }
+    }
+
+    /// [`AskVision::prompt`] for such an ask. One prompt for both
+    /// outcomes wherever a phrase can still bring a screenshot, so
+    /// the backend warmed before the question is the one that
+    /// answers.
+    pub(super) fn prompt_routed(&self, has_image: bool) -> ScreenPrompt {
+        use crate::settings::VisionTrigger;
+        match self.choice {
+            VisionChoice::Force => ScreenPrompt::Attached,
+            VisionChoice::Settings if cfg!(feature = "vision") && self.settings.trigger != VisionTrigger::Off => {
+                ScreenPrompt::IfAttached
+            }
+            _ if has_image => ScreenPrompt::Attached,
+            _ => ScreenPrompt::None,
+        }
+    }
+}
+
+/// Capture when the question has one of the Vision phrases in it and
+/// Vision is not switched off; no capture otherwise.
+#[cfg(feature = "vision")]
+fn said_a_phrase(settings: &VisionSettings, question: &str) -> Step {
+    use crate::settings::VisionTrigger;
+    if settings.trigger == VisionTrigger::Off {
+        return Step::NoCapture;
+    }
+    match crate::vision::matched_phrase(&settings.effective_phrases(), question) {
+        Some(_) => Step::Capture,
+        None => Step::NoCapture,
+    }
+}
+
+#[cfg(not(feature = "vision"))]
+fn said_a_phrase(_settings: &VisionSettings, _question: &str) -> Step {
+    Step::NoCapture
+}
+
+/// An image that stands in for the screen in an eval
+/// ([`super::AskPlan::with_screen_stand_in`]): where an ask would
+/// take a screenshot it takes a copy of this, and how often it did
+/// is counted. Made of synthetic pixels by whoever builds it; with
+/// one in a plan, the real screen is not captured by that plan.
+#[derive(Clone, Debug)]
+pub(crate) struct StandIn {
+    image: AskImage,
+    taken: std::sync::Arc<AtomicUsize>,
+}
+
+impl StandIn {
+    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
+    pub(crate) fn new(image: AskImage) -> Self {
+        Self { image, taken: std::sync::Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// How many times an ask took the image in place of a capture.
+    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
+    pub(crate) fn taken(&self) -> usize {
+        self.taken.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn take(&self) -> AskImage {
+        self.taken.fetch_add(1, Ordering::SeqCst);
+        self.image.clone()
+    }
+}
+
+/// Two stand-ins are the same when they count in the same place.
+impl PartialEq for StandIn {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.taken, &other.taken)
+    }
+}
+
+impl Eq for StandIn {}
+
 #[cfg(feature = "vision")]
 fn from_settings(settings: &VisionSettings, question: &str) -> Step {
     use crate::vision::Decision;

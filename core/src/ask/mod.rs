@@ -75,6 +75,30 @@
 //! dictation pipeline ends in [`submit_listening`] with a transcript
 //! and has no other way in.
 //!
+//! **Tools (Agent, TASK-99).** An ask can be given tools that reach
+//! into the person's own apps (`crate::agent`, cargo feature
+//! `agent`, off by default in the settings). It is then still an
+//! ask: the same question, the same panel, the same answer that is
+//! never typed by itself. What is added shows on the snapshot:
+//!
+//! - every tool call is a step ([`AskStep`], [`AskSnapshot::steps`]);
+//! - a tool that sends, posts, deletes or changes something does not
+//!   run until the person said yes to exactly that call. While it
+//!   waits, the ask is `confirming` ([`AskPhase::Confirming`],
+//!   [`AskSnapshot::confirm`]); [`confirm_allow`] and
+//!   [`confirm_deny`] answer it, no answer in time is a no, and so
+//!   is a cancel;
+//! - where the ask looked for what the question is about
+//!   ([`ContextSource`]): when the app in front has a connection the
+//!   ask can use, it is pointed at that and takes no screenshot,
+//!   unless the person asked for the screen in so many words.
+//!
+//! The rule "an ask never changes anything" holds for every ask
+//! without tools exactly as before, with the same arguments to the
+//! CLI. An ask with tools can change something only through a tool
+//! the person ticked, and for anything but reading and drafting only
+//! after their yes.
+//!
 //! Entry points:
 //!
 //! - one ask at a time, process-wide, for the desktop app:
@@ -87,7 +111,9 @@
 //!   it saw a moment ago says which one ([`cancel_if`],
 //!   [`dismiss_if`]), so a new ask that started meanwhile is left
 //!   alone; the plain [`cancel`] and [`dismiss`] are for "whatever is
-//!   there now" (the cancel key).
+//!   there now" (the cancel key). A confirm is answered with
+//!   [`confirm_allow`] or [`confirm_deny`], which name the ask and
+//!   the confirm the same way.
 //! - the plain function for everything else (the CLI, the eval set):
 //!   [`answer`], or [`AskPlan`] when the backend should be warmed
 //!   first ([`AskPlan::send_and_record`] to keep what the app keeps
@@ -115,11 +141,18 @@ pub mod hint;
 pub mod openai_compat;
 pub mod prompt;
 mod screen;
+pub(crate) mod steps;
 pub(crate) mod wipe;
 
 pub use crate::refine::CallUsage;
 pub use prompt::ScreenPrompt;
 pub use screen::{AskCaptureToken, NEED_SCREEN, ScreenState, VisionChoice};
+#[cfg(feature = "agent")]
+pub(crate) use screen::StandIn;
+pub use steps::{
+    AskConfirm, AskStep, CONFIRM_INPUT_MAX_CHARS, ConfirmDecision, ConfirmOutcome, ContextSource, STEP_LINE_MAX_CHARS,
+    StepState, ToolKind, answer_confirm,
+};
 
 use crate::settings::VisionSettings;
 use screen::{Shot, Step};
@@ -197,6 +230,21 @@ pub enum AskEvent {
     /// ([`AskReply::suggestion`]). Sent once, as soon as it is known,
     /// which is before the text of the answer.
     Suggestion(AskSuggestion),
+    /// A tool call started, or changed (an ask with tools). It takes
+    /// the place of the step with the same [`AskStep::id`], or is a
+    /// new one.
+    Step(AskStep),
+    /// A tool call waits for the person's yes or no. Whoever shows
+    /// it answers with [`answer_confirm`] (the app's own ask:
+    /// [`confirm_allow`], [`confirm_deny`]). An answer given from
+    /// inside the sink is found at once.
+    Confirm(AskConfirm),
+    /// That confirm is over, and how.
+    ConfirmClosed { request_id: String, outcome: ConfirmOutcome },
+    /// Where the ask looks for what the question is about, when that
+    /// is a connection. Sent once, before anything goes to the
+    /// model.
+    Context(ContextSource),
 }
 
 /// Something the person could do to get a better answer next time.
@@ -253,6 +301,11 @@ pub struct AskReply {
     pub screen_notice: String,
     /// See [`AskSuggestion`]. `None` most of the time.
     pub suggestion: Option<AskSuggestion>,
+    /// The tool calls of this ask, in the order they were made, each
+    /// as it ended. Empty for an ask without tools.
+    pub steps: Vec<AskStep>,
+    /// Where the ask looked for what the question is about.
+    pub context_source: ContextSource,
 }
 
 /// Why there is no answer.
@@ -431,6 +484,8 @@ impl<'a> Turn<'a> {
             screen: ScreenState::None,
             screen_notice: String::new(),
             suggestion: None,
+            steps: Vec::new(),
+            context_source: ContextSource::None,
         }
     }
 }
@@ -494,6 +549,33 @@ pub struct AskPlan {
     /// When it is off, the reason for a missing screenshot does not
     /// name the protected app that is in front either.
     names_front_app: bool,
+    /// The tools of this ask, when it has any (Agent, TASK-99;
+    /// [`AskPlan::with_agent`]). `None` = an ask without tools: the
+    /// ask from before Agent, with the same prompt and the same
+    /// arguments to the CLI.
+    #[cfg(feature = "agent")]
+    agent: Option<crate::agent::AgentRun>,
+    /// What the system prompt says about those tools
+    /// ([`prompt::Extras::tools`]). Empty for an ask without tools.
+    tools_prompt: String,
+    /// The connection this ask is pointed at, because the app in
+    /// front has one. Then no screenshot is taken unless the person
+    /// asked for the screen in so many words.
+    routed_to: Option<String>,
+    /// An image that stands in for the screen ([`screen::StandIn`]).
+    stand_in: Option<screen::StandIn>,
+}
+
+/// What an ask did besides answering, known also when there is no
+/// answer: whether a screenshot was taken, which tools were called,
+/// where it looked for its context. It is what the diagnostics row
+/// records ([`Outcome::record`]), so an ask that took a screenshot or
+/// called a tool and then failed or was cancelled still says so.
+#[derive(Clone, Debug, Default)]
+struct Trace {
+    screen: ScreenState,
+    steps: Vec<AskStep>,
+    context_source: ContextSource,
 }
 
 /// The markers one turn of an ask looks for in the reply.
@@ -602,6 +684,11 @@ impl AskPlan {
             today: today.to_string(),
             vision: screen::AskVision::default(),
             names_front_app: ask.context.front_app,
+            #[cfg(feature = "agent")]
+            agent: None,
+            tools_prompt: String::new(),
+            routed_to: None,
+            stand_in: None,
         };
         plan.setup.system = plan.system_for(plan.screen_prompt(false));
         plan
@@ -644,10 +731,72 @@ impl AskPlan {
         self.vision.choice
     }
 
+    /// The same plan as an ask with tools (Agent, TASK-99): `run` is
+    /// what `crate::agent::AgentRun::for_ask` (the app) or
+    /// `AgentRun::new` (`openwhisper agent run`) made of the Agent
+    /// settings and the app in front. With `None`, and with any
+    /// backend but the Claude CLI, the plan stays an ask without
+    /// tools.
+    ///
+    /// What changes:
+    ///
+    /// - the backend is the CLI started with the run's connections
+    ///   and nothing else (`crate::agent::claude`);
+    /// - the prompt says which tools there are and what the rules
+    ///   for them are (`crate::agent::prompt`);
+    /// - the timeout is doubled: an ask that calls tools asks the
+    ///   model more than once. The time a confirm waits for the
+    ///   person does not count against it;
+    /// - when the app in front has one of the run's connections
+    ///   ([`crate::agent::AgentRun::route`]), the ask is pointed at
+    ///   that connection and takes no screenshot, whatever the
+    ///   Vision trigger says, unless the question has one of the
+    ///   Vision phrases in it (or the caller forces the screen).
+    ///
+    /// Call it once, on a plan that has no tools yet.
+    #[cfg(feature = "agent")]
+    pub fn with_agent(mut self, run: Option<crate::agent::AgentRun>) -> Self {
+        let run = run.filter(|_| self.backend != RefineBackendKind::OpenaiCompatible);
+        if run.is_some() && self.agent.is_none() {
+            let doubled = self.timeout.saturating_mul(2);
+            self.timeout = doubled.min(Duration::from_millis(ASK_TIMEOUT_MAX_MS * 2));
+        }
+        self.tools_prompt = run.as_ref().map_or(String::new(), |run| crate::agent::prompt::section(run, self.names_front_app));
+        self.routed_to = run.as_ref().and_then(|run| run.route.as_ref()).map(|route| route.connection.clone());
+        self.agent = run;
+        self.setup.system = self.system_for(self.screen_prompt(false));
+        self
+    }
+
+    /// The tools of this plan, when it is an ask with tools.
+    #[cfg(feature = "agent")]
+    pub fn agent(&self) -> Option<&crate::agent::AgentRun> {
+        self.agent.as_ref()
+    }
+
+    /// Where this ask will look for what the question is about, as
+    /// far as that is known before the question: the connection of
+    /// the app in front, when the plan is pointed at one.
+    pub fn routed_to(&self) -> Option<&str> {
+        self.routed_to.as_deref()
+    }
+
+    /// The same plan with `image` standing in for the screen: where
+    /// the ask would take a screenshot, it takes this image instead,
+    /// and the real screen is never captured. For the eval sets,
+    /// which must see what an ask does about the screen without
+    /// looking at anybody's.
+    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
+    pub(crate) fn with_screen_stand_in(mut self, stand_in: screen::StandIn) -> Self {
+        self.stand_in = Some(stand_in);
+        self
+    }
+
     /// What the prompt says about the screen
-    /// ([`screen::AskVision::prompt`]).
+    /// ([`screen::AskVision::prompt`]; for an ask that is pointed at
+    /// a connection [`screen::AskVision::prompt_routed`]).
     fn screen_prompt(&self, has_image: bool) -> ScreenPrompt {
-        self.vision.prompt(has_image)
+        if self.routed_to.is_some() { self.vision.prompt_routed(has_image) } else { self.vision.prompt(has_image) }
     }
 
     /// What this ask can do about the web, as the prompt says it.
@@ -665,7 +814,12 @@ impl AskPlan {
     /// rule are the same in the prompt a backend is warmed with and
     /// in the prompt the question goes out with.
     fn system_for(&self, screen: ScreenPrompt) -> String {
-        let extras = prompt::Extras { context: &self.context, no_long_dashes: self.no_long_dashes, screen };
+        let extras = prompt::Extras {
+            context: &self.context,
+            no_long_dashes: self.no_long_dashes,
+            screen,
+            tools: &self.tools_prompt,
+        };
         prompt::system_prompt_with(&self.instructions, &self.terms, self.web_access(), &self.today, extras)
     }
 
@@ -739,6 +893,10 @@ impl AskPlan {
         if let Some(make) = test_support::factory() {
             return make(self);
         }
+        #[cfg(feature = "agent")]
+        if let Some(run) = &self.agent {
+            return Box::new(crate::agent::claude::ClaudeAgent::new(self.claude_cli.clone(), run.clone()));
+        }
         match self.backend {
             RefineBackendKind::OpenaiCompatible => Box::new(openai_compat::OpenAiAsk::new(
                 self.openai.clone(),
@@ -790,14 +948,27 @@ impl AskPlan {
         self.converse(None, backend, question, sink, cancel).0
     }
 
+    /// Where an ask of this plan looked, given what became of the
+    /// screen: the connection it is pointed at, else the screen when
+    /// a screenshot went out (or the caller brought an image), else
+    /// nowhere.
+    fn context_source(&self, screen: ScreenState, brought_image: bool) -> ContextSource {
+        match &self.routed_to {
+            Some(name) => ContextSource::Connection { name: name.clone() },
+            None if screen == ScreenState::Included || brought_image => ContextSource::Screen,
+            None => ContextSource::None,
+        }
+    }
+
     /// One ask from the question to the answer: one turn, or two when
     /// the model asked for the screen. `session` is the id of the
     /// app's ask this is, `None` outside the app's session.
     ///
-    /// Next to the result: what became of the screen. It is known
-    /// also when there is no answer, and that is the point: an ask
-    /// that took a screenshot and then failed or was cancelled still
-    /// says so on its diagnostics row ([`Outcome::record`]).
+    /// Next to the result: what the ask did besides answering
+    /// ([`Trace`]). It is known also when there is no answer, and
+    /// that is the point: an ask that took a screenshot or called a
+    /// tool and then failed or was cancelled still says so on its
+    /// diagnostics row ([`Outcome::record`]).
     fn converse(
         &self,
         session: Option<u64>,
@@ -805,12 +976,17 @@ impl AskPlan {
         question: &AskInput,
         sink: &mut dyn FnMut(AskEvent),
         cancel: &CancelFlag,
-    ) -> (Result<AskReply, AskError>, ScreenState) {
+    ) -> (Result<AskReply, AskError>, Trace) {
         if question.text.trim().is_empty() && question.images.is_empty() {
-            return (Err(AskError::Backend(NO_QUESTION.to_string())), ScreenState::None);
+            return (Err(AskError::Backend(NO_QUESTION.to_string())), Trace::default());
         }
         let mut seen = ScreenSeen::default();
         let mut turns = 1;
+        // The tool calls, as the backend reports them.
+        let mut steps: Vec<AskStep> = Vec::new();
+        if let Some(name) = &self.routed_to {
+            sink(AskEvent::Context(ContextSource::Connection { name: name.clone() }));
+        }
         // The net under the dash rule of the prompt: text passes
         // through it on its way to the sink, so the panel never shows
         // a dash that the finished answer then has not. It sits after
@@ -818,14 +994,19 @@ impl AskPlan {
         // as the model wrote it.
         let mut dashes = self.no_long_dashes.then(crate::dashes::Normalizer::new);
         let result = {
-            let mut out = |event: AskEvent| match (dashes.as_mut(), event) {
-                (Some(dashes), AskEvent::Text(piece)) => {
-                    let piece = dashes.push(&piece);
-                    if !piece.is_empty() {
-                        sink(AskEvent::Text(piece));
-                    }
+            let mut out = |event: AskEvent| {
+                if let AskEvent::Step(step) = &event {
+                    steps::upsert(&mut steps, step.clone());
                 }
-                (_, event) => sink(event),
+                match (dashes.as_mut(), event) {
+                    (Some(dashes), AskEvent::Text(piece)) => {
+                        let piece = dashes.push(&piece);
+                        if !piece.is_empty() {
+                            sink(AskEvent::Text(piece));
+                        }
+                    }
+                    (_, event) => sink(event),
+                }
             };
             self.exchange(session, backend, question, &mut out, cancel, &mut seen, &mut turns)
         };
@@ -842,7 +1023,7 @@ impl AskPlan {
         // Lengths only, never the text: verbose logs end up in bug
         // reports.
         crate::verbose_log!(
-            "[ow.ask] backend={} ok={} chars_in={} chars_out={} first_text_ms={:?} ms={:?} turns={} screen={}",
+            "[ow.ask] backend={} ok={} chars_in={} chars_out={} first_text_ms={:?} ms={:?} turns={} screen={} tools={}",
             backend.id(),
             result.is_ok(),
             question.text.trim().chars().count(),
@@ -850,9 +1031,14 @@ impl AskPlan {
             result.as_ref().ok().and_then(|r| r.first_text_ms),
             result.as_ref().ok().map(|r| r.elapsed_ms),
             turns,
-            seen.state.as_str()
+            seen.state.as_str(),
+            steps.len()
         );
-        let screen = seen.state;
+        let trace = Trace {
+            screen: seen.state,
+            context_source: self.context_source(seen.state, !question.images.is_empty()),
+            steps,
+        };
         let result = result.and_then(|mut reply| {
             if reply.text.is_empty() {
                 return Err(AskError::Backend(NO_ANSWER.to_string()));
@@ -862,9 +1048,11 @@ impl AskPlan {
             }
             reply.screen = seen.state;
             reply.screen_notice = seen.notice;
+            reply.steps = trace.steps.clone();
+            reply.context_source = trace.context_source.clone();
             Ok(reply)
         });
-        (result, screen)
+        (result, trace)
     }
 
     /// The turns of one ask: the question, and when the model asked
@@ -883,7 +1071,15 @@ impl AskPlan {
     ) -> Result<AskReply, AskError> {
         let started = Instant::now();
         let mut images = question.images.clone();
-        let step = if images.is_empty() { self.vision.decide(&question.text) } else { Step::NoCapture };
+        let step = if !images.is_empty() {
+            Step::NoCapture
+        } else if self.routed_to.is_some() {
+            // The app in front has a connection: the screen only
+            // when the person asked for it in so many words.
+            self.vision.decide_routed(&question.text)
+        } else {
+            self.vision.decide(&question.text)
+        };
         if step == Step::Capture {
             images.extend(self.capture(session, seen, sink));
             if cancel.is_cancelled() {
@@ -941,6 +1137,13 @@ impl AskPlan {
         sink: &mut dyn FnMut(AskEvent),
     ) -> Option<AskImage> {
         sink(AskEvent::Screen { state: ScreenState::Capturing, notice: String::new() });
+        if let Some(stand_in) = &self.stand_in {
+            // An eval: its own image, and the real screen is left
+            // alone.
+            seen.state = ScreenState::Included;
+            sink(AskEvent::Screen { state: ScreenState::Included, notice: String::new() });
+            return Some(stand_in.take());
+        }
         // The proof that an ask is asking. Made here, used once.
         let token = match session {
             Some(id) => AskCaptureToken::for_session(id),
@@ -1028,7 +1231,7 @@ impl AskPlan {
     ) -> Result<AskReply, AskError> {
         let at_ms = now_ms();
         let sent = Instant::now();
-        let (result, screen) = {
+        let (result, trace) = {
             // A screenshot may only be taken while this guard lives.
             let _ask = screen::OneShot::begin();
             self.converse(None, backend, question, sink, cancel)
@@ -1038,7 +1241,7 @@ impl AskPlan {
             backend_id: backend.id(),
             question: &question.text,
             result: &result,
-            screen,
+            trace: &trace,
             accepted: result.is_ok(),
             at_ms,
             elapsed_ms: sent.elapsed().as_millis() as u64,
@@ -1081,6 +1284,8 @@ fn both_turns(first: AskReply, second: AskReply, before: Duration, total: Durati
         suggestion: second.suggestion.or(first.suggestion),
         screen: ScreenState::None,
         screen_notice: String::new(),
+        steps: Vec::new(),
+        context_source: ContextSource::None,
     }
 }
 
@@ -1202,6 +1407,10 @@ pub enum AskPhase {
     Thinking,
     /// The answer is streaming in.
     Answering,
+    /// A tool call waits for the person's yes or no
+    /// ([`AskSnapshot::confirm`]). Nothing else happens until they
+    /// answer, the confirm runs out of time, or the ask is cancelled.
+    Confirming,
     /// The answer is complete.
     Done,
     /// There is no answer; [`AskSnapshot::error`] says why.
@@ -1218,6 +1427,7 @@ impl AskPhase {
             Self::Listening => "listening",
             Self::Thinking => "thinking",
             Self::Answering => "answering",
+            Self::Confirming => "confirming",
             Self::Done => "done",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
@@ -1226,7 +1436,13 @@ impl AskPhase {
 
     /// Something is in flight that a cancel would stop.
     pub fn is_busy(self) -> bool {
-        matches!(self, Self::Listening | Self::Thinking | Self::Answering)
+        matches!(self, Self::Listening | Self::Thinking | Self::Answering | Self::Confirming)
+    }
+
+    /// The question is with the model: it thinks, answers, or waits
+    /// on a confirm.
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Thinking | Self::Answering | Self::Confirming)
     }
 }
 
@@ -1278,6 +1494,17 @@ pub struct AskSnapshot {
     /// Why there is no screenshot, as one sentence for the person.
     /// Empty unless `screen` is `blocked` or `unavailable`.
     pub screen_notice: String,
+    /// The tool calls of this ask so far, in the order they were
+    /// made (an ask with tools; empty otherwise). A step changes in
+    /// place: `running` or `waiting`, then `done`, `failed` or
+    /// `denied`. Kept when the ask ends, however it ends.
+    pub steps: Vec<AskStep>,
+    /// The tool call that waits for the person right now, with its
+    /// whole input. Set exactly while the phase is `confirming`.
+    pub confirm: Option<AskConfirm>,
+    /// Where the ask looked for what the question is about: nowhere,
+    /// the screen, or the connection of the app in front.
+    pub context_source: ContextSource,
     /// Goes up on every change, so a shell can emit only on change.
     pub version: u64,
 }
@@ -1287,6 +1514,58 @@ struct Warm {
     backend: Box<dyn AskBackend>,
     /// The context settings the facts in `plan` were read with.
     context_settings: crate::settings::ContextSettings,
+    /// The app that was in front when the recording started, as far
+    /// as it was read ([`front_app`]): what the tools of the ask are
+    /// routed by.
+    front: Option<(String, String)>,
+}
+
+/// The app the person is working in, as `(id, name)`: `None` when it
+/// cannot be read or when it is OpenWhisper itself. Never the title
+/// of the window.
+#[cfg(feature = "focus")]
+fn front_app() -> Option<(String, String)> {
+    let focus = crate::focus::current_app();
+    let name = focus.app_name.trim().to_string();
+    (!focus.is_self && !(focus.app_id.trim().is_empty() && name.is_empty())).then(|| (focus.app_id.trim().to_string(), name))
+}
+
+#[cfg(not(feature = "focus"))]
+fn front_app() -> Option<(String, String)> {
+    None
+}
+
+/// Agent is switched on in the settings file as it is right now, so
+/// the app in front is worth reading for it.
+#[cfg(feature = "agent")]
+fn agent_is_on() -> bool {
+    crate::settings::fresh_agent_settings().enabled
+}
+
+#[cfg(not(feature = "agent"))]
+fn agent_is_on() -> bool {
+    false
+}
+
+/// `plan` as the app's ask uses it: with the tools the Agent settings
+/// give it, as they are **on disk** right now
+/// ([`crate::settings::fresh_agent_settings`], for the reason
+/// [`with_session_vision`] gives: a tool the person just took away
+/// from a terminal must be gone for the ask that comes next), and
+/// with `front` as the app the person is working in. An ask that is
+/// not an agent ask (`crate::agent::AgentRun::for_ask`) comes back
+/// unchanged.
+#[cfg(feature = "agent")]
+fn with_session_agent(plan: AskPlan, front: Option<&(String, String)>) -> AskPlan {
+    let settings = crate::settings::fresh_agent_settings();
+    let front = front.map(|(id, name)| crate::agent::FrontApp::new(id, name));
+    let run = crate::agent::AgentRun::for_ask(&settings, plan.backend, front.as_ref());
+    plan.with_agent(run)
+}
+
+#[cfg(not(feature = "agent"))]
+fn with_session_agent(plan: AskPlan, _front: Option<&(String, String)>) -> AskPlan {
+    plan
 }
 
 /// The name of the app the person is working in, for the device
@@ -1318,7 +1597,7 @@ struct Session {
 
 impl Session {
     fn running(&self, id: u64) -> bool {
-        self.snap.id == id && matches!(self.snap.phase, AskPhase::Thinking | AskPhase::Answering)
+        self.snap.id == id && self.snap.phase.is_running()
     }
 
     fn listening(&self, id: u64) -> bool {
@@ -1425,10 +1704,16 @@ pub fn warm_listening(id: u64) {
     let ask = session_ask_settings();
     // The facts about the computer are read here, when the person
     // starts to talk: the answer panel never takes focus, so the app
-    // in front is the one they are working in.
-    let front_app = ask.context.front_app.then(front_app_name).flatten();
-    let plan =
-        with_session_vision(AskPlan::for_app(&ask, &crate::settings::current_refine_settings(), front_app.as_deref()));
+    // in front is the one they are working in. It is read once, for
+    // the facts (its name, when that fact is on) and for the tools
+    // of an agent ask (which connection belongs to it).
+    let front = (ask.context.front_app || agent_is_on()).then(front_app).flatten();
+    let front_name =
+        front.as_ref().filter(|_| ask.context.front_app).map(|(_, name)| name.clone()).filter(|name| !name.is_empty());
+    let plan = with_session_agent(
+        with_session_vision(AskPlan::for_app(&ask, &crate::settings::current_refine_settings(), front_name.as_deref())),
+        front.as_ref(),
+    );
     let mut backend = plan.backend();
     backend.warm(&plan.setup);
     crate::verbose_log!(
@@ -1437,7 +1722,7 @@ pub fn warm_listening(id: u64) {
         started.elapsed().as_millis(),
         plan.setup.web_search
     );
-    let mut slot = Some(Warm { plan, backend, context_settings: ask.cleaned().context });
+    let mut slot = Some(Warm { plan, backend, context_settings: ask.cleaned().context, front });
     read(|s| {
         if s.listening(id) {
             s.warm = slot.take();
@@ -1565,6 +1850,7 @@ fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
                 s.snap.error = STOPPED.to_string();
                 s.snap.searching = false;
                 settle_screen(&mut s.snap);
+                settle_steps(&mut s.snap);
                 s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
             }
         });
@@ -1578,6 +1864,34 @@ fn settle_screen(snap: &mut AskSnapshot) {
     if snap.screen == ScreenState::Capturing {
         snap.screen = ScreenState::None;
     }
+}
+
+/// The ask ended without an answer: nothing waits for the person any
+/// more, and no step stays "running" or "waiting" on a snapshot that
+/// will not change again. A call that waited did not run. Of a call
+/// that was running nothing more is known: the process it ran in is
+/// gone.
+fn settle_steps(snap: &mut AskSnapshot) {
+    snap.confirm = None;
+    for step in &mut snap.steps {
+        match step.state {
+            StepState::Waiting => {
+                step.state = StepState::Denied;
+                step.outcome = "The ask ended before you answered, so it was not done.".to_string();
+            }
+            StepState::Running => {
+                step.state = StepState::Failed;
+                step.outcome = "The ask ended while this was running, so its result is not known.".to_string();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The phase an ask goes back to when a confirm is over: `answering`
+/// when text has already arrived, `thinking` otherwise.
+fn after_confirm(snap: &AskSnapshot) -> AskPhase {
+    if snap.answer.trim().is_empty() { AskPhase::Thinking } else { AskPhase::Answering }
 }
 
 /// [`run`] without the net under it.
@@ -1602,7 +1916,17 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         _ => context_preview(&ask),
     };
     let terms = crate::dictionary::current_matcher();
-    let plan = with_session_vision(AskPlan::with_context(&ask, &refine, terms.prompt_terms(), &facts));
+    // The app in front, for the tools of an agent ask: the one read
+    // when the recording started, like the facts. A typed question
+    // reads it now.
+    let front = match &warm {
+        Some(warm) => warm.front.clone(),
+        None => agent_is_on().then(front_app).flatten(),
+    };
+    let plan = with_session_agent(
+        with_session_vision(AskPlan::with_context(&ask, &refine, terms.prompt_terms(), &facts)),
+        front.as_ref(),
+    );
     // The backend warmed while the person talked is used when it was
     // warmed for exactly this plan, which is every ask where no
     // setting or dictionary term changed meanwhile.
@@ -1652,12 +1976,33 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                 AskEvent::Screen { state, notice } => {
                     s.snap.screen = state;
                     s.snap.screen_notice = notice;
+                    if state == ScreenState::Included && s.snap.context_source == ContextSource::None {
+                        s.snap.context_source = ContextSource::Screen;
+                    }
                 }
                 AskEvent::Suggestion(suggestion) => s.snap.suggestion = Some(suggestion),
+                AskEvent::Step(step) => steps::upsert(&mut s.snap.steps, step),
+                AskEvent::Confirm(confirm) => {
+                    s.snap.confirm = Some(confirm);
+                    s.snap.phase = AskPhase::Confirming;
+                    s.snap.searching = false;
+                }
+                AskEvent::ConfirmClosed { request_id, .. } => {
+                    // `confirm_allow` and `confirm_deny` have
+                    // usually done this already; a confirm that ran
+                    // out of time ends here.
+                    if s.snap.confirm.as_ref().is_some_and(|c| c.request_id == request_id) {
+                        s.snap.confirm = None;
+                    }
+                    if s.snap.phase == AskPhase::Confirming && s.snap.confirm.is_none() {
+                        s.snap.phase = after_confirm(&s.snap);
+                    }
+                }
+                AskEvent::Context(source) => s.snap.context_source = source,
             }
         });
     };
-    let (result, screen) = plan.converse(Some(id), backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
+    let (result, trace) = plan.converse(Some(id), backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
     // One ask is one conversation: the process goes with the answer.
     drop(backend);
     let elapsed_ms = sent.elapsed().as_millis() as u64;
@@ -1669,12 +2014,15 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
             return false;
         }
         match s.snap.phase {
-            AskPhase::Thinking | AskPhase::Answering => {
+            AskPhase::Thinking | AskPhase::Answering | AskPhase::Confirming => {
                 s.snap.searching = false;
                 s.snap.elapsed_ms = elapsed_ms;
                 s.sent = None;
+                s.snap.confirm = None;
                 match &result {
                     Ok(reply) => {
+                        s.snap.steps = reply.steps.clone();
+                        s.snap.context_source = reply.context_source.clone();
                         s.snap.answer = reply.text.clone();
                         s.snap.notice = reply.notice.clone();
                         s.snap.suggestion = reply.suggestion;
@@ -1687,11 +2035,13 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     }
                     Err(AskError::Cancelled) => {
                         settle_screen(&mut s.snap);
+                        settle_steps(&mut s.snap);
                         s.snap.phase = AskPhase::Cancelled;
                         false
                     }
                     Err(e) => {
                         settle_screen(&mut s.snap);
+                        settle_steps(&mut s.snap);
                         s.snap.error = error_text(e, &plan);
                         s.snap.phase = AskPhase::Error;
                         false
@@ -1713,7 +2063,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         backend_id,
         question,
         result: &result,
-        screen,
+        trace: &trace,
         accepted,
         at_ms: started_at_ms,
         elapsed_ms,
@@ -1730,8 +2080,9 @@ struct Outcome<'a> {
     /// As it was sent, before the fence.
     question: &'a str,
     result: &'a Result<AskReply, AskError>,
-    /// What became of the screen, known also when there is no reply.
-    screen: ScreenState,
+    /// What the ask did besides answering, known also when there is
+    /// no reply.
+    trace: &'a Trace,
     /// The answer counted: it was not cancelled, dismissed or
     /// replaced in its last moment.
     accepted: bool,
@@ -1759,13 +2110,13 @@ impl Outcome<'_> {
             self.backend_id,
             self.question,
             self.result,
-            self.screen,
+            self.trace,
             self.at_ms,
             self.elapsed_ms,
         ));
         if let (true, true, Ok(reply)) = (history, self.accepted, self.result) {
             let screen = reply.screen == ScreenState::Included;
-            keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms, screen);
+            keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms, screen, &reply.steps);
         }
     }
 }
@@ -1785,7 +2136,10 @@ fn error_text(e: &AskError, plan: &AskPlan) -> String {
 /// And whether a screenshot was taken (`screen`): that is on the row
 /// of every ask, also one that failed or was cancelled after the
 /// capture. The transcript history only keeps asks that finished, so
-/// this row is the record that a screenshot existed at all.
+/// this row is the record that a screenshot existed at all. The same
+/// goes for the tools of an agent ask: how many calls were made, and
+/// where the ask looked for its context (never which tools, their
+/// input or their results).
 #[allow(clippy::too_many_arguments)]
 fn run_record(
     status: &str,
@@ -1793,7 +2147,7 @@ fn run_record(
     backend_id: &str,
     question: &str,
     result: &Result<AskReply, AskError>,
-    screen: ScreenState,
+    trace: &Trace,
     at_ms: i64,
     elapsed_ms: u64,
 ) -> RefineRun {
@@ -1826,7 +2180,9 @@ fn run_record(
         window_7d_resets_at: windows.and_then(|p| p.seven_day_resets_at),
         mode: None,
         first_text_ms: reply.and_then(|r| r.first_text_ms).map(|ms| ms as i64),
-        screen: Some(screen == ScreenState::Included),
+        screen: Some(trace.screen == ScreenState::Included),
+        context_source: Some(trace.context_source.label()),
+        tool_calls: Some(trace.steps.len() as i64),
     }
 }
 
@@ -1834,12 +2190,22 @@ fn run_record(
 /// the entry's text, the answer under it ([`crate::history`]).
 /// Cancelled and failed asks are not kept. `screen`: a screenshot
 /// went out with the question, which the entry says (the image itself
-/// is kept nowhere).
-fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, screen: bool) {
+/// is kept nowhere). `steps`: the tool calls of an agent ask, of
+/// which the entry keeps the tool and how the call ended, never its
+/// input or its result.
+fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, screen: bool, steps: &[AskStep]) {
     let settings = crate::settings::current_history_settings();
     let Some(dir) = crate::history::current_dir() else {
         return;
     };
+    let tools: Vec<crate::history::HistoryTool> = steps
+        .iter()
+        .map(|step| crate::history::HistoryTool {
+            connection: step.connection.clone(),
+            tool: step.tool.clone(),
+            outcome: step.state.as_str().to_string(),
+        })
+        .collect();
     if settings.enabled {
         let entry = crate::history::NewEntry {
             at_ms: if at_ms > 0 { at_ms } else { now_ms() },
@@ -1852,6 +2218,7 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, scr
             kind: crate::history::KIND_ASK,
             answer: Some(answer),
             screen,
+            tools: &tools,
         };
         if let Err(e) = crate::history::append(&dir, &entry) {
             eprintln!("[history] could not save the ask: {e}");
@@ -1865,7 +2232,8 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, scr
 
 /// Stop the current ask. While the model is working, the request is
 /// killed and the phase goes to `cancelled` at once (what has arrived
-/// of the answer stays on the snapshot). While `listening`, the ask
+/// of the answer stays on the snapshot). A tool call that was waiting
+/// for a yes or no is refused, and never runs. While `listening`, the ask
 /// is simply gone: back to `idle`, and the transcript of that
 /// recording will not be sent. In any other phase nothing happens.
 /// Returns whether there was something to stop.
@@ -1890,11 +2258,15 @@ fn cancel_current(only: Option<u64>) -> bool {
         }
         match s.snap.phase {
             AskPhase::Listening => (true, s.reset()),
-            AskPhase::Thinking | AskPhase::Answering => {
+            AskPhase::Thinking | AskPhase::Answering | AskPhase::Confirming => {
+                // A confirm that waits is a no from here on: the
+                // backend sees the flag, tells the CLI so, and ends
+                // the process.
                 s.cancel.cancel();
                 s.snap.phase = AskPhase::Cancelled;
                 s.snap.searching = false;
                 settle_screen(&mut s.snap);
+                settle_steps(&mut s.snap);
                 s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
                 (true, None)
             }
@@ -1944,11 +2316,46 @@ pub fn fail_listening(id: u64, reason: &str) -> bool {
     failed
 }
 
+/// Say yes to the confirm `request_id` of the ask `ask_id`: the tool
+/// runs, with exactly the input the confirm showed. Only while that
+/// ask is the current one and that confirm is the one it is waiting
+/// on ([`AskSnapshot::confirm`]); returns whether it was. A click
+/// that arrives late (the confirm ran out of time, the ask was
+/// cancelled or replaced) changes nothing, and neither does a second
+/// answer to the same confirm.
+pub fn confirm_allow(ask_id: u64, request_id: &str) -> bool {
+    confirm_answer(ask_id, request_id, ConfirmDecision::Allow)
+}
+
+/// Say no to the confirm `request_id` of the ask `ask_id`: the tool
+/// does not run, the model is told so, and the ask goes on to its
+/// answer. Scoped like [`confirm_allow`].
+pub fn confirm_deny(ask_id: u64, request_id: &str) -> bool {
+    confirm_answer(ask_id, request_id, ConfirmDecision::Deny)
+}
+
+fn confirm_answer(ask_id: u64, request_id: &str, decision: ConfirmDecision) -> bool {
+    change(|s| {
+        let on_show = s.snap.id == ask_id
+            && s.snap.phase == AskPhase::Confirming
+            && s.snap.confirm.as_ref().is_some_and(|c| c.request_id == request_id);
+        if !on_show || !steps::answer_confirm(request_id, decision) {
+            return false;
+        }
+        // At once, so the panel closes the confirm and a second
+        // click finds nothing to answer. What became of the step
+        // follows from the backend a moment later.
+        s.snap.confirm = None;
+        s.snap.phase = after_confirm(&s.snap);
+        true
+    })
+}
+
 /// The current ask.
 pub fn snapshot() -> AskSnapshot {
     read(|s| {
         let mut snap = s.snap.clone();
-        if let Some(sent) = s.sent.filter(|_| matches!(snap.phase, AskPhase::Thinking | AskPhase::Answering)) {
+        if let Some(sent) = s.sent.filter(|_| snap.phase.is_running()) {
             snap.elapsed_ms = sent.elapsed().as_millis() as u64;
         }
         snap
@@ -2013,6 +2420,7 @@ pub(crate) mod test_support {
             crate::settings::set_ask_settings_cache(AskSettings::default());
             crate::settings::set_refine_settings_cache(RefineSettings::default());
             crate::settings::set_vision_settings_cache(VisionSettings::default());
+            crate::settings::set_agent_settings_cache(crate::settings::AgentSettings::default());
             crate::settings::set_settings_file(None);
         }
     }
@@ -2035,6 +2443,7 @@ pub(crate) mod test_support {
         crate::settings::set_ask_settings_cache(settings);
         crate::settings::set_refine_settings_cache(RefineSettings::default());
         crate::settings::set_vision_settings_cache(VisionSettings::default());
+        crate::settings::set_agent_settings_cache(crate::settings::AgentSettings::default());
         // No settings file: the asks of a test run on the caches.
         crate::settings::set_settings_file(None);
         Scope { _guard: guard }
@@ -2147,3 +2556,5 @@ pub(crate) mod test_support {
 mod tests;
 #[cfg(all(test, feature = "vision"))]
 mod screen_tests;
+#[cfg(all(test, feature = "agent"))]
+mod agent_tests;

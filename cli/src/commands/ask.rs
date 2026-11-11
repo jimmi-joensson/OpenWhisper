@@ -6,7 +6,9 @@
 //! - `run [TEXT]`: ask a question (argument or stdin). The answer
 //!   streams to stdout as it arrives; where the question was sent,
 //!   the time to the first text, the total time and the tokens go to
-//!   stderr. `--json` prints one record at the end instead. The run
+//!   stderr. `--json` prints one record at the end instead. When the
+//!   question needed the web and web search is off, a line on stderr
+//!   says how to switch it on (`suggestion` in the record). The run
 //!   leaves the diagnostics row an ask in the app leaves (a row in
 //!   `refine_runs`, when the app's database exists), and with
 //!   `--history` the question and answer in the transcript history,
@@ -31,7 +33,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, CancelFlag, eval};
+use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, eval};
 use openwhisper_core::refine;
 use openwhisper_core::settings::{self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings};
 use openwhisper_core::store::Store;
@@ -270,6 +272,20 @@ fn use_history() -> Result<bool> {
     Ok(settings::load_history_settings(&dir.join("settings.json")).enabled)
 }
 
+/// What `ask run` says on stderr for an answer that came back with a
+/// suggestion: the same thing the answer panel says, with the
+/// commands in place of the link.
+fn suggestion_line(suggestion: AskSuggestion) -> &'static str {
+    match suggestion {
+        AskSuggestion::WebSearch => {
+            "web search is off, so this answer could not look anything up. Turn it on with: openwhisper ask config \
+--web-search true, or pass --web-search"
+        }
+        // A suggestion this CLI does not know yet has no line.
+        _ => "",
+    }
+}
+
 fn effort_label(effort: &str) -> String {
     if effort.is_empty() { String::new() } else { format!(", {effort} effort") }
 }
@@ -358,6 +374,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "warm_lead_ms": reply.and_then(|r| r.warm_lead_ms),
             "usage": reply.and_then(|r| r.usage.as_ref()),
             "notice": reply.map_or(plan.notice.as_str(), |r| r.notice.as_str()),
+            "suggestion": reply.and_then(|r| r.suggestion),
             "backend": refine.backend.as_str(),
             "model": plan.setup.model,
             "effort": effort,
@@ -374,6 +391,9 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             if !json {
                 if !stream {
                     println!("{}", reply.text);
+                }
+                if let Some(line) = reply.suggestion.map(suggestion_line).filter(|line| !line.is_empty()) {
+                    eprintln!("{line}");
                 }
                 eprintln!(
                     "first text after {}, done in {} ms ({}, {}{}{})",
@@ -540,7 +560,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         eprintln!("questions go to: {}", plan.destination());
     }
     let mut results = Vec::new();
-    for case in eval::cases() {
+    for case in eval::cases_for(&plan) {
         if args.only.as_deref().is_some_and(|prefix| !case.name.starts_with(prefix)) {
             continue;
         }
@@ -549,11 +569,13 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         let result = eval::run_case(&case, &plan, backend.as_mut());
         if !json {
             println!(
-                "{}  {:<24} {:>6} {:>6} ms  {}",
+                "{}  {:<26} {:>6} {:>6} ms  {}{}",
                 if result.passed { "PASS" } else { "FAIL" },
                 result.name,
                 result.first_text_ms.map_or("-".to_string(), |ms| ms.to_string()),
                 result.elapsed_ms,
+                // Marked by the model as needing the web.
+                if result.suggestion.is_some() { "[web] " } else { "" },
                 one_line(&result.answer)
             );
             if !result.passed {
@@ -571,7 +593,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         bail!(
             "no eval case starts with \"{}\"; the cases are: {}",
             args.only.unwrap_or_default(),
-            eval::cases().iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
+            eval::cases_for(&plan).iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
         );
     }
 
@@ -691,6 +713,15 @@ mod tests {
         assert_eq!(refine.claude_cli.path.as_deref(), Some("/opt/claude"));
         // Nothing here switches Ask on: running is the opt-in.
         assert!(!ask.enabled);
+    }
+
+    #[test]
+    fn the_web_search_suggestion_names_both_ways_to_switch_it_on() {
+        let line = suggestion_line(AskSuggestion::WebSearch);
+        assert!(line.starts_with("web search is off, so this answer could not look anything up."), "{line}");
+        assert!(line.contains("openwhisper ask config --web-search true"), "{line}");
+        assert!(line.ends_with("or pass --web-search"), "{line}");
+        assert!(!line.contains('\u{2014}') && !line.contains('\u{2013}'));
     }
 
     #[test]

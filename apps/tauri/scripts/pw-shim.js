@@ -31,6 +31,27 @@ async (page) => {
           window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Brings the main window forward on Settings, mirroring
+        // tests/fixtures/tauri-shim.ts: with a `pane` (and a `focus`
+        // row on it) the object form of `ow_navigate`, without one
+        // the plain string.
+        if (cmd === "open_settings_window") {
+          window.__owOpenSettingsCount = (window.__owOpenSettingsCount ?? 0) + 1;
+          window.__owOpenSettingsCalls = [...(window.__owOpenSettingsCalls ?? []), args ?? {}];
+          const named = (value) =>
+            typeof value === "string" && value.trim() ? value.trim() : null;
+          const toPane = named((args ?? {}).pane);
+          const toRow = named((args ?? {}).focus);
+          window.__owEmit(
+            "ow_navigate",
+            toPane === null
+              ? "settings"
+              : toRow === null
+                ? { view: "settings", pane: toPane }
+                : { view: "settings", pane: toPane, focus: toRow },
+          );
+          return null;
+        }
         // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
         // optional `cycle_mode` slot is absent until set; its command
         // target is "cycle-mode". The optional `ask` slot has a
@@ -111,6 +132,7 @@ async (page) => {
             question: "",
             answer: "",
             notice: "",
+            suggestion: null,
             error: "",
             backend: "",
             model: "",

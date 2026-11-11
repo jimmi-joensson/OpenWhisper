@@ -472,6 +472,115 @@ const WITH_ASK: SeedEntry[] = [
   },
 ];
 
+// "Turn on web search" in the answer window calls
+// `open_settings_window` with the Ask pane and its Web search row;
+// Rust brings the main window forward and sends `ow_navigate` in its
+// object form. This is the main window's side of that.
+test.describe("ask pane: opened from the answer window", () => {
+  // Shorter than the pane, so the Web search row starts out below
+  // the fold.
+  test.use({ viewport: { width: 1000, height: 420 } });
+
+  const webSearchRow = (page: Page) => page.locator("#settings-ask-web-search");
+
+  async function waitForNavigateListener(page: Page) {
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
+    await page.waitForFunction(() => window.__owListeners("ow_navigate") > 0);
+  }
+
+  test("the event opens the Ask pane with the Web search row in view", async ({ page }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+
+    // Opened by hand, the pane starts at its top and the row is
+    // further down than this window shows.
+    await openAsk(page);
+    await expect(webSearchRow(page)).toBeVisible();
+    await expect(webSearchRow(page)).not.toBeInViewport({ ratio: 1 });
+
+    // From Home, as when the answer window sends the person here.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toHaveCount(0);
+    await page.evaluate(() =>
+      window.__owEmit("ow_navigate", { view: "settings", pane: "ask", focus: "web-search" }),
+    );
+    await expect(page.getByRole("tab", { name: "Ask", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+    await expect(webSearchSwitch(page)).toBeInViewport({ ratio: 1 });
+    // The row is the one with the switch, and it can be used at once.
+    await expect(webSearchRow(page).getByText("Web search", { exact: true })).toBeVisible();
+    await webSearchSwitch(page).click();
+    await expect.poll(async () => (await lastSave(page))?.web_search).toBe(true);
+  });
+
+  test("the command the link calls leads there, and works again while the pane is open", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+    const open = () =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<unknown> };
+          }
+        ).__TAURI_INTERNALS__.invoke("open_settings_window", { pane: "ask", focus: "web-search" }),
+      );
+
+    await open();
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toBeVisible();
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+
+    // Scrolled back to the top of the pane, the link brings the row
+    // back.
+    await page.getByRole("heading", { name: "Ask", exact: true }).scrollIntoViewIfNeeded();
+    await expect(webSearchRow(page)).not.toBeInViewport({ ratio: 1 });
+    await open();
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+  });
+
+  test("a pane without a row, an unknown pane and the plain names still work", async ({ page }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+
+    await page.evaluate(() => window.__owEmit("ow_navigate", { view: "settings", pane: "ask" }));
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toBeVisible();
+
+    // A pane this window does not have: Settings, where it was.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await page.evaluate(() =>
+      window.__owEmit("ow_navigate", { view: "settings", pane: "billing", focus: "web-search" }),
+    );
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "General", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    // The string the tray sends, and the command without arguments.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+    await page.evaluate(() =>
+      (
+        window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown> };
+        }
+      ).__TAURI_INTERNALS__.invoke("open_settings_window"),
+    );
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "General", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // A view that does not exist changes nothing.
+    await page.evaluate(() => window.__owEmit("ow_navigate", { view: "nowhere", pane: "ask" }));
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  });
+});
+
 test.describe("history: asks", () => {
   test("an ask on Home is marked, shows the question, and has the answer one click away", async ({
     page,

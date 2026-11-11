@@ -372,9 +372,32 @@ async function installTauriShim(
             ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Brings the main window forward on Settings. With a `pane`
+        // (and a `focus` row on it) Rust sends the object form of
+        // `ow_navigate`, without one the plain string
+        // (`settings_payload` in src-tauri/src/navigate.rs). The
+        // arguments of every call are kept in `__owOpenSettingsCalls`.
+        // Keep in step with scripts/pw-shim.js.
         if (cmd === "open_settings_window") {
-          (window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount =
-            ((window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount ?? 0) + 1;
+          const w = window as unknown as {
+            __owOpenSettingsCount?: number;
+            __owOpenSettingsCalls?: Record<string, unknown>[];
+          };
+          w.__owOpenSettingsCount = (w.__owOpenSettingsCount ?? 0) + 1;
+          w.__owOpenSettingsCalls = [...(w.__owOpenSettingsCalls ?? []), args ?? {}];
+          const named = (value: unknown) =>
+            typeof value === "string" && value.trim() ? value.trim() : null;
+          const { pane, focus } = (args ?? {}) as { pane?: unknown; focus?: unknown };
+          const toPane = named(pane);
+          const toRow = named(focus);
+          window.__owEmit(
+            "ow_navigate",
+            toPane === null
+              ? "settings"
+              : toRow === null
+                ? { view: "settings", pane: toPane }
+                : { view: "settings", pane: toPane, focus: toRow },
+          );
           return null;
         }
         // Hotkey slots. `toggle` and `cancel` always have a binding;
@@ -501,6 +524,7 @@ async function installTauriShim(
             question: "",
             answer: "",
             notice: "",
+            suggestion: null,
             error: "",
             backend: "",
             model: "",
@@ -1684,6 +1708,8 @@ export interface MockAskSnapshot {
   question: string;
   answer: string;
   notice: string;
+  // Mirrors `AskSuggestion` in core; null when there is none.
+  suggestion: "web-search" | null;
   error: string;
   backend: string;
   model: string;
@@ -1710,6 +1736,7 @@ export const ASK_SNAPSHOT_DEFAULTS: MockAskSnapshot = {
   question: "",
   answer: "",
   notice: "",
+  suggestion: null,
   error: "",
   backend: "claude-cli",
   model: "sonnet",

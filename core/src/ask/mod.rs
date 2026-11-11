@@ -70,6 +70,7 @@ use crate::settings::{
 
 pub mod claude_cli;
 pub mod eval;
+pub mod hint;
 pub mod openai_compat;
 pub mod prompt;
 
@@ -118,6 +119,33 @@ pub enum AskEvent {
     Searching { query: String },
     /// That search is back; the model carries on.
     SearchDone,
+    /// The answer comes with a suggestion for the person
+    /// ([`AskReply::suggestion`]). Sent once, as soon as it is known,
+    /// which is before the text of the answer.
+    Suggestion(AskSuggestion),
+}
+
+/// Something the person could do to get a better answer next time.
+/// The model decides when it applies (it marks its answer, see
+/// [`hint`]); the app says it in its own words and never shows
+/// anything the model wrote for it.
+#[non_exhaustive]
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskSuggestion {
+    /// The question needed current information from the web, and web
+    /// search is switched off
+    /// ([`crate::settings::AskSettings::web_search`]).
+    WebSearch,
+}
+
+impl AskSuggestion {
+    /// Stable id, same as the serialized form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSearch => "web-search",
+        }
+    }
 }
 
 /// A finished answer.
@@ -141,6 +169,8 @@ pub struct AskReply {
     /// made ("web search is not available with this backend"). Empty
     /// most of the time.
     pub notice: String,
+    /// See [`AskSuggestion`]. `None` most of the time.
+    pub suggestion: Option<AskSuggestion>,
 }
 
 /// Why there is no answer.
@@ -316,6 +346,7 @@ impl<'a> Turn<'a> {
             usage,
             warm_lead_ms: warm_lead.map(|d| d.as_millis() as u64),
             notice: notice.to_string(),
+            suggestion: None,
         }
     }
 }
@@ -332,6 +363,10 @@ const NO_QUESTION: &str = "There was no question to answer.";
 const NO_ANSWER: &str = "The model returned no answer.";
 const STOPPED: &str = "The ask stopped on an internal error. Ask again.";
 
+/// The answer when the model wrote the web search marker and nothing
+/// else.
+pub const NEEDS_THE_WEB: &str = "This needs current information from the web.";
+
 /// Everything one ask is made with, worked out from the two settings
 /// blocks: which backend, the conversation setup, the timeout. The
 /// app and the CLI go through the same type, so `openwhisper ask run`
@@ -346,6 +381,12 @@ pub struct AskPlan {
     pub timeout: Duration,
     /// See [`AskReply::notice`].
     pub notice: String,
+    /// Web search is off and the backend has one to switch on (the
+    /// Claude backend). The prompt then asks the model to mark an
+    /// answer that needed the web ([`prompt::WebAccess::SwitchedOff`]);
+    /// [`AskPlan::send`] takes the mark off the answer and turns it
+    /// into [`AskReply::suggestion`].
+    pub web_hint: bool,
     claude_cli: ClaudeCliSettings,
     openai: OpenAiSettings,
 }
@@ -361,17 +402,23 @@ impl AskPlan {
         let web_search = ask.web_search && !openai;
         let notice = if ask.web_search && openai { WEB_SEARCH_UNAVAILABLE } else { "" };
         let timeout_ms = if web_search { ask.timeout_ms.saturating_mul(2) } else { ask.timeout_ms };
+        let web = match (web_search, openai) {
+            (true, _) => prompt::WebAccess::Search,
+            (false, true) => prompt::WebAccess::Unavailable,
+            (false, false) => prompt::WebAccess::SwitchedOff,
+        };
         let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
         Self {
             backend: refine.backend,
             setup: AskSetup {
-                system: prompt::system_prompt(&ask.instructions, terms, web_search, &today),
+                system: prompt::system_prompt(&ask.instructions, terms, web, &today),
                 model: ask.model_for(refine),
                 effort: ask.effort_for(refine),
                 web_search,
             },
             timeout: Duration::from_millis(timeout_ms.min(ASK_TIMEOUT_MAX_MS * 2)),
             notice: notice.to_string(),
+            web_hint: web == prompt::WebAccess::SwitchedOff,
             claude_cli: refine.claude_cli.clone(),
             openai: refine.openai.clone(),
         }
@@ -416,6 +463,11 @@ impl AskPlan {
     /// Ask `question` through `backend`: the question is fenced
     /// ([`prompt::user_message`]), the answer streams into `sink`.
     /// `question.text` is the question as heard or typed.
+    ///
+    /// With [`AskPlan::web_hint`], an answer the model marked as
+    /// needing the web comes back with [`AskReply::suggestion`] set.
+    /// The mark itself reaches neither `sink` nor the reply; the sink
+    /// gets [`AskEvent::Suggestion`] in its place.
     pub fn send(
         &self,
         backend: &mut dyn AskBackend,
@@ -427,7 +479,11 @@ impl AskPlan {
             return Err(AskError::Backend(NO_QUESTION.to_string()));
         }
         let input = AskInput { text: prompt::user_message(&question.text), images: question.images.clone() };
-        let result = backend.send(&self.setup, &input, sink, cancel, self.timeout);
+        let result = if self.web_hint {
+            self.send_marked(backend, &input, sink, cancel)
+        } else {
+            backend.send(&self.setup, &input, sink, cancel, self.timeout)
+        };
         // Lengths only, never the text: verbose logs end up in bug
         // reports.
         crate::verbose_log!(
@@ -445,6 +501,36 @@ impl AskPlan {
         }
         if reply.notice.is_empty() {
             reply.notice = self.notice.clone();
+        }
+        Ok(reply)
+    }
+
+    /// [`AskBackend::send`] for a plan whose prompt carries the web
+    /// search rule: the marker line is taken off the stream as it
+    /// arrives ([`hint::MarkerSink`]) and off the reply.
+    fn send_marked(
+        &self,
+        backend: &mut dyn AskBackend,
+        input: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+    ) -> Result<AskReply, AskError> {
+        let found = AskEvent::Suggestion(AskSuggestion::WebSearch);
+        let mut filter = hint::MarkerSink::new(prompt::NEEDS_WEB_SEARCH, found, sink);
+        let result = backend.send(&self.setup, input, &mut |event| filter.event(event), cancel, self.timeout);
+        // Whatever was held back and is not the marker, also when
+        // the ask failed midway.
+        filter.finish();
+        let mut reply = result?;
+        let (marked, text) = hint::split(prompt::NEEDS_WEB_SEARCH, &reply.text);
+        if marked {
+            reply.suggestion = Some(AskSuggestion::WebSearch);
+            reply.text = prompt::clean_answer(&text);
+            if reply.text.is_empty() {
+                // The marker and nothing after it.
+                reply.text = NEEDS_THE_WEB.to_string();
+                sink(AskEvent::Text(reply.text.clone()));
+            }
         }
         Ok(reply)
     }
@@ -624,6 +710,10 @@ pub struct AskSnapshot {
     pub answer: String,
     /// See [`AskReply::notice`].
     pub notice: String,
+    /// See [`AskSuggestion`]. Set as soon as the model marked its
+    /// answer, so it is there while the answer streams. Not kept in
+    /// the history.
+    pub suggestion: Option<AskSuggestion>,
     /// Why there is no answer; empty unless the phase is `error`.
     pub error: String,
     /// Backend id, model and effort (`""` when none is sent).
@@ -942,6 +1032,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     s.snap.search_query = query;
                 }
                 AskEvent::SearchDone => s.snap.searching = false,
+                AskEvent::Suggestion(suggestion) => s.snap.suggestion = Some(suggestion),
             }
         });
     };
@@ -965,6 +1056,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     Ok(reply) => {
                         s.snap.answer = reply.text.clone();
                         s.snap.notice = reply.notice.clone();
+                        s.snap.suggestion = reply.suggestion;
                         s.snap.first_text_ms = s.snap.first_text_ms.or(reply.first_text_ms);
                         s.snap.usage = reply.usage.clone();
                         s.snap.phase = AskPhase::Done;
@@ -1385,6 +1477,7 @@ pub(crate) mod test_support {
                 usage: Some(CallUsage { tokens_in: 900, tokens_cached: 800, tokens_out: 40, cost_usd: Some(0.002), plan: None }),
                 warm_lead_ms: Some(2500),
                 notice: String::new(),
+                suggestion: None,
             })
         }
     }

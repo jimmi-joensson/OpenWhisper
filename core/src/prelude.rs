@@ -48,7 +48,7 @@ pub use crate::diagnostics::recognizer_info;
 #[cfg(feature = "ask")]
 pub use crate::ask::{
     AskBackend, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup, AskSnapshot,
-    AskStatus, CancelFlag,
+    AskStatus, AskSuggestion, CancelFlag,
 };
 pub use crate::dictation::{DictationSnapshot, Injector, RefineInfo, SessionKind};
 pub use crate::media_gate::{MediaController, MediaGateState, PauseDiagnostic};

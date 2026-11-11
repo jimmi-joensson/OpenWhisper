@@ -33,6 +33,12 @@ export interface AskUsage {
   } | null;
 }
 
+// Mirrors `AskSuggestion` in core: something the person could do to
+// get a better answer next time. The model decides when it applies;
+// the panel says it in the app's words. "web-search": the question
+// needed current information from the web and web search is off.
+export type AskSuggestion = "web-search";
+
 // Mirrors `AskSnapshot` in core: the one ask of the running app.
 // This is the whole payload of `ask_tick` and what `ask_snapshot`
 // and `ask_start` return.
@@ -46,6 +52,9 @@ export interface AskSnapshot {
   // "done". Kept when an ask is cancelled or fails midway.
   answer: string;
   notice: string;
+  // Set as soon as the model marked its answer, so it can show while
+  // the answer streams. null when there is nothing to suggest.
+  suggestion: AskSuggestion | null;
   // Why there is no answer; "" unless the phase is "error".
   error: string;
   backend: string;

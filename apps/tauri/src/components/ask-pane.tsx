@@ -28,6 +28,7 @@ import {
   EFFORT_LABELS,
   type RefineEffort,
 } from "@/lib/refine";
+import { settingsRowId } from "@/lib/navigate";
 import type { SettingsPaneId } from "@/lib/settings-panes";
 import { useAsk, useAskBackend } from "@/lib/use-ask";
 import { useCurrentHotkey } from "@/lib/use-current-hotkey";
@@ -150,7 +151,13 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
 
       <SectionHeader>Answers</SectionHeader>
 
-      <Field orientation="horizontal" data-disabled={claude ? undefined : true}>
+      {/* The id is what "Turn on web search" in the answer window
+          leads to: App scrolls this row into view (lib/navigate.ts). */}
+      <Field
+        id={settingsRowId("ask", "web-search")}
+        orientation="horizontal"
+        data-disabled={claude ? undefined : true}
+      >
         <FieldContent>
           <FieldLabel htmlFor="ask-web-search">Web search</FieldLabel>
           <FieldDescription data-testid="ask-web-search-note">

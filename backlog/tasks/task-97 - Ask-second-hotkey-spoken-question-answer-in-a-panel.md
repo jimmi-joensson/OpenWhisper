@@ -4,7 +4,7 @@ title: Ask - second hotkey, spoken question, answer in a panel
 status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-11T00:28:00Z'
+updated_date: '2026-11-11T08:14:00Z'
 labels:
   - ask
   - core
@@ -58,4 +58,11 @@ Latency (AC 6), Claude CLI 2.1.322, Sonnet, low effort: cold first text 1.1 to 1
 Independent review: no high-severity finding. Confirmed by the reviewer: the CLI flags seen live in the process list (safe mode, tools off, strict MCP, no session persistence, permission mode default; with web search exactly WebSearch), the injector has two call sites (dictation delivery and the insert command, finished answers only), the released history parser run against files with ask entries (nothing lost or merged). 9 findings fixed in a1ec0b3.
 Not verified, needs a person in the Dev app: pressing the ask key, the answer window showing and where, focus staying in the other app, clicks and text selection in a window that never takes focus, Insert landing in the other app, Esc cancelling a running ask, fullscreen Spaces, anything on Windows at run time (the process-tree kill behind a cmd shim is compile-checked only), a real OpenAI-compatible endpoint. ACs 1 to 4 stay unchecked until then.
 Known: with web search on the CLI delivers the answer in one burst after the search, so the panel shows Searching and then the whole answer. An ask needs no Refine switch but uses Refine's backend settings.
+
+2026-11-11, after the user tried the Dev build: three additions on task-97-ask.
+1. Web search hint (c2e5888): with web search off on the Claude backend the model flags a question that needs current information with a first-line marker; core strips it and sets a suggestion; the panel shows a notice with a link to Settings, Ask; the CLI prints the same. Live eval: 6 of 6 questions that need the web flagged, 0 of 6 plain ones, twice.
+2. Device context (6fa883f): date, time and time zone; the computer; the name of the app in front; language and region; each behind a switch, all on by default; an optional typed place; no location permission. The Ask pane previews the exact text; openwhisper ask context prints it. Not sent: clipboard, window titles, user name, installed apps, network name, IP.
+3. No long dashes (6fa883f): refine.no_long_dashes, on by default; one rule line in the cleanup, mode and ask prompts, plus a normalising pass over model output.
+Tests run by the orchestrator: core lib 590, CLI 45, shell 65 + 1, unit 40, Playwright 319, Windows target checks clean. Live: ask eval 32 of 32 twice; refine eval cold 29 and 31 of 32 with every miss a 5 s timeout typed as said (all 32 safe), warmed 32 of 32; the dash cases passed in every run. These three additions have not had an independent review yet; they are covered by the whole-stack review at the end.
+Follow-ups to file as their own tasks (agreed with the user, not built): selected text in the app in front as context, follow-up questions, system Location Services, a Codex CLI backend.
 <!-- SECTION:NOTES:END -->

@@ -204,11 +204,16 @@ objc2-screen-capture-kit = { version = "0.3", optional = true, default-features 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
 # Focus context: foreground window, owning process, exe version info.
+# Vision: monitor capture (Gdi), window bounds and the cloaked flag
+# (Dwm), per-monitor DPI awareness for the capturing thread (HiDpi).
 windows = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_HiDpi",
 ] }
 
 [dev-dependencies]

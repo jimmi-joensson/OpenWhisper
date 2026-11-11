@@ -1,10 +1,10 @@
 ---
 id: TASK-97
 title: Ask - second hotkey, spoken question, answer in a panel
-status: In Progress
+status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-10T17:38:00Z'
+updated_date: '2026-11-11T00:28:00Z'
 labels:
   - ask
   - core
@@ -34,8 +34,8 @@ Needs: the hotkey, an ask pipeline in core (separate from the Refiner trait: ans
 - [ ] #2 The answer appears in a panel and is never typed into the focused app unless the user chooses insert
 - [ ] #3 The panel shows progress, errors and a cancel; closing it cancels the request
 - [ ] #4 Works with both backends; opt-in with a plain statement of where the question is sent
-- [ ] #5 Headless parity: openwhisper ask reaches the same core function
-- [ ] #6 Latency measured per backend and written into the task notes
+- [x] #5 Headless parity: openwhisper ask reaches the same core function
+- [x] #6 Latency measured per backend and written into the task notes
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -50,4 +50,12 @@ Feasibility (2026-11-10, Claude Code 2.1.322, Sonnet low, run by a subagent and 
 - OpenAI-compatible: streaming over the existing ureq client works against a fake SSE server (BufReader over the body); no real endpoint was available.
 
 2026-11-10: plan doc-50, subtasks 97.1 to 97.6. Branch task-97-ask, stacked on task-96-modes.
+
+2026-11-11 build finished on branch task-97-ask (last code commit a1ec0b3), stacked on task-96-modes.
+Built: a second hotkey slot (Right Option tap on macOS, Ctrl+Shift+Space on Windows, installed only while Ask is on), the recorder with a session kind, core/src/ask (streaming Claude CLI and OpenAI-compatible backends, one ask at a time, cancel, web search as a setting), the answer window (non-activating panel above the pill: progress, errors, Cancel, Copy, Insert, Dismiss), the Ask settings pane with where the question is sent, asks in history (kind=ask, the answer as a quote) and in the Refine runs table, openwhisper ask run|status|config|eval.
+Tests run by the orchestrator: core lib 499, CLI 19 + 11 + 9 + 1, shell 62 + 1, unit 35, Playwright 302, Windows target checks clean.
+Latency (AC 6), Claude CLI 2.1.322, Sonnet, low effort: cold first text 1.1 to 1.8 s, whole answer 1.8 to 3.5 s; process started 3 s ahead (what the hotkey does) first text 0.6 to 1.2 s, whole answer 1.2 to 1.6 s; web search with a search 11 s, text in one burst; ask eval 12/12 three times, first text median 1.1 to 1.2 s. OpenAI-compatible backend: not measured, no endpoint. Its streaming, cancel and timeout were tested against a local fake server, and its HTTPS path against a real endpoint without a key (the 401 came back with its message).
+Independent review: no high-severity finding. Confirmed by the reviewer: the CLI flags seen live in the process list (safe mode, tools off, strict MCP, no session persistence, permission mode default; with web search exactly WebSearch), the injector has two call sites (dictation delivery and the insert command, finished answers only), the released history parser run against files with ask entries (nothing lost or merged). 9 findings fixed in a1ec0b3.
+Not verified, needs a person in the Dev app: pressing the ask key, the answer window showing and where, focus staying in the other app, clicks and text selection in a window that never takes focus, Insert landing in the other app, Esc cancelling a running ask, fullscreen Spaces, anything on Windows at run time (the process-tree kill behind a cmd shim is compile-checked only), a real OpenAI-compatible endpoint. ACs 1 to 4 stay unchecked until then.
+Known: with web search on the CLI delivers the answer in one burst after the search, so the panel shows Searching and then the whole answer. An ask needs no Refine switch but uses Refine's backend settings.
 <!-- SECTION:NOTES:END -->

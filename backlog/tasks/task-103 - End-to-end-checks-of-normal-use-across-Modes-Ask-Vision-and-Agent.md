@@ -1,9 +1,10 @@
 ---
 id: TASK-103
 title: End-to-end checks of normal use across Modes, Ask, Vision and Agent
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-11T10:21:00Z'
+updated_date: '2026-11-11T11:50:00Z'
 labels:
   - testing
   - ask
@@ -30,3 +31,9 @@ The last step of the assistant roadmap (TASK-96 to TASK-99), asked for by the us
 - [ ] #5 A walkthrough document for the Dev app exists with expected results per step, macOS and Windows
 - [ ] #6 Results of the run are written into this task
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Plan: doc-53. Subtasks 103.1 to 103.4. Branch task-103-e2e, stacked on task-99-agent.
+<!-- SECTION:NOTES:END -->

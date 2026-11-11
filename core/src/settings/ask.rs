@@ -25,6 +25,67 @@ pub const ASK_TIMEOUT_DEFAULT_MS: u64 = 60_000;
 /// in the prompt of every ask.
 pub const ASK_INSTRUCTIONS_MAX_CHARS: usize = 4000;
 
+/// Longest "where you are" text kept, in characters.
+pub const ASK_PLACE_MAX_CHARS: usize = 120;
+
+/// What an ask tells the model about the computer it was asked on
+/// (`ask.context`): four groups of facts the app reads by itself, each
+/// with its own switch, and one line the person types. All groups are
+/// on by default; a file written before this existed loads that way.
+///
+/// What each group holds is in [`crate::ask::context`]. Nothing here
+/// needs a permission, and nothing uses location services: where the
+/// person is, the model only knows from the time zone, the region and
+/// `place`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct ContextSettings {
+    /// The date, the local time, the time zone and its UTC offset.
+    pub date_time: bool,
+    /// Operating system, machine model, chip, memory, power, displays,
+    /// free disk space, online or offline.
+    pub computer: bool,
+    /// The name of the app the person is working in when they ask.
+    /// Never the title of its window.
+    pub front_app: bool,
+    /// System language, region, units, clock, currency and keyboard
+    /// layout.
+    pub locale: bool,
+    /// Where the person is, in their own words ("Aarhus, Denmark").
+    /// Empty = not given. One line.
+    pub place: String,
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self { date_time: true, computer: true, front_app: true, locale: true, place: String::new() }
+    }
+}
+
+impl ContextSettings {
+    /// The place on one line, trimmed and no longer than
+    /// [`ASK_PLACE_MAX_CHARS`].
+    pub fn cleaned(mut self) -> Self {
+        self.place = self
+            .place
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(ASK_PLACE_MAX_CHARS)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        self
+    }
+
+    /// Every group is off and no place is given: an ask tells the
+    /// model nothing about the computer.
+    pub fn is_off(&self) -> bool {
+        !(self.date_time || self.computer || self.front_app || self.locale) && self.place.trim().is_empty()
+    }
+}
+
 /// The `ask` settings block.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
@@ -52,6 +113,8 @@ pub struct AskSettings {
     /// How long an ask waits for the model. Doubled while web search
     /// is in use, since a search alone takes 15 to 20 seconds.
     pub timeout_ms: u64,
+    /// What an ask tells the model about this computer.
+    pub context: ContextSettings,
 }
 
 impl Default for AskSettings {
@@ -63,6 +126,7 @@ impl Default for AskSettings {
             model: None,
             effort: None,
             timeout_ms: ASK_TIMEOUT_DEFAULT_MS,
+            context: ContextSettings::default(),
         }
     }
 }
@@ -86,6 +150,7 @@ impl AskSettings {
             self.effort = Some(RefineEffort::Low);
         }
         self.timeout_ms = self.timeout_ms.clamp(ASK_TIMEOUT_MIN_MS, ASK_TIMEOUT_MAX_MS);
+        self.context = self.context.cleaned();
         self
     }
 
@@ -147,6 +212,47 @@ mod tests {
         let s: AskSettings = serde_json::from_str(r#"{"enabled":true,"effort":"turbo"}"#).unwrap();
         assert!(s.enabled);
         assert_eq!(s.effort, None);
+    }
+
+    #[test]
+    fn the_context_groups_are_on_by_default_and_old_files_load() {
+        let s = AskSettings::default();
+        assert_eq!(
+            s.context,
+            ContextSettings { date_time: true, computer: true, front_app: true, locale: true, place: String::new() }
+        );
+        assert!(!s.context.is_off());
+        // A block written before the context existed.
+        let s: AskSettings = serde_json::from_str(r#"{"enabled":true,"web_search":true}"#).unwrap();
+        assert_eq!(s.context, ContextSettings::default());
+        // A block that names only some of it.
+        let s: AskSettings =
+            serde_json::from_str(r#"{"context":{"computer":false,"place":"Aarhus, Denmark"}}"#).unwrap();
+        assert!(s.context.date_time && s.context.front_app && s.context.locale);
+        assert!(!s.context.computer);
+        assert_eq!(s.context.place, "Aarhus, Denmark");
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""context":{"date_time":true,"computer":false,"front_app":true,"locale":true,"place":"Aarhus, Denmark"}"#), "{json}");
+    }
+
+    #[test]
+    fn the_place_is_one_trimmed_line_of_limited_length() {
+        let context = |place: &str| ContextSettings { place: place.into(), ..ContextSettings::default() }.cleaned();
+        assert_eq!(context("  Aarhus,\n  Denmark \t").place, "Aarhus, Denmark");
+        assert_eq!(context("   ").place, "");
+        let long = context(&"æ".repeat(ASK_PLACE_MAX_CHARS + 30));
+        assert_eq!(long.place.chars().count(), ASK_PLACE_MAX_CHARS);
+        // The cut does not leave a blank at the end.
+        let cut = context(&format!("{} tail", "x".repeat(ASK_PLACE_MAX_CHARS - 1)));
+        assert_eq!(cut.place, "x".repeat(ASK_PLACE_MAX_CHARS - 1));
+        // The block cleans it too.
+        let ask = AskSettings { context: ContextSettings { place: " Odense ".into(), ..ContextSettings::default() }, ..AskSettings::default() };
+        assert_eq!(ask.cleaned().context.place, "Odense");
+
+        let off = ContextSettings { date_time: false, computer: false, front_app: false, locale: false, place: " ".into() };
+        assert!(off.is_off());
+        assert!(!ContextSettings { place: "Odense".into(), ..off.clone() }.is_off());
+        assert!(!ContextSettings { locale: true, ..off }.is_off());
     }
 
     #[test]

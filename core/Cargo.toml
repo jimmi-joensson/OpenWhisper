@@ -34,8 +34,18 @@ refine = ["dep:ureq", "dep:keyring"]
 # up with and shown in a panel instead of typed. Builds on Refine's
 # backends (binary lookup, HTTP client, keychain), hence the
 # dependency. `base64` carries images to the model (the screen, in
-# TASK-98).
-ask = ["refine", "dep:base64"]
+# TASK-98). An ask also tells the model a few facts about the computer
+# it was asked on (`ask::context`): the IANA time zone name comes from
+# `iana-time-zone`, the machine from sysinfo, and the rest from the
+# platform bindings the `focus` feature already uses (CoreFoundation
+# on macOS, the `windows` crate on Windows).
+ask = [
+    "refine",
+    "dep:base64",
+    "dep:iana-time-zone",
+    "dep:core-foundation",
+    "dep:windows",
+]
 # Focus context (TASK-94): which app is frontmost and its window title.
 # Its own feature so the SwiftUI staticlib flavor does not pull in the
 # platform bindings it never calls.
@@ -115,6 +125,11 @@ ureq = { version = "2.12", default-features = false, features = ["tls"], optiona
 # Ask (feature `ask`): images travel to the model base64-encoded, in
 # both wire formats. Already in the lockfile through other crates.
 base64 = { version = "0.22", optional = true }
+# Ask (feature `ask`): the name of the system time zone
+# ("Europe/Copenhagen"), which chrono does not give. Pure Rust per
+# platform, MIT OR Apache-2.0, and already in the lockfile: chrono's
+# `clock` feature depends on it.
+iana-time-zone = { version = "0.1", optional = true }
 # SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
 sha2 = { version = "0.10", optional = true }
 tar = { version = "0.4", optional = true }
@@ -169,6 +184,8 @@ coreaudio-rs = { version = "0.14", default-features = false, features = ["core_a
 keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
 # Focus context: NSWorkspace for the frontmost app, CoreFoundation
 # types for the Accessibility calls. Same versions as the Tauri shell.
+# `core-foundation` is also what the device context of an ask reads
+# the locale, the power source and the machine's name through.
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray"] }
@@ -178,11 +195,19 @@ core-foundation = { version = "0.10", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["windows-native"] }
 # Focus context: foreground window, owning process, exe version info.
+# Device context of an ask: power status, monitors, the BIOS keys of
+# the registry, the locale, the keyboard layout, the connection state.
 windows = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_Graphics_Gdi",
+    "Win32_Globalization",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Networking_WinInet",
 ] }
 
 [dev-dependencies]

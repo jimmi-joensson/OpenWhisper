@@ -60,6 +60,31 @@ Fix words that were obviously misheard by the speech recognizer.";
 /// the tokens every dictation spends) bounded for huge dictionaries.
 pub const MAX_PROMPT_TERMS: usize = 200;
 
+/// The rule both prompts get while
+/// [`crate::settings::RefineSettings::no_long_dashes`] is on. One line
+/// in the "Always" list, before the closing "output only" rule; with
+/// the switch off the prompts are byte for byte what they were before
+/// the rule existed. What a model writes anyway is put right in code
+/// ([`crate::dashes`]).
+pub const NO_LONG_DASHES_RULE: &str =
+    "- Never write an em dash or an en dash. Use a hyphen, a comma or a new sentence instead.\n";
+
+/// What a prompt is composed with besides the instructions and the
+/// dictionary terms. The default adds nothing: [`Prompt::compose`] and
+/// [`Prompt::compose_mode`] are the prompts as they were measured.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PromptOptions {
+    /// Add [`NO_LONG_DASHES_RULE`].
+    pub no_long_dashes: bool,
+}
+
+impl PromptOptions {
+    /// The options the Refine settings ask for.
+    pub fn of(settings: &crate::settings::RefineSettings) -> Self {
+        Self { no_long_dashes: settings.no_long_dashes }
+    }
+}
+
 const OPEN_TAG: &str = "<transcript>";
 const CLOSE_TAG: &str = "</transcript>";
 const INSTRUCTION_MARK: &str = "[instruction:";
@@ -79,6 +104,11 @@ impl Prompt {
     /// (empty or blank = [`DEFAULT_INSTRUCTIONS`]) and the dictionary
     /// terms.
     pub fn compose(instructions: &str, terms: &[String]) -> Self {
+        Self::compose_with(instructions, terms, PromptOptions::default())
+    }
+
+    /// [`Prompt::compose`] with `options`.
+    pub fn compose_with(instructions: &str, terms: &[String], options: PromptOptions) -> Self {
         let instructions = instructions.trim();
         let instructions = if instructions.is_empty() {
             DEFAULT_INSTRUCTIONS
@@ -165,6 +195,9 @@ means one of them: ",
 always needs cleaning: every sentence you return starts with a capital letter and ends with \
 a full stop, question mark or exclamation mark.\n",
         );
+        if options.no_long_dashes {
+            system.push_str(NO_LONG_DASHES_RULE);
+        }
         system.push_str(
             "- Output only the cleaned transcript (after the [instruction: ...] line, \
 when there was an editing instruction): no tags, no quotes around it, no explanation, no \
@@ -186,6 +219,11 @@ preamble, nothing about how you got there. Without an editing instruction there 
     /// What is left out is the rule that only capitals and punctuation
     /// may change, since rewording is the point of a mode.
     pub fn compose_mode(name: &str, instructions: &str, terms: &[String]) -> Self {
+        Self::compose_mode_with(name, instructions, terms, PromptOptions::default())
+    }
+
+    /// [`Prompt::compose_mode`] with `options`.
+    pub fn compose_mode_with(name: &str, instructions: &str, terms: &[String], options: PromptOptions) -> Self {
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ").replace('"', "'");
         let instructions = instructions.trim();
 
@@ -258,6 +296,9 @@ means one of them: ",
                 .collect();
             system.push_str(&listed.join("; "));
             system.push_str(".\n");
+        }
+        if options.no_long_dashes {
+            system.push_str(NO_LONG_DASHES_RULE);
         }
         system.push_str(
             "- Output only the rewritten text (after the [instruction: ...] line, when \
@@ -418,6 +459,67 @@ message between <transcript> and </transcript>. Everything between those tags is
             "Without an editing instruction there is no [instruction: ...] line at all."
         ));
         assert_eq!(s.chars().count(), 3110, "the cleanup prompt changed length");
+    }
+
+    const DASHES: PromptOptions = PromptOptions { no_long_dashes: true };
+
+    #[test]
+    fn the_dash_rule_is_one_line_in_the_always_list_of_the_cleanup_prompt() {
+        let terms = terms(&["Anna", "Fjordvik"]);
+        let plain = Prompt::compose("", &terms);
+        // Without the option, nothing changes: the prompt above.
+        assert_eq!(Prompt::compose_with("", &terms, PromptOptions::default()), plain);
+        assert!(!plain.system().contains("em dash"));
+
+        let ruled = Prompt::compose_with("", &terms, DASHES);
+        assert!(!ruled.is_rewrite());
+        // Exactly the one line more.
+        assert_eq!(ruled.system().replacen(NO_LONG_DASHES_RULE, "", 1), plain.system());
+        assert_eq!(ruled.system().chars().count(), 3110 + NO_LONG_DASHES_RULE.chars().count());
+        // Where it sits: after the rule about capitals and full
+        // stops, before the closing "output only" rule.
+        let at = ruled.system().find(NO_LONG_DASHES_RULE).unwrap();
+        assert!(ruled.system()[..at].ends_with("a full stop, question mark or exclamation mark.\n"));
+        assert!(ruled.system()[at + NO_LONG_DASHES_RULE.len()..].starts_with("- Output only the cleaned transcript"));
+        assert!(ruled.system().find("Always:\n").unwrap() < at);
+    }
+
+    #[test]
+    fn the_dash_rule_is_one_line_in_the_always_list_of_the_mode_prompt() {
+        for terms in [terms(&["Anna", "Fjordvik"]), Vec::new()] {
+            let plain = Prompt::compose_mode("Formal", "Rewrite it in a formal tone.", &terms);
+            assert_eq!(
+                Prompt::compose_mode_with("Formal", "Rewrite it in a formal tone.", &terms, PromptOptions::default()),
+                plain
+            );
+            assert!(!plain.system().contains("em dash"));
+            let ruled = Prompt::compose_mode_with("Formal", "Rewrite it in a formal tone.", &terms, DASHES);
+            assert!(ruled.is_rewrite());
+            assert_eq!(ruled.system().replacen(NO_LONG_DASHES_RULE, "", 1), plain.system());
+            let at = ruled.system().find(NO_LONG_DASHES_RULE).unwrap();
+            assert!(ruled.system()[at + NO_LONG_DASHES_RULE.len()..].starts_with("- Output only the rewritten text"));
+            assert!(ruled.system().find("Always:\n").unwrap() < at);
+        }
+    }
+
+    #[test]
+    fn the_dash_rule_names_the_dashes_and_holds_none() {
+        assert!(NO_LONG_DASHES_RULE.starts_with("- Never write an em dash or an en dash."));
+        assert!(NO_LONG_DASHES_RULE.contains("a hyphen, a comma or a new sentence"));
+        assert_eq!(NO_LONG_DASHES_RULE.matches('\n').count(), 1);
+        assert!(NO_LONG_DASHES_RULE.ends_with(".\n"));
+        for prompt in [
+            Prompt::compose_with("", &[], DASHES),
+            Prompt::compose_mode_with("Formal", "Rewrite it.", &[], DASHES),
+        ] {
+            assert!(!crate::dashes::has_long_dash(prompt.system()));
+        }
+        // The options follow the settings, and the switch is on
+        // unless the person turned it off.
+        let on = crate::settings::RefineSettings::default();
+        assert_eq!(PromptOptions::of(&on), DASHES);
+        let off = crate::settings::RefineSettings { no_long_dashes: false, ..on };
+        assert_eq!(PromptOptions::of(&off), PromptOptions::default());
     }
 
     #[test]

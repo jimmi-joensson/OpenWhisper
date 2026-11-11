@@ -29,6 +29,13 @@
 //!   tool stops and reports an error.
 //! - **The answer is never typed by itself.** See above.
 //!
+//! An ask also tells the model a few facts about the computer it was
+//! asked on ([`context`]: the date and time, the machine, the app in
+//! front, the language and region, and where the person says they
+//! are), each group behind its own switch, and its answers hold no
+//! em dash and no en dash while that is switched on
+//! ([`crate::settings::RefineSettings::no_long_dashes`], [`crate::dashes`]).
+//!
 //! This is a separate pipeline from [`crate::refine::Refiner`], which
 //! is text in, text out within a few seconds. An answer is long, so
 //! it streams ([`AskEvent`]); it can be cancelled ([`CancelFlag`]);
@@ -69,6 +76,7 @@ use crate::settings::{
 };
 
 pub mod claude_cli;
+pub mod context;
 pub mod eval;
 pub mod hint;
 pub mod openai_compat;
@@ -387,15 +395,39 @@ pub struct AskPlan {
     /// [`AskPlan::send`] takes the mark off the answer and turns it
     /// into [`AskReply::suggestion`].
     pub web_hint: bool,
+    /// The facts about the computer the prompt carries, as rendered
+    /// ([`context::DeviceContext::render`]). Empty = none. It is part
+    /// of [`AskSetup::system`]; kept here as well so the ask that was
+    /// warmed with it can be sent with the same one.
+    pub context: String,
+    /// Em dashes and en dashes are taken out of the answer, as it
+    /// streams and at the end
+    /// ([`crate::settings::RefineSettings::no_long_dashes`]).
+    pub no_long_dashes: bool,
     claude_cli: ClaudeCliSettings,
     openai: OpenAiSettings,
 }
 
 impl AskPlan {
     /// The plan for these settings, with the dictionary terms given
-    /// instead of read from the user's dictionary. For the eval set
-    /// and tests.
+    /// instead of read from the user's dictionary, and without any
+    /// facts about the computer: the prompt only says what day it is.
+    /// For tests, and for the eval set run without a device context.
     pub fn with_terms(ask: &AskSettings, refine: &RefineSettings, terms: &[String]) -> Self {
+        let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
+        Self::assemble(ask, refine, terms, &today, "")
+    }
+
+    /// The plan for these settings with the dictionary terms and the
+    /// rendered device context given ([`context::DeviceContext::render`]).
+    /// The context carries the date when its date group is on, so the
+    /// prompt does not say it a second time; with an empty context the
+    /// prompt has neither.
+    pub fn with_context(ask: &AskSettings, refine: &RefineSettings, terms: &[String], context: &str) -> Self {
+        Self::assemble(ask, refine, terms, "", context)
+    }
+
+    fn assemble(ask: &AskSettings, refine: &RefineSettings, terms: &[String], today: &str, context: &str) -> Self {
         let ask = ask.clone().cleaned();
         let openai = refine.backend == RefineBackendKind::OpenaiCompatible;
         // Only the Claude CLI has a web search to switch on.
@@ -407,11 +439,12 @@ impl AskPlan {
             (false, true) => prompt::WebAccess::Unavailable,
             (false, false) => prompt::WebAccess::SwitchedOff,
         };
-        let today = chrono::Local::now().format("%A %-d %B %Y").to_string();
+        let context = context.trim();
+        let extras = prompt::Extras { context, no_long_dashes: refine.no_long_dashes };
         Self {
             backend: refine.backend,
             setup: AskSetup {
-                system: prompt::system_prompt(&ask.instructions, terms, web, &today),
+                system: prompt::system_prompt_with(&ask.instructions, terms, web, today, extras),
                 model: ask.model_for(refine),
                 effort: ask.effort_for(refine),
                 web_search,
@@ -419,15 +452,28 @@ impl AskPlan {
             timeout: Duration::from_millis(timeout_ms.min(ASK_TIMEOUT_MAX_MS * 2)),
             notice: notice.to_string(),
             web_hint: web == prompt::WebAccess::SwitchedOff,
+            context: context.to_string(),
+            no_long_dashes: refine.no_long_dashes,
             claude_cli: refine.claude_cli.clone(),
             openai: refine.openai.clone(),
         }
     }
 
-    /// The plan for these settings and the current dictionary.
+    /// The plan for these settings, the current dictionary and the
+    /// facts about this computer the settings ask for, read now
+    /// ([`context::gather`]). No app in front: for a caller that has
+    /// none to name (a terminal is not where the person is working).
     pub fn new(ask: &AskSettings, refine: &RefineSettings) -> Self {
+        Self::for_app(ask, refine, None)
+    }
+
+    /// [`AskPlan::new`] with the name of the app the person is
+    /// working in, when the caller knows it. It reaches the prompt
+    /// only while that group of facts is switched on.
+    pub fn for_app(ask: &AskSettings, refine: &RefineSettings, front_app: Option<&str>) -> Self {
+        let facts = context::gather(&ask.context, front_app).render();
         let matcher = crate::dictionary::current_matcher();
-        Self::with_terms(ask, refine, matcher.prompt_terms())
+        Self::with_context(ask, refine, matcher.prompt_terms(), &facts)
     }
 
     /// A backend for this plan. Cheap: nothing is started until
@@ -479,11 +525,36 @@ impl AskPlan {
             return Err(AskError::Backend(NO_QUESTION.to_string()));
         }
         let input = AskInput { text: prompt::user_message(&question.text), images: question.images.clone() };
-        let result = if self.web_hint {
-            self.send_marked(backend, &input, sink, cancel)
-        } else {
-            backend.send(&self.setup, &input, sink, cancel, self.timeout)
+        // The net under the dash rule of the prompt: text passes
+        // through it on its way to the sink, so the panel never shows
+        // a dash that the finished answer then has not.
+        let mut dashes = self.no_long_dashes.then(crate::dashes::Normalizer::new);
+        let result = {
+            let mut out = |event: AskEvent| match (dashes.as_mut(), event) {
+                (Some(dashes), AskEvent::Text(piece)) => {
+                    let piece = dashes.push(&piece);
+                    if !piece.is_empty() {
+                        sink(AskEvent::Text(piece));
+                    }
+                }
+                (_, event) => sink(event),
+            };
+            if self.web_hint {
+                self.send_marked(backend, &input, &mut out, cancel)
+            } else {
+                backend.send(&self.setup, &input, &mut out, cancel, self.timeout)
+            }
         };
+        // A dash the text ended on, also when the ask failed midway.
+        if let Some(rest) = dashes.as_mut().map(crate::dashes::Normalizer::finish).filter(|rest| !rest.is_empty()) {
+            sink(AskEvent::Text(rest));
+        }
+        let result = result.map(|mut reply| {
+            if self.no_long_dashes {
+                reply.text = crate::dashes::normalize(&reply.text);
+            }
+            reply
+        });
         // Lengths only, never the text: verbose logs end up in bug
         // reports.
         crate::verbose_log!(
@@ -646,6 +717,22 @@ impl std::ops::Deref for AskStatus {
     }
 }
 
+/// The facts about this computer an ask would send along if it
+/// started now, as the model would get them
+/// ([`context::DeviceContext::render`]): what `ask` switches on, read
+/// this moment, with the app in front as an ask would name it. Empty
+/// when there is nothing to tell. For a settings screen that shows
+/// the person what leaves the machine; nothing is sent anywhere.
+///
+/// Asked from one of OpenWhisper's own windows, the app in front is
+/// OpenWhisper itself, which an ask never names, so the text then
+/// has no such line.
+pub fn context_preview(ask: &AskSettings) -> String {
+    let ask = ask.clone().cleaned();
+    let front_app = ask.context.front_app.then(front_app_name).flatten();
+    context::gather(&ask.context, front_app.as_deref()).render()
+}
+
 /// Check whether an ask can run with these settings. Makes no model
 /// call; for the Claude CLI it runs `claude auth status`, which takes
 /// a moment: call [`outline`] when the backend's state is not needed.
@@ -743,6 +830,23 @@ pub struct AskSnapshot {
 struct Warm {
     plan: AskPlan,
     backend: Box<dyn AskBackend>,
+    /// The context settings the facts in `plan` were read with.
+    context_settings: crate::settings::ContextSettings,
+}
+
+/// The name of the app the person is working in, for the device
+/// context: `None` when it cannot be read or when it is OpenWhisper
+/// itself. The name only, never the title of the window.
+#[cfg(feature = "focus")]
+fn front_app_name() -> Option<String> {
+    let focus = crate::focus::current_app();
+    let name = focus.app_name.trim();
+    (!focus.is_self && !name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(not(feature = "focus"))]
+fn front_app_name() -> Option<String> {
+    None
 }
 
 struct Session {
@@ -863,7 +967,12 @@ pub fn warm_listening(id: u64) {
         return;
     }
     let started = Instant::now();
-    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    let ask = crate::settings::current_ask_settings();
+    // The facts about the computer are read here, when the person
+    // starts to talk: the answer panel never takes focus, so the app
+    // in front is the one they are working in.
+    let front_app = ask.context.front_app.then(front_app_name).flatten();
+    let plan = AskPlan::for_app(&ask, &crate::settings::current_refine_settings(), front_app.as_deref());
     let mut backend = plan.backend();
     backend.warm(&plan.setup);
     crate::verbose_log!(
@@ -872,7 +981,7 @@ pub fn warm_listening(id: u64) {
         started.elapsed().as_millis(),
         plan.setup.web_search
     );
-    let mut slot = Some(Warm { plan, backend });
+    let mut slot = Some(Warm { plan, backend, context_settings: ask.cleaned().context });
     read(|s| {
         if s.listening(id) {
             s.warm = slot.take();
@@ -985,7 +1094,18 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         drop(late);
         return;
     }
-    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    let ask = crate::settings::current_ask_settings().cleaned();
+    let refine = crate::settings::current_refine_settings();
+    // The facts about the computer are the ones read when the
+    // recording started (the time then, the app in front then), as
+    // long as the switches are what they were: the backend was warmed
+    // with a prompt that holds them. A typed question, or a recording
+    // too short for the warm-up to finish, reads them now.
+    let facts = match &warm {
+        Some(warm) if warm.context_settings == ask.context => warm.plan.context.clone(),
+        _ => context_preview(&ask),
+    };
+    let plan = AskPlan::with_context(&ask, &refine, crate::dictionary::current_matcher().prompt_terms(), &facts);
     // The backend warmed while the person talked is used when it was
     // warmed for exactly this plan, which is every ask where no
     // setting or dictionary term changed meanwhile.

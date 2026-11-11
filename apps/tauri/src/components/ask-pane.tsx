@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, RefreshCw } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -18,9 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { askContext, type AskContextSettings } from "@/lib/ask";
 import { configToChipKeys } from "@/lib/hotkey-format";
 import {
   BACKEND_EFFORTS,
@@ -30,7 +32,7 @@ import {
 } from "@/lib/refine";
 import { settingsRowId } from "@/lib/navigate";
 import type { SettingsPaneId } from "@/lib/settings-panes";
-import { useAsk, useAskBackend } from "@/lib/use-ask";
+import { useAsk, useAskBackend, useAskContextPreview } from "@/lib/use-ask";
 import { useCurrentHotkey } from "@/lib/use-current-hotkey";
 
 // The first choice of the model and effort selects: nothing is
@@ -39,6 +41,49 @@ const DEFAULT_CHOICE = "__default__";
 
 // Shown until `ask_get` has answered.
 const FALLBACK_DESTINATION = "the model Refine is set up with";
+
+// Longest "where you are" text, until `ask_get` has said what core
+// keeps (`ASK_PLACE_MAX_CHARS`).
+const FALLBACK_PLACE_MAX_CHARS = 120;
+
+// The four groups of facts an ask reads from the computer, in the
+// order core sends them, each with what is in it. Which facts a
+// group holds is core's (`core/src/ask/context.rs`); this is the
+// sentence that says so.
+const CONTEXT_GROUPS: {
+  key: Exclude<keyof AskContextSettings, "place">;
+  id: string;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "date_time",
+    id: "date-time",
+    label: "Date and time",
+    description: "Today's date, the time and your time zone.",
+  },
+  {
+    key: "computer",
+    id: "computer",
+    label: "Computer",
+    description:
+      "Operating system, model, chip, memory, battery or plugged in, displays, free disk space and whether you are online. Never the network name, the IP address, the serial number, the name of the computer or your user name.",
+  },
+  {
+    key: "front_app",
+    id: "front-app",
+    label: "App in front",
+    description:
+      "The name of the app you are working in when you ask. Only the name, never the title of the window.",
+  },
+  {
+    key: "locale",
+    id: "locale",
+    label: "Language and region",
+    description:
+      "System language, region, units, 12 or 24 hour clock, currency and keyboard layout.",
+  },
+];
 
 interface AskPaneProps {
   // Opens another settings pane: Refine, where the backend is set
@@ -200,7 +245,164 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
           onSave={(instructions) => update({ instructions })}
         />
       )}
+
+      {state && settings && (
+        <>
+          <Separator />
+          <ContextSection
+            context={askContext(settings)}
+            enabled={settings.enabled}
+            destination={destination}
+            placeMaxChars={state.limits.place_max_chars ?? FALLBACK_PLACE_MAX_CHARS}
+            onChange={(patch) => update({ context: { ...askContext(settings), ...patch } })}
+          />
+        </>
+      )}
     </FieldGroup>
+  );
+}
+
+// What an ask tells the model about this computer: four switches,
+// the place the person types, and the exact text that would be sent
+// right now. Everything shown is read or stored by Rust; with Ask
+// off nothing is sent, and the controls wait for the switch.
+function ContextSection({
+  context,
+  enabled,
+  destination,
+  placeMaxChars,
+  onChange,
+}: {
+  context: AskContextSettings;
+  // Ask is switched on.
+  enabled: boolean;
+  destination: string;
+  placeMaxChars: number;
+  onChange: (patch: Partial<AskContextSettings>) => void;
+}) {
+  const preview = useAskContextPreview();
+  const disabled = !enabled;
+
+  return (
+    <>
+      <SectionHeader>What the model is told about your computer</SectionHeader>
+      <FieldDescription data-testid="ask-context-intro">
+        These facts go with every question, to the same place as the
+        question: {destination}.
+      </FieldDescription>
+      {disabled && (
+        <FieldDescription data-testid="ask-context-off">
+          Ask is switched off, so nothing is sent. Switch Ask on to
+          change what the model is told.
+        </FieldDescription>
+      )}
+
+      {CONTEXT_GROUPS.map((group) => (
+        <Field
+          key={group.key}
+          orientation="horizontal"
+          data-disabled={disabled ? true : undefined}
+        >
+          <FieldContent>
+            <FieldLabel htmlFor={`ask-context-${group.id}`}>{group.label}</FieldLabel>
+            <FieldDescription>{group.description}</FieldDescription>
+          </FieldContent>
+          <Switch
+            id={`ask-context-${group.id}`}
+            checked={context[group.key]}
+            disabled={disabled}
+            onCheckedChange={(on) => onChange({ [group.key]: on })}
+          />
+        </Field>
+      ))}
+
+      <PlaceField
+        value={context.place}
+        maxChars={placeMaxChars}
+        disabled={disabled}
+        onSave={(place) => onChange({ place })}
+      />
+
+      <Field>
+        <div className="flex items-center justify-between gap-3">
+          <FieldLabel htmlFor="ask-context-preview">What is sent right now</FieldLabel>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={preview.refreshing}
+            onClick={preview.refresh}
+          >
+            <RefreshCw data-icon="inline-start" />
+            Refresh
+          </Button>
+        </div>
+        <Textarea
+          id="ask-context-preview"
+          readOnly
+          value={preview.text ?? ""}
+          spellCheck={false}
+          className="font-mono text-xs"
+          placeholder={
+            preview.error
+              ? "The preview could not be read."
+              : preview.text === ""
+                ? "Nothing. Every switch is off and no place is given."
+                : "Reading."
+          }
+        />
+        <FieldDescription>
+          This is the exact text that goes with a question asked now.
+          {context.front_app
+            ? " The app in front is read when you ask, so it is not in this preview while this window is in front."
+            : ""}
+        </FieldDescription>
+      </Field>
+    </>
+  );
+}
+
+function PlaceField({
+  value,
+  maxChars,
+  disabled,
+  onSave,
+}: {
+  // "" = no place given.
+  value: string;
+  maxChars: number;
+  disabled: boolean;
+  onSave: (place: string) => void;
+}) {
+  // Saved on blur or Enter, not per keystroke: every save rewrites
+  // settings.json.
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+
+  const commit = () => {
+    const next = text.trim();
+    if (next !== value) onSave(next);
+  };
+
+  return (
+    <Field data-disabled={disabled ? true : undefined}>
+      <FieldLabel htmlFor="ask-context-place">Where you are</FieldLabel>
+      <Input
+        id="ask-context-place"
+        value={text}
+        maxLength={maxChars}
+        disabled={disabled}
+        placeholder="For example: Aarhus, Denmark"
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+      />
+      <FieldDescription>
+        Optional. Without it the model only knows your time zone and
+        region. Nothing here uses location services.
+      </FieldDescription>
+    </Field>
   );
 }
 

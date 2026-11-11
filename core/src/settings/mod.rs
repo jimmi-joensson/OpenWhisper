@@ -44,8 +44,9 @@
 //!   TASK-96). The built-in Dictation mode is not stored. Raw JSON in
 //!   the envelope for the same reason as `refine`.
 //! - `ask`: the switch, web search, standing instructions, model,
-//!   effort and timeout of Ask ([`AskSettings`], TASK-97). Off by
-//!   default. The backend is the one in `refine`. Raw JSON in the
+//!   effort and timeout of Ask, and what an ask tells the model about
+//!   the computer ([`AskSettings`], [`ContextSettings`], TASK-97). Off
+//!   by default. The backend is the one in `refine`. Raw JSON in the
 //!   envelope for the same reason as `refine`.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
@@ -83,7 +84,8 @@ use serde::{Deserialize, Serialize};
 
 mod ask;
 pub use ask::{
-    ASK_INSTRUCTIONS_MAX_CHARS, ASK_TIMEOUT_DEFAULT_MS, ASK_TIMEOUT_MAX_MS, ASK_TIMEOUT_MIN_MS, AskSettings,
+    ASK_INSTRUCTIONS_MAX_CHARS, ASK_PLACE_MAX_CHARS, ASK_TIMEOUT_DEFAULT_MS, ASK_TIMEOUT_MAX_MS, ASK_TIMEOUT_MIN_MS,
+    AskSettings, ContextSettings,
 };
 
 mod history;
@@ -1416,8 +1418,11 @@ mod tests {
             model: Some("opus".into()),
             effort: Some(RefineEffort::Medium),
             timeout_ms: 1,
+            context: ContextSettings { computer: false, place: "  Aarhus,  Denmark ".into(), ..ContextSettings::default() },
         };
         let written = save_ask_settings(&path, ask).unwrap();
+        assert_eq!(written.context.place, "Aarhus, Denmark");
+        assert!(!written.context.computer && written.context.date_time);
         assert_eq!(written.instructions, "Answer in Danish.");
         assert_eq!(written.timeout_ms, ASK_TIMEOUT_MIN_MS);
         assert_eq!(current_ask_settings(), written);

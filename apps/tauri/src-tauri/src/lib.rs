@@ -1356,6 +1356,7 @@ pub fn run() {
             ask::ask_get,
             ask::ask_status,
             ask::ask_set,
+            ask::ask_context_preview,
             ask::ask_start,
             ask::ask_toggle,
             ask::ask_cancel,

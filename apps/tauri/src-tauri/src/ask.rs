@@ -35,7 +35,7 @@ use openwhisper_core::ask::{self, AskOutline, AskPhase, AskSnapshot};
 use openwhisper_core::dictation;
 use openwhisper_core::refine::BackendStatus;
 use openwhisper_core::settings::{
-    self as core_settings, AskSettings, ASK_INSTRUCTIONS_MAX_CHARS, ASK_TIMEOUT_DEFAULT_MS,
+    self as core_settings, AskSettings, ASK_INSTRUCTIONS_MAX_CHARS, ASK_PLACE_MAX_CHARS, ASK_TIMEOUT_DEFAULT_MS,
     ASK_TIMEOUT_MAX_MS, ASK_TIMEOUT_MIN_MS, DEFAULT_CLAUDE_MODEL,
 };
 use tauri::{AppHandle, Emitter, Manager};
@@ -91,6 +91,7 @@ pub struct AskLimits {
     pub timeout_max_ms: u64,
     pub timeout_default_ms: u64,
     pub instructions_max_chars: usize,
+    pub place_max_chars: usize,
 }
 
 fn state(outline: AskOutline) -> AskState {
@@ -101,6 +102,7 @@ fn state(outline: AskOutline) -> AskState {
             timeout_max_ms: ASK_TIMEOUT_MAX_MS,
             timeout_default_ms: ASK_TIMEOUT_DEFAULT_MS,
             instructions_max_chars: ASK_INSTRUCTIONS_MAX_CHARS,
+            place_max_chars: ASK_PLACE_MAX_CHARS,
         },
         default_model: DEFAULT_CLAUDE_MODEL,
     }
@@ -123,6 +125,10 @@ pub fn init(app: &AppHandle) {
         let _held = ask_lock();
         let _ = core_settings::load_ask_settings(&path);
     }
+    // The facts an ask tells the model about this computer: read them
+    // once now, on a thread of core's own, so the first ask does not
+    // pay for the reads that are slow the first time.
+    ask::context::prewarm();
 }
 
 /// The Ask block changed from `before` to `now`: re-install the
@@ -175,6 +181,19 @@ pub async fn ask_status() -> Result<BackendStatus, String> {
     })
     .await
     .map_err(|e| format!("ask status: {e}"))
+}
+
+/// The facts about this computer an ask would send along if it
+/// started now, as the exact text the model would get
+/// (`ask::context_preview`, the text `openwhisper ask context`
+/// prints). For the preview in the Ask pane; nothing is sent
+/// anywhere. Off the UI thread: the facts are local reads, and the
+/// first one of a session takes a moment.
+#[tauri::command]
+pub async fn ask_context_preview() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| ask::context_preview(&core_settings::current_ask_settings()))
+        .await
+        .map_err(|e| format!("ask context: {e}"))
 }
 
 /// Save the whole block; returns what core stored (trimmed, clamped).
@@ -727,8 +746,35 @@ mod tests {
                 "model": null,
                 "effort": null,
                 "timeout_ms": 60_000,
+                "context": {
+                    "date_time": true,
+                    "computer": true,
+                    "front_app": true,
+                    "locale": true,
+                    "place": "",
+                },
             })
         );
+    }
+
+    #[test]
+    fn the_settings_payload_carries_the_context_switches_and_the_place_limit() {
+        let refine = openwhisper_core::settings::RefineSettings::default();
+        let ask = AskSettings {
+            context: openwhisper_core::settings::ContextSettings {
+                computer: false,
+                place: "Aarhus, Denmark".into(),
+                ..Default::default()
+            },
+            ..AskSettings::default()
+        };
+        let value = serde_json::to_value(state(ask::outline(&ask, &refine))).unwrap();
+        assert_eq!(value["settings"]["context"]["computer"], false);
+        assert_eq!(value["settings"]["context"]["date_time"], true);
+        assert_eq!(value["settings"]["context"]["place"], "Aarhus, Denmark");
+        assert_eq!(value["limits"]["place_max_chars"], 120);
+        // The text of the preview is core's, read off the same block.
+        assert!(ask::context_preview(&ask).starts_with("Where the person is: Aarhus, Denmark\nDate: "));
     }
 
     /// Every window of a config file, by label.

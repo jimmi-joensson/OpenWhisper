@@ -17,6 +17,9 @@
 //!   and the settings an ask would use.
 //! - `config`: print the `ask` settings block, or change it with
 //!   flags.
+//! - `context`: print the facts about this computer an ask would
+//!   send along right now, exactly as the model gets them. Nothing is
+//!   sent anywhere.
 //! - `eval`: run the built-in eval set against the real backend.
 //!
 //! `run` and `eval` work whether or not Ask is switched on in the
@@ -33,7 +36,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, eval};
+use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, context, eval};
 use openwhisper_core::refine;
 use openwhisper_core::settings::{self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings};
 use openwhisper_core::store::Store;
@@ -53,6 +56,8 @@ pub enum AskCommand {
     Status(Overrides),
     /// Print the Ask settings, or change them with flags.
     Config(ConfigArgs),
+    /// Print what an ask tells the model about this computer.
+    Context(ContextArgs),
     /// Run the built-in eval set against the real backend.
     Eval(EvalArgs),
 }
@@ -113,8 +118,40 @@ pub struct RunArgs {
     /// Off by default, so a script does not write into it.
     #[arg(long)]
     history: bool,
+    /// The app to name as the one in front. From a terminal the app
+    /// in front is the terminal, which says nothing about what you
+    /// are working on, so without this flag no app is named. Used
+    /// only while that part of the context is switched on.
+    #[arg(long, value_name = "NAME")]
+    front_app: Option<String>,
     #[command(flatten)]
     overrides: Overrides,
+}
+
+/// `ask context`: the saved context settings, with flags to try a
+/// variant. Nothing here is written back.
+#[derive(Args, Debug, Default)]
+pub struct ContextArgs {
+    /// Where you are, in place of the saved text. An empty string
+    /// tries it without a place.
+    #[arg(long, value_name = "TEXT")]
+    place: Option<String>,
+    /// Leave out the date, the time and the time zone.
+    #[arg(long)]
+    no_date_time: bool,
+    /// Leave out the facts about the computer.
+    #[arg(long)]
+    no_computer: bool,
+    /// Leave out the app in front.
+    #[arg(long)]
+    no_front_app: bool,
+    /// Leave out language and region.
+    #[arg(long)]
+    no_locale: bool,
+    /// The app to name as the one in front. Without it no app is
+    /// named: from a terminal the app in front is the terminal.
+    #[arg(long, value_name = "NAME")]
+    front_app: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -144,6 +181,29 @@ pub struct ConfigArgs {
     /// Timeout in milliseconds (doubled with web search).
     #[arg(long)]
     timeout_ms: Option<u64>,
+    /// Where you are ("Aarhus, Denmark"). Told to the model with
+    /// every question, so it does not have to guess from the time
+    /// zone. Nothing uses location services.
+    #[arg(long, value_name = "TEXT", conflicts_with = "clear_place")]
+    place: Option<String>,
+    /// Remove the place.
+    #[arg(long)]
+    clear_place: bool,
+    /// Tell the model the date, the time and the time zone.
+    #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
+    context_date_time: Option<bool>,
+    /// Tell the model about the computer: system, model, chip,
+    /// memory, power, displays, free disk space, online or offline.
+    #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
+    context_computer: Option<bool>,
+    /// Tell the model the name of the app in front (never the title
+    /// of its window).
+    #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
+    context_front_app: Option<bool>,
+    /// Tell the model the language, region, units, clock, currency
+    /// and keyboard layout.
+    #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
+    context_locale: Option<bool>,
 }
 
 #[derive(Args, Debug)]
@@ -151,6 +211,11 @@ pub struct EvalArgs {
     /// Run only cases whose name starts with this text.
     #[arg(long, value_name = "PREFIX")]
     only: Option<String>,
+    /// Ask without any facts about the computer: the prompt as it is
+    /// with every part of the context switched off, plus the date.
+    /// The cases about those facts (device-*) are left out.
+    #[arg(long)]
+    no_context: bool,
     #[command(flatten)]
     overrides: Overrides,
 }
@@ -168,6 +233,7 @@ pub fn run(args: AskArgs, json: bool) -> Result<()> {
         AskCommand::Run(a) => run_question(a, json),
         AskCommand::Status(o) => status(&o, json),
         AskCommand::Config(a) => config(a, json),
+        AskCommand::Context(a) => show_context(a, json),
         AskCommand::Eval(a) => run_eval(a, json),
     }
 }
@@ -313,7 +379,9 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         bail!("no question given: pass it as an argument or pipe it on stdin");
     }
 
-    let plan = AskPlan::new(&ask, &refine);
+    // The facts about this computer the saved settings ask for. No
+    // app in front unless one was named: here that is the terminal.
+    let plan = AskPlan::for_app(&ask, &refine, args.front_app.as_deref());
     let destination = plan.destination();
     let recorded = use_store();
     let kept = args.history && use_history()?;
@@ -322,6 +390,12 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         eprintln!("question goes to: {destination}");
         if !plan.notice.is_empty() {
             eprintln!("note: {}", plan.notice);
+        }
+        if !plan.context.is_empty() {
+            eprintln!(
+                "with {} facts about this computer (see: openwhisper ask context)",
+                plan.context.lines().count()
+            );
         }
         if args.history && !kept {
             eprintln!("note: transcript history is switched off, so this ask is not kept in it");
@@ -380,6 +454,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "effort": effort,
             "web_search": plan.setup.web_search,
             "timeout_ms": plan.timeout.as_millis() as u64,
+            "context": plan.context,
             "destination": destination,
             "recorded": recorded,
             "kept_in_history": kept && result.is_ok(),
@@ -459,6 +534,8 @@ fn status(overrides: &Overrides, json: bool) -> Result<()> {
     if !status.notice.is_empty() {
         println!("note              {}", status.notice);
     }
+    println!("device context    {}", context_summary(&status.settings.context));
+    println!("no long dashes    {}", if refine.no_long_dashes { "on" } else { "off" });
     match refine.backend {
         RefineBackendKind::OpenaiCompatible => {
             println!("endpoint          {}", refine.openai.base_url);
@@ -485,7 +562,13 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
         || args.clear_model
         || args.effort.is_some()
         || args.clear_effort
-        || args.timeout_ms.is_some();
+        || args.timeout_ms.is_some()
+        || args.place.is_some()
+        || args.clear_place
+        || args.context_date_time.is_some()
+        || args.context_computer.is_some()
+        || args.context_front_app.is_some()
+        || args.context_locale.is_some();
 
     if let Some(v) = args.enabled {
         next.enabled = v;
@@ -511,6 +594,24 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     if let Some(v) = args.timeout_ms {
         next.timeout_ms = v;
     }
+    if let Some(v) = args.place {
+        next.context.place = v;
+    }
+    if args.clear_place {
+        next.context.place.clear();
+    }
+    if let Some(v) = args.context_date_time {
+        next.context.date_time = v;
+    }
+    if let Some(v) = args.context_computer {
+        next.context.computer = v;
+    }
+    if let Some(v) = args.context_front_app {
+        next.context.front_app = v;
+    }
+    if let Some(v) = args.context_locale {
+        next.context.locale = v;
+    }
     let current = if changes {
         settings::save_ask_settings(&path, next)
             .map_err(|e| anyhow!(e))
@@ -532,9 +633,62 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
     println!("model          {}", current.model.as_deref().unwrap_or("(default: sonnet)"));
     println!("effort         {}", current.effort.map_or("(default: low)", RefineEffort::as_str));
     println!("timeout_ms     {}", current.timeout_ms);
+    println!("context        {}", context_summary(&current.context));
+    println!("place          {}", if current.context.place.is_empty() { "(none)" } else { &current.context.place });
     println!("{}  {}", if changes { "written      " } else { "settings_path" }, path.display());
     if changes {
         eprintln!("A running OpenWhisper picks this up when its Ask settings are opened, or on restart.");
+    }
+    Ok(())
+}
+
+/// Which groups of facts are switched on, in a few words.
+fn context_summary(c: &settings::ContextSettings) -> String {
+    let groups = [
+        (c.date_time, "date and time"),
+        (c.computer, "computer"),
+        (c.front_app, "app in front"),
+        (c.locale, "language and region"),
+        (!c.place.is_empty(), "place"),
+    ];
+    let on: Vec<&str> = groups.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+    if on.is_empty() { "nothing".to_string() } else { on.join(", ") }
+}
+
+/// The saved context settings with the flags of `ask context` on top.
+fn context_settings(saved: settings::ContextSettings, args: &ContextArgs) -> settings::ContextSettings {
+    settings::ContextSettings {
+        date_time: saved.date_time && !args.no_date_time,
+        computer: saved.computer && !args.no_computer,
+        front_app: saved.front_app && !args.no_front_app,
+        locale: saved.locale && !args.no_locale,
+        place: args.place.clone().unwrap_or(saved.place),
+    }
+    .cleaned()
+}
+
+/// `ask context`: the text an ask would send about this computer
+/// right now, and nothing else on stdout, so it can be piped.
+fn show_context(args: ContextArgs, json: bool) -> Result<()> {
+    let saved = settings::load_ask_settings(&settings_path()?).context;
+    let wanted = context_settings(saved, &args);
+    let facts = context::gather(&wanted, args.front_app.as_deref());
+    let text = facts.render();
+    if json {
+        let value = serde_json::json!({ "text": text, "facts": facts, "settings": wanted });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    if text.is_empty() {
+        eprintln!("nothing: every part of the context is switched off and no place is set");
+        return Ok(());
+    }
+    println!("{text}");
+    if wanted.front_app && args.front_app.is_none() {
+        eprintln!(
+            "note: no app in front is named here (from a terminal that is the terminal). In the app it is the \
+app you are working in; try one with --front-app NAME"
+        );
     }
     Ok(())
 }
@@ -555,16 +709,25 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
     if !backend_status.ready {
         bail!("backend {} is not ready: {}", backend_status.backend, backend_status.message);
     }
-    let plan = eval::plan(&ask, &refine);
+    // What every case shares: the backend, the model, where the
+    // questions go. The facts about the computer are the case's own.
+    let plan = if args.no_context { eval::bare_plan(&ask, &refine) } else { eval::plan(&ask, &refine) };
+    let cases = || if args.no_context { eval::cases_without_context(&plan) } else { eval::cases_for(&plan) };
     if !json {
         eprintln!("questions go to: {}", plan.destination());
+        if args.no_context {
+            eprintln!("without any facts about the computer; the device-* cases are left out");
+        } else {
+            eprintln!("with the facts of a made-up computer, the same for whoever runs this");
+        }
     }
     let mut results = Vec::new();
-    for case in eval::cases_for(&plan) {
+    for case in cases() {
         if args.only.as_deref().is_some_and(|prefix| !case.name.starts_with(prefix)) {
             continue;
         }
         // A fresh conversation per case, like a fresh ask.
+        let plan = if args.no_context { plan.clone() } else { eval::plan_for(&case, &ask, &refine) };
         let mut backend = plan.backend();
         let result = eval::run_case(&case, &plan, backend.as_mut());
         if !json {
@@ -593,7 +756,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
         bail!(
             "no eval case starts with \"{}\"; the cases are: {}",
             args.only.unwrap_or_default(),
-            eval::cases_for(&plan).iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
+            cases().iter().map(|c| c.name).collect::<Vec<_>>().join(", ")
         );
     }
 
@@ -605,6 +768,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
             "backend": refine.backend.as_str(),
             "model": plan.setup.model,
             "effort": plan.effort_id(),
+            "device_context": !args.no_context,
             "passed": passed,
             "total": results.len(),
             "latency_ms": { "first_text": first_text.to_json(), "total": total.to_json() },
@@ -722,6 +886,42 @@ mod tests {
         assert!(line.contains("openwhisper ask config --web-search true"), "{line}");
         assert!(line.ends_with("or pass --web-search"), "{line}");
         assert!(!line.contains('\u{2014}') && !line.contains('\u{2013}'));
+    }
+
+    #[test]
+    fn the_context_flags_only_ever_take_away_and_the_place_replaces() {
+        let saved = settings::ContextSettings { place: "Aarhus, Denmark".into(), ..Default::default() };
+        // No flags: the saved settings.
+        assert_eq!(context_settings(saved.clone(), &ContextArgs::default()), saved);
+        let args = ContextArgs { no_computer: true, no_locale: true, place: Some("  Odense ".into()), ..Default::default() };
+        let tried = context_settings(saved.clone(), &args);
+        assert!(tried.date_time && tried.front_app && !tried.computer && !tried.locale);
+        assert_eq!(tried.place, "Odense");
+        // A group that is off in the settings stays off.
+        let off = settings::ContextSettings { date_time: false, ..saved.clone() };
+        assert!(!context_settings(off, &ContextArgs::default()).date_time);
+        // An empty place tries it without one.
+        let none = ContextArgs { place: Some(String::new()), ..Default::default() };
+        assert_eq!(context_settings(saved, &none).place, "");
+    }
+
+    #[test]
+    fn the_context_summary_names_what_is_on() {
+        let all = settings::ContextSettings::default();
+        assert_eq!(context_summary(&all), "date and time, computer, app in front, language and region");
+        let some = settings::ContextSettings { computer: false, front_app: false, place: "Odense".into(), ..all };
+        assert_eq!(context_summary(&some), "date and time, language and region, place");
+        let none = settings::ContextSettings { date_time: false, locale: false, place: String::new(), ..some };
+        assert_eq!(context_summary(&none), "nothing");
+    }
+
+    #[test]
+    fn a_run_names_the_app_in_front_only_when_told_which() {
+        let ask = AskSettings::default();
+        let refine = RefineSettings::default();
+        assert!(!AskPlan::for_app(&ask, &refine, None).context.contains("App in front"));
+        let named = AskPlan::for_app(&ask, &refine, Some("Notes"));
+        assert!(named.context.contains("\nApp in front: Notes"), "{}", named.context);
     }
 
     #[test]

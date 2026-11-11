@@ -29,7 +29,7 @@ import {
   type RefineEffort,
 } from "@/lib/refine";
 import type { SettingsPaneId } from "@/lib/settings-panes";
-import { useAsk } from "@/lib/use-ask";
+import { useAsk, useAskBackend } from "@/lib/use-ask";
 import { useCurrentHotkey } from "@/lib/use-current-hotkey";
 
 // The first choice of the model and effort selects: nothing is
@@ -48,19 +48,21 @@ interface AskPaneProps {
 // Ask pane (TASK-97): the switch for the second hotkey, where
 // questions are sent, and how they are answered.
 //
-// A thin view over Rust (`ask_get`, `ask_set`). The backend itself
-// (which model service, the sign-in, the key) is Refine's and is set
-// up on the Refine pane; this pane only says what it is and whether
-// it can run.
+// A thin view over Rust (`ask_get`, `ask_set`, and `ask_status` for
+// whether the backend can run). The backend itself (which model
+// service, the sign-in, the key) is Refine's and is set up on the
+// Refine pane; this pane only says what it is and whether it can
+// run.
 export function AskPane({ onOpenPane }: AskPaneProps) {
   const { state, error, update } = useAsk();
   const hotkey = useCurrentHotkey("ask");
   const hotkeyKeys = configToChipKeys(hotkey);
 
+  const backend = useAskBackend();
+
   const settings = state?.settings;
-  const backend = state?.backend;
-  const claude = backend ? backend.backend === "claude-cli" : true;
-  const destination = backend?.destination ?? FALLBACK_DESTINATION;
+  const claude = state ? state.backend_kind === "claude-cli" : true;
+  const destination = state?.destination ?? FALLBACK_DESTINATION;
 
   return (
     <FieldGroup className="px-1 py-2">

@@ -358,6 +358,86 @@ done
         assert!(record["destination"].as_str().is_some_and(|d| d.contains("Anthropic")), "{record}");
     }
 
+    /// The newest rows of the diagnostics table, through the CLI.
+    fn runs(cfg: &Config) -> Vec<Value> {
+        cfg.json(&["refine", "history", "--limit", "10"])["runs"].as_array().expect("runs").clone()
+    }
+
+    #[test]
+    fn run_leaves_the_diagnostics_row_an_ask_in_the_app_leaves() {
+        let cfg = Config::new("recorded");
+        let claude = fake_cli(&cfg);
+
+        // No database yet (the app has not run): nothing is recorded
+        // and none is created.
+        let record = cfg.json(&["ask", "run", "what is the capital of norway", "--claude-path", &claude]);
+        assert_eq!(record["recorded"], false);
+        assert!(!cfg.dir.join("openwhisper.db").exists());
+
+        // With the app's database in place, the run is in it.
+        drop(openwhisper_core::store::Store::open_or_init(&cfg.dir.join("openwhisper.db")).expect("create the database"));
+        let record = cfg.json(&["ask", "run", "what is the capital of norway", "--claude-path", &claude]);
+        assert_eq!(record["recorded"], true);
+        assert_eq!(record["kept_in_history"], false);
+        let rows = runs(&cfg);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["source"], "ask");
+        assert_eq!(row["status"], "answered");
+        assert_eq!(row["backend"], "claude-cli");
+        assert_eq!(row["model"], "sonnet");
+        assert_eq!(row["effort"], "low");
+        assert_eq!(row["chars_in"], 29);
+        assert_eq!(row["chars_out"], 30);
+        assert_eq!(row["tokens_in"], 602);
+        assert_eq!(row["tokens_out"], 11);
+        assert!(row["first_text_ms"].is_i64(), "{row}");
+        // Lengths and numbers only: neither the question nor the
+        // answer is in the row.
+        let text = row.to_string().to_lowercase();
+        assert!(!text.contains("norway") && !text.contains("oslo"), "{text}");
+
+        // A run that fails leaves its row too.
+        let out = cfg.spawn(&["ask", "run", "what is two plus two", "--claude-path", "/nonexistent/claude"]);
+        assert!(!out.status.success());
+        let rows = runs(&cfg);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0]["source"], "ask");
+        assert_eq!(rows[0]["status"], "unavailable");
+    }
+
+    #[test]
+    fn run_keeps_the_ask_in_history_only_with_the_flag_and_history_on() {
+        let cfg = Config::new("history");
+        let claude = fake_cli(&cfg);
+        let stored = |cfg: &Config| cfg.json(&["history", "list"])["stored"].as_u64().expect("stored");
+
+        // History on, no flag: a script does not write into it.
+        cfg.json(&["history", "config", "--enabled", "true"]);
+        cfg.json(&["ask", "run", "what is the capital of norway", "--claude-path", &claude]);
+        assert_eq!(stored(&cfg), 0);
+
+        // With the flag: the question, with the answer under it.
+        let record = cfg.json(&["ask", "run", "what is the capital of norway", "--history", "--claude-path", &claude]);
+        assert_eq!(record["kept_in_history"], true);
+        let page = cfg.json(&["history", "list"]);
+        assert_eq!(page["stored"], 1);
+        assert_eq!(page["entries"][0]["text"], "what is the capital of norway");
+        assert_eq!(page["entries"][0]["answer"], "The capital of Norway is Oslo.");
+        assert_eq!(page["entries"][0]["kind"], "ask");
+
+        // History off: the flag keeps nothing, and says so.
+        cfg.json(&["history", "config", "--enabled", "false"]);
+        let out = cfg.spawn(&["ask", "run", "what is the capital of norway", "--history", "--claude-path", &claude]);
+        assert!(out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("transcript history is switched off"), "{stderr}");
+        assert_eq!(stored(&cfg), 1);
+        let record = cfg.json(&["ask", "run", "what is the capital of norway", "--history", "--claude-path", &claude]);
+        assert_eq!(record["kept_in_history"], false);
+        assert_eq!(stored(&cfg), 1);
+    }
+
     #[test]
     fn run_uses_the_dictionary_like_a_dictation_does() {
         let cfg = Config::new("dictionary");

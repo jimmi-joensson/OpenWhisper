@@ -747,26 +747,53 @@ fn ask_begin<E: DictationEnv>(env: &E) {
     let _ = env;
 }
 
-/// The current ask is off: its recording was empty or could not be
-/// transcribed, or the person closed it.
+/// The ask is off: its recording was empty, or the person closed it.
+/// With an `id`, only when the current ask is still that one, so a
+/// close that lands late leaves a new ask alone; without, whatever
+/// ask is there.
 #[cfg(feature = "recognizer")]
-fn ask_reset() {
+fn ask_dismiss(id: Option<u64>) {
     #[cfg(feature = "ask")]
-    crate::ask::dismiss();
+    match id {
+        Some(id) => {
+            crate::ask::dismiss_if(id);
+        }
+        None => crate::ask::dismiss(),
+    }
+    #[cfg(not(feature = "ask"))]
+    let _ = id;
 }
 
-/// Stop the current ask, if one is listening, thinking or answering.
-/// See [`run_cancel_ask`].
+/// Stop the ask, if it is listening, thinking or answering. With an
+/// `id`, only when the current ask is still that one; without,
+/// whatever ask is there (the cancel key). See [`run_cancel_ask`].
 #[cfg(feature = "recognizer")]
-fn ask_cancel() -> bool {
+fn ask_cancel(id: Option<u64>) -> bool {
     #[cfg(feature = "ask")]
     {
-        crate::ask::cancel()
+        match id {
+            Some(id) => crate::ask::cancel_if(id),
+            None => crate::ask::cancel(),
+        }
     }
     #[cfg(not(feature = "ask"))]
     {
+        let _ = id;
         false
     }
+}
+
+/// The recording that just failed was for an ask: that ask ends in
+/// its error phase with the reason, so the panel shows it instead of
+/// staying on "listening". Does nothing for a dictation, and nothing
+/// when the ask is not listening any more.
+fn ask_fail(kind: SessionKind, ask_id: u64, message: &str) {
+    #[cfg(feature = "ask")]
+    if kind == SessionKind::Ask && ask_id != 0 {
+        crate::ask::fail_listening(ask_id, &format!("The question could not be transcribed ({message})."));
+    }
+    #[cfg(not(feature = "ask"))]
+    let _ = (kind, ask_id, message);
 }
 
 /// The ask recording is transcribed, so the dictation machine is done
@@ -826,36 +853,43 @@ pub fn cancel_would_act() -> bool {
     }
 }
 
-/// Cancel the current ask, whatever it is doing: what the cancel
-/// button of the answer panel calls. An ask that is being recorded
-/// ends with its recording ([`run_cancel`]); one that is being
-/// transcribed or answered is stopped where it is (the model request
-/// is killed and the ask shows as cancelled). A finished answer is
-/// left alone, and so is a dictation that happens to be recording.
-/// Returns whether there was something to stop.
+/// Cancel an ask, whatever it is doing: what the cancel button of
+/// the answer panel calls. An ask that is being recorded ends with
+/// its recording ([`run_cancel`]); one that is being transcribed or
+/// answered is stopped where it is (the model request is killed and
+/// the ask shows as cancelled). A finished answer is left alone, and
+/// so is a dictation that happens to be recording.
+///
+/// `id` is the ask the caller means, the one its panel shows. When
+/// the current ask is another one by now, nothing happens. `None`
+/// means whatever ask is there. Returns whether there was something
+/// to stop.
 #[cfg(feature = "recognizer")]
-pub fn run_cancel_ask<E: DictationEnv>(env: &E) -> bool {
-    if recording_an_ask() {
+pub fn run_cancel_ask<E: DictationEnv>(env: &E, id: Option<u64>) -> bool {
+    if recording_an_ask(id) {
         return run_cancel(env);
     }
-    ask_cancel()
+    ask_cancel(id)
 }
 
-/// Close the current ask: what closing the answer panel calls. Like
+/// Close an ask: what closing the answer panel calls. Like
 /// [`run_cancel_ask`], and then the ask is gone from the snapshot
-/// altogether, finished answer included.
+/// altogether, finished answer included. `id` as there: a close that
+/// was meant for an earlier ask does not touch the one that started
+/// since.
 #[cfg(feature = "recognizer")]
-pub fn run_dismiss_ask<E: DictationEnv>(env: &E) {
-    if recording_an_ask() {
+pub fn run_dismiss_ask<E: DictationEnv>(env: &E, id: Option<u64>) {
+    if recording_an_ask(id) {
         let _ = run_cancel(env);
     }
-    ask_reset();
+    ask_dismiss(id);
 }
 
-/// The recording in flight is an ask.
+/// The recording in flight is an ask: the ask `id`, when one is
+/// given.
 #[cfg(feature = "recognizer")]
-fn recording_an_ask() -> bool {
-    is_recording() && with_state(|s| s.kind) == SessionKind::Ask
+fn recording_an_ask(id: Option<u64>) -> bool {
+    is_recording() && with_state(|s| s.kind == SessionKind::Ask && id.is_none_or(|id| id == s.ask_id))
 }
 
 pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
@@ -981,9 +1015,16 @@ pub fn set_injector(injector: Box<dyn Injector>) {
     let _ = INJECTOR.set(injector);
 }
 
+/// The recording or its transcription failed: ERROR, with `message`.
+///
+/// When the recording was for an ask, that ask ends here too, in its
+/// own error phase: nothing will ever submit it. This is the one
+/// place every failure passes (the recognizer that fails to load
+/// while the person talks, the stop pipeline, a shell's own errors),
+/// so no path can leave an ask on "listening".
 pub fn dictation_deliver_error(message: &str) {
     IS_RECORDING.store(false, Ordering::Relaxed);
-    with_state(|s| {
+    let (kind, ask_id) = with_state(|s| {
         s.error_message = message.to_string();
         s.status_message = message.to_string();
         s.phase = PHASE_ERROR;
@@ -992,7 +1033,9 @@ pub fn dictation_deliver_error(message: &str) {
         s.voiced_ms_at_drain = None;
         s.download_bytes_done = 0;
         s.download_bytes_total = 0;
+        (s.kind, s.ask_id)
     });
+    ask_fail(kind, ask_id, message);
     crate::crashes::event_buffer::push_event(
         "Error",
         serde_json::json!({ "message": message }),
@@ -1120,42 +1163,55 @@ pub fn run_toggle_kind<E: DictationEnv>(env: &E, kind: SessionKind) -> Result<()
     Ok(())
 }
 
-/// Run a user-initiated cancel. Stops audio capture, drains the buffer
-/// (samples are discarded), flips the phase machine to IDLE without
-/// emitting a transcript, and resumes paused media.
+/// Run a user-initiated cancel: what the cancel key does. It is for
+/// one thing at a time.
 ///
-/// An ask goes the same way. Cancelling an ask recording also ends
-/// the ask it was for. With nothing being recorded, the cancel is for
-/// an ask that is still being transcribed or answered; a finished
-/// answer is left alone, and so is an ask that is running while a
-/// *dictation* is cancelled. The answer panel has its own two
-/// entries, [`run_cancel_ask`] and [`run_dismiss_ask`].
+/// - **A recording is in flight.** Stops audio capture, drains the
+///   buffer (samples are discarded), flips the phase machine to IDLE
+///   without emitting a transcript, drops what was warmed for it and
+///   resumes paused media. When the recording was for an ask, that
+///   ask ends with it. An ask that is still answering in its panel
+///   while a *dictation* is cancelled is left alone.
+/// - **Nothing is being recorded.** Then the key is for an ask that
+///   is being transcribed or answered, and only for that: the
+///   recorder, the sample buffer and Refine are not touched, so a
+///   dictation that is being transcribed at that moment keeps its
+///   samples and its warmed Refine backend. A finished answer is left
+///   alone.
+///
+/// The answer panel has its own two entries, [`run_cancel_ask`] and
+/// [`run_dismiss_ask`].
 ///
 /// Returns `true` if a recording was actually cancelled or a running
 /// ask was stopped.
 #[cfg(feature = "recognizer")]
 pub fn run_cancel<E: DictationEnv>(env: &E) -> bool {
+    if !is_recording() {
+        return ask_cancel(None);
+    }
     crate::audio::audio_stop_capture();
     let _ = crate::audio::audio_drain_samples();
-    let kind = with_state(|s| s.kind);
-    let cancelled = dictation_request_cancel();
-    refine_discard();
-    let ask_stopped = cancel_ask_with(cancelled, kind);
+    let stopped = cancel_recording();
     env.resume_audio();
-    cancelled || ask_stopped
+    stopped
 }
 
-/// The ask part of a cancel. `recording_cancelled` and `kind` say
-/// what the cancel just did to the recorder.
+/// The state half of cancelling the recording in flight: the phase
+/// machine, what was warmed for the recording, and the ask it was
+/// for.
 #[cfg(feature = "recognizer")]
-fn cancel_ask_with(recording_cancelled: bool, kind: SessionKind) -> bool {
-    match (recording_cancelled, kind) {
+fn cancel_recording() -> bool {
+    let (kind, ask_id) = with_state(|s| (s.kind, s.ask_id));
+    let cancelled = dictation_request_cancel();
+    refine_discard();
+    let ask_stopped = match kind {
         // A dictation was cancelled. An ask that is still answering
         // in its panel is none of this key press's business.
-        (true, SessionKind::Dictation) => false,
-        // The ask recording, or nothing: whatever ask is in flight.
-        (true, SessionKind::Ask) | (false, _) => ask_cancel(),
-    }
+        SessionKind::Dictation => false,
+        // The ask this recording was for, and no other.
+        SessionKind::Ask => ask_cancel(Some(ask_id)),
+    };
+    cancelled || ask_stopped
 }
 
 /// Begin an audio-preview session (Settings → Audio mic meter). Mutually
@@ -1193,11 +1249,17 @@ pub fn run_preview_stop<E: DictationEnv>(env: &E) {
 #[cfg(feature = "recognizer")]
 pub fn run_stop_pipeline() {
     // The kind the recording was started as, not the key that
-    // stopped it.
-    let kind = with_state(|s| s.kind);
-    let give_up = || match kind {
-        SessionKind::Ask => ask_reset(),
-        SessionKind::Dictation => refine_discard(),
+    // stopped it, and the ask it was for. Read once, here: nothing
+    // can start a new recording while this one is TRANSCRIBING, but
+    // from DONE or ERROR on, a new ask can be on its way.
+    let (kind, ask_id) = with_state(|s| (s.kind, s.ask_id));
+    // The recording could not be transcribed. For an ask, the error
+    // delivery ends the ask too ([`dictation_deliver_error`]).
+    let fail = |message: &str| {
+        if kind == SessionKind::Dictation {
+            refine_discard();
+        }
+        dictation_deliver_error(message);
     };
     let t_drain = std::time::Instant::now();
     let samples = crate::audio::audio_drain_samples();
@@ -1217,7 +1279,13 @@ pub fn run_stop_pipeline() {
     dictation_mark_capture_stopped(count);
     if count == 0 {
         crate::verbose_log!("[ow.dictation] stop empty drain_ms={drain_ms}");
-        give_up();
+        // Nothing was said: no error, and what was started for the
+        // recording goes. The phase is DONE by now, so the ask is
+        // closed by its id: a new one may have started already.
+        match kind {
+            SessionKind::Ask => ask_dismiss(Some(ask_id)),
+            SessionKind::Dictation => refine_discard(),
+        }
         return;
     }
     // Defensive: recognizer_transcribe requires the engine to be
@@ -1226,8 +1294,7 @@ pub fn run_stop_pipeline() {
     // block until it's ready.
     let t_load = std::time::Instant::now();
     if let Err(e) = crate::recognizer::recognizer_ensure_loaded() {
-        give_up();
-        dictation_deliver_error(&format!("recognizer load: {e}"));
+        fail(&format!("recognizer load: {e}"));
         return;
     }
     let load_ms = t_load.elapsed().as_millis();
@@ -1263,10 +1330,7 @@ pub fn run_stop_pipeline() {
             );
             dictation_deliver_transcript(&text, res.confidence);
         }
-        Err(e) => {
-            give_up();
-            dictation_deliver_error(&format!("transcribe: {e}"));
-        }
+        Err(e) => fail(&format!("transcribe: {e}")),
     }
 }
 
@@ -1732,6 +1796,8 @@ mod tests {
         #[derive(Default)]
         struct InlineEnv {
             spawned: Mutex<Vec<&'static str>>,
+            /// How often paused media was resumed.
+            resumed: AtomicUsize,
         }
 
         impl DictationEnv for InlineEnv {
@@ -1739,11 +1805,43 @@ mod tests {
                 true
             }
             fn pause_audio(&self) {}
-            fn resume_audio(&self) {}
+            fn resume_audio(&self) {
+                self.resumed.fetch_add(1, Ordering::SeqCst);
+            }
             fn spawn(&self, name: &'static str, f: Box<dyn FnOnce() + Send + 'static>) {
                 self.spawned.lock().unwrap().push(name);
                 f();
             }
+        }
+
+        /// A factory whose backends say "Partial", then wait until
+        /// they are cancelled (or give up after five seconds).
+        fn waiting(
+            calls: &Arc<Mutex<Calls>>,
+        ) -> impl Fn(&ask::AskPlan) -> Box<dyn ask::AskBackend> + Send + Sync + use<> {
+            let calls = calls.clone();
+            move |_| {
+                Box::new(Stub::new(calls.clone(), |_, sink, cancel| {
+                    sink(AskEvent::Text("Partial".into()));
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(AskError::Cancelled)
+                }))
+            }
+        }
+
+        /// Ask a typed question on a thread of its own and wait
+        /// until its answer is streaming in.
+        fn ask_in_the_background() -> std::thread::JoinHandle<Result<ask::AskSnapshot, AskError>> {
+            let worker = std::thread::spawn(|| ask::submit("tell me a long story"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while ask::snapshot().phase != AskPhase::Answering {
+                assert!(std::time::Instant::now() < deadline, "the ask never started answering");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            worker
         }
 
         fn on() -> AskSettings {
@@ -1887,10 +1985,7 @@ mod tests {
             assert_eq!(ask::snapshot().phase, AskPhase::Listening);
 
             // What `run_cancel` does, without the audio calls.
-            let kind = with_state(|s| s.kind);
-            let cancelled = dictation_request_cancel();
-            assert!(cancelled);
-            assert!(cancel_ask_with(cancelled, kind));
+            assert!(cancel_recording());
 
             assert_eq!(ask::snapshot().phase, AskPhase::Idle);
             assert_eq!(dictation_snapshot().phase(), PHASE_IDLE);
@@ -1913,10 +2008,8 @@ mod tests {
             assert!(!is_recording());
             assert!(cancel_would_act());
 
-            let kind = with_state(|s| s.kind);
-            let cancelled = dictation_request_cancel();
-            assert!(!cancelled);
-            assert!(cancel_ask_with(cancelled, kind));
+            // Nothing is recording: the cancel key is for the ask.
+            assert!(run_cancel(&InlineEnv::default()));
             assert_eq!(ask::snapshot().phase, AskPhase::Idle);
 
             // The transcript arrives after the cancel: it is dropped.
@@ -1926,54 +2019,175 @@ mod tests {
             assert_eq!(dictation_snapshot().phase(), PHASE_DONE);
             // Once nothing is in flight, the key is the app's again.
             assert!(!cancel_would_act());
-            assert!(!run_cancel_ask(&InlineEnv::default()));
+            assert!(!run_cancel_ask(&InlineEnv::default(), None));
+            assert!(!run_cancel(&InlineEnv::default()));
         }
 
         #[test]
         fn cancelling_a_dictation_leaves_a_running_ask_alone() {
             let _lock = start();
             let calls = Arc::new(Mutex::new(Calls::default()));
-            let _scope = scope(on(), {
-                let calls = calls.clone();
-                move |_| {
-                    Box::new(Stub::new(calls.clone(), |_, sink, cancel| {
-                        sink(AskEvent::Text("Partial".into()));
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        Err(AskError::Cancelled)
-                    }))
-                }
-            });
-            let worker = std::thread::spawn(|| ask::submit("tell me a long story"));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while ask::snapshot().phase != AskPhase::Answering {
-                assert!(std::time::Instant::now() < deadline, "the ask never started answering");
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            let _scope = scope(on(), waiting(&calls));
+            let worker = ask_in_the_background();
 
             // A dictation is started and cancelled meanwhile.
             assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
             dictation_mark_capture_started();
-            let kind = with_state(|s| s.kind);
-            let cancelled = dictation_request_cancel();
-            assert!(cancelled);
-            assert!(!cancel_ask_with(cancelled, kind));
+            assert!(cancel_recording());
+            assert_eq!(dictation_snapshot().phase(), PHASE_IDLE);
             assert_eq!(ask::snapshot().phase, AskPhase::Answering);
 
             // With nothing recording, the same key stops the ask.
             assert!(cancel_would_act());
-            assert!(run_cancel_ask(&InlineEnv::default()));
+            assert!(run_cancel(&InlineEnv::default()));
             assert_eq!(ask::snapshot().phase, AskPhase::Cancelled);
             assert_eq!(worker.join().unwrap().unwrap().phase, AskPhase::Cancelled);
             assert!(!cancel_would_act());
             // The panel's cancel leaves the cancelled ask to look at;
             // closing the panel takes it away.
             assert_eq!(ask::snapshot().answer, "Partial");
-            run_dismiss_ask(&InlineEnv::default());
+            run_dismiss_ask(&InlineEnv::default(), None);
             assert_eq!(ask::snapshot().phase, AskPhase::Idle);
             assert_eq!(ask::snapshot().answer, "");
+        }
+
+        #[test]
+        fn cancelling_an_ask_leaves_a_dictation_that_is_being_transcribed_alone() {
+            let _lock = start();
+            let calls = Arc::new(Mutex::new(Calls::default()));
+            let _scope = scope(on(), waiting(&calls));
+            // Refine is on, with a backend that counts.
+            let refined = Arc::new(Mutex::new(crate::refine::test_support::Calls::default()));
+            crate::refine::test_support::set_factory(Some(Arc::new({
+                let refined = refined.clone();
+                move |_: &crate::settings::RefineSettings| -> Box<dyn crate::refine::Refiner> {
+                    Box::new(crate::refine::test_support::Stub::new(refined.clone(), |t| Ok(t.to_string())))
+                }
+            })));
+            crate::settings::set_refine_settings_cache(crate::settings::RefineSettings {
+                enabled: true,
+                ..crate::settings::RefineSettings::default()
+            });
+
+            // An ask is answering in its panel.
+            let worker = ask_in_the_background();
+            // Meanwhile a dictation was recorded, with Refine warmed
+            // for it, and is now being transcribed.
+            assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+            dictation_mark_capture_started();
+            crate::refine::warm_for_recording();
+            assert_eq!(dictation_request_toggle(), TOGGLE_STOP_RECORDING);
+            dictation_mark_transcribing_pending();
+            assert_eq!(refined.lock().unwrap().warmed, 1);
+
+            // The cancel key: nothing is recording, an ask is busy.
+            assert!(cancel_would_act());
+            let env = InlineEnv::default();
+            assert!(run_cancel(&env));
+
+            // The ask is stopped.
+            assert_eq!(worker.join().unwrap().unwrap().phase, AskPhase::Cancelled);
+            // The dictation is where it was: still being transcribed,
+            // its Refine backend still warm, no media resumed under
+            // it.
+            assert_eq!(dictation_snapshot().phase(), PHASE_TRANSCRIBING);
+            assert_eq!(refined.lock().unwrap().dropped, 0, "the dictation's warmed Refine backend was dropped");
+            assert_eq!(env.resumed.load(Ordering::SeqCst), 0);
+            // And its text still goes through that backend.
+            assert_eq!(refine_stage("one two three four five").trim(), "one two three four five");
+            assert_eq!(refined.lock().unwrap().refined.len(), 1);
+
+            // Once the ask is over too, the key does nothing at all.
+            assert!(!run_cancel(&env));
+            assert_eq!(dictation_snapshot().phase(), PHASE_TRANSCRIBING);
+
+            crate::refine::test_support::set_factory(None);
+        }
+
+        #[test]
+        fn a_late_close_of_one_ask_leaves_the_next_one_alone() {
+            let _lock = start();
+            let calls = Arc::new(Mutex::new(Calls::default()));
+            let _scope = scope(on(), {
+                let calls = calls.clone();
+                move |_| Box::new(Stub::saying(calls.clone(), "Four."))
+            });
+            let env = InlineEnv::default();
+
+            // An ask recording that turns out empty: the stop
+            // pipeline has read which ask it is for, the phase is
+            // DONE, and before the pipeline closes the ask...
+            assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+            dictation_mark_capture_started();
+            ask_begin(&env);
+            let first = with_state(|s| s.ask_id);
+            assert_eq!(ask::snapshot().id, first);
+            dictation_mark_transcribing_pending();
+            dictation_mark_capture_stopped(0);
+            assert_eq!(dictation_snapshot().phase(), PHASE_DONE);
+
+            // ...the person starts the next ask.
+            assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+            dictation_mark_capture_started();
+            ask_begin(&env);
+            let second = ask::snapshot().id;
+            assert_ne!(second, first);
+
+            // The first pipeline's close, and the panel's close and
+            // cancel of the ask it was showing, all land now.
+            ask_dismiss(Some(first));
+            run_dismiss_ask(&env, Some(first));
+            assert!(!run_cancel_ask(&env, Some(first)));
+            assert_eq!(ask::snapshot().id, second);
+            assert_eq!(ask::snapshot().phase, AskPhase::Listening);
+            assert!(is_recording(), "the new recording was cancelled");
+            assert_eq!(calls.lock().unwrap().dropped, 1, "only the first ask's backend is gone");
+
+            // Meant for the new one, they work.
+            dictation_mark_transcribing_pending();
+            dictation_mark_capture_stopped(16000);
+            assert!(run_cancel_ask(&env, Some(second)));
+            assert_eq!(ask::snapshot().phase, AskPhase::Idle);
+        }
+
+        #[test]
+        fn a_recognizer_that_fails_while_the_question_is_recorded_ends_the_ask_with_the_reason() {
+            let _lock = start();
+            let calls = Arc::new(Mutex::new(Calls::default()));
+            let _scope = scope(on(), {
+                let calls = calls.clone();
+                move |_| Box::new(Stub::saying(calls.clone(), "Four."))
+            });
+            assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+            dictation_mark_capture_started();
+            ask_begin(&InlineEnv::default());
+            let id = ask::snapshot().id;
+            assert_eq!(ask::snapshot().phase, AskPhase::Listening);
+
+            // What the recognizer load thread does when it fails.
+            dictation_deliver_error("recognizer load failed: model file missing");
+
+            assert_eq!(dictation_snapshot().phase(), PHASE_ERROR);
+            let asked = ask::snapshot();
+            assert_eq!(asked.id, id);
+            assert_eq!(asked.phase, AskPhase::Error, "the ask stayed on listening");
+            assert_eq!(
+                asked.error,
+                "The question could not be transcribed (recognizer load failed: model file missing)."
+            );
+            assert!(!cancel_would_act());
+            assert_eq!(calls.lock().unwrap().dropped, 1, "the warmed backend is gone");
+            assert!(calls.lock().unwrap().sent.is_empty());
+
+            // A later error of the dictation machine does not reach
+            // an ask that is past listening.
+            assert_eq!(ask::submit("what is two plus two").unwrap().phase, AskPhase::Done);
+            with_state(|s| {
+                s.kind = SessionKind::Ask;
+                s.ask_id = ask::snapshot().id;
+            });
+            dictation_deliver_error("recognizer load: boom");
+            assert_eq!(ask::snapshot().phase, AskPhase::Done);
         }
 
         #[test]
@@ -1986,15 +2200,16 @@ mod tests {
             });
             assert_eq!(ask::submit("what is two plus two").unwrap().phase, AskPhase::Done);
             // Nothing to cancel: the answer stays for copy and insert.
-            assert!(!run_cancel_ask(&InlineEnv::default()));
+            assert!(!run_cancel_ask(&InlineEnv::default(), None));
+            assert!(!run_cancel(&InlineEnv::default()));
             assert_eq!(ask::finished_answer().as_deref(), Some("Four."));
-            run_dismiss_ask(&InlineEnv::default());
+            run_dismiss_ask(&InlineEnv::default(), None);
             assert_eq!(ask::finished_answer(), None);
             assert_eq!(ask::snapshot().phase, AskPhase::Idle);
         }
 
         #[test]
-        fn an_empty_or_failed_ask_recording_resets_the_ask() {
+        fn an_empty_ask_recording_closes_the_ask_and_a_failed_one_ends_it_in_error() {
             let _lock = start();
             let calls = Arc::new(Mutex::new(Calls::default()));
             let _scope = scope(on(), {
@@ -2009,17 +2224,19 @@ mod tests {
                 ask_begin(&InlineEnv::default());
                 assert_eq!(ask::snapshot().phase, AskPhase::Listening);
                 dictation_mark_transcribing_pending();
+                let id = with_state(|s| s.ask_id);
                 if failure == "empty" {
                     dictation_mark_capture_stopped(0);
-                    ask_reset();
+                    ask_dismiss(Some(id));
                     assert_eq!(dictation_snapshot().phase(), PHASE_DONE);
+                    assert_eq!(ask::snapshot().phase, AskPhase::Idle);
                 } else {
                     dictation_mark_capture_stopped(16000);
-                    ask_reset();
                     dictation_deliver_error("transcribe: boom");
                     assert_eq!(dictation_snapshot().phase(), PHASE_ERROR);
+                    assert_eq!(ask::snapshot().phase, AskPhase::Error);
+                    assert_eq!(ask::snapshot().error, "The question could not be transcribed (transcribe: boom).");
                 }
-                assert_eq!(ask::snapshot().phase, AskPhase::Idle, "{failure}");
                 assert!(!cancel_would_act(), "{failure}");
             }
             // Nothing heard at all: the ask ends idle, no call.

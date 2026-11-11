@@ -321,39 +321,60 @@ pub(crate) fn deliver_capture(config: HotkeyConfig) {
     }
 }
 
+/// Run `change`, one caller at a time, process-wide.
+///
+/// Every install and teardown of the platform hook goes through
+/// here. They come from more than one thread: the main thread (boot,
+/// a hotkey save, the fullscreen path) and a blocking thread (the Ask
+/// switch, noticed in `ask_get` or saved in `ask_set`). An install is
+/// "tear down the old hook, read the settings, put up the new one";
+/// two of those interleaved can leave two hooks up, or none.
+fn serialized<R>(change: impl FnOnce() -> R) -> R {
+    static CHANGING: Mutex<()> = Mutex::new(());
+    let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+    change()
+}
+
 /// Toggle the global hotkey on/off. Used by the fullscreen-aware path.
 pub fn set_active(app: &AppHandle, active: bool) {
     if active {
         install(app);
     } else {
-        #[cfg(target_os = "macos")]
-        mac::teardown();
-        #[cfg(target_os = "windows")]
-        windows::teardown(app);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = app;
+        serialized(|| {
+            #[cfg(target_os = "macos")]
+            mac::teardown();
+            #[cfg(target_os = "windows")]
+            windows::teardown(app);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let _ = app;
+        });
     }
 }
 
 /// Install the platform hook for every bound slot. Idempotent: calling
 /// twice tears down and reinstalls. Used at boot, from `hotkey_retry`,
 /// after any hotkey save, reset or clear, and after Ask is switched
-/// on or off (`ask_set`).
+/// on or off (`ask_set`, or `ask_get` when the file changed). Safe to
+/// call from any thread: installs are [`serialized`], and the
+/// settings are read inside, so the install that runs last puts up
+/// the hook for the settings as they are last.
 pub fn install(app: &AppHandle) {
-    store_handle(app);
-    let settings = effective_settings(
-        crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings),
-        openwhisper_core::settings::current_ask_settings().enabled,
-    );
-    #[cfg(target_os = "macos")]
-    emit_status(app, mac::install(app, &settings));
-    #[cfg(target_os = "windows")]
-    emit_status(app, windows::install(app, &settings));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = settings;
-        emit_status(app, Err("hotkey: platform not supported in MVP".into()));
-    }
+    serialized(|| {
+        store_handle(app);
+        let settings = effective_settings(
+            crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings),
+            openwhisper_core::settings::current_ask_settings().enabled,
+        );
+        #[cfg(target_os = "macos")]
+        emit_status(app, mac::install(app, &settings));
+        #[cfg(target_os = "windows")]
+        emit_status(app, windows::install(app, &settings));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = settings;
+            emit_status(app, Err("hotkey: platform not supported in MVP".into()));
+        }
+    });
 }
 
 #[tauri::command]
@@ -422,6 +443,34 @@ mod tests {
 
     fn targets<T>(compiled: &[(usize, T)]) -> Vec<&'static str> {
         compiled.iter().map(|(i, _)| SLOTS[*i].target.as_str()).collect()
+    }
+
+    #[test]
+    fn installs_from_several_threads_run_one_at_a_time() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        static INSIDE: AtomicBool = AtomicBool::new(false);
+        static OVERLAPS: AtomicUsize = AtomicUsize::new(0);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..5 {
+                        serialized(|| {
+                            if INSIDE.swap(true, Ordering::SeqCst) {
+                                OVERLAPS.fetch_add(1, Ordering::SeqCst);
+                            }
+                            // Long enough for another thread to get
+                            // in, if anything let it.
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            INSIDE.store(false, Ordering::SeqCst);
+                        });
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(OVERLAPS.load(Ordering::SeqCst), 0);
     }
 
     #[test]

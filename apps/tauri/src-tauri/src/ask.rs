@@ -31,8 +31,9 @@ use std::sync::{mpsc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use openwhisper_core::ask::{self, AskPhase, AskSnapshot, AskStatus};
+use openwhisper_core::ask::{self, AskOutline, AskPhase, AskSnapshot};
 use openwhisper_core::dictation;
+use openwhisper_core::refine::BackendStatus;
 use openwhisper_core::settings::{
     self as core_settings, AskSettings, ASK_INSTRUCTIONS_MAX_CHARS, ASK_TIMEOUT_DEFAULT_MS,
     ASK_TIMEOUT_MAX_MS, ASK_TIMEOUT_MIN_MS, DEFAULT_CLAUDE_MODEL,
@@ -69,14 +70,15 @@ const BUSY_TICK: Duration = Duration::from_millis(250);
 
 // --- settings ------------------------------------------------------
 
-/// What the Ask pane loads: core's [`AskStatus`] (`settings`,
-/// `backend` with its `destination` sentence, `model`, `effort`,
-/// `web_search`, `timeout_ms`, `notice`) side by side with what the
-/// controls need to know.
+/// What every reader of the Ask settings loads: core's
+/// [`AskOutline`] (`settings`, `model`, `effort`, `web_search`,
+/// `timeout_ms`, `notice`) side by side with what the controls need
+/// to know. Read off the settings alone: the state of the backend is
+/// not in it, see [`ask_status`].
 #[derive(serde::Serialize)]
 pub struct AskState {
     #[serde(flatten)]
-    pub status: AskStatus,
+    pub outline: AskOutline,
     pub limits: AskLimits,
     /// The Claude model an ask uses when the block names none.
     pub default_model: &'static str,
@@ -91,9 +93,9 @@ pub struct AskLimits {
     pub instructions_max_chars: usize,
 }
 
-fn state(status: AskStatus) -> AskState {
+fn state(outline: AskOutline) -> AskState {
     AskState {
-        status,
+        outline,
         limits: AskLimits {
             timeout_min_ms: ASK_TIMEOUT_MIN_MS,
             timeout_max_ms: ASK_TIMEOUT_MAX_MS,
@@ -140,9 +142,10 @@ fn announce(app: &AppHandle, before: &AskSettings, now: &AskSettings) {
 }
 
 /// Fresh read from disk (the block is also edited by the headless
-/// CLI), with whether the backend can run and where questions are
-/// sent. The backend check probes the Claude CLI (about 0.2 s), so
-/// all of it runs on a blocking thread.
+/// CLI), with what an ask would use right now. Cheap: nothing is
+/// asked of the backend, so every window that only wants to know
+/// whether Ask is on can call it. Off the UI thread for the file
+/// read.
 #[tauri::command]
 pub async fn ask_get(app: AppHandle) -> Result<AskState, String> {
     let path = settings_path(&app)?;
@@ -155,7 +158,20 @@ pub async fn ask_get(app: AppHandle) -> Result<AskState, String> {
         if before != settings {
             announce(&app, &before, &settings);
         }
-        state(ask::status(&settings, &core_settings::current_refine_settings()))
+        state(ask::outline(&settings, &core_settings::current_refine_settings()))
+    })
+    .await
+    .map_err(|e| format!("ask settings: {e}"))
+}
+
+/// Whether the backend an ask uses can run, and where questions are
+/// sent (`destination`). Only the Ask pane asks: the check probes
+/// the Claude CLI (about 0.2 s, a process start), so it runs on a
+/// blocking thread and is not part of [`ask_get`].
+#[tauri::command]
+pub async fn ask_status() -> Result<BackendStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        openwhisper_core::refine::backend_status(&core_settings::current_refine_settings())
     })
     .await
     .map_err(|e| format!("ask status: {e}"))
@@ -197,19 +213,22 @@ pub fn ask_toggle() -> Result<(), String> {
     crate::do_ask_toggle()
 }
 
-/// Stop the current ask, whatever it is doing; a finished answer
-/// stays. Returns whether there was something to stop. Off the UI
+/// Stop an ask, whatever it is doing; a finished answer stays.
+/// `id` is the ask the caller is showing: when another ask has taken
+/// its place by now, nothing happens. Without an id: whatever ask is
+/// there. Returns whether there was something to stop. Off the UI
 /// thread: stopping kills and reaps the backend process.
 #[tauri::command(async)]
-pub fn ask_cancel() -> bool {
-    dictation::run_cancel_ask(&TauriDictationEnv)
+pub fn ask_cancel(id: Option<u64>) -> bool {
+    dictation::run_cancel_ask(&TauriDictationEnv, id)
 }
 
-/// Close the ask: stop it when it is still running, drop it from the
-/// snapshot and hide the answer window.
+/// Close an ask: stop it when it is still running, drop it from the
+/// snapshot and hide the answer window. `id` as for [`ask_cancel`]:
+/// a close meant for an earlier ask leaves the current one alone.
 #[tauri::command(async)]
-pub fn ask_dismiss(app: AppHandle) {
-    dictation::run_dismiss_ask(&TauriDictationEnv);
+pub fn ask_dismiss(app: AppHandle, id: Option<u64>) {
+    dictation::run_dismiss_ask(&TauriDictationEnv, id);
     sync_window(&app);
 }
 
@@ -219,24 +238,29 @@ pub fn ask_dismiss(app: AppHandle) {
 ///
 /// The ask is closed and the answer window is gone before the paste
 /// is sent, so the keystroke meets the other app with nothing of
-/// ours on screen above it.
+/// ours on screen above it. With an `id`, only the answer of that
+/// ask is inserted.
 #[tauri::command(async)]
-pub fn ask_insert(app: AppHandle) -> bool {
-    let Some(answer) = ask::finished_answer() else {
+pub fn ask_insert(app: AppHandle, id: Option<u64>) -> bool {
+    let Some((answered, answer)) = ask::finished() else {
         return false;
     };
-    dictation::run_dismiss_ask(&TauriDictationEnv);
+    if id.is_some_and(|id| id != answered) {
+        return false;
+    }
+    dictation::run_dismiss_ask(&TauriDictationEnv, Some(answered));
     sync_window_now(&app);
     crate::injection::inject_text(&app, &answer);
     true
 }
 
-/// Put the answer on the clipboard: the whole answer once it is
-/// complete, what has arrived of it before that. Returns whether
-/// anything was copied.
+/// Put the answer on the clipboard. What that is, core decides
+/// ([`ask::text_to_copy`]): the whole answer once it is complete,
+/// what has arrived of it before that. Returns whether anything was
+/// copied.
 #[tauri::command(async)]
 pub fn ask_copy() -> bool {
-    let Some(text) = copy_source(ask::finished_answer(), ask::snapshot().answer) else {
+    let Some(text) = ask::text_to_copy() else {
         return false;
     };
     match crate::injection::copy_text(&text) {
@@ -246,12 +270,6 @@ pub fn ask_copy() -> bool {
             false
         }
     }
-}
-
-/// What "copy" copies: the finished answer, else the partial one;
-/// nothing when there is no text at all.
-fn copy_source(finished: Option<String>, partial: String) -> Option<String> {
-    finished.or(Some(partial)).filter(|text| !text.trim().is_empty())
 }
 
 /// The current ask, for a window that opens after the last tick.
@@ -306,19 +324,37 @@ pub fn spawn_emitter(app: AppHandle) {
 /// with it.
 static SUPPRESSED: AtomicBool = AtomicBool::new(false);
 
-/// What was last applied to the answer window: 0 unknown, 1 hidden,
-/// 2 shown. It starts hidden (`visible: false` in the config).
-static APPLIED: AtomicU8 = AtomicU8::new(1);
+/// What the answer window is right now: 1 hidden, 2 shown. It starts
+/// hidden (`visible: false` in the config). Written on the main
+/// thread only, in the same step that shows or hides the window, so
+/// it cannot say one thing while the window is the other.
+static APPLIED: AtomicU8 = AtomicU8::new(HIDDEN);
+
+const HIDDEN: u8 = 1;
+const SHOWN: u8 = 2;
 
 fn suppressed() -> bool {
     SUPPRESSED.load(Ordering::Relaxed)
 }
 
-/// The window is already what `phase` asks for. False too after a
-/// show or hide that could not be queued, so the emitter tries again.
+/// The window is already what `phase` asks for. False for as long as
+/// a show or hide is still to be applied (or could not be queued), so
+/// the emitter tries again.
 fn window_in_step(phase: AskPhase) -> bool {
-    let want = if window_should_show(phase, suppressed()) { 2 } else { 1 };
-    APPLIED.load(Ordering::Relaxed) == want
+    window_change(APPLIED.load(Ordering::Relaxed), window_should_show(phase, suppressed())).is_none()
+}
+
+/// What to do with the window, given what it is (`applied`) and
+/// whether it should be on screen now: `Some(true)` show it,
+/// `Some(false)` hide it, `None` leave it.
+///
+/// The step that runs on the main thread asks this with the state of
+/// that moment, not with what was wanted when the step was queued. A
+/// show that was queued before a newer hide therefore finds nothing
+/// to show any more when its turn comes.
+fn window_change(applied: u8, show: bool) -> Option<bool> {
+    let want = if show { SHOWN } else { HIDDEN };
+    (applied != want).then_some(show)
 }
 
 /// The answer window is on screen while there is an ask to show (any
@@ -352,20 +388,18 @@ fn sync_window_now(app: &AppHandle) {
     }
 }
 
-/// Decide whether the window is to be shown and queue the change on
-/// the main thread. Returns a receiver that hears when it was
-/// applied, `None` when there was nothing to change.
+/// Queue a step on the main thread that brings the window in line
+/// with the ask. Returns a receiver that hears when the step has
+/// run, `None` when the window is in step already or the step could
+/// not be queued.
 ///
-/// One caller at a time, each reading the phase itself: the emitter
-/// thread and the commands both come here, and an older phase must
-/// not be queued after a newer one. The lock is not held while
-/// anyone waits for the main thread.
+/// What the step does is decided when it runs, from the ask and the
+/// window as they are then ([`window_change`]): the emitter thread
+/// and the commands all come here, their steps can run in any order
+/// and after any delay, and each of them leaves the window right for
+/// the moment it ran in.
 fn queue_window_sync(app: &AppHandle) -> Option<mpsc::Receiver<()>> {
-    static SYNC: Mutex<()> = Mutex::new(());
-    let _held = SYNC.lock().unwrap_or_else(|e| e.into_inner());
-    let show = window_should_show(ask::snapshot().phase, suppressed());
-    let want = if show { 2 } else { 1 };
-    if APPLIED.swap(want, Ordering::Relaxed) == want {
+    if window_in_step(ask::snapshot().phase) {
         return None;
     }
     let handle = app.clone();
@@ -373,19 +407,23 @@ fn queue_window_sync(app: &AppHandle) -> Option<mpsc::Receiver<()>> {
     // Window geometry and the panel calls are main-thread-only on
     // macOS. Called from the main thread, this runs in place.
     let queued = app.run_on_main_thread(move || {
-        if show {
-            // On the pill's monitor, above the pill, before it is seen.
-            match crate::pill_spot(&handle, crate::fullscreen::last_pill_monitor()) {
-                Ok(spot) => place_window(&handle, &spot),
-                Err(e) => eprintln!("[ask] answer window not placed: {e}"),
+        let show = window_should_show(ask::snapshot().phase, suppressed());
+        if let Some(show) = window_change(APPLIED.load(Ordering::Relaxed), show) {
+            if show {
+                // On the pill's monitor, above the pill, before it is
+                // seen.
+                match crate::pill_spot(&handle, crate::fullscreen::last_pill_monitor()) {
+                    Ok(spot) => place_window(&handle, &spot),
+                    Err(e) => eprintln!("[ask] answer window not placed: {e}"),
+                }
             }
+            set_window_visible(&handle, show);
+            APPLIED.store(if show { SHOWN } else { HIDDEN }, Ordering::Relaxed);
         }
-        set_window_visible(&handle, show);
         let _ = done.send(());
     });
     if let Err(e) = queued {
-        APPLIED.store(0, Ordering::Relaxed);
-        eprintln!("[ask] answer window not {}: {e}", if show { "shown" } else { "hidden" });
+        eprintln!("[ask] answer window not brought in step: {e}");
         return None;
     }
     Some(applied)
@@ -509,6 +547,50 @@ mod tests {
     }
 
     #[test]
+    fn a_window_step_acts_on_the_state_of_the_moment_it_runs_in() {
+        // In step: nothing to do, either way.
+        assert_eq!(window_change(HIDDEN, false), None);
+        assert_eq!(window_change(SHOWN, true), None);
+        // Out of step: show, or hide.
+        assert_eq!(window_change(HIDDEN, true), Some(true));
+        assert_eq!(window_change(SHOWN, false), Some(false));
+
+        // Steps run in the order they were queued, each with what is
+        // wanted when it runs. A show is queued (an ask starts), then
+        // a hide (it is dismissed) before either has run.
+        let run = |applied: &mut u8, show_now: bool| {
+            if let Some(show) = window_change(*applied, show_now) {
+                *applied = if show { SHOWN } else { HIDDEN };
+            }
+        };
+        let mut applied = HIDDEN;
+        // Both steps run after the dismiss: neither shows anything.
+        run(&mut applied, false);
+        run(&mut applied, false);
+        assert_eq!(applied, HIDDEN);
+        // The show ran before the dismiss, the hide after: hidden.
+        run(&mut applied, true);
+        assert_eq!(applied, SHOWN);
+        run(&mut applied, false);
+        assert_eq!(applied, HIDDEN);
+        // A step queued for a hide that runs after a new ask began
+        // shows the window instead of hiding it.
+        run(&mut applied, true);
+        assert_eq!(applied, SHOWN);
+    }
+
+    #[test]
+    fn the_window_counts_as_out_of_step_until_the_step_has_run() {
+        // The applied state is only written by the step itself, so
+        // while nothing has run the emitter keeps asking for one.
+        assert_eq!(APPLIED.load(Ordering::Relaxed), HIDDEN);
+        assert!(window_in_step(AskPhase::Idle));
+        for phase in [AskPhase::Listening, AskPhase::Answering, AskPhase::Done] {
+            assert!(!window_in_step(phase), "{phase:?}");
+        }
+    }
+
+    #[test]
     fn a_tick_is_sent_first_and_on_every_change() {
         let ms = Duration::from_millis;
         // The first tick, so a window that just opened has the state.
@@ -532,16 +614,6 @@ mod tests {
         for phase in [AskPhase::Done, AskPhase::Error, AskPhase::Cancelled, AskPhase::Idle] {
             assert!(!tick_due(Some((3, ms(5_000))), &snap(phase, 3)), "{phase:?}");
         }
-    }
-
-    #[test]
-    fn copy_takes_the_finished_answer_then_the_partial_one() {
-        let s = |t: &str| t.to_string();
-        assert_eq!(copy_source(Some(s("All of it.")), s("All of")), Some(s("All of it.")));
-        assert_eq!(copy_source(None, s("So far")), Some(s("So far")));
-        assert_eq!(copy_source(None, s("")), None);
-        assert_eq!(copy_source(None, s(" \n")), None);
-        assert_eq!(copy_source(Some(s("")), s("")), None);
     }
 
     fn spot(mon_x: f64, mon_y: f64, mon_w: f64, capsule_top: f64) -> PillSpot {
@@ -607,6 +679,35 @@ mod tests {
         assert_eq!(value["answer"], "A tap is");
         assert_eq!(value["first_text_ms"], serde_json::Value::Null);
         assert_eq!(serde_json::to_value(AskPhase::Idle).unwrap(), "idle");
+    }
+
+    #[test]
+    fn the_settings_payload_has_no_backend_state_in_it() {
+        // What `ask_get` answers with: read off the two settings
+        // blocks alone, so nothing in it can have cost a probe.
+        let refine = openwhisper_core::settings::RefineSettings::default();
+        let value = serde_json::to_value(state(ask::outline(&AskSettings::default(), &refine))).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        // The fields `AskState` in src/lib/ask.ts mirrors.
+        assert_eq!(
+            keys,
+            [
+                "backend_kind",
+                "default_model",
+                "destination",
+                "effort",
+                "limits",
+                "model",
+                "notice",
+                "settings",
+                "timeout_ms",
+                "web_search",
+            ]
+        );
+        assert_eq!(value["backend_kind"], "claude-cli");
+        assert_eq!(value["settings"]["enabled"], false);
+        assert_eq!(value["limits"]["timeout_default_ms"], 60_000);
     }
 
     #[test]

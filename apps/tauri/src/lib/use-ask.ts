@@ -3,7 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import { ASK_CHANGED_EVENT, type AskSettings, type AskState } from "./ask";
+import {
+  ASK_CHANGED_EVENT,
+  type AskBackendStatus,
+  type AskSettings,
+  type AskState,
+} from "./ask";
 
 // Data for the Ask settings (TASK-97), on TanStack Query like the
 // history and the modes: Rust owns the Ask block and every rule
@@ -12,10 +17,17 @@ import { ASK_CHANGED_EVENT, type AskSettings, type AskState } from "./ask";
 // (trimmed, clamped), and that answer is what ends up on screen.
 
 const ASK_KEY = ["ask"] as const;
+// Its own key, not under `ASK_KEY`: a change of the Ask block does
+// not change whether the backend can run, so it must not start the
+// check again.
+const ASK_BACKEND_KEY = ["ask-backend"] as const;
 
-// The Ask block, whether the backend can run and where questions are
-// sent, and a way to change the block. `state` is null until the
-// first read has answered.
+// The Ask block, what an ask would use right now and where questions
+// are sent, and a way to change the block. `state` is null until the
+// first read has answered. This is the one way the webview reads the
+// Ask settings: every caller shares the cache entry, and
+// `useAskSync` keeps it in step with Rust. The read is cheap
+// (`ask_get` asks nothing of the backend).
 export function useAsk() {
   const client = useQueryClient();
   const query = useQuery({
@@ -60,6 +72,18 @@ export function useAsk() {
     error: failure ? String(failure) : null,
     update,
   };
+}
+
+// Whether the backend an ask uses can run (`ask_status`); null until
+// the check has answered. The check starts the Claude CLI for a
+// moment, so this is for the Ask pane alone, which shows the result.
+// It runs when the pane opens and when the window gets focus again.
+export function useAskBackend(): AskBackendStatus | null {
+  const query = useQuery({
+    queryKey: ASK_BACKEND_KEY,
+    queryFn: () => invoke<AskBackendStatus>("ask_status"),
+  });
+  return query.data ?? null;
 }
 
 // Follow changes to the Ask block made anywhere: this window's own

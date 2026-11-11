@@ -24,7 +24,12 @@
 //! - **Cancel.** The reader thread hands lines over a channel and the
 //!   turn polls it, so a cancel or the timeout kills the process
 //!   within a few milliseconds even while the model is silent (a web
-//!   search prints nothing for 15 seconds or more).
+//!   search prints nothing for 15 seconds or more). The question is
+//!   written to stdin from a thread of its own for the same reason: a
+//!   large one (a screenshot) can fill the pipe before the CLI reads,
+//!   and a write that waits must not keep the turn from being
+//!   cancelled or timing out. On Windows the kill takes the whole
+//!   process tree, see [`refine_cli::end_process`].
 //!
 //! Measured with Claude Code 2.1.322, Sonnet at low effort
 //! (2026-11-10): cold, the first text is back after 1.3 to 2.3 s;
@@ -34,7 +39,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -180,6 +185,9 @@ struct Process {
     spawned_at: Instant,
     /// Turns answered so far.
     turns: u32,
+    /// A question was sent and its result has not come back: the
+    /// model may be working on it.
+    mid_turn: bool,
 }
 
 impl Process {
@@ -242,6 +250,7 @@ impl Process {
             prompt_file,
             spawned_at: Instant::now(),
             turns: 0,
+            mid_turn: false,
         })
     }
 
@@ -255,21 +264,27 @@ impl Process {
         timeout: Duration,
         warm_lead: Option<Duration>,
     ) -> Result<AskReply, AskError> {
+        let Some(mut stdin) = self.stdin.take() else {
+            return Err(AskError::Backend("Claude Code has no input channel".into()));
+        };
+        // Written on a thread of its own: the line can be large, and
+        // a CLI that is not reading yet lets the write wait. This
+        // thread keeps its eye on the cancel flag and the clock
+        // meanwhile. When the turn is given up, the process is killed
+        // (on drop), which ends a write that is still waiting.
         let line = user_line(input);
-        let written = match self.stdin.as_mut() {
-            Some(stdin) => stdin
+        let (wrote_tx, wrote) = mpsc::channel();
+        thread::spawn(move || {
+            let result = stdin
                 .write_all(line.as_bytes())
                 .and_then(|()| stdin.write_all(b"\n"))
-                .and_then(|()| stdin.flush()),
-            None => return Err(AskError::Backend("Claude Code has no input channel".into())),
-        };
-        if written.is_err() {
-            // The process is already gone; wait for its last words.
-            return Err(match self.lines.recv_timeout(Duration::from_millis(500)) {
-                Err(RecvTimeoutError::Disconnected) => self.exit_error(),
-                _ => AskError::Backend("Claude Code exited before it was asked".into()),
-            });
-        }
+                .and_then(|()| stdin.flush());
+            // stdin goes back for a further turn. When nobody waits
+            // for it any more, it closes here.
+            let _ = wrote_tx.send((result, stdin));
+        });
+        self.mid_turn = true;
+        let mut writing = true;
 
         let deadline = started + timeout;
         let mut turn = Turn::new(sink, started);
@@ -281,6 +296,23 @@ impl Process {
             let now = Instant::now();
             if now >= deadline {
                 return Err(AskError::Timeout);
+            }
+            if writing {
+                match wrote.try_recv() {
+                    Ok((Ok(()), stdin)) => {
+                        self.stdin = Some(stdin);
+                        writing = false;
+                    }
+                    Ok((Err(_), _)) | Err(TryRecvError::Disconnected) => {
+                        // The process is already gone; wait for its
+                        // last words.
+                        return Err(match self.lines.recv_timeout(Duration::from_millis(500)) {
+                            Err(RecvTimeoutError::Disconnected) => self.exit_error(),
+                            _ => AskError::Backend("Claude Code exited before it was asked".into()),
+                        });
+                    }
+                    Err(TryRecvError::Empty) => {}
+                }
             }
             let line = match self.lines.recv_timeout(POLL.min(deadline - now)) {
                 Ok(line) => line,
@@ -303,6 +335,7 @@ impl Process {
                         call
                     });
                     self.turns += 1;
+                    self.mid_turn = false;
                     return Ok(turn.finish(usage, warm_lead, ""));
                 }
                 Line::Other => {}
@@ -318,12 +351,13 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // Close stdin first: a CLI behind a `claude.cmd` shim is a
-        // grandchild that `kill` does not reach, but it exits on its
-        // own once its input is closed.
+        // Close stdin first: an idle CLI exits on its own once its
+        // input is closed. One that is working on a turn finishes the
+        // turn first, so it is killed, and on Windows everything
+        // under it too: behind a `claude.cmd` shim the CLI is a
+        // grandchild that a plain kill does not reach.
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        refine_cli::end_process(&mut self.child, self.mid_turn);
         let _ = fs::remove_file(&self.prompt_file);
     }
 }
@@ -801,6 +835,66 @@ echo '{"type":"stream_event","event":{"type":"content_block_start","index":1,"co
         assert!(cli.process.is_none());
     }
 
+    /// A question far larger than a pipe holds, for a CLI that never
+    /// reads it.
+    fn huge_question() -> AskInput {
+        AskInput {
+            text: "what is on this screen".into(),
+            images: vec![AskImage { media_type: "image/png".into(), data: vec![7u8; 2 * 1024 * 1024] }],
+        }
+    }
+
+    /// Never reads its input, and stays for half a minute.
+    const DEAF: &str = r#"echo $$ > "$(dirname "$0")/pid.txt"; sleep 30"#;
+
+    #[test]
+    fn a_question_the_cli_does_not_read_can_still_be_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), DEAF));
+        cli.warm(&setup(false));
+        let pid = wait_for(&dir.path().join("pid.txt"));
+        let cancel = CancelFlag::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                cancel.cancel();
+            })
+        };
+        let started = Instant::now();
+        let err = cli.send(&setup(false), &huge_question(), &mut |_| {}, &cancel, Duration::from_secs(20)).unwrap_err();
+        canceller.join().unwrap();
+        assert_eq!(err, AskError::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(!alive(&pid), "process {pid} survived the cancel");
+    }
+
+    #[test]
+    fn a_question_the_cli_does_not_read_still_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), DEAF));
+        cli.warm(&setup(false));
+        let pid = wait_for(&dir.path().join("pid.txt"));
+        let started = Instant::now();
+        let (reply, _) = send(&mut cli, &setup(false), &huge_question(), Duration::from_millis(300));
+        assert_eq!(reply.unwrap_err(), AskError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(!alive(&pid), "process {pid} survived the timeout");
+    }
+
+    #[test]
+    fn a_large_question_reaches_a_cli_that_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), STREAM_OK));
+        let reply = send(&mut cli, &setup(false), &huge_question(), LONG).0.unwrap();
+        assert_eq!(reply.text, "The capital of Norway is Oslo (turn 1).");
+        // All of it arrived, and stdin is back for a further turn.
+        let sent = fs::read_to_string(dir.path().join("stdin-1.txt")).unwrap();
+        assert!(sent.len() > 2 * 1024 * 1024, "{}", sent.len());
+        let again = send(&mut cli, &setup(false), &AskInput::text("and of sweden"), LONG).0.unwrap();
+        assert_eq!(again.text, "The capital of Norway is Oslo (turn 2).");
+    }
+
     #[test]
     fn a_slow_cli_times_out_and_is_killed() {
         let dir = tempfile::tempdir().unwrap();
@@ -874,7 +968,9 @@ echo '{"type":"stream_event","event":{"type":"content_block_start","index":1,"co
 ///
 /// Written on macOS and compile-checked for `x86_64-pc-windows-gnu`,
 /// but not yet run: the first `cargo test` on Windows is what verifies
-/// streaming through a `.cmd` shim, the cancel and the kill.
+/// streaming through a `.cmd` shim, the cancel and the kill, including
+/// that the process behind the shim is gone after a cancel and after
+/// a timeout ([`refine_cli::end_process`]).
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
@@ -936,6 +1032,76 @@ exit /b 0";
             .unwrap_err();
         assert_eq!(err, AskError::Timeout);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A shim that takes the question and then starts a process of
+    /// its own that runs for half a minute: the place the real CLI
+    /// has behind `claude.cmd`. That process writes its id to
+    /// `pid.txt` next to the shim.
+    const SLOW_GRANDCHILD: &str = "set /p line=\r\n\
+powershell -NoProfile -Command \"$PID | Out-File -Encoding ascii '%~dp0pid.txt'; Start-Sleep -Seconds 30\"";
+
+    /// The id the grandchild wrote, once it is up.
+    fn grandchild_pid(dir: &Path) -> String {
+        let file = dir.join("pid.txt");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let pid = fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+            if !pid.is_empty() {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "the grandchild never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `tasklist` still knows the process `pid`.
+    fn alive(pid: &str) -> bool {
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn cancel_ends_the_process_behind_the_cmd_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        // Cancel once the grandchild is up and has said who it is.
+        let canceller = {
+            let cancel = cancel.clone();
+            let dir = dir.path().to_path_buf();
+            thread::spawn(move || {
+                let pid = grandchild_pid(&dir);
+                assert!(alive(&pid), "the grandchild {pid} is not running");
+                cancel.cancel();
+                pid
+            })
+        };
+        let err = ClaudeCliAsk::new(fake_cli(dir.path(), SLOW_GRANDCHILD))
+            .send(&setup(), &AskInput::text("hello"), &mut |_| {}, &cancel, Duration::from_secs(25))
+            .unwrap_err();
+        let pid = canceller.join().unwrap();
+        assert_eq!(err, AskError::Cancelled);
+        // The process is dropped when `send` returns an error, and
+        // the tree with it: `taskkill` has finished by then.
+        assert!(!alive(&pid), "the process behind the shim ({pid}) outlived the cancel");
+    }
+
+    #[test]
+    fn a_timeout_ends_the_process_behind_the_cmd_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = {
+            let dir = dir.path().to_path_buf();
+            thread::spawn(move || grandchild_pid(&dir))
+        };
+        let err = ClaudeCliAsk::new(fake_cli(dir.path(), SLOW_GRANDCHILD))
+            .send(&setup(), &AskInput::text("hello"), &mut |_| {}, &CancelFlag::new(), Duration::from_secs(8))
+            .unwrap_err();
+        assert_eq!(err, AskError::Timeout);
+        let pid = pid.join().unwrap();
+        assert!(!alive(&pid), "the process behind the shim ({pid}) outlived the timeout");
     }
 
     #[test]

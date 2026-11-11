@@ -6,7 +6,6 @@ import {
   cancelJsCapture,
   hotkeyFor,
   startJsCapture,
-  syncFallbackAskEnabled,
   syncFallbackBindings,
   withHotkey,
   type HotkeyCapturedPayload,
@@ -16,7 +15,7 @@ import {
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
-import { ASK_CHANGED_EVENT, type AskSettings, type AskState } from "./lib/ask";
+import { useAsk } from "./lib/use-ask";
 import { Badge } from "./components/ui/badge";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { LevelMeter } from "./components/level-meter";
@@ -685,29 +684,9 @@ function ShortcutsPane() {
   );
   const [error, setError] = useState<string | null>(null);
   // Whether Ask is switched on; null until known. The ask slot is
-  // only installed while it is.
-  const [askEnabled, setAskEnabled] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    invoke<AskState | null>("ask_get")
-      .then((state) => {
-        if (alive && state) setAskEnabled(state.settings.enabled);
-      })
-      .catch(() => {});
-    const unlisten = listen<AskSettings>(ASK_CHANGED_EVENT, (evt) => {
-      setAskEnabled(evt.payload.enabled);
-    });
-    return () => {
-      alive = false;
-      void unlisten.then((fn) => fn());
-    };
-  }, []);
-
-  // The Windows in-window fallback follows the switch too.
-  useEffect(() => {
-    if (askEnabled !== null) syncFallbackAskEnabled(askEnabled);
-  }, [askEnabled]);
+  // only installed while it is. From the Ask settings every reader
+  // shares, which follow `ask_changed`.
+  const askEnabled = useAsk().state?.settings.enabled ?? null;
 
   useEffect(() => {
     let alive = true;

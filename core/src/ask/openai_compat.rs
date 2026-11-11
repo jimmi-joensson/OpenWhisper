@@ -13,11 +13,21 @@
 //! - **Timeouts.** A connect timeout and a limit on how long the
 //!   server may stay silent, instead of one deadline for the whole
 //!   call: a local model writing a long answer at ten tokens a second
-//!   is slow, not stuck.
+//!   is slow, not stuck. Every line the server sends counts as a sign
+//!   of life, not only text: a model that streams its reasoning for a
+//!   minute before the first word of the answer is working too, and
+//!   so is a server that sends keep-alive comments.
 //! - **Cancel.** The request runs on its own thread and hands what it
 //!   reads over a channel, so a cancel is noticed within
-//!   milliseconds, also before the first byte. The thread ends on its
-//!   next read or write.
+//!   milliseconds, also before the first byte. A cancel or a timeout
+//!   then closes the connection ([`Wire::cut`]), whatever the server
+//!   is doing: the server sees it at once and stops working on an
+//!   answer nobody will read.
+//! - **A cut-off answer is not an answer.** The stream ends properly
+//!   with `data: [DONE]`, or with a chunk carrying a `finish_reason`
+//!   for the servers that never send `[DONE]`. A connection that
+//!   closes before either, after some text, is an error; the text
+//!   that arrived stays on show.
 //! - **A conversation.** The messages so far are kept, so a further
 //!   [`AskBackend::send`] continues it.
 //! - **No web search.** There is no portable one in this API. When it
@@ -27,8 +37,10 @@
 //! Verified against a local fake server only (2026-11-10): no real
 //! endpoint was at hand.
 
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -94,11 +106,15 @@ pub fn user_message(input: &AskInput) -> Value {
     json!({ "role": "user", "content": parts })
 }
 
-/// What the request thread reports.
+/// What the request thread reports. Every message is a sign of life
+/// from the server.
 enum Msg {
     /// A piece of the answer.
     Delta(String),
     Usage(CallUsage),
+    /// A line with nothing for the answer in it: reasoning, a
+    /// keep-alive comment, a role chunk.
+    Alive,
     /// The stream ended properly.
     Done,
     Failed(AskError),
@@ -151,10 +167,12 @@ impl AskBackend for OpenAiAsk {
         }
 
         let (tx, rx) = mpsc::channel();
+        let wire = Wire::default();
         {
             let settings = settings.clone();
             let api_key = self.api_key.clone();
-            thread::spawn(move || request(&settings, api_key.as_deref(), body, timeout, &tx));
+            let wire = wire.clone();
+            thread::spawn(move || request(&settings, api_key.as_deref(), body, timeout, &wire, &tx));
         }
 
         let mut turn = Turn::new(sink, started);
@@ -167,27 +185,39 @@ impl AskBackend for OpenAiAsk {
             if last_sign.elapsed() >= timeout {
                 break Err(AskError::Timeout);
             }
-            match rx.recv_timeout(POLL) {
-                Ok(Msg::Delta(text)) => {
-                    last_sign = Instant::now();
-                    turn.text(&text);
+            let msg = match rx.recv_timeout(POLL) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => continue,
+                // The connection closed before the stream said it was
+                // over. Text that arrived is on show already, but it
+                // is not the whole answer.
+                Err(RecvTimeoutError::Disconnected) if turn.has_text() => {
+                    break Err(AskError::Backend(format!(
+                        "The answer was cut off: {} closed the connection before the end.",
+                        refine_api::host(&settings.base_url)
+                    )));
                 }
-                Ok(Msg::Usage(u)) => usage = Some(u),
-                Ok(Msg::Done) => break Ok(()),
-                Ok(Msg::Failed(e)) => break Err(e),
-                Err(RecvTimeoutError::Timeout) => {}
-                // The connection closed without `[DONE]`. Some servers
-                // never send it: what arrived is the answer.
-                Err(RecvTimeoutError::Disconnected) if turn.has_text() => break Ok(()),
                 Err(RecvTimeoutError::Disconnected) => {
                     break Err(AskError::Backend(format!(
                         "{} closed the connection without an answer",
                         refine_api::host(&settings.base_url)
                     )));
                 }
+            };
+            // Whatever it says, the server is alive.
+            last_sign = Instant::now();
+            match msg {
+                Msg::Delta(text) => turn.text(&text),
+                Msg::Usage(u) => usage = Some(u),
+                Msg::Alive => {}
+                Msg::Done => break Ok(()),
+                Msg::Failed(e) => break Err(e),
             }
         };
-        // Dropping `rx` here is what stops the request thread.
+        // Close the connection, whichever way the turn ended: after a
+        // cancel or a timeout this is what tells the server to stop,
+        // and what ends the request thread's blocked read.
+        wire.cut();
         drop(rx);
         if let Err(e) = result {
             // The turn did not happen: a retry must not find the
@@ -203,17 +233,31 @@ impl AskBackend for OpenAiAsk {
 }
 
 /// Post `body` and report the stream on `tx`. Runs on its own thread
-/// and ends when the stream does, on an error, or as soon as nobody
-/// receives any more.
-fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, silence: Duration, tx: &Sender<Msg>) {
+/// and ends when the stream does, on an error, as soon as nobody
+/// receives any more, or when `wire` is cut (which ends a read that
+/// is waiting for the server).
+fn request(
+    settings: &OpenAiSettings,
+    api_key: Option<&str>,
+    mut body: Value,
+    silence: Duration,
+    wire: &Wire,
+    tx: &Sender<Msg>,
+) {
     let url = refine_api::endpoint_url(&settings.base_url);
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(CONNECT_TIMEOUT.min(silence))
-        // The caller gives up first; this only makes sure the thread
-        // does not outlive a dead connection for long.
-        .timeout_read(silence + Duration::from_secs(1))
-        .timeout_write(CONNECT_TIMEOUT)
-        .build();
+    let connect_timeout = CONNECT_TIMEOUT.min(silence);
+    let agent = {
+        let wire = wire.clone();
+        ureq::AgentBuilder::new()
+            // Every connection goes over the wire, so it can be cut.
+            .resolver(move |netloc: &str| wire.route(netloc, connect_timeout))
+            .timeout_connect(connect_timeout)
+            // The caller gives up first and cuts the wire; this only
+            // makes sure the thread cannot outlive a dead connection.
+            .timeout_read(silence + Duration::from_secs(1))
+            .timeout_write(CONNECT_TIMEOUT)
+            .build()
+    };
     let failed = |e: CallError| Msg::Failed(e.into_refine(settings).into());
 
     // A server may refuse an optional field. Drop it and ask again
@@ -258,6 +302,8 @@ fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, si
     // plain JSON body instead of a stream.
     let mut plain = String::new();
     let mut streamed = false;
+    // The model said it was done (`finish_reason`).
+    let mut finished = false;
     for line in BufReader::new(response.into_reader()).lines() {
         let line = match line {
             Ok(line) => line,
@@ -272,10 +318,23 @@ fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, si
                 return;
             }
         };
+        // Every line is reported, also the ones with nothing for the
+        // answer in them: the caller counts them as signs of life,
+        // and a send that fails is how this thread learns that the
+        // ask was cancelled or timed out.
         let sent = match read_event(&line) {
             Event::Delta(text) => {
                 streamed = true;
                 tx.send(Msg::Delta(text))
+            }
+            Event::Finish(text) => {
+                finished = true;
+                if text.is_empty() {
+                    tx.send(Msg::Alive)
+                } else {
+                    streamed = true;
+                    tx.send(Msg::Delta(text))
+                }
             }
             Event::Usage(usage) => tx.send(Msg::Usage(usage)),
             Event::Done => {
@@ -292,9 +351,9 @@ fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, si
             Event::NotAnEvent => {
                 plain.push_str(&line);
                 plain.push('\n');
-                Ok(())
+                tx.send(Msg::Alive)
             }
-            Event::Nothing => Ok(()),
+            Event::Nothing => tx.send(Msg::Alive),
         };
         if sent.is_err() {
             // The ask was cancelled or timed out: stop reading, which
@@ -302,7 +361,12 @@ fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, si
             return;
         }
     }
-    if !streamed && !plain.trim().is_empty() {
+    // The connection closed without `[DONE]`.
+    if finished {
+        // Some servers never send it. The model said it was done, so
+        // what arrived is the whole answer.
+        let _ = tx.send(Msg::Done);
+    } else if !streamed && !plain.trim().is_empty() {
         match refine_api::extract_content(&plain) {
             Ok(text) => {
                 let _ = tx.send(Msg::Delta(text));
@@ -316,7 +380,140 @@ fn request(settings: &OpenAiSettings, api_key: Option<&str>, mut body: Value, si
             }
         }
     }
-    // Otherwise the channel closes, and the caller takes what came.
+    // Otherwise the channel closes without `Done`, and the caller
+    // reports an answer that was cut off (or none at all).
+}
+
+// --- the wire -------------------------------------------------------
+
+/// The connections of one request, with a switch that closes them
+/// from another thread.
+///
+/// ureq 2 keeps its socket to itself, and a read that is waiting for
+/// the server cannot be interrupted: not while the response headers
+/// are still to come, and not in the body either (there is one read
+/// timeout for both, and its chunk decoder cannot pick up again after
+/// a timeout, so a short timeout used as a poll is not an option). So
+/// the request does not connect to the server itself. [`Wire::route`]
+/// is its resolver: it opens the connection to the server and sends
+/// ureq to a socket on loopback instead, and two threads pass the
+/// bytes on unchanged in both directions. TLS is not touched: it runs
+/// between ureq and the server, through the hop.
+///
+/// [`Wire::cut`] closes both sockets. The server sees that at once,
+/// and ureq's read ends.
+#[derive(Clone, Default)]
+struct Wire(Arc<Mutex<WireState>>);
+
+#[derive(Default)]
+struct WireState {
+    cut: bool,
+    /// Every socket of every connection made over this wire.
+    sockets: Vec<TcpStream>,
+}
+
+impl Wire {
+    fn state(&self) -> std::sync::MutexGuard<'_, WireState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Close every connection, now and from here on.
+    fn cut(&self) {
+        let mut state = self.state();
+        state.cut = true;
+        for socket in state.sockets.drain(..) {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Keep a handle on both sockets of a connection. False when the
+    /// wire was cut meanwhile (or the sockets cannot be held): the
+    /// caller drops them, which closes them.
+    fn hold(&self, a: &TcpStream, b: &TcpStream) -> bool {
+        let mut state = self.state();
+        let (Ok(a), Ok(b)) = (a.try_clone(), b.try_clone()) else {
+            return false;
+        };
+        if state.cut {
+            return false;
+        }
+        state.sockets.extend([a, b]);
+        true
+    }
+
+    /// The resolver of the request: connect to `netloc` (the server's
+    /// `host:port`) and answer with the loopback address that leads
+    /// there. Errors read like ureq's own: a name that does not
+    /// resolve and a server that does not answer both come out as
+    /// "could not reach".
+    fn route(&self, netloc: &str, connect_timeout: Duration) -> io::Result<Vec<SocketAddr>> {
+        if self.state().cut {
+            return Err(io::Error::other("the ask was stopped"));
+        }
+        let mut server = Err(io::Error::new(io::ErrorKind::NotFound, format!("no address for {netloc}")));
+        for addr in netloc.to_socket_addrs()? {
+            server = TcpStream::connect_timeout(&addr, connect_timeout);
+            if server.is_ok() {
+                break;
+            }
+        }
+        let server = server?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let hop = listener.local_addr()?;
+        let wire = self.clone();
+        thread::spawn(move || wire.pass(&listener, server));
+        Ok(vec![hop])
+    }
+
+    /// Take the one connection ureq makes to `listener` and pass the
+    /// bytes between it and `server` until one side closes or the
+    /// wire is cut.
+    fn pass(&self, listener: &TcpListener, server: TcpStream) {
+        let Some(client) = accept_one(listener) else {
+            return;
+        };
+        // Small pieces, each as soon as it is there.
+        let _ = client.set_nodelay(true);
+        let _ = server.set_nodelay(true);
+        let (Ok(client_out), Ok(server_in)) = (client.try_clone(), server.try_clone()) else {
+            return;
+        };
+        if !self.hold(&client, &server) {
+            return;
+        }
+        let answers = thread::spawn(move || {
+            let _ = io::copy(&mut &server_in, &mut &client_out);
+            // The server is done sending: ureq reads the end.
+            let _ = client_out.shutdown(Shutdown::Write);
+        });
+        let _ = io::copy(&mut &client, &mut &server);
+        // ureq let go of its socket (or the wire was cut): the
+        // conversation is over, in both directions.
+        let _ = server.shutdown(Shutdown::Both);
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = answers.join();
+    }
+}
+
+/// The connection ureq makes right after [`Wire::route`] answered.
+/// Does not wait for long: a connection that never comes must not
+/// leave a thread behind.
+fn accept_one(listener: &TcpListener) -> Option<TcpStream> {
+    listener.set_nonblocking(true).ok()?;
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((client, _)) => {
+                // Some systems hand the listener's mode on.
+                client.set_nonblocking(false).ok()?;
+                return Some(client);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// Which optional field a 400 complains about, if any.
@@ -336,6 +533,9 @@ fn refused_param(message: &str) -> Option<&'static str> {
 #[derive(Debug, PartialEq)]
 enum Event {
     Delta(String),
+    /// The model ended the answer in this chunk (`finish_reason`),
+    /// which may carry the last piece of text.
+    Finish(String),
     Usage(CallUsage),
     Done,
     /// The server reported an error inside the stream.
@@ -371,6 +571,9 @@ fn read_event(line: &str) -> Event {
         Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""),
         _ => String::new(),
     };
+    if v["choices"][0]["finish_reason"].is_string() {
+        return Event::Finish(text);
+    }
     if !text.is_empty() {
         return Event::Delta(text);
     }
@@ -412,9 +615,37 @@ mod tests {
     /// One-thread HTTP server answering each request with the next
     /// canned [`Answer`].
     fn serve(answers: Vec<Answer>) -> (String, Receiver<Seen>) {
+        let (url, seen, _closed) = serve_watched(answers);
+        (url, seen)
+    }
+
+    /// Wait up to `time` for the client to close the connection.
+    fn closed_within(stream: &mut std::net::TcpStream, time: Duration) -> bool {
+        let deadline = Instant::now() + time;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            stream.set_read_timeout(Some(left)).unwrap();
+            match stream.read(&mut [0u8; 64]) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => return false,
+                // Reset by the client.
+                Err(_) => return true,
+            }
+        }
+    }
+
+    /// [`serve`], also reporting the moment the server saw the client
+    /// close the connection while it was still answering (during a
+    /// pause, a hang, or on a write).
+    fn serve_watched(answers: Vec<Answer>) -> (String, Receiver<Seen>, Receiver<Instant>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let (tx, rx) = mpsc::channel();
+        let (closed_tx, closed) = mpsc::channel();
         thread::spawn(move || {
             for answer in answers {
                 let Ok((mut stream, _)) = listener.accept() else { return };
@@ -441,18 +672,22 @@ mod tests {
                     headers,
                     body: serde_json::from_slice(&raw).unwrap_or(Value::Null),
                 });
-                match answer {
+                let gone = match answer {
                     Answer::Stream(chunks) => {
                         let _ = write!(
                             stream,
                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
                         );
+                        let _ = stream.flush();
+                        let mut gone = false;
                         for (chunk, pause) in chunks {
-                            if stream.write_all(chunk.as_bytes()).and_then(|()| stream.flush()).is_err() {
+                            gone = stream.write_all(chunk.as_bytes()).and_then(|()| stream.flush()).is_err()
+                                || closed_within(&mut stream, pause);
+                            if gone {
                                 break;
                             }
-                            thread::sleep(pause);
                         }
+                        gone
                     }
                     Answer::Body(status, body) => {
                         let _ = write!(
@@ -460,18 +695,63 @@ mod tests {
                             "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         );
+                        false
                     }
-                    Answer::Hang(time) => thread::sleep(time),
+                    Answer::Hang(time) => closed_within(&mut stream, time),
+                };
+                if gone {
+                    let _ = closed_tx.send(Instant::now());
                 }
             }
         });
-        (url, rx)
+        (url, rx, closed)
     }
 
     const NO_PAUSE: Duration = Duration::from_millis(0);
 
     fn delta(text: &str) -> String {
         format!("data: {}\n\n", json!({ "choices": [{ "index": 0, "delta": { "content": text } }] }))
+    }
+
+    /// A chunk of the model's reasoning: no text for the answer.
+    fn reasoning(text: &str) -> String {
+        format!("data: {}\n\n", json!({ "choices": [{ "index": 0, "delta": { "reasoning_content": text } }] }))
+    }
+
+    /// Reasoning chunks and keep-alive comments in turn, `pause`
+    /// apart.
+    fn thinking(lines: usize, pause: Duration) -> Vec<(String, Duration)> {
+        (0..lines)
+            .map(|i| if i % 2 == 0 { reasoning("hm ") } else { ": keep-alive\n\n".to_string() })
+            .map(|line| (line, pause))
+            .collect()
+    }
+
+    /// Send the question and cancel it `after` this long. Returns the
+    /// result, the events, and the moment of the cancel.
+    fn send_and_cancel(url: &str, after: Duration) -> (Result<AskReply, AskError>, Vec<AskEvent>, Instant) {
+        let cancel = CancelFlag::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                thread::sleep(after);
+                cancel.cancel();
+                Instant::now()
+            })
+        };
+        let mut events = Vec::new();
+        let result = backend(url, None).send(&setup(), &question(), &mut |e| events.push(e), &cancel, LONG);
+        (result, events, canceller.join().unwrap())
+    }
+
+    /// The server saw the connection close within half a second of
+    /// `since`.
+    fn assert_closed_soon(closed: &Receiver<Instant>, since: Instant, what: &str) {
+        let at = closed
+            .recv_timeout(Duration::from_secs(4))
+            .unwrap_or_else(|_| panic!("{what}: the server never saw the connection close"));
+        let took = at.saturating_duration_since(since);
+        assert!(took < Duration::from_millis(500), "{what}: the connection closed {took:?} later");
     }
 
     /// A stream the way OpenAI sends it: a role chunk, the text, a
@@ -583,11 +863,42 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_without_done_or_usage_is_still_an_answer() {
-        let (url, _seen) = serve(vec![Answer::Stream(vec![(delta("Oslo."), NO_PAUSE)])]);
+    fn a_stream_that_finished_without_done_or_usage_is_still_an_answer() {
+        // Some servers never send `[DONE]`: the finish chunk is the
+        // end, on its own or with the last piece of text in it.
+        let finish = format!("data: {}\n\n", json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }));
+        let (url, _seen) = serve(vec![Answer::Stream(vec![(delta("Oslo."), NO_PAUSE), (finish, NO_PAUSE)])]);
         let reply = send(&mut backend(&url, None), &setup(), &question(), LONG).0.unwrap();
         assert_eq!(reply.text, "Oslo.");
         assert_eq!(reply.usage, None);
+
+        let last = format!(
+            "data: {}\n\n",
+            json!({ "choices": [{ "delta": { "content": "is Oslo." }, "finish_reason": "stop" }] })
+        );
+        let (url, _seen) = serve(vec![Answer::Stream(vec![(delta("It "), NO_PAUSE), (last, NO_PAUSE)])]);
+        let (reply, events) = send(&mut backend(&url, None), &setup(), &question(), LONG);
+        assert_eq!(reply.unwrap().text, "It is Oslo.");
+        assert_eq!(events, vec![AskEvent::Text("It ".into()), AskEvent::Text("is Oslo.".into())]);
+    }
+
+    #[test]
+    fn a_stream_cut_off_before_the_end_is_an_error_that_keeps_what_arrived() {
+        // Text, then the connection closes: no `[DONE]`, no finish.
+        let chunks = vec![(delta("The capital "), NO_PAUSE), (delta("of Norway"), NO_PAUSE)];
+        let (url, seen) = serve(vec![Answer::Stream(chunks), Answer::Stream(stream_of(&["Oslo."]))]);
+        let mut b = backend(&url, None);
+        let (reply, events) = send(&mut b, &setup(), &question(), LONG);
+        match reply.unwrap_err() {
+            AskError::Backend(m) => assert!(m.contains("cut off") && m.contains("127.0.0.1"), "{m}"),
+            other => panic!("expected Backend, got {other:?}"),
+        }
+        // What arrived was shown, and stays with whoever showed it.
+        assert_eq!(events, vec![AskEvent::Text("The capital ".into()), AskEvent::Text("of Norway".into())]);
+        // The half answer is not part of the conversation.
+        assert_eq!(send(&mut b, &setup(), &question(), LONG).0.unwrap().text, "Oslo.");
+        let _cut = seen.recv().unwrap();
+        assert_eq!(seen.recv().unwrap().body["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -655,12 +966,62 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_server_times_out() {
-        let (url, _seen) = serve(vec![Answer::Hang(Duration::from_secs(3))]);
-        let started = Instant::now();
-        let (reply, _) = send(&mut backend(&url, None), &setup(), &question(), Duration::from_millis(300));
-        assert_eq!(reply.unwrap_err(), AskError::Timeout);
-        assert!(started.elapsed() < Duration::from_millis(2000), "{:?}", started.elapsed());
+    fn a_silent_server_times_out_and_the_connection_is_closed() {
+        let silent: [(&str, Answer); 3] = [
+            ("before the headers", Answer::Hang(Duration::from_secs(5))),
+            ("after the headers", Answer::Stream(vec![(String::new(), Duration::from_secs(5))])),
+            ("after some text", Answer::Stream(vec![(delta("The capital "), Duration::from_secs(5))])),
+        ];
+        for (what, answer) in silent {
+            let (url, _seen, closed) = serve_watched(vec![answer]);
+            let started = Instant::now();
+            let (reply, _) = send(&mut backend(&url, None), &setup(), &question(), Duration::from_millis(300));
+            let gave_up = Instant::now();
+            assert_eq!(reply.unwrap_err(), AskError::Timeout, "{what}");
+            assert!(started.elapsed() < Duration::from_millis(2000), "{what}: {:?}", started.elapsed());
+            assert_closed_soon(&closed, gave_up, what);
+        }
+    }
+
+    #[test]
+    fn cancel_closes_the_connection_while_the_server_is_silent() {
+        let silent: [(&str, Answer); 2] = [
+            ("before the headers", Answer::Hang(Duration::from_secs(5))),
+            ("after the headers", Answer::Stream(vec![(String::new(), Duration::from_secs(5))])),
+        ];
+        for (what, answer) in silent {
+            let (url, _seen, closed) = serve_watched(vec![answer]);
+            let started = Instant::now();
+            let (reply, events, cancelled) = send_and_cancel(&url, Duration::from_millis(200));
+            assert_eq!(reply.unwrap_err(), AskError::Cancelled, "{what}");
+            assert!(events.is_empty(), "{what}: {events:?}");
+            assert!(started.elapsed() < Duration::from_millis(1000), "{what}: {:?}", started.elapsed());
+            assert_closed_soon(&closed, cancelled, what);
+        }
+    }
+
+    #[test]
+    fn cancel_closes_the_connection_while_only_reasoning_and_keep_alives_arrive() {
+        // Three seconds of lines with nothing for the answer in them.
+        let (url, _seen, closed) = serve_watched(vec![Answer::Stream(thinking(100, Duration::from_millis(30)))]);
+        let (reply, events, cancelled) = send_and_cancel(&url, Duration::from_millis(200));
+        assert_eq!(reply.unwrap_err(), AskError::Cancelled);
+        assert!(events.is_empty(), "{events:?}");
+        assert_closed_soon(&closed, cancelled, "reasoning");
+    }
+
+    #[test]
+    fn a_long_reasoning_stream_is_not_a_timeout() {
+        // 1.2 s of reasoning and keep-alives before the first word,
+        // against a limit of 400 ms on silence.
+        let mut chunks = thinking(12, Duration::from_millis(100));
+        chunks.extend(stream_of(&["Oslo."]));
+        let (url, _seen) = serve(vec![Answer::Stream(chunks)]);
+        let (reply, events) = send(&mut backend(&url, None), &setup(), &question(), Duration::from_millis(400));
+        let reply = reply.unwrap();
+        assert_eq!(reply.text, "Oslo.");
+        assert_eq!(events, vec![AskEvent::Text("Oslo.".into())]);
+        assert!(reply.first_text_ms.unwrap() >= 1000, "{:?}", reply.first_text_ms);
     }
 
     #[test]
@@ -802,6 +1163,16 @@ mod tests {
         );
         assert_eq!(read_event(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#), Event::Nothing);
         assert_eq!(read_event(r#"data: {"choices":[{"delta":{"content":null}}],"usage":null}"#), Event::Nothing);
+        assert_eq!(read_event(r#"data: {"choices":[{"delta":{"reasoning_content":"hm"}}]}"#), Event::Nothing);
+        assert_eq!(
+            read_event(r#"data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}"#),
+            Event::Delta("Hi".into())
+        );
+        assert_eq!(read_event(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#), Event::Finish(String::new()));
+        assert_eq!(
+            read_event(r#"data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}"#),
+            Event::Finish("Hi".into())
+        );
         assert_eq!(read_event(r#"data: {"error":{"message":"boom"}}"#), Event::Failed("boom".into()));
         assert_eq!(read_event(r#"{"choices":[{"message":{"content":"Hi"}}]}"#), Event::NotAnEvent);
         assert!(matches!(

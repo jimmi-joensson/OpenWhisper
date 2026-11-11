@@ -126,6 +126,53 @@ fn status_says_what_an_ask_would_use_without_calling_a_model() {
     assert_eq!(json["settings"]["web_search"], true);
 }
 
+#[test]
+fn the_outline_says_the_same_without_asking_the_backend() {
+    // A binary that would hang the probe for a long time if it ran.
+    let dir = tempfile::tempdir().unwrap();
+    let slow = dir.path().join("claude");
+    std::fs::write(&slow, "#!/bin/sh\nsleep 5\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let refine = RefineSettings {
+        claude_cli: ClaudeCliSettings { path: Some(slow.display().to_string()), ..ClaudeCliSettings::default() },
+        ..RefineSettings::default()
+    };
+    let ask = AskSettings { web_search: true, model: Some("opus".into()), timeout_ms: 1, ..on() };
+    let started = Instant::now();
+    let o = outline(&ask, &refine);
+    assert!(started.elapsed() < Duration::from_millis(500), "the outline ran the probe: {:?}", started.elapsed());
+    assert!(o.settings.enabled);
+    assert_eq!((o.model.as_str(), o.effort.as_str()), ("opus", "low"));
+    assert!(o.web_search);
+    assert_eq!(o.timeout_ms, 10_000);
+    // No backend state in it, and the same fields the status has
+    // next to its `backend`.
+    let json = serde_json::to_value(&o).unwrap();
+    let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["backend_kind", "destination", "effort", "model", "notice", "settings", "timeout_ms", "web_search"]
+    );
+    assert_eq!(o.backend_kind, "claude-cli");
+    assert_eq!(o.destination, crate::refine::claude_cli::DESTINATION);
+    let missing = RefineSettings {
+        claude_cli: ClaudeCliSettings { path: Some("/nonexistent/claude".into()), ..ClaudeCliSettings::default() },
+        ..RefineSettings::default()
+    };
+    let full = serde_json::to_value(status(&ask, &missing)).unwrap();
+    for key in keys {
+        assert_eq!(full[key], json[key], "{key}");
+    }
+    assert_eq!(full.as_object().unwrap().len(), 9);
+    // The sentence is the one the backend's own status carries.
+    assert_eq!(full["destination"], full["backend"]["destination"]);
+}
+
 // --- the plain function ---------------------------------------------
 
 #[test]
@@ -451,6 +498,151 @@ fn dismiss_while_answering_goes_idle_and_stays_idle() {
 }
 
 #[test]
+fn a_cancel_or_close_meant_for_an_earlier_ask_leaves_the_current_one_alone() {
+    let calls = calls();
+    let _scope = scope(on(), waiting(&calls));
+
+    // The first ask is cancelled; its panel will close it in a moment.
+    let worker = thread::spawn(|| submit("the first question"));
+    wait_until("the first ask is answering", || snapshot().phase == AskPhase::Answering);
+    let first = snapshot().id;
+    assert!(cancel_if(first));
+    assert_eq!(worker.join().unwrap().unwrap().phase, AskPhase::Cancelled);
+
+    // Before it does, the next ask starts: recording, then answering.
+    let second = begin_listening().unwrap();
+    assert_ne!(second, first);
+    assert!(!dismiss_if(first), "the late close took the new ask with it");
+    assert!(!cancel_if(first));
+    assert_eq!((snapshot().id, snapshot().phase), (second, AskPhase::Listening));
+    assert!(is_busy());
+
+    let worker = thread::spawn(move || submit_listening(second, "the second question", 900));
+    wait_until("the second ask is answering", || snapshot().phase == AskPhase::Answering);
+    assert!(!dismiss_if(first));
+    assert!(!cancel_if(first));
+    assert_eq!((snapshot().id, snapshot().phase), (second, AskPhase::Answering));
+    assert_eq!(snapshot().answer, "Partial");
+
+    // The unscoped forms mean "whatever is there", and still do that.
+    assert!(cancel());
+    assert_eq!(worker.join().unwrap().unwrap().phase, AskPhase::Cancelled);
+    // Meant for the ask on show, the close closes it.
+    assert!(dismiss_if(second));
+    assert_eq!(snapshot().phase, AskPhase::Idle);
+    assert_eq!(snapshot().answer, "");
+    // And an id that never existed closes nothing.
+    assert!(!dismiss_if(second + 1000));
+}
+
+#[test]
+fn a_recording_that_cannot_be_transcribed_ends_the_ask_in_error() {
+    let calls = calls();
+    let _scope = scope(on(), saying(&calls, "Four."));
+    let id = begin_listening().unwrap();
+    assert_eq!(calls.lock().unwrap().warmed, 1);
+
+    // Not for another ask.
+    assert!(!fail_listening(id + 1, "boom"));
+    assert_eq!(snapshot().phase, AskPhase::Listening);
+
+    assert!(fail_listening(id, " The question could not be transcribed (boom). "));
+    let failed = snapshot();
+    assert_eq!((failed.id, failed.phase), (id, AskPhase::Error));
+    assert_eq!(failed.error, "The question could not be transcribed (boom).");
+    assert!(!is_busy());
+    assert_eq!(finished_answer(), None);
+    // The warmed backend is gone, and a transcript that still
+    // arrives is not sent.
+    assert_eq!(calls.lock().unwrap().dropped, 1);
+    assert_eq!(submit_listening(id, "what is two plus two", 900), Err(AskError::Cancelled));
+    assert!(calls.lock().unwrap().sent.is_empty());
+
+    // Only a listening ask can fail this way: an answer stays.
+    assert_eq!(submit("what is two plus two").unwrap().phase, AskPhase::Done);
+    assert!(!fail_listening(snapshot().id, "boom"));
+    assert_eq!(snapshot().phase, AskPhase::Done);
+}
+
+#[test]
+fn a_backend_that_panics_ends_the_ask_in_error_and_the_next_ask_runs() {
+    let calls = calls();
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), |input, sink, _| {
+                sink(AskEvent::Text("Half an".into()));
+                if input.text.contains("break") {
+                    panic!("the backend broke (this panic is part of the test)");
+                }
+                Ok("Half an answer, whole.".into())
+            }))
+        }
+    });
+    let id = begin_listening().unwrap();
+    let ended = submit_listening(id, "please break", 900).unwrap();
+    assert_eq!((ended.id, ended.phase), (id, AskPhase::Error), "the ask stayed {:?}", ended.phase);
+    assert_eq!(ended.error, "The ask stopped on an internal error. Ask again.");
+    // What had arrived is still on show, and is not an answer.
+    assert_eq!(ended.answer, "Half an");
+    assert_eq!(finished_answer(), None);
+    assert!(!is_busy(), "the ask is still busy");
+    assert!(!cancel());
+    // The backend went down with it.
+    assert_eq!(calls.lock().unwrap().dropped, 1);
+
+    // The next ask is not in the way of anything.
+    let next = submit("what is two plus two").unwrap();
+    assert_eq!(next.phase, AskPhase::Done);
+    assert_eq!(next.answer, "Half an answer, whole.");
+}
+
+#[test]
+fn copy_takes_the_whole_answer_and_before_that_what_has_arrived() {
+    let calls = calls();
+    let _scope = scope(on(), waiting(&calls));
+    // Nothing to copy without an ask, or while it only listens.
+    assert_eq!(text_to_copy(), None);
+    let id = mark_listening().unwrap();
+    assert_eq!(text_to_copy(), None);
+
+    // While the answer streams in: what is there so far.
+    let worker = thread::spawn(move || submit_listening(id, "tell me a long story", 900));
+    wait_until("the answer is streaming", || snapshot().phase == AskPhase::Answering);
+    assert_eq!(text_to_copy().as_deref(), Some("Partial"));
+    assert_eq!(finished_answer(), None);
+    // Cancelled midway: the same.
+    assert!(cancel_if(id));
+    worker.join().unwrap().unwrap();
+    assert_eq!(text_to_copy().as_deref(), Some("Partial"));
+    dismiss();
+    assert_eq!(text_to_copy(), None);
+}
+
+#[test]
+fn copy_takes_the_finished_answer_and_nothing_when_there_is_no_text() {
+    let calls = calls();
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), |input, sink, _| {
+                if input.text.contains("fail") {
+                    return Err(AskError::Backend("boom".into()));
+                }
+                sink(AskEvent::Text("All of".into()));
+                Ok("All of it.".into())
+            }))
+        }
+    });
+    assert_eq!(submit("say it all").unwrap().phase, AskPhase::Done);
+    assert_eq!(text_to_copy().as_deref(), Some("All of it."));
+    assert_eq!(text_to_copy(), finished_answer());
+    // An ask that failed before any text: nothing.
+    assert_eq!(submit("this will fail").unwrap().phase, AskPhase::Error);
+    assert_eq!(text_to_copy(), None);
+}
+
+#[test]
 fn a_new_ask_replaces_the_one_before_and_cancels_it_when_it_still_runs() {
     let calls = calls();
     let _scope = scope(on(), waiting(&calls));
@@ -636,4 +828,72 @@ fn every_ask_that_reached_the_backend_leaves_a_diagnostics_row_without_its_text(
     let before = runs::recent(store, 500).unwrap().len();
     submit("   ").unwrap();
     assert_eq!(runs::recent(store, 500).unwrap().len(), before);
+}
+
+#[test]
+fn an_ask_outside_the_app_leaves_the_same_row_and_history_only_when_asked_to() {
+    let _dictation = crate::dictation::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let store = super::test_support::store();
+    let calls = calls();
+    let _scope = scope(AskSettings::default(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), |input, sink, _| {
+                if input.text.contains("fail") {
+                    return Err(AskError::Backend("boom".into()));
+                }
+                sink(AskEvent::Text("Brennholt is in Oslo.".into()));
+                Ok("Brennholt is in Oslo.".into())
+            }))
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    history_in(Some(dir.path()));
+    let plan = AskPlan::with_terms(&AskSettings::default(), &RefineSettings::default(), &[]);
+    let before = snapshot();
+    let rows_before = runs::recent(store, 500).unwrap().len();
+    let ask_once = |question: &str, history: bool| {
+        let mut backend = plan.backend();
+        plan.send_and_record(backend.as_mut(), &AskInput::text(question), &mut |_| {}, &CancelFlag::new(), history)
+    };
+
+    // What `openwhisper ask run` does: a row, no history.
+    let reply = ask_once("where is brennholt", false).unwrap();
+    assert_eq!(reply.text, "Brennholt is in Oslo.");
+    let row = runs::recent(store, 1).unwrap().remove(0);
+    assert_eq!((row.source.as_str(), row.status.as_str()), ("ask", "answered"));
+    assert_eq!((row.backend.as_str(), row.model.as_str(), row.effort.as_str()), ("stub", "sonnet", "low"));
+    assert_eq!((row.chars_in, row.chars_out), (18, 21));
+    assert_eq!(row.tokens_out, Some(40));
+    assert!(row.at_ms > 0);
+    assert_eq!(runs::recent(store, 500).unwrap().len(), rows_before + 1);
+    assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 0);
+
+    // With `--history`: the question and the answer are kept.
+    ask_once("where is brennholt", true).unwrap();
+    let page = crate::history::list(dir.path(), "", 10, 0);
+    assert_eq!(page.stored, 1);
+    assert!(page.entries[0].is_ask());
+    assert_eq!(page.entries[0].text, "where is brennholt");
+    assert_eq!(page.entries[0].answer.as_deref(), Some("Brennholt is in Oslo."));
+
+    // A failed ask leaves its row and no history entry.
+    assert_eq!(ask_once("this will fail", true), Err(AskError::Backend("boom".into())));
+    let row = runs::recent(store, 1).unwrap().remove(0);
+    assert_eq!((row.status.as_str(), row.detail.as_str()), ("failed", "boom"));
+    assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 1);
+
+    // History switched off in the settings wins over the flag.
+    history_in(None);
+    crate::settings::set_history_settings_cache(HistorySettings {
+        enabled: false,
+        retention_days: 0,
+        folder: Some(dir.path().to_string_lossy().into_owned()),
+    });
+    ask_once("where is brennholt", true).unwrap();
+    assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 1);
+
+    // None of it touched the app's one ask.
+    assert_eq!(snapshot(), before);
+    crate::settings::set_history_settings_cache(HistorySettings::default());
 }

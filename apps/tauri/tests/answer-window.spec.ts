@@ -25,6 +25,20 @@ async function calls(page: Page): Promise<string[]> {
   );
 }
 
+// The same, each with the arguments it was called with. Without the
+// `ask_snapshot` the panel reads when it opens.
+async function callsWithArgs(
+  page: Page,
+): Promise<{ cmd: string; args: Record<string, unknown> }[]> {
+  return page.evaluate(() =>
+    (
+      (window as unknown as {
+        __owAskCalls?: { cmd: string; args: Record<string, unknown> }[];
+      }).__owAskCalls ?? []
+    ).filter((c) => c.cmd !== "ask_snapshot"),
+  );
+}
+
 function recorded<T>(page: Page, key: string): Promise<T | undefined> {
   return page.evaluate(
     (k) => (window as unknown as Record<string, unknown>)[k] as T | undefined,
@@ -231,6 +245,58 @@ test.describe("answer window", () => {
       "ask_cancel",
       "ask_dismiss",
     ]);
+  });
+
+  test("every command names the ask the panel is showing", async ({ page }) => {
+    await open(page);
+
+    // Cancel, and the close the panel sends by itself afterwards.
+    await emitAskTick(page, { id: 7, phase: "answering", question: "what is a tap", answer: "A" });
+    await button(page, "Cancel").click();
+    await expect(card(page)).toHaveCount(0);
+    expect(await callsWithArgs(page)).toEqual([
+      { cmd: "ask_cancel", args: { id: 7 } },
+      { cmd: "ask_dismiss", args: { id: 7 } },
+    ]);
+
+    // Insert.
+    await emitAskTick(page, { id: 8, phase: "done", question: "what is a tap", answer: "A press." });
+    await button(page, "Insert").click();
+    await expect(card(page)).toHaveCount(0);
+    expect((await callsWithArgs(page)).at(-1)).toEqual({ cmd: "ask_insert", args: { id: 8 } });
+
+    // Dismiss.
+    await emitAskTick(page, { id: 9, phase: "done", question: "what is a tap", answer: "A press." });
+    await button(page, "Dismiss").click();
+    await expect(card(page)).toHaveCount(0);
+    expect((await callsWithArgs(page)).at(-1)).toEqual({ cmd: "ask_dismiss", args: { id: 9 } });
+  });
+
+  test("the close of a cancelled ask leaves an ask that started meanwhile alone", async ({
+    page,
+  }) => {
+    await open(page);
+    // Ask 7 was cancelled; the panel says so and will close it.
+    await emitAskTick(page, { id: 7, phase: "cancelled", question: "what is a tap" });
+    await expect(page.getByTestId("answer-status")).toHaveText("Cancelled");
+
+    // Before it does, the next ask starts recording. Its tick has
+    // not reached the panel yet: only Rust knows about it.
+    await page.evaluate(() => {
+      const w = window as unknown as { __owAskSnapshot: Record<string, unknown> };
+      w.__owAskSnapshot = { ...w.__owAskSnapshot, id: 8, phase: "listening", question: "" };
+    });
+
+    // The close goes out for ask 7, by name.
+    await expect
+      .poll(async () => (await callsWithArgs(page)).at(-1))
+      .toEqual({ cmd: "ask_dismiss", args: { id: 7 } });
+    // So ask 8 is still there, and shows when its tick arrives.
+    const current = await recorded<{ id: number; phase: string }>(page, "__owAskSnapshot");
+    expect([current?.id, current?.phase]).toEqual([8, "listening"]);
+    await emitAskTick(page, { id: 8, phase: "listening" });
+    await expect(page.getByTestId("answer-status")).toHaveText("Listening");
+    await expect(button(page, "Cancel")).toBeVisible();
   });
 
   test("an ask cancelled from outside closes the same way", async ({ page }) => {

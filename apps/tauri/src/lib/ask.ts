@@ -90,11 +90,16 @@ export interface AskSettings {
 export const ASK_CHANGED_EVENT = "ask_changed";
 
 // What `ask_get` returns (`AskState` in src-tauri/src/ask.rs): the
-// stored block, whether the backend can run and where questions are
-// sent (`backend.destination`), and what an ask would use right now.
+// stored block and what an ask would use right now. All of it is
+// read off the settings, so the call is cheap. Whether the backend
+// can run is not in it: that is `ask_status`.
 export interface AskState {
   settings: AskSettings;
-  backend: RefineBackendStatus;
+  // The backend Refine is set up with, which an ask uses too:
+  // "claude-cli" or "openai-compatible".
+  backend_kind: string;
+  // Where questions are sent, as a part of a sentence.
+  destination: string;
   model: string;
   effort: string;
   // Web search is on and the backend has one.
@@ -109,6 +114,11 @@ export interface AskState {
   };
   default_model: string;
 }
+
+// What `ask_status` returns: whether the backend an ask uses can run
+// (`BackendStatus` in core, the one Refine's status is). Getting it
+// starts the Claude CLI for a moment, so only the Ask pane asks.
+export type AskBackendStatus = RefineBackendStatus;
 
 // An ask is listening, thinking or answering: a cancel would stop it.
 export function askIsBusy(phase: AskPhase): boolean {

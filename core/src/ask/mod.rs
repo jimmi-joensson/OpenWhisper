@@ -42,12 +42,17 @@
 //!   [`begin_listening`] when the ask recording starts, [`submit`]
 //!   with the transcript (or typed text), [`cancel`], [`dismiss`],
 //!   and [`snapshot`] for the panel. The dictation pipeline uses the
-//!   split forms [`mark_listening`], [`warm_listening`] and
-//!   [`submit_listening`], which tie the three steps of one recording
-//!   together by id.
+//!   split forms [`mark_listening`], [`warm_listening`],
+//!   [`submit_listening`] and [`fail_listening`], which tie the steps
+//!   of one recording together by id. Whoever stops or closes an ask
+//!   it saw a moment ago says which one ([`cancel_if`],
+//!   [`dismiss_if`]), so a new ask that started meanwhile is left
+//!   alone; the plain [`cancel`] and [`dismiss`] are for "whatever is
+//!   there now" (the cancel key).
 //! - the plain function for everything else (the CLI, the eval set):
 //!   [`answer`], or [`AskPlan`] when the backend should be warmed
-//!   first. No global state.
+//!   first ([`AskPlan::send_and_record`] to keep what the app keeps
+//!   of an ask). No global state.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -325,6 +330,7 @@ pub const WEB_SEARCH_UNAVAILABLE: &str =
 const ASK_OFF: &str = "Ask is switched off. Switch it on in the settings to ask questions.";
 const NO_QUESTION: &str = "There was no question to answer.";
 const NO_ANSWER: &str = "The model returned no answer.";
+const STOPPED: &str = "The ask stopped on an internal error. Ask again.";
 
 /// Everything one ask is made with, worked out from the two settings
 /// blocks: which backend, the conversation setup, the timeout. The
@@ -442,6 +448,37 @@ impl AskPlan {
         }
         Ok(reply)
     }
+
+    /// [`AskPlan::send`], and then what the app keeps of an ask: its
+    /// diagnostics row (when a store is registered,
+    /// [`crate::stats::set_store`]) and, with `history`, the question
+    /// and the answer in the transcript history (when that is
+    /// switched on and has a folder). This is how `openwhisper ask
+    /// run` leaves the same trace as the ask key.
+    pub fn send_and_record(
+        &self,
+        backend: &mut dyn AskBackend,
+        question: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+        history: bool,
+    ) -> Result<AskReply, AskError> {
+        let at_ms = now_ms();
+        let sent = Instant::now();
+        let result = self.send(backend, question, sink, cancel);
+        let outcome = Outcome {
+            plan: self,
+            backend_id: backend.id(),
+            question: &question.text,
+            result: &result,
+            accepted: result.is_ok(),
+            at_ms,
+            elapsed_ms: sent.elapsed().as_millis() as u64,
+            spoken_ms: 0,
+        };
+        outcome.record(history);
+        result
+    }
 }
 
 /// Answer one question with a fresh backend: the pure form of an ask,
@@ -463,14 +500,20 @@ pub fn answer(
     plan.send(backend.as_mut(), input, sink, cancel)
 }
 
-/// What the Ask pane and `openwhisper ask status` show.
+/// What an ask would use right now, read off the two settings blocks
+/// alone: nothing is started and nothing is asked of the backend, so
+/// this is cheap enough for anything that only wants to know whether
+/// Ask is on.
 #[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct AskStatus {
+pub struct AskOutline {
     /// The saved block.
     pub settings: AskSettings,
-    /// Whether the backend can run, and where questions are sent
-    /// ([`BackendStatus::destination`]).
-    pub backend: BackendStatus,
+    /// Id of the backend Refine is set up with, which an ask uses
+    /// too: `"claude-cli"` or `"openai-compatible"`.
+    pub backend_kind: String,
+    /// Where the question is sent, as a sentence part
+    /// ([`AskPlan::destination`]).
+    pub destination: String,
     /// The model and effort an ask would use right now.
     pub model: String,
     /// `""` when no effort is sent.
@@ -482,19 +525,46 @@ pub struct AskStatus {
     pub notice: String,
 }
 
-/// Check whether an ask can run with these settings. Makes no model
-/// call; for the Claude CLI it runs `claude auth status`.
-pub fn status(ask: &AskSettings, refine: &RefineSettings) -> AskStatus {
+/// See [`AskOutline`].
+pub fn outline(ask: &AskSettings, refine: &RefineSettings) -> AskOutline {
     let plan = AskPlan::with_terms(ask, refine, &[]);
-    AskStatus {
+    AskOutline {
         settings: ask.clone().cleaned(),
-        backend: crate::refine::backend_status(refine),
+        backend_kind: plan.backend.as_str().to_string(),
+        destination: plan.destination(),
         model: plan.setup.model.clone(),
         effort: plan.effort_id().to_string(),
         web_search: plan.setup.web_search,
         timeout_ms: plan.timeout.as_millis() as u64,
         notice: plan.notice,
     }
+}
+
+/// What the Ask pane and `openwhisper ask status` show: the
+/// [`AskOutline`] (its fields sit next to `backend` when serialized)
+/// and the state of the backend.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AskStatus {
+    #[serde(flatten)]
+    pub outline: AskOutline,
+    /// Whether the backend can run, and where questions are sent
+    /// ([`BackendStatus::destination`]).
+    pub backend: BackendStatus,
+}
+
+impl std::ops::Deref for AskStatus {
+    type Target = AskOutline;
+
+    fn deref(&self) -> &AskOutline {
+        &self.outline
+    }
+}
+
+/// Check whether an ask can run with these settings. Makes no model
+/// call; for the Claude CLI it runs `claude auth status`, which takes
+/// a moment: call [`outline`] when the backend's state is not needed.
+pub fn status(ask: &AskSettings, refine: &RefineSettings) -> AskStatus {
+    AskStatus { outline: outline(ask, refine), backend: crate::refine::backend_status(refine) }
 }
 
 // --- the one ask of the running app --------------------------------
@@ -795,14 +865,35 @@ fn start(s: &mut Session, question: &str, spoken_ms: i64) {
 }
 
 /// Run the ask `id` to its end. The session is already `thinking`.
+///
+/// Whatever happens in there, the ask does not stay `thinking`: a
+/// panic (in a backend, say) is caught here and ends the ask in
+/// `error`, so the panel says so and the next ask can start. The
+/// panic hook has run by then, so a crash report is still written.
 fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_to_end(id, question, warm)));
+    if ran.is_err() {
+        change(|s| {
+            if s.running(id) {
+                s.snap.phase = AskPhase::Error;
+                s.snap.error = STOPPED.to_string();
+                s.snap.searching = false;
+                s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
+            }
+        });
+    }
+    snapshot()
+}
+
+/// [`run`] without the net under it.
+fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
     let question = question.trim();
     if question.is_empty() {
         // Nothing was heard: no call, no error, no ask.
         drop(warm);
         let late = change(|s| if s.running(id) { s.reset() } else { None });
         drop(late);
-        return snapshot();
+        return;
     }
     let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
     // The backend warmed while the person talked is used when it was
@@ -828,7 +919,7 @@ fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
     });
     let Some((cancel, started_at_ms, spoken_ms)) = going else {
         // Cancelled or replaced before the backend was even ready.
-        return snapshot();
+        return;
     };
 
     let sent = Instant::now();
@@ -900,18 +991,61 @@ fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
         }
     });
 
-    let status = match &result {
-        Ok(_) if accepted => "answered",
-        Ok(_) | Err(AskError::Cancelled) => "cancelled",
-        Err(AskError::Timeout) => "timeout",
-        Err(AskError::Unavailable(_)) => "unavailable",
-        Err(AskError::Backend(_)) => "failed",
+    let outcome = Outcome {
+        plan: &plan,
+        backend_id,
+        question,
+        result: &result,
+        accepted,
+        at_ms: started_at_ms,
+        elapsed_ms,
+        spoken_ms,
     };
-    runs::record_run(&run_record(status, &plan, backend_id, question, &result, started_at_ms, elapsed_ms));
-    if let (true, Ok(reply)) = (accepted, &result) {
-        keep_in_history(question, &reply.text, started_at_ms, spoken_ms);
+    outcome.record(true);
+}
+
+/// How one ask ended, for what is kept of it. The one path for the
+/// app's ask and for [`AskPlan::send_and_record`].
+struct Outcome<'a> {
+    plan: &'a AskPlan,
+    backend_id: &'a str,
+    /// As it was sent, before the fence.
+    question: &'a str,
+    result: &'a Result<AskReply, AskError>,
+    /// The answer counted: it was not cancelled, dismissed or
+    /// replaced in its last moment.
+    accepted: bool,
+    /// When the ask began, Unix epoch milliseconds.
+    at_ms: i64,
+    elapsed_ms: u64,
+    /// Voiced length of the recording; 0 for a typed question.
+    spoken_ms: i64,
+}
+
+impl Outcome<'_> {
+    /// Write the diagnostics row and, with `history`, keep an
+    /// accepted answer in the transcript history.
+    fn record(&self, history: bool) {
+        let status = match self.result {
+            Ok(_) if self.accepted => "answered",
+            Ok(_) | Err(AskError::Cancelled) => "cancelled",
+            Err(AskError::Timeout) => "timeout",
+            Err(AskError::Unavailable(_)) => "unavailable",
+            Err(AskError::Backend(_)) => "failed",
+        };
+        runs::record_run(&run_record(
+            status,
+            self.plan,
+            self.backend_id,
+            self.question,
+            self.result,
+            self.at_ms,
+            self.elapsed_ms,
+        ));
+        if let (true, true, Ok(reply)) = (history, self.accepted, self.result) {
+            keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms);
+        }
     }
-    snapshot()
 }
 
 /// What the panel says for an error.
@@ -1002,27 +1136,78 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64) {
 /// is simply gone: back to `idle`, and the transcript of that
 /// recording will not be sent. In any other phase nothing happens.
 /// Returns whether there was something to stop.
+///
+/// This stops whatever ask is there now, which is what the cancel
+/// key means. A caller that has one particular ask in mind uses
+/// [`cancel_if`].
 pub fn cancel() -> bool {
-    let (stopped, warm) = change(|s| match s.snap.phase {
-        AskPhase::Listening => (true, s.reset()),
-        AskPhase::Thinking | AskPhase::Answering => {
-            s.cancel.cancel();
-            s.snap.phase = AskPhase::Cancelled;
-            s.snap.searching = false;
-            s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
-            (true, None)
+    cancel_current(None)
+}
+
+/// [`cancel`], but only when the current ask is still the ask `id`.
+/// An ask that started after the caller last looked is not touched.
+pub fn cancel_if(id: u64) -> bool {
+    cancel_current(Some(id))
+}
+
+fn cancel_current(only: Option<u64>) -> bool {
+    let (stopped, warm) = change(|s| {
+        if only.is_some_and(|id| id != s.snap.id) {
+            return (false, None);
         }
-        _ => (false, None),
+        match s.snap.phase {
+            AskPhase::Listening => (true, s.reset()),
+            AskPhase::Thinking | AskPhase::Answering => {
+                s.cancel.cancel();
+                s.snap.phase = AskPhase::Cancelled;
+                s.snap.searching = false;
+                s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
+                (true, None)
+            }
+            _ => (false, None),
+        }
     });
     drop(warm);
     stopped
 }
 
 /// Close the ask: cancel it when it is still running, then `idle`
-/// with nothing on the snapshot. What the panel's close button calls.
+/// with nothing on the snapshot.
+///
+/// This closes whatever ask is there now. The panel's close button,
+/// and anything else that closes the ask it was showing, uses
+/// [`dismiss_if`].
 pub fn dismiss() {
     let warm = change(Session::reset);
     drop(warm);
+}
+
+/// [`dismiss`], but only when the current ask is still the ask `id`:
+/// a close that arrives late (the panel closes a cancelled ask a
+/// moment after showing it; a recording turns out empty) must not
+/// take a new ask with it. Returns whether that ask was closed.
+pub fn dismiss_if(id: u64) -> bool {
+    let (closed, warm) = change(|s| if s.snap.id == id { (true, s.reset()) } else { (false, None) });
+    drop(warm);
+    closed
+}
+
+/// The recording of the ask `id` ended without a question to send:
+/// it could not be transcribed. The ask ends in `error` with `reason`
+/// on the snapshot, so the panel says what happened instead of
+/// listening forever. Only while that ask is still `listening`;
+/// returns whether it was.
+pub fn fail_listening(id: u64, reason: &str) -> bool {
+    let (failed, warm) = change(|s| {
+        if !s.listening(id) {
+            return (false, None);
+        }
+        s.snap.phase = AskPhase::Error;
+        s.snap.error = reason.trim().to_string();
+        (true, s.warm.take())
+    });
+    drop(warm);
+    failed
 }
 
 /// The current ask.
@@ -1044,9 +1229,24 @@ pub fn is_busy() -> bool {
 }
 
 /// The complete answer, only once the ask is `done`. This is what an
-/// explicit "insert" or "copy" hands on; core never does so itself.
+/// explicit "insert" hands on; core never does so itself.
 pub fn finished_answer() -> Option<String> {
     read(|s| (s.snap.phase == AskPhase::Done).then(|| s.snap.answer.clone()))
+}
+
+/// [`finished_answer`] together with the id of the ask it is the
+/// answer of, so the caller can close exactly that ask before it
+/// hands the text on.
+pub fn finished() -> Option<(u64, String)> {
+    read(|s| (s.snap.phase == AskPhase::Done).then(|| (s.snap.id, s.snap.answer.clone())))
+}
+
+/// What an explicit "copy" copies: the whole answer once it is
+/// complete, what has arrived of it before that (also of an ask that
+/// was cancelled or failed midway). `None` when there is no text at
+/// all.
+pub fn text_to_copy() -> Option<String> {
+    read(|s| Some(s.snap.answer.clone()).filter(|text| !text.trim().is_empty()))
 }
 
 // --- test support --------------------------------------------------

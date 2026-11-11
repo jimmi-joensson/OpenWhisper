@@ -6,7 +6,11 @@
 //! - `run [TEXT]`: ask a question (argument or stdin). The answer
 //!   streams to stdout as it arrives; where the question was sent,
 //!   the time to the first text, the total time and the tokens go to
-//!   stderr. `--json` prints one record at the end instead.
+//!   stderr. `--json` prints one record at the end instead. The run
+//!   leaves the diagnostics row an ask in the app leaves (a row in
+//!   `refine_runs`, when the app's database exists), and with
+//!   `--history` the question and answer in the transcript history,
+//!   when that is switched on.
 //! - `status`: whether the backend can run, where questions are sent,
 //!   and the settings an ask would use.
 //! - `config`: print the `ask` settings block, or change it with
@@ -21,6 +25,7 @@
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -29,7 +34,8 @@ use clap::{Args, Subcommand};
 use openwhisper_core::ask::{self, AskEvent, AskInput, AskPlan, CancelFlag, eval};
 use openwhisper_core::refine;
 use openwhisper_core::settings::{self, AskSettings, RefineBackendKind, RefineEffort, RefineSettings};
-use openwhisper_core::{dictionary, transcript};
+use openwhisper_core::store::Store;
+use openwhisper_core::{dictionary, history, stats, transcript};
 
 #[derive(Args, Debug)]
 pub struct AskArgs {
@@ -100,6 +106,11 @@ pub struct RunArgs {
     /// latency.
     #[arg(long, value_name = "MS")]
     warm_ms: Option<u64>,
+    /// Also keep the question and the answer in the transcript
+    /// history, like an ask in the app, when history is switched on.
+    /// Off by default, so a script does not write into it.
+    #[arg(long)]
+    history: bool,
     #[command(flatten)]
     overrides: Overrides,
 }
@@ -227,6 +238,38 @@ fn use_dictionary() {
     }
 }
 
+/// Register the app's database with core, when the app has made
+/// one, so the run leaves its diagnostics row there (the place
+/// `openwhisper refine history` reads). Without one, nothing is
+/// recorded: the CLI does not create the app's database.
+fn use_store() -> bool {
+    let Ok(path) = super::database_path() else {
+        return false;
+    };
+    if !path.is_file() {
+        return false;
+    }
+    match Store::open_or_init(&path) {
+        Ok(store) => {
+            stats::set_store(Arc::new(store));
+            true
+        }
+        Err(e) => {
+            eprintln!("note: the run is not recorded ({}: {e})", path.display());
+            false
+        }
+    }
+}
+
+/// Point core at the transcript history of this config: its settings
+/// and the folder the app writes to. Returns whether history is
+/// switched on.
+fn use_history() -> Result<bool> {
+    let dir = super::config_dir()?;
+    history::set_default_dir(dir.join(history::DEFAULT_FOLDER_NAME));
+    Ok(settings::load_history_settings(&dir.join("settings.json")).enabled)
+}
+
 fn effort_label(effort: &str) -> String {
     if effort.is_empty() { String::new() } else { format!(", {effort} effort") }
 }
@@ -256,11 +299,16 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
 
     let plan = AskPlan::new(&ask, &refine);
     let destination = plan.destination();
+    let recorded = use_store();
+    let kept = args.history && use_history()?;
     if !json {
         // Before anything leaves the machine.
         eprintln!("question goes to: {destination}");
         if !plan.notice.is_empty() {
             eprintln!("note: {}", plan.notice);
+        }
+        if args.history && !kept {
+            eprintln!("note: transcript history is switched off, so this ask is not kept in it");
         }
     }
 
@@ -283,7 +331,15 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         backend.warm(&plan.setup);
         thread::sleep(Duration::from_millis(ms));
     }
-    let result = plan.send(backend.as_mut(), &AskInput::text(question.clone()), &mut sink, &CancelFlag::new());
+    // The same path as an ask in the app: the answer, then its
+    // diagnostics row and, when asked for, its history entry.
+    let result = plan.send_and_record(
+        backend.as_mut(),
+        &AskInput::text(question.clone()),
+        &mut sink,
+        &CancelFlag::new(),
+        kept,
+    );
     drop(backend);
     drop(out);
     if stream && last_char != '\n' {
@@ -308,6 +364,8 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "web_search": plan.setup.web_search,
             "timeout_ms": plan.timeout.as_millis() as u64,
             "destination": destination,
+            "recorded": recorded,
+            "kept_in_history": kept && result.is_ok(),
         });
         println!("{}", serde_json::to_string_pretty(&record)?);
     }

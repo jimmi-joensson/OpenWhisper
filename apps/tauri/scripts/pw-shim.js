@@ -130,28 +130,39 @@ async (page) => {
             w.__owAskSnapshot = next;
             window.__owEmit("ask_tick", structuredClone(next));
           };
+          // What `ask_status` answers: the state of the backend,
+          // which only the Ask pane asks for (in the app it starts
+          // the Claude CLI). `__owAskBackend` overrides it.
+          const backendStatus = {
+            backend: "claude-cli",
+            state: "ready",
+            ready: true,
+            message: "Claude Code is signed in with your Claude subscription (max).",
+            destination:
+              "Anthropic (Claude), through the Claude Code app signed in on this computer",
+            path: "/Users/test/.local/bin/claude",
+            version: "2.1.322 (Claude Code)",
+            auth_method: "claude.ai",
+            plan: "max",
+            has_api_key: false,
+            ...(w.__owAskBackend ?? {}),
+          };
+          if (cmd === "ask_status") return structuredClone(backendStatus);
+          // A cancel, close or insert that names an ask only acts on
+          // that ask (`cancel_if` and `dismiss_if` in core).
+          const meant = (args ?? {});
+          const other = meant.id != null && meant.id !== snap.id;
           if (cmd === "ask_get") {
             // `AskPlan::with_terms` in core: the OpenAI-compatible
             // backend (set with `__owAskBackend`) answers with
             // Refine's model and has no web search.
-            const openai = w.__owAskBackend?.backend === "openai-compatible";
+            const openai = backendStatus.backend === "openai-compatible";
             const webSearch = stored.web_search && !openai;
+            // No backend state in it: that is `ask_status`.
             return structuredClone({
               settings: stored,
-              backend: {
-                backend: "claude-cli",
-                state: "ready",
-                ready: true,
-                message: "Claude Code is signed in with your Claude subscription (max).",
-                destination:
-                  "Anthropic (Claude), through the Claude Code app signed in on this computer",
-                path: "/Users/test/.local/bin/claude",
-                version: "2.1.322 (Claude Code)",
-                auth_method: "claude.ai",
-                plan: "max",
-                has_api_key: false,
-                ...(w.__owAskBackend ?? {}),
-              },
+              backend_kind: backendStatus.backend,
+              destination: backendStatus.destination,
               model: openai ? "small-model" : (stored.model ?? "sonnet"),
               effort: openai ? "" : (stored.effort ?? "low"),
               web_search: webSearch,
@@ -200,7 +211,7 @@ async (page) => {
           }
           if (cmd === "ask_toggle") return null;
           if (cmd === "ask_cancel") {
-            if (!busy) return false;
+            if (!busy || other) return false;
             change(
               snap.phase === "listening"
                 ? idle(snap.version + 1)
@@ -209,11 +220,11 @@ async (page) => {
             return true;
           }
           if (cmd === "ask_dismiss") {
-            change(idle(snap.version + 1));
+            if (!other) change(idle(snap.version + 1));
             return null;
           }
           if (cmd === "ask_insert") {
-            if (snap.phase !== "done") return false;
+            if (snap.phase !== "done" || other) return false;
             w.__owAskInserted = [...(w.__owAskInserted ?? []), snap.answer];
             change(idle(snap.version + 1));
             return true;

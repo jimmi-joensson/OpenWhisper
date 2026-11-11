@@ -239,7 +239,7 @@ pub fn cases() -> Vec<EvalCase> {
         },
         EvalCase {
             name: "plain-text",
-            risk: "answers with Markdown the panel shows as raw symbols",
+            risk: "answers with Markdown that is raw symbols once inserted, or that the panel does not render",
             question: "give me three tips for a good presentation",
             check: |a| {
                 has_none(a, &["**", "|--", "| --"])?;

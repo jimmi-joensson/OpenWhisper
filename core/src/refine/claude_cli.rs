@@ -43,7 +43,10 @@
 //! system prompt is handed over in a temp file instead of an argument
 //! (see [`spawn_args`]), because a `.cmd` shim goes through `cmd.exe`,
 //! which cannot carry quotes and newlines safely and caps the command
-//! line at 8191 characters.
+//! line at 8191 characters; and a process that is stopped in the
+//! middle of a request is ended with everything under it, because
+//! behind a shim the CLI is not the process that was spawned
+//! ([`end_process`]).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -436,10 +439,58 @@ fn child_path(bin: &Path, inherited: Option<&OsStr>, windows: bool) -> Option<st
     std::env::join_paths(dirs).ok()
 }
 
+/// End the CLI process `child` and reap it. Shared with Ask.
+///
+/// `mid_turn` says the model may still be working on a turn (a
+/// cancel, a timeout, an error halfway). The CLI only exits by itself
+/// when its input closes while it is idle: with a turn in flight it
+/// finishes the turn first (seen live with Claude Code 2.1.322), so
+/// closing stdin is not enough then.
+///
+/// On Unix the child is the CLI itself (a `#!` script runs in the
+/// process that was spawned), so killing it ends the turn. On Windows
+/// an npm install is a `claude.cmd` shim: the child is `cmd.exe` and
+/// the CLI is its child, which killing `cmd.exe` leaves running. So
+/// there the whole tree is ended with `taskkill /T /F` first.
+/// `taskkill` rather than a Job Object because it needs nothing new:
+/// no FFI, no dependency, and nothing to set up at spawn that could
+/// change how the CLI starts.
+pub(crate) fn end_process(child: &mut Child, mid_turn: bool) {
+    #[cfg(windows)]
+    if mid_turn {
+        kill_tree(child.id());
+    }
+    #[cfg(not(windows))]
+    let _ = mid_turn;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Force-end the process `pid` and every process under it, without a
+/// console window. Waits for `taskkill` to finish (some tens of
+/// milliseconds), so the tree is gone when this returns.
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    // By full path: a `taskkill` found through PATH could be anything.
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let _ = Command::new(system.join("System32").join("taskkill.exe"))
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // CREATE_NO_WINDOW
+        .creation_flags(0x0800_0000)
+        .status();
+}
+
 /// One spawned CLI process, good for one request.
 struct Process {
     child: Child,
     stdin: Option<ChildStdin>,
+    /// The transcript was sent and no result has come back: the model
+    /// may be working on it.
+    mid_turn: bool,
     /// The single result the reader thread sends.
     rx: Receiver<Result<String, RefineError>>,
     /// Filled by the reader thread before it sends the result.
@@ -527,6 +578,7 @@ impl Process {
         Ok(Self {
             child,
             stdin,
+            mid_turn: false,
             rx,
             usage,
             system: system.to_string(),
@@ -574,8 +626,14 @@ impl Process {
                 Err(_) => Err(RefineError::Backend("Claude Code exited before it was asked".into())),
             };
         }
+        self.mid_turn = true;
         match self.rx.recv_timeout(timeout) {
-            Ok(result) => result,
+            Ok(result) => {
+                // The result line, or the process ended: either way
+                // nothing is being worked on any more.
+                self.mid_turn = false;
+                result
+            }
             Err(RecvTimeoutError::Timeout) => Err(RefineError::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
                 Err(RefineError::Backend("Claude Code stopped without an answer".into()))
@@ -586,12 +644,12 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // Close stdin first: a CLI behind a `claude.cmd` shim is a
-        // grandchild that `kill` does not reach, but it exits on its
-        // own once its input is closed.
+        // Close stdin first: an idle CLI exits on its own once its
+        // input is closed, also the one behind a `claude.cmd` shim
+        // that `kill` does not reach. One that is working on a turn
+        // does not, see [`end_process`].
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        end_process(&mut self.child, self.mid_turn);
         let _ = fs::remove_file(&self.prompt_file);
     }
 }
@@ -1059,7 +1117,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello ther
 /// Written on macOS and compile-checked for `x86_64-pc-windows-gnu`,
 /// but not yet run: the first `cargo test` on Windows is what verifies
 /// spawning through a `.cmd` shim, the stdin hand-over, the timeout
-/// and the kill.
+/// and the kill, including that the process behind the shim is gone
+/// after a timeout ([`end_process`]).
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
@@ -1121,6 +1180,55 @@ exit /b 0";
             .unwrap_err();
         assert_eq!(err, RefineError::Timeout);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A shim that takes the transcript and then starts a process of
+    /// its own that runs for half a minute: the place the real CLI
+    /// has behind `claude.cmd`. That process writes its id to
+    /// `pid.txt` next to the shim.
+    const SLOW_GRANDCHILD: &str = "set /p line=\r\n\
+powershell -NoProfile -Command \"$PID | Out-File -Encoding ascii '%~dp0pid.txt'; Start-Sleep -Seconds 30\"";
+
+    /// The id the grandchild wrote, once it is up.
+    fn grandchild_pid(dir: &Path) -> String {
+        let file = dir.join("pid.txt");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let pid = fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+            if !pid.is_empty() {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "the grandchild never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `tasklist` still knows the process `pid`.
+    fn alive(pid: &str) -> bool {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn a_timeout_ends_the_process_behind_the_cmd_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = {
+            let dir = dir.path().to_path_buf();
+            thread::spawn(move || grandchild_pid(&dir))
+        };
+        // Long enough for the grandchild to come up and say who it
+        // is; it would run for 30 seconds if nobody stopped it.
+        let err = ClaudeCli::new(fake_cli(dir.path(), SLOW_GRANDCHILD))
+            .refine(&prompt(), "hello there", Duration::from_secs(8))
+            .unwrap_err();
+        assert_eq!(err, RefineError::Timeout);
+        let pid = pid.join().unwrap();
+        // The process is dropped when `refine` returns, and the tree
+        // with it: `taskkill` has finished by then.
+        assert!(!alive(&pid), "the process behind the shim ({pid}) outlived the timeout");
     }
 
     #[test]

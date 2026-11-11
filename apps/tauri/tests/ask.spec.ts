@@ -66,6 +66,12 @@ async function choose(page: Page, option: string) {
   await expect(page.getByRole("option")).toHaveCount(0);
 }
 
+// How often the main window called an ask command.
+async function askCalls(page: Page, cmd: string): Promise<number> {
+  const calls = (await recorded<{ cmd: string }[]>(page, "__owAskCalls")) ?? [];
+  return calls.filter((c) => c.cmd === cmd).length;
+}
+
 const askSwitch = (page: Page) => page.getByRole("switch", { name: "Ask", exact: true });
 const webSearchSwitch = (page: Page) => page.getByRole("switch", { name: "Web search" });
 
@@ -101,6 +107,37 @@ test.describe("ask pane", () => {
     await expect(page.getByTestId("ask-backend-status")).toHaveCount(0);
     // And no way to send anything from here.
     await expect(page.getByRole("button", { name: /test/i })).toHaveCount(0);
+  });
+
+  test("only the Ask pane asks whether the backend can run", async ({ page }) => {
+    await page.goto("/");
+    // The app is up: the Ask settings were read (the Windows hotkey
+    // fallback wants the switch), the backend was left alone.
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
+    await expect.poll(() => askCalls(page, "ask_get")).toBeGreaterThan(0);
+    expect(await askCalls(page, "ask_status")).toBe(0);
+
+    // The Shortcuts pane reads the switch too, from the same place.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "settings"));
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveText("Off");
+    expect(await askCalls(page, "ask_status")).toBe(0);
+
+    // The Ask pane is where the state of the backend is shown.
+    await page.getByRole("tab", { name: "Ask", exact: true }).click();
+    await expect(page.getByTestId("ask-privacy")).toContainText("Anthropic (Claude)");
+    await expect.poll(() => askCalls(page, "ask_status")).toBe(1);
+
+    // A change of the block is read again; the backend is not asked
+    // again for it.
+    const reads = await askCalls(page, "ask_get");
+    await emitAskChanged(page, { enabled: true });
+    await expect(askSwitch(page)).toBeChecked();
+    await expect.poll(() => askCalls(page, "ask_get")).toBeGreaterThan(reads);
+    expect(await askCalls(page, "ask_status")).toBe(1);
+    // And the Shortcuts pane has followed, without a read of its own.
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    await expect(page.getByTestId("shortcut-off-ask")).toHaveCount(0);
   });
 
   test("the switch saves on and off", async ({ page }) => {

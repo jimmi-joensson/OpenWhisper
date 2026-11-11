@@ -116,10 +116,16 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   };
 
   // A cancelled ask says so briefly, then closes: the shell hides
-  // the window once the ask is dismissed.
+  // the window once the ask is dismissed. The close names the ask it
+  // is for. If a new ask has started by the time it lands (the timer
+  // fired and the next tick was still on its way), Rust leaves that
+  // one alone.
   useEffect(() => {
     if (phase !== "cancelled") return;
-    const timer = setTimeout(() => void invoke("ask_dismiss").catch(() => {}), CANCELLED_SHOWN_MS);
+    const timer = setTimeout(
+      () => void invoke("ask_dismiss", { id }).catch(() => {}),
+      CANCELLED_SHOWN_MS,
+    );
     return () => clearTimeout(timer);
   }, [phase, id]);
 
@@ -136,8 +142,10 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
       })
       .catch(() => {});
   };
+  // Every command names the ask this panel is showing, so it can
+  // only ever act on that one.
   const run = (command: "ask_cancel" | "ask_insert" | "ask_dismiss") => {
-    void invoke(command).catch(() => {});
+    void invoke(command, { id }).catch(() => {});
   };
 
   const busy = askIsBusy(phase);

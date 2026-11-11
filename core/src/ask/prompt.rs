@@ -19,9 +19,11 @@
 //! because a model that is asked to "send an email to Anna" and has
 //! no way to do it will otherwise happily report that it did.
 //!
-//! The answer is shown as plain text in a small panel, and one click
-//! inserts it at the cursor. So the prompt asks for short plain-text
-//! answers, and for the text itself when the person asks for a draft.
+//! The answer is shown in a small panel that renders only the
+//! lightest Markdown (paragraphs, lists, bold, code), and one click
+//! inserts it at the cursor exactly as it was written. So the prompt
+//! asks for short plain-text answers, and for the text itself when
+//! the person asks for a draft.
 
 use crate::refine::prompt::MAX_PROMPT_TERMS;
 
@@ -94,8 +96,9 @@ end. When the person asks for a length (\"in one word\", \"in one sentence\"), k
 answer.\n",
     );
     system.push_str(
-        "- Write plain text. The panel does not render Markdown, so no headings, no bold, \
-no tables. A simple list with a hyphen per line is fine, and so is a code block for code.\n",
+        "- Write plain text. The panel shows only the simplest formatting, and the person may \
+insert your answer as it is where they are typing, so no headings, no bold, no tables. A \
+simple list with a hyphen per line is fine, and so is a code block for code.\n",
     );
     system.push_str(
         "- When you do not know, or the answer depends on something you cannot know (the \
@@ -185,6 +188,11 @@ mod tests {
         assert!(system.contains("between <question> and </question>"));
         assert!(system.contains("Answer in the language the question is asked in"));
         assert!(system.contains("Write plain text"));
+        // The reason given is the true one: the panel does render
+        // light Markdown; what speaks against it is the insert.
+        assert!(!system.contains("does not render Markdown"));
+        assert!(system.contains("insert your answer as it is where they are typing"));
+        assert!(system.contains("no headings, no bold, no tables"));
         assert!(system.contains("keep it short"));
         // No terms, no date, no instructions: none of those sections.
         assert!(!system.contains("spelled correctly"));

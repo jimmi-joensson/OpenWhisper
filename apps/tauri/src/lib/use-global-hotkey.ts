@@ -32,6 +32,8 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { useAsk } from "./use-ask";
+
 export type HotkeyKind = "modifier-tap" | "chord";
 export interface HotkeyConfig {
   kind: HotkeyKind;
@@ -105,12 +107,9 @@ export function syncFallbackBindings(settings: HotkeySettings) {
 
 // Whether Ask is switched on. The ask slot is only installed while it
 // is (`hotkey::effective_settings` in Rust); with Ask off its chord is
-// left to the focused control here too.
+// left to the focused control here too. Written by the hook, from the
+// Ask settings every other reader shares (`useAsk`).
 let fallbackAskEnabled = false;
-
-export function syncFallbackAskEnabled(enabled: boolean) {
-  fallbackAskEnabled = enabled;
-}
 
 // ---- module-level capture state ----
 //
@@ -158,18 +157,6 @@ export function useGlobalHotkey({ cancelWouldAct }: UseGlobalHotkeyOpts) {
     void invoke<HotkeySettings>("settings_get_hotkeys").then((s) => {
       if (alive) fallbackBindings = s;
     });
-    // The Ask switch, and every later change of it.
-    void invoke<{ settings: { enabled: boolean } } | null>("ask_get")
-      .then((state) => {
-        if (alive && state) fallbackAskEnabled = state.settings.enabled;
-      })
-      .catch(() => {});
-    let unlistenAsk: UnlistenFn | undefined;
-    void listen<{ enabled: boolean }>("ask_changed", (evt) => {
-      fallbackAskEnabled = evt.payload.enabled;
-    }).then((fn) => {
-      unlistenAsk = fn;
-    });
 
     let unlisten: UnlistenFn | undefined;
     void listen<HotkeyCapturedPayload>("hotkey_captured", (evt) => {
@@ -186,9 +173,15 @@ export function useGlobalHotkey({ cancelWouldAct }: UseGlobalHotkeyOpts) {
     return () => {
       alive = false;
       unlisten?.();
-      unlistenAsk?.();
     };
   }, [isWindows]);
+
+  // The Ask switch, and every later change of it: from the shared
+  // Ask settings, which follow `ask_changed`.
+  const askEnabled = useAsk().state?.settings.enabled ?? false;
+  useEffect(() => {
+    fallbackAskEnabled = askEnabled;
+  }, [askEnabled]);
 
   useEffect(() => {
     if (!isWindows) return;

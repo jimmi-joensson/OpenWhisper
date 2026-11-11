@@ -1340,6 +1340,7 @@ pub fn run() {
             dictation_toggle,
             dictation_cancel,
             ask::ask_get,
+            ask::ask_status,
             ask::ask_set,
             ask::ask_start,
             ask::ask_toggle,

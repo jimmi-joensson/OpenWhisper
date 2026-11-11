@@ -31,6 +31,27 @@ async (page) => {
           window.__owHotkeyRetryCount = (window.__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Brings the main window forward on Settings, mirroring
+        // tests/fixtures/tauri-shim.ts: with a `pane` (and a `focus`
+        // row on it) the object form of `ow_navigate`, without one
+        // the plain string.
+        if (cmd === "open_settings_window") {
+          window.__owOpenSettingsCount = (window.__owOpenSettingsCount ?? 0) + 1;
+          window.__owOpenSettingsCalls = [...(window.__owOpenSettingsCalls ?? []), args ?? {}];
+          const named = (value) =>
+            typeof value === "string" && value.trim() ? value.trim() : null;
+          const toPane = named((args ?? {}).pane);
+          const toRow = named((args ?? {}).focus);
+          window.__owEmit(
+            "ow_navigate",
+            toPane === null
+              ? "settings"
+              : toRow === null
+                ? { view: "settings", pane: toPane }
+                : { view: "settings", pane: toPane, focus: toRow },
+          );
+          return null;
+        }
         // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
         // optional `cycle_mode` slot is absent until set; its command
         // target is "cycle-mode". The optional `ask` slot has a
@@ -85,6 +106,8 @@ async (page) => {
           return def;
         }
         // Ask (TASK-97), mirroring tests/fixtures/tauri-shim.ts.
+        // `ask_context_preview` answers with the facts of a made-up
+        // computer for the groups the stored block switches on.
         // `__owAskSettings` seeds the stored block; the one ask lives
         // on `__owAskSnapshot` (set it, then
         // `__owEmit('ask_tick', window.__owAskSnapshot)`), and cancel,
@@ -101,6 +124,16 @@ async (page) => {
               effort: null,
               timeout_ms: 60000,
               ...(w.__owAskSettings ?? {}),
+              // `ContextSettings::default()` in core: every group
+              // on, no place. A seed may name only some of it.
+              context: {
+                date_time: true,
+                computer: true,
+                front_app: true,
+                locale: true,
+                place: "",
+                ...(w.__owAskSettings?.context ?? {}),
+              },
             };
           }
           const stored = w.__owAskStored;
@@ -111,6 +144,7 @@ async (page) => {
             question: "",
             answer: "",
             notice: "",
+            suggestion: null,
             error: "",
             backend: "",
             model: "",
@@ -179,6 +213,7 @@ async (page) => {
                 timeout_max_ms: 300000,
                 timeout_default_ms: 60000,
                 instructions_max_chars: 4000,
+                place_max_chars: 120,
               },
               default_model: "sonnet",
             });
@@ -192,11 +227,62 @@ async (page) => {
               model: settings.model?.trim() || null,
               effort: settings.effort === "minimal" ? "low" : settings.effort,
               timeout_ms: Math.min(Math.max(settings.timeout_ms, 5000), 300000),
+              // `ContextSettings::cleaned` in core: the place on one
+              // line, at most 120 characters.
+              context: {
+                ...settings.context,
+                place: settings.context.place
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .join(" ")
+                  .slice(0, 120)
+                  .trimEnd(),
+              },
             };
             w.__owAskStored = saved;
             w.__owAskSaves = [...(w.__owAskSaves ?? []), saved];
             window.__owEmit("ask_changed", structuredClone(saved));
             return structuredClone(saved);
+          }
+          if (cmd === "ask_context_preview") {
+            // `ask::context_preview` in core: the facts the stored
+            // block switches on, as labelled lines. The computer is
+            // made up. No app in front: the window asking is
+            // OpenWhisper's own, which an ask never names.
+            if (w.__owAskContextFail) throw "ask context: not available";
+            const c = stored.context;
+            const lines = [];
+            if (c.place) lines.push(`Where the person is: ${c.place}`);
+            if (c.date_time) {
+              lines.push(
+                "Date: Wednesday 11 November 2026",
+                "Local time: 14:32",
+                "Time zone: Europe/Copenhagen (UTC+01:00)",
+              );
+            }
+            if (c.computer) {
+              lines.push(
+                "Operating system: macOS 26.0",
+                "Computer: Northwind Book Pro 14, NB14,2",
+                "Chip: Northwind N3 Pro",
+                "Memory: 32 GB",
+                "Power: on battery, 82% charged",
+                "Displays: 1 (1512 x 982)",
+                "Free disk space: about 210 GB",
+                "Internet: online",
+              );
+            }
+            if (c.locale) {
+              lines.push(
+                "Language: English (en)",
+                "Region: Denmark (DK)",
+                "Units: metric",
+                "Clock: 24-hour",
+                "Currency: DKK",
+                "Keyboard layout: Danish",
+              );
+            }
+            return lines.join("\n");
           }
           if (cmd === "ask_snapshot") return structuredClone(snap);
           if (cmd === "ask_start") {

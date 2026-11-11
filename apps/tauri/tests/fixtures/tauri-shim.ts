@@ -372,9 +372,32 @@ async function installTauriShim(
             ((window as unknown as { __owHotkeyRetryCount?: number }).__owHotkeyRetryCount ?? 0) + 1;
           return null;
         }
+        // Brings the main window forward on Settings. With a `pane`
+        // (and a `focus` row on it) Rust sends the object form of
+        // `ow_navigate`, without one the plain string
+        // (`settings_payload` in src-tauri/src/navigate.rs). The
+        // arguments of every call are kept in `__owOpenSettingsCalls`.
+        // Keep in step with scripts/pw-shim.js.
         if (cmd === "open_settings_window") {
-          (window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount =
-            ((window as unknown as { __owOpenSettingsCount?: number }).__owOpenSettingsCount ?? 0) + 1;
+          const w = window as unknown as {
+            __owOpenSettingsCount?: number;
+            __owOpenSettingsCalls?: Record<string, unknown>[];
+          };
+          w.__owOpenSettingsCount = (w.__owOpenSettingsCount ?? 0) + 1;
+          w.__owOpenSettingsCalls = [...(w.__owOpenSettingsCalls ?? []), args ?? {}];
+          const named = (value: unknown) =>
+            typeof value === "string" && value.trim() ? value.trim() : null;
+          const { pane, focus } = (args ?? {}) as { pane?: unknown; focus?: unknown };
+          const toPane = named(pane);
+          const toRow = named(focus);
+          window.__owEmit(
+            "ow_navigate",
+            toPane === null
+              ? "settings"
+              : toRow === null
+                ? { view: "settings", pane: toPane }
+                : { view: "settings", pane: toPane, focus: toRow },
+          );
           return null;
         }
         // Hotkey slots. `toggle` and `cancel` always have a binding;
@@ -450,6 +473,9 @@ async function installTauriShim(
         }
         // Ask (TASK-97). `__owAskSettings` seeds the stored block and
         // `__owAskBackend` overrides the backend status (`ask_status`).
+        // `ask_context_preview` answers with the facts of a made-up
+        // computer for the groups the stored block switches on;
+        // `__owAskContextFail` makes it fail.
         // The one ask lives on `__owAskSnapshot`: `emitAskTick` (below)
         // sets it, and cancel, dismiss, insert and copy answer from it
         // the way core does. Every call is recorded in `__owAskCalls`,
@@ -464,6 +490,13 @@ async function installTauriShim(
             model: string | null;
             effort: string | null;
             timeout_ms: number;
+            context: {
+              date_time: boolean;
+              computer: boolean;
+              front_app: boolean;
+              locale: boolean;
+              place: string;
+            };
           };
           type AskSnapshot = Record<string, unknown> & {
             id: number;
@@ -472,8 +505,11 @@ async function installTauriShim(
             version: number;
           };
           const w = window as unknown as {
-            __owAskSettings?: Partial<AskSettings>;
+            __owAskSettings?: Partial<Omit<AskSettings, "context">> & {
+              context?: Partial<AskSettings["context"]>;
+            };
             __owAskStored?: AskSettings;
+            __owAskContextFail?: boolean;
             __owAskSaves?: AskSettings[];
             __owAskBackend?: Record<string, unknown>;
             __owAskCalls?: { cmd: string; args: Record<string, unknown> }[];
@@ -491,6 +527,16 @@ async function installTauriShim(
               effort: null,
               timeout_ms: 60000,
               ...(w.__owAskSettings ?? {}),
+              // `ContextSettings::default()` in core: every group
+              // on, no place. A seed may name only some of it.
+              context: {
+                date_time: true,
+                computer: true,
+                front_app: true,
+                locale: true,
+                place: "",
+                ...(w.__owAskSettings?.context ?? {}),
+              },
             };
           }
           const stored = w.__owAskStored;
@@ -501,6 +547,7 @@ async function installTauriShim(
             question: "",
             answer: "",
             notice: "",
+            suggestion: null,
             error: "",
             backend: "",
             model: "",
@@ -570,6 +617,7 @@ async function installTauriShim(
                 timeout_max_ms: 300000,
                 timeout_default_ms: 60000,
                 instructions_max_chars: 4000,
+                place_max_chars: 120,
               },
               default_model: "sonnet",
             });
@@ -583,11 +631,62 @@ async function installTauriShim(
               model: settings.model?.trim() || null,
               effort: settings.effort === "minimal" ? "low" : settings.effort,
               timeout_ms: Math.min(Math.max(settings.timeout_ms, 5000), 300000),
+              // `ContextSettings::cleaned` in core: the place on one
+              // line, at most 120 characters.
+              context: {
+                ...settings.context,
+                place: settings.context.place
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .join(" ")
+                  .slice(0, 120)
+                  .trimEnd(),
+              },
             };
             w.__owAskStored = saved;
             w.__owAskSaves = [...(w.__owAskSaves ?? []), saved];
             window.__owEmit("ask_changed", structuredClone(saved));
             return structuredClone(saved);
+          }
+          if (cmd === "ask_context_preview") {
+            // `ask::context_preview` in core: the facts the stored
+            // block switches on, as labelled lines. The computer is
+            // made up. No app in front: the window asking is
+            // OpenWhisper's own, which an ask never names.
+            if (w.__owAskContextFail) throw "ask context: not available";
+            const c = stored.context;
+            const lines: string[] = [];
+            if (c.place) lines.push(`Where the person is: ${c.place}`);
+            if (c.date_time) {
+              lines.push(
+                "Date: Wednesday 11 November 2026",
+                "Local time: 14:32",
+                "Time zone: Europe/Copenhagen (UTC+01:00)",
+              );
+            }
+            if (c.computer) {
+              lines.push(
+                "Operating system: macOS 26.0",
+                "Computer: Northwind Book Pro 14, NB14,2",
+                "Chip: Northwind N3 Pro",
+                "Memory: 32 GB",
+                "Power: on battery, 82% charged",
+                "Displays: 1 (1512 x 982)",
+                "Free disk space: about 210 GB",
+                "Internet: online",
+              );
+            }
+            if (c.locale) {
+              lines.push(
+                "Language: English (en)",
+                "Region: Denmark (DK)",
+                "Units: metric",
+                "Clock: 24-hour",
+                "Currency: DKK",
+                "Keyboard layout: Danish",
+              );
+            }
+            return lines.join("\n");
           }
           if (cmd === "ask_snapshot") return structuredClone(snap);
           if (cmd === "ask_start") {
@@ -1193,6 +1292,7 @@ async function installTauriShim(
             timeout_ms: number;
             min_words: number;
             drift_guard: boolean;
+            no_long_dashes: boolean;
             claude_cli: { model: string; effort: string; path: string | null };
             openai: { base_url: string; model: string; effort: string | null };
           };
@@ -1215,6 +1315,7 @@ async function installTauriShim(
             timeout_ms: 5000,
             min_words: 4,
             drift_guard: true,
+            no_long_dashes: true,
             claude_cli: { model: "sonnet", effort: "low", path: null },
             openai: { base_url: "https://api.openai.com/v1", model: "", effort: null },
           };
@@ -1834,6 +1935,8 @@ export interface MockAskSnapshot {
   question: string;
   answer: string;
   notice: string;
+  // Mirrors `AskSuggestion` in core; null when there is none.
+  suggestion: "web-search" | null;
   error: string;
   backend: string;
   model: string;
@@ -1864,6 +1967,7 @@ export const ASK_SNAPSHOT_DEFAULTS: MockAskSnapshot = {
   question: "",
   answer: "",
   notice: "",
+  suggestion: null,
   error: "",
   backend: "claude-cli",
   model: "sonnet",
@@ -1889,6 +1993,13 @@ export interface MockAskSettings {
   model: string | null;
   effort: string | null;
   timeout_ms: number;
+  context: {
+    date_time: boolean;
+    computer: boolean;
+    front_app: boolean;
+    locale: boolean;
+    place: string;
+  };
 }
 
 // Push `ask_tick` as the Rust emitter does, and make the snapshot the
@@ -1940,6 +2051,7 @@ export async function emitAskChanged(
       model: null,
       effort: null,
       timeout_ms: 60000,
+      context: { date_time: true, computer: true, front_app: true, locale: true, place: "" },
       ...value,
     };
     (window as unknown as { __owAskStored?: unknown }).__owAskStored = next;

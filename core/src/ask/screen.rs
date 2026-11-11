@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Serialize;
 
 use super::prompt::ScreenPrompt;
-use super::{AskEvent, AskImage};
+use super::AskImage;
 use crate::settings::VisionSettings;
 
 /// What became of the screen in one ask. On [`super::AskSnapshot`]
@@ -282,191 +282,16 @@ impl AskCaptureToken {
 
 /// What the model replies, and nothing else, when it cannot answer
 /// without the screen ([`crate::settings::VisionTrigger::Smart`]).
+///
+/// It never reaches the panel: the text of a reply is held back until
+/// it is clear that the reply is not this word ([`super::hint`], which
+/// looks for it as a [`super::hint::Form::Reply`] marker, together
+/// with the web search marker when the ask knows that one too).
 pub const NEED_SCREEN: &str = "NEED_SCREEN";
-
-/// `text` without what a model may wrap a bare word in.
-fn undecorated(text: &str) -> &str {
-    text.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '*' | '_' | '<' | '[' | '('))
-}
-
-/// How a reply relates to the marker, as far as it has arrived.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Seen {
-    /// Could still become the marker.
-    Maybe,
-    /// Starts with the marker.
-    Marker,
-    /// Is something else.
-    Text,
-}
-
-fn seen(text: &str) -> Seen {
-    let probe = undecorated(text);
-    let n = NEED_SCREEN.len();
-    match probe.get(..n) {
-        // Shorter than the marker (or cut inside a character, which
-        // the marker does not have): a prefix of it, or not.
-        None => {
-            if probe.len() < n && probe.is_ascii() && NEED_SCREEN[..probe.len()].eq_ignore_ascii_case(probe) {
-                Seen::Maybe
-            } else {
-                Seen::Text
-            }
-        }
-        Some(head) if head.eq_ignore_ascii_case(NEED_SCREEN) => {
-            // "NEED_SCREENSHOTS are..." is a word, not the marker.
-            match probe[n..].chars().next() {
-                Some(c) if c.is_alphanumeric() || c == '_' => Seen::Text,
-                _ => Seen::Marker,
-            }
-        }
-        Some(_) => Seen::Text,
-    }
-}
-
-/// The reply is the marker: the model wants the screen.
-pub(super) fn is_marker(reply: &str) -> bool {
-    seen(reply) == Seen::Marker
-}
-
-/// Stands between a backend and the sink while the model may answer
-/// with the marker, so that the marker never reaches the panel. Text
-/// is held back until it is clear what the reply is: the marker can
-/// arrive in pieces. Once it is clear that the reply is an answer,
-/// everything held is passed on and the gate is open.
-pub(super) struct MarkerGate {
-    held: String,
-    state: Seen,
-}
-
-impl MarkerGate {
-    pub(super) fn new() -> Self {
-        Self { held: String::new(), state: Seen::Maybe }
-    }
-
-    /// The event to pass on for `event`, if any.
-    pub(super) fn pass(&mut self, event: AskEvent) -> Option<AskEvent> {
-        let AskEvent::Text(piece) = event else {
-            return Some(event);
-        };
-        match self.state {
-            Seen::Text => Some(AskEvent::Text(piece)),
-            // The reply began with the marker: nothing of it is shown.
-            Seen::Marker => None,
-            Seen::Maybe => {
-                self.held.push_str(&piece);
-                self.state = seen(&self.held);
-                match self.state {
-                    Seen::Text => Some(AskEvent::Text(std::mem::take(&mut self.held))),
-                    _ => None,
-                }
-            }
-        }
-    }
-
-    /// The reply began with the marker.
-    pub(super) fn saw_marker(&self) -> bool {
-        self.state == Seen::Marker
-    }
-
-    /// The turn is over and the reply was not the marker: what is
-    /// still held (a short answer that happens to begin like it).
-    pub(super) fn flush(&mut self) -> Option<AskEvent> {
-        let held = std::mem::take(&mut self.held);
-        self.state = Seen::Text;
-        (!held.is_empty()).then_some(AskEvent::Text(held))
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn text(s: &str) -> AskEvent {
-        AskEvent::Text(s.to_string())
-    }
-
-    /// Feed `pieces` through a gate; what came out, and whether the
-    /// reply was the marker.
-    fn through(pieces: &[&str]) -> (String, bool) {
-        let mut gate = MarkerGate::new();
-        let mut out = String::new();
-        for piece in pieces {
-            if let Some(AskEvent::Text(t)) = gate.pass(text(piece)) {
-                out.push_str(&t);
-            }
-        }
-        let whole: String = pieces.concat();
-        let marker = gate.saw_marker() || is_marker(&whole);
-        if !marker {
-            if let Some(AskEvent::Text(t)) = gate.flush() {
-                out.push_str(&t);
-            }
-        }
-        (out, marker)
-    }
-
-    #[test]
-    fn the_marker_never_passes_however_it_is_cut() {
-        for cut in 0..=NEED_SCREEN.len() {
-            let (a, b) = NEED_SCREEN.split_at(cut);
-            assert_eq!(through(&[a, b]), (String::new(), true), "cut at {cut}");
-        }
-        let letters: Vec<String> = NEED_SCREEN.chars().map(String::from).collect();
-        let letters: Vec<&str> = letters.iter().map(String::as_str).collect();
-        assert_eq!(through(&letters), (String::new(), true));
-        for wrapped in [
-            "NEED_SCREEN\n",
-            "  NEED_SCREEN  ",
-            "`NEED_SCREEN`",
-            "NEED_SCREEN.",
-            "need_screen",
-            "\"NEED_SCREEN\"",
-            "**NEED_SCREEN**",
-            "NEED_SCREEN\n\nI cannot see your screen.",
-        ] {
-            assert_eq!(through(&[wrapped]), (String::new(), true), "{wrapped}");
-            assert!(is_marker(wrapped));
-        }
-        // Whatever follows the marker in later pieces stays back too.
-        assert_eq!(through(&["NEED_", "SCREEN", " because", " I cannot see it"]), (String::new(), true));
-    }
-
-    #[test]
-    fn an_answer_passes_whole_as_soon_as_it_is_clear_it_is_one() {
-        assert_eq!(through(&["Four", "."]), ("Four.".to_string(), false));
-        // Starts like the marker, then is not: nothing is lost.
-        assert_eq!(through(&["N", "E", "ED", " more sleep."]), ("NEED more sleep.".to_string(), false));
-        assert_eq!(through(&["Need", "_SCREENSHOTS are", " handy."]), ("Need_SCREENSHOTS are handy.".to_string(), false));
-        // A short answer that is a prefix of the marker comes out at
-        // the end of the turn.
-        assert_eq!(through(&["NE"]), ("NE".to_string(), false));
-        assert_eq!(through(&["Né", "e"]), ("Née".to_string(), false));
-        assert_eq!(through(&["", ""]), (String::new(), false));
-        assert!(!is_marker(""));
-        assert!(!is_marker("I NEED_SCREEN"));
-        assert!(!is_marker("NEED_SCREENS"));
-    }
-
-    #[test]
-    fn the_first_piece_decides_when_it_is_long_enough() {
-        let mut gate = MarkerGate::new();
-        assert_eq!(gate.pass(text("The capital ")), Some(text("The capital ")));
-        assert_eq!(gate.pass(text("NEED_SCREEN")), Some(text("NEED_SCREEN")));
-        assert!(!gate.saw_marker());
-        assert_eq!(gate.flush(), None);
-    }
-
-    #[test]
-    fn other_events_always_pass() {
-        let mut gate = MarkerGate::new();
-        let searching = AskEvent::Searching { query: "ferry timetable".into() };
-        assert_eq!(gate.pass(searching.clone()), Some(searching));
-        assert_eq!(gate.pass(text("NEED_SCR")), None);
-        assert_eq!(gate.pass(AskEvent::SearchDone), Some(AskEvent::SearchDone));
-        assert_eq!(gate.pass(text("EEN")), None);
-        assert!(gate.saw_marker());
-    }
 
     #[test]
     fn a_token_is_live_only_while_its_ask_runs() {

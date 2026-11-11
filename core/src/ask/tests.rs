@@ -897,3 +897,501 @@ fn an_ask_outside_the_app_leaves_the_same_row_and_history_only_when_asked_to() {
     assert_eq!(snapshot(), before);
     crate::settings::set_history_settings_cache(HistorySettings::default());
 }
+
+// --- the web search suggestion ----------------------------------------
+
+fn openai() -> RefineSettings {
+    RefineSettings {
+        backend: RefineBackendKind::OpenaiCompatible,
+        openai: OpenAiSettings { model: "m".into(), ..OpenAiSettings::default() },
+        ..RefineSettings::default()
+    }
+}
+
+/// A factory whose backends stream `pieces` and return them joined.
+fn streaming(
+    calls: &Arc<Mutex<Calls>>,
+    pieces: &'static [&'static str],
+) -> impl Fn(&AskPlan) -> Box<dyn AskBackend> + Send + Sync + use<> {
+    let calls = calls.clone();
+    move |_| {
+        Box::new(Stub::new(calls.clone(), move |_, sink, _| {
+            for piece in pieces {
+                sink(AskEvent::Text((*piece).to_string()));
+            }
+            Ok(pieces.concat())
+        }))
+    }
+}
+
+/// Every piece of text in `events`, joined.
+fn text_of(events: &[AskEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AskEvent::Text(piece) => Some(piece.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_marker_rule_is_in_the_plan_only_while_web_search_could_be_switched_on() {
+    // Web search off, on the Claude backend: the one case.
+    let plan = AskPlan::with_terms(&on(), &RefineSettings::default(), &[]);
+    assert!(plan.web_hint);
+    assert!(plan.setup.system.contains("a first line that is exactly NEEDS_WEB_SEARCH"));
+    assert!(!plan.setup.web_search);
+
+    // Web search on: the model searches, there is nothing to suggest.
+    let searching = AskSettings { web_search: true, ..on() };
+    let plan = AskPlan::with_terms(&searching, &RefineSettings::default(), &[]);
+    assert!(!plan.web_hint);
+    assert!(!plan.setup.system.contains(prompt::NEEDS_WEB_SEARCH));
+
+    // A backend with no web search to switch on, whatever the switch
+    // says.
+    for ask in [on(), searching] {
+        let plan = AskPlan::with_terms(&ask, &openai(), &[]);
+        assert!(!plan.web_hint);
+        assert!(!plan.setup.system.contains(prompt::NEEDS_WEB_SEARCH));
+        assert!(plan.setup.system.contains("You cannot look anything up"));
+    }
+}
+
+#[test]
+fn a_marked_answer_comes_back_with_the_suggestion_and_without_the_marker() {
+    let calls = calls();
+    let _scope = scope(on(), streaming(&calls, &["NEEDS_WEB", "_SEARCH \r\n", "I cannot check ", "the weather from here."]));
+    let mut events = Vec::new();
+    let reply = answer(
+        &on(),
+        &RefineSettings::default(),
+        &AskInput::text("how will the weather be today"),
+        &mut |e| events.push(e),
+        &CancelFlag::new(),
+    )
+    .unwrap();
+    assert_eq!(reply.suggestion, Some(AskSuggestion::WebSearch));
+    assert_eq!(reply.text, "I cannot check the weather from here.");
+    // The sink heard about the suggestion first, then the answer;
+    // the marker was in nothing it saw.
+    assert_eq!(
+        events,
+        vec![
+            AskEvent::Suggestion(AskSuggestion::WebSearch),
+            AskEvent::Text("I cannot check ".into()),
+            AskEvent::Text("the weather from here.".into()),
+        ]
+    );
+    assert!(!format!("{events:?}").contains("NEEDS"));
+}
+
+#[test]
+fn an_answer_without_the_marker_has_no_suggestion() {
+    let calls = calls();
+    let _scope = scope(on(), streaming(&calls, &["Paris. ", "NEEDS_WEB_SEARCH", " is not a word."]));
+    let mut events = Vec::new();
+    let reply = answer(
+        &on(),
+        &RefineSettings::default(),
+        &AskInput::text("capital of france"),
+        &mut |e| events.push(e),
+        &CancelFlag::new(),
+    )
+    .unwrap();
+    assert_eq!(reply.suggestion, None);
+    // Not on the first line: ordinary text, left alone.
+    assert_eq!(reply.text, "Paris. NEEDS_WEB_SEARCH is not a word.");
+    assert_eq!(
+        events,
+        vec![
+            AskEvent::Text("Paris. ".into()),
+            AskEvent::Text("NEEDS_WEB_SEARCH".into()),
+            AskEvent::Text(" is not a word.".into()),
+        ]
+    );
+}
+
+#[test]
+fn an_answer_that_is_only_the_marker_gets_a_plain_sentence() {
+    let calls = calls();
+    let _scope = scope(on(), streaming(&calls, &["NEEDS_WEB_SEARCH", "\n"]));
+    let mut events = Vec::new();
+    let reply = answer(
+        &on(),
+        &RefineSettings::default(),
+        &AskInput::text("who won tonight"),
+        &mut |e| events.push(e),
+        &CancelFlag::new(),
+    )
+    .unwrap();
+    assert_eq!(reply.suggestion, Some(AskSuggestion::WebSearch));
+    assert_eq!(reply.text, NEEDS_THE_WEB);
+    assert_eq!(events, vec![AskEvent::Suggestion(AskSuggestion::WebSearch), AskEvent::Text(NEEDS_THE_WEB.into())]);
+}
+
+#[test]
+fn a_backend_that_does_not_stream_is_read_off_its_reply() {
+    let calls = calls();
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| Box::new(Stub::new(calls.clone(), |_, _, _| Ok("NEEDS_WEB_SEARCH\n\nAbout 7.45, last I knew.".into())))
+    });
+    let reply =
+        answer(&on(), &RefineSettings::default(), &AskInput::text("euro rate"), &mut |_| {}, &CancelFlag::new())
+            .unwrap();
+    assert_eq!(reply.suggestion, Some(AskSuggestion::WebSearch));
+    assert_eq!(reply.text, "About 7.45, last I knew.");
+}
+
+#[test]
+fn where_the_rule_is_not_in_the_prompt_the_marker_is_ordinary_text() {
+    let calls = calls();
+    let _scope = scope(on(), streaming(&calls, &["NEEDS_WEB_SEARCH\n", "It is sunny."]));
+    for (ask, refine) in [(AskSettings { web_search: true, ..on() }, RefineSettings::default()), (on(), openai())] {
+        let mut events = Vec::new();
+        let reply =
+            answer(&ask, &refine, &AskInput::text("weather"), &mut |e| events.push(e), &CancelFlag::new()).unwrap();
+        assert_eq!(reply.suggestion, None);
+        assert_eq!(reply.text, "NEEDS_WEB_SEARCH\nIt is sunny.");
+        assert_eq!(text_of(&events), "NEEDS_WEB_SEARCH\nIt is sunny.");
+    }
+}
+
+#[test]
+fn the_suggestion_is_on_the_snapshot_while_the_answer_streams() {
+    let _dictation = crate::dictation::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    let seen: Arc<Mutex<Vec<AskSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
+    let _scope = scope(on(), {
+        let (calls, seen) = (calls.clone(), seen.clone());
+        move |_| {
+            let seen = seen.clone();
+            Box::new(Stub::new(calls.clone(), move |input, sink, _| {
+                if input.text.contains("france") {
+                    sink(AskEvent::Text("Paris.".into()));
+                    return Ok("Paris.".into());
+                }
+                for piece in ["NEEDS_WEB", "_SEARCH\n", "I cannot check ", "the weather from here."] {
+                    sink(AskEvent::Text(piece.into()));
+                    seen.lock().unwrap().push(snapshot());
+                }
+                Ok("NEEDS_WEB_SEARCH\nI cannot check the weather from here.".into())
+            }))
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    history_in(Some(dir.path()));
+
+    let done = submit("how will the weather be today").unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    assert_eq!(done.suggestion, Some(AskSuggestion::WebSearch));
+    assert_eq!(done.answer, "I cannot check the weather from here.");
+    assert_eq!(finished_answer().as_deref(), Some("I cannot check the weather from here."));
+    assert_eq!(text_to_copy().as_deref(), Some("I cannot check the weather from here."));
+
+    // What the panel saw on the way: nothing while the first line
+    // could still be the marker, the suggestion as soon as it was,
+    // and never the marker.
+    let seen = seen.lock().unwrap().clone();
+    let on_the_way: Vec<(AskPhase, Option<AskSuggestion>, &str)> =
+        seen.iter().map(|s| (s.phase, s.suggestion, s.answer.as_str())).collect();
+    let web = Some(AskSuggestion::WebSearch);
+    assert_eq!(
+        on_the_way,
+        [
+            (AskPhase::Thinking, None, ""),
+            (AskPhase::Thinking, web, ""),
+            (AskPhase::Answering, web, "I cannot check "),
+            (AskPhase::Answering, web, "I cannot check the weather from here."),
+        ]
+    );
+    assert!(seen[1].version > seen[0].version, "the suggestion is a change the panel hears about");
+
+    // The history keeps the question and the answer, nothing of the
+    // marker or the suggestion.
+    let page = crate::history::list(dir.path(), "", 10, 0);
+    assert_eq!(page.stored, 1);
+    assert_eq!(page.entries[0].answer.as_deref(), Some("I cannot check the weather from here."));
+    let mut files = Vec::new();
+    let mut folders = vec![dir.path().to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(folder).unwrap().flatten() {
+            if entry.path().is_dir() {
+                folders.push(entry.path());
+            } else {
+                files.push(std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    for file in &files {
+        assert!(!file.contains("NEEDS_WEB") && !file.contains("suggestion") && !file.contains("web-search"), "{file}");
+    }
+
+    // The next ask starts without it.
+    let next = submit("what is the capital of france").unwrap();
+    assert_eq!((next.phase, next.suggestion, next.answer.as_str()), (AskPhase::Done, None, "Paris."));
+    history_in(None);
+    crate::settings::set_history_settings_cache(HistorySettings::default());
+}
+
+#[test]
+fn an_ask_that_fails_after_the_marker_keeps_what_arrived_without_it() {
+    let calls = calls();
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), |_, sink, _| {
+                sink(AskEvent::Text("NEEDS_WEB_SEARCH\nI cannot ".into()));
+                Err(AskError::Backend("boom".into()))
+            }))
+        }
+    });
+    let failed = submit("how will the weather be today").unwrap();
+    assert_eq!((failed.phase, failed.error.as_str()), (AskPhase::Error, "boom"));
+    assert_eq!(failed.answer, "I cannot ");
+    assert_eq!(text_to_copy().as_deref(), Some("I cannot "));
+}
+
+#[test]
+fn the_suggestion_is_a_word_or_null_on_the_wire() {
+    let snap = AskSnapshot { suggestion: Some(AskSuggestion::WebSearch), ..AskSnapshot::default() };
+    assert_eq!(serde_json::to_value(&snap).unwrap()["suggestion"], "web-search");
+    assert_eq!(serde_json::to_value(AskSnapshot::default()).unwrap()["suggestion"], serde_json::Value::Null);
+    let reply = AskReply { suggestion: Some(AskSuggestion::WebSearch), ..AskReply::default() };
+    assert_eq!(serde_json::to_value(&reply).unwrap()["suggestion"], "web-search");
+    assert_eq!(serde_json::to_value(AskReply::default()).unwrap()["suggestion"], serde_json::Value::Null);
+    assert_eq!(AskSuggestion::WebSearch.as_str(), "web-search");
+}
+
+// --- the device context -------------------------------------------------
+
+fn context_off() -> crate::settings::ContextSettings {
+    crate::settings::ContextSettings {
+        date_time: false,
+        computer: false,
+        front_app: false,
+        locale: false,
+        place: String::new(),
+    }
+}
+
+const FACTS: &str = "Where the person is: Aarhus, Denmark\nDate: Wednesday 11 November 2026\nLocal time: 14:32";
+
+#[test]
+fn a_plan_with_a_context_carries_it_in_the_prompt_and_says_the_date_once() {
+    let plan = AskPlan::with_context(&on(), &RefineSettings::default(), &[], FACTS);
+    assert_eq!(plan.context, FACTS);
+    assert!(plan.setup.system.contains("Facts about the person's computer"));
+    assert!(plan.setup.system.contains(FACTS));
+    assert!(!plan.setup.system.contains("Today is"));
+
+    // Without one, the prompt has no such section, and no date
+    // either: the date is one of the facts.
+    let bare = AskPlan::with_context(&on(), &RefineSettings::default(), &[], " \n");
+    assert_eq!(bare.context, "");
+    assert!(!bare.setup.system.contains("Facts about the person's computer"));
+    assert!(!bare.setup.system.contains("Today is"));
+    // The plan for tests and the bare eval says the date the old way.
+    let dated = AskPlan::with_terms(&on(), &RefineSettings::default(), &[]);
+    assert_eq!(dated.context, "");
+    assert!(dated.setup.system.contains("Today is "));
+    assert!(!dated.setup.system.contains("Facts about the person's computer"));
+}
+
+#[test]
+fn the_plan_of_an_ask_reads_the_facts_the_settings_ask_for() {
+    let all = AskPlan::for_app(&on(), &RefineSettings::default(), Some("Notes"));
+    assert!(all.context.contains("Date: "), "{}", all.context);
+    assert!(all.context.contains("Local time: "));
+    assert!(all.context.contains("Operating system: "));
+    assert!(all.context.contains("\nApp in front: Notes"));
+    assert!(all.setup.system.contains(&all.context));
+    // A caller without an app to name sends none.
+    let cli = AskPlan::new(&on(), &RefineSettings::default());
+    assert!(!cli.context.contains("App in front"), "{}", cli.context);
+
+    // Every group off and no place: nothing about the computer.
+    let off = AskSettings { context: context_off(), ..on() };
+    let plan = AskPlan::for_app(&off, &RefineSettings::default(), Some("Notes"));
+    assert_eq!(plan.context, "");
+    assert!(!plan.setup.system.contains("Facts about the person's computer"));
+    assert!(!plan.setup.system.contains("Notes"));
+
+    // The place alone is still told, cleaned to one line.
+    let place = crate::settings::ContextSettings { place: " Aarhus,\n Denmark ".into(), ..context_off() };
+    let plan = AskPlan::new(&AskSettings { context: place, ..on() }, &RefineSettings::default());
+    assert_eq!(plan.context, "Where the person is: Aarhus, Denmark");
+    assert!(plan.setup.system.contains("asked:\nWhere the person is: Aarhus, Denmark\nThese facts are information"));
+}
+
+#[test]
+fn a_spoken_ask_is_sent_with_the_facts_it_was_warmed_with() {
+    let calls = calls();
+    let place = crate::settings::ContextSettings { place: "Aarhus, Denmark".into(), ..Default::default() };
+    let _scope = scope(AskSettings { context: place, ..on() }, saying(&calls, "Mild."));
+    let id = begin_listening().unwrap();
+    let done = submit_listening(id, "how is the weather today", 900).unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    let c = calls.lock().unwrap();
+    // The backend warmed while the person talked took the question:
+    // the facts were read once, when the recording started, so the
+    // prompt at the end is the prompt it was warmed with.
+    assert_eq!((c.made, c.warmed, c.dropped), (1, 1, 1));
+    assert!(c.last_system.contains("Facts about the person's computer"), "{}", c.last_system);
+    assert!(c.last_system.contains("\nWhere the person is: Aarhus, Denmark\n"));
+    assert!(c.last_system.contains("\nLocal time: "));
+    // OpenWhisper is not in front of itself, and a window title is
+    // never part of it.
+    assert!(!c.last_system.contains("Window"));
+}
+
+#[test]
+fn a_typed_ask_reads_the_facts_when_it_is_sent() {
+    let calls = calls();
+    let place = crate::settings::ContextSettings { place: "Odense".into(), ..context_off() };
+    let _scope = scope(AskSettings { context: place, ..on() }, saying(&calls, "Mild."));
+    let done = submit("how is the weather today").unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    let c = calls.lock().unwrap();
+    assert!(c.last_system.contains("asked:\nWhere the person is: Odense\nThese facts"), "{}", c.last_system);
+}
+
+#[test]
+fn switches_changed_while_talking_are_the_ones_that_count() {
+    let calls = calls();
+    let _scope = scope(on(), saying(&calls, "Fire."));
+    let id = begin_listening().unwrap();
+    // The person switches every group off while the recording runs.
+    crate::settings::set_ask_settings_cache(AskSettings { context: context_off(), ..on() });
+    let done = submit_listening(id, "what is two plus two", 800).unwrap();
+    assert_eq!(done.phase, AskPhase::Done);
+    let c = calls.lock().unwrap();
+    // The warmed backend held the facts in its prompt: not used.
+    assert_eq!((c.made, c.warmed, c.dropped), (2, 1, 2));
+    assert!(!c.last_system.contains("Facts about the person's computer"), "{}", c.last_system);
+}
+
+#[test]
+fn the_preview_is_the_text_an_ask_would_send() {
+    let place = crate::settings::ContextSettings { place: " Aarhus,  Denmark ".into(), ..context_off() };
+    assert_eq!(context_preview(&AskSettings { context: place, ..on() }), "Where the person is: Aarhus, Denmark");
+    assert_eq!(context_preview(&AskSettings { context: context_off(), ..on() }), "");
+    // Ask being off changes nothing about what would be sent.
+    let all = context_preview(&AskSettings::default());
+    assert!(all.starts_with("Date: "), "{all}");
+    assert!(all.contains("\nOperating system: "));
+}
+
+#[test]
+fn the_snapshot_does_not_carry_the_facts() {
+    let calls = calls();
+    let place = crate::settings::ContextSettings { place: "Aarhus, Denmark".into(), ..Default::default() };
+    let _scope = scope(AskSettings { context: place, ..on() }, saying(&calls, "Mild."));
+    let done = submit("how is the weather today").unwrap();
+    let json = serde_json::to_string(&done).unwrap();
+    assert!(!json.contains("Aarhus") && !json.contains("context"), "{json}");
+}
+
+// --- no long dashes ---------------------------------------------------------
+
+#[test]
+fn an_answer_has_no_long_dashes_as_it_streams_and_when_it_is_done() {
+    let calls = calls();
+    let pieces: &[&str] = &["The report \u{2014}", " late as it is \u{2014} is 10", "\u{2013}", "12 pages", "\u{2014}"];
+    let _scope = scope(on(), streaming(&calls, pieces));
+    let plan = AskPlan::with_terms(&on(), &RefineSettings::default(), &[]);
+    assert!(plan.no_long_dashes);
+    assert!(plan.setup.system.contains("- Never write an em dash or an en dash."));
+    let mut events = Vec::new();
+    let reply = plan
+        .send(plan.backend().as_mut(), &AskInput::text("how long is it"), &mut |e| events.push(e), &CancelFlag::new())
+        .unwrap();
+    assert_eq!(reply.text, "The report - late as it is - is 10-12 pages -");
+    // What the panel was shown, piece by piece, is the same text.
+    assert_eq!(text_of(&events), reply.text);
+    assert!(events.iter().all(|e| !matches!(e, AskEvent::Text(t) if crate::dashes::has_long_dash(t) || t.is_empty())));
+}
+
+#[test]
+fn the_stored_answer_and_the_stream_agree_in_the_app() {
+    let calls = calls();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let _scope = scope(on(), {
+        let (calls, seen) = (calls.clone(), seen.clone());
+        move |_| {
+            let seen = seen.clone();
+            Box::new(Stub::new(calls.clone(), move |_, sink, _| {
+                for piece in ["Paris \u{2014}", " the capital \u{2014} is", " on the Seine."] {
+                    sink(AskEvent::Text(piece.to_string()));
+                    seen.lock().unwrap().push(snapshot().answer);
+                }
+                Ok("Paris \u{2014} the capital \u{2014} is on the Seine.".into())
+            }))
+        }
+    });
+    let done = submit("where is paris").unwrap();
+    assert_eq!(done.answer, "Paris - the capital - is on the Seine.");
+    assert_eq!(finished_answer().as_deref(), Some("Paris - the capital - is on the Seine."));
+    // Every stage the panel showed is the start of the final answer.
+    let seen = seen.lock().unwrap();
+    assert_eq!(*seen, ["Paris ", "Paris - the capital - is", "Paris - the capital - is on the Seine."]);
+    for shown in seen.iter() {
+        assert!(done.answer.starts_with(shown.as_str()), "{shown}");
+    }
+}
+
+#[test]
+fn with_the_switch_off_an_answer_keeps_its_dashes_and_the_prompt_has_no_rule() {
+    let calls = calls();
+    let pieces: &[&str] = &["Paris \u{2014} the capital."];
+    let _scope = scope(on(), streaming(&calls, pieces));
+    let refine = RefineSettings { no_long_dashes: false, ..RefineSettings::default() };
+    let plan = AskPlan::with_terms(&on(), &refine, &[]);
+    assert!(!plan.no_long_dashes);
+    assert!(!plan.setup.system.contains("em dash"));
+    let mut events = Vec::new();
+    let reply = plan
+        .send(plan.backend().as_mut(), &AskInput::text("where"), &mut |e| events.push(e), &CancelFlag::new())
+        .unwrap();
+    assert_eq!(reply.text, "Paris \u{2014} the capital.");
+    assert_eq!(text_of(&events), reply.text);
+}
+
+#[test]
+fn the_marker_and_the_dash_net_work_together() {
+    let calls = calls();
+    let pieces: &[&str] = &["NEEDS_WEB", "_SEARCH\nI cannot check \u{2014}", " web search is off."];
+    let _scope = scope(on(), streaming(&calls, pieces));
+    let plan = AskPlan::with_terms(&on(), &RefineSettings::default(), &[]);
+    let mut events = Vec::new();
+    let reply = plan
+        .send(plan.backend().as_mut(), &AskInput::text("weather"), &mut |e| events.push(e), &CancelFlag::new())
+        .unwrap();
+    assert_eq!(reply.suggestion, Some(AskSuggestion::WebSearch));
+    assert_eq!(reply.text, "I cannot check - web search is off.");
+    assert_eq!(text_of(&events), reply.text);
+    assert!(events.contains(&AskEvent::Suggestion(AskSuggestion::WebSearch)));
+}
+
+#[test]
+fn an_ask_that_fails_midway_still_shows_a_dash_it_ended_on_as_a_hyphen() {
+    let calls = calls();
+    let _scope = scope(on(), {
+        let calls = calls.clone();
+        move |_| {
+            Box::new(Stub::new(calls.clone(), |_, sink, _| {
+                sink(AskEvent::Text("So far \u{2014}".into()));
+                Err(AskError::Backend("the connection dropped".into()))
+            }))
+        }
+    });
+    let plan = AskPlan::with_terms(&on(), &RefineSettings::default(), &[]);
+    let mut events = Vec::new();
+    let result =
+        plan.send(plan.backend().as_mut(), &AskInput::text("go on"), &mut |e| events.push(e), &CancelFlag::new());
+    assert!(result.is_err());
+    assert_eq!(text_of(&events), "So far -");
+}

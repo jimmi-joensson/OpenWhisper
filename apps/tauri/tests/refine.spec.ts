@@ -329,6 +329,58 @@ test.describe("refine pane", () => {
     await expect(note).toContainText("never answered or carried out");
   });
 
+  test("never use long dashes is on by default, says what it does and saves off and on", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openRefine(page);
+    const dashes = page.getByRole("switch", { name: "Never use long dashes" });
+    await expect(dashes).toBeChecked();
+    await expect(
+      page.getByText(
+        "Refine and Ask write a hyphen, a comma or a new sentence instead of an em dash or en dash.",
+      ),
+    ).toBeVisible();
+    // The sentence itself is written without one (U+2014, U+2013).
+    const pane = await page.getByRole("tabpanel").innerText();
+    expect(pane).not.toMatch(/[\u2013\u2014]/);
+
+    const lastSave = async () =>
+      (await recorded<{ no_long_dashes: boolean; enabled: boolean }[]>(page, "__owRefineSaves"))?.at(-1);
+    await dashes.click();
+    await expect(dashes).not.toBeChecked();
+    await expect.poll(async () => (await lastSave())?.no_long_dashes).toBe(false);
+    // The switch works with Refine off, and leaves it off.
+    expect((await lastSave())?.enabled).toBe(false);
+
+    await dashes.click();
+    await expect(dashes).toBeChecked();
+    await expect.poll(async () => (await lastSave())?.no_long_dashes).toBe(true);
+  });
+
+  test("never use long dashes shows what is stored, and on for a block without it", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineSettings: unknown }).__owRefineSettings = {
+        no_long_dashes: false,
+      };
+    });
+    await page.goto("/");
+    await openRefine(page);
+    await expect(page.getByRole("switch", { name: "Never use long dashes" })).not.toBeChecked();
+
+    // A block from before the switch existed.
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineSettings: unknown }).__owRefineSettings = {
+        no_long_dashes: undefined,
+      };
+    });
+    await page.reload();
+    await openRefine(page);
+    await expect(page.getByRole("switch", { name: "Never use long dashes" })).toBeChecked();
+  });
+
   test("the API key note names the platform's own store", async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "platform", { get: () => "Win32" });

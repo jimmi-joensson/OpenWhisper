@@ -683,6 +683,7 @@ fn run_eval(args: EvalArgs, json: bool) -> Result<()> {
     if !json {
         eprintln!("questions go to: {}", plan.destination());
         eprintln!("the images are drawn from made-up text; the real screen is never captured");
+        eprintln!("with the facts of a made-up computer, the same for whoever runs this");
     }
     let mut results = Vec::new();
     for case in &cases {

@@ -12,6 +12,14 @@ type Page = import("@playwright/test").Page;
 // the history lists, and asks among the Refine runs in Diagnostics.
 // The answer window has its own spec (answer-window.spec.ts).
 
+interface AskContext {
+  date_time: boolean;
+  computer: boolean;
+  front_app: boolean;
+  locale: boolean;
+  place: string;
+}
+
 interface AskSettings {
   enabled: boolean;
   web_search: boolean;
@@ -19,6 +27,7 @@ interface AskSettings {
   model: string | null;
   effort: string | null;
   timeout_ms: number;
+  context: AskContext;
 }
 
 async function openAsk(page: Page) {
@@ -44,7 +53,10 @@ async function lastSave(page: Page): Promise<AskSettings | undefined> {
 // Seed what the shim answers `ask_get` with.
 async function seedAsk(
   page: Page,
-  seed: { settings?: Partial<AskSettings>; backend?: Record<string, unknown> },
+  seed: {
+    settings?: Partial<Omit<AskSettings, "context">> & { context?: Partial<AskContext> };
+    backend?: Record<string, unknown>;
+  },
 ) {
   await page.addInitScript((s) => {
     const w = window as unknown as Record<string, unknown>;
@@ -161,6 +173,7 @@ test.describe("ask pane", () => {
       model: null,
       effort: null,
       timeout_ms: 60000,
+      context: { date_time: true, computer: true, front_app: true, locale: true, place: "" },
     });
   });
 
@@ -410,6 +423,274 @@ test.describe("ask pane", () => {
   });
 });
 
+// --- what the model is told about the computer -------------------------
+
+const contextSwitch = (page: Page, name: string) => page.getByRole("switch", { name, exact: true });
+const placeField = (page: Page) => page.getByLabel("Where you are");
+const contextPreview = (page: Page) => page.getByLabel("What is sent right now");
+
+const GROUPS = ["Date and time", "Computer", "App in front", "Language and region"];
+
+// The text the shim's made-up computer gives for every group.
+const FULL_PREVIEW = [
+  "Date: Wednesday 11 November 2026",
+  "Local time: 14:32",
+  "Time zone: Europe/Copenhagen (UTC+01:00)",
+  "Operating system: macOS 26.0",
+  "Computer: Northwind Book Pro 14, NB14,2",
+  "Chip: Northwind N3 Pro",
+  "Memory: 32 GB",
+  "Power: on battery, 82% charged",
+  "Displays: 1 (1512 x 982)",
+  "Free disk space: about 210 GB",
+  "Internet: online",
+  "Language: English (en)",
+  "Region: Denmark (DK)",
+  "Units: metric",
+  "Clock: 24-hour",
+  "Currency: DKK",
+  "Keyboard layout: Danish",
+].join("\n");
+
+test.describe("ask pane: what the model is told about the computer", () => {
+  test("says where the facts go and what each group holds, all on by default", async ({
+    page,
+  }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+
+    await expect(
+      page.getByRole("heading", { name: "What the model is told about your computer" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("ask-context-intro")).toHaveText(
+      "These facts go with every question, to the same place as the question: Anthropic (Claude), through the Claude Code app signed in on this computer.",
+    );
+    for (const name of GROUPS) {
+      await expect(contextSwitch(page, name)).toBeChecked();
+      await expect(contextSwitch(page, name)).toBeEnabled();
+    }
+    await expect(page.getByText("Today's date, the time and your time zone.")).toBeVisible();
+    await expect(
+      page.getByText("Never the network name, the IP address, the serial number"),
+    ).toContainText("free disk space and whether you are online");
+    await expect(
+      page.getByText("The name of the app you are working in when you ask."),
+    ).toContainText("Only the name, never the title of the window.");
+    await expect(
+      page.getByText("System language, region, units, 12 or 24 hour clock"),
+    ).toContainText("currency and keyboard layout");
+
+    await expect(placeField(page)).toHaveValue("");
+    await expect(placeField(page)).toBeEnabled();
+    await expect(
+      page.getByText("Without it the model only knows your time zone and region."),
+    ).toContainText("Optional.");
+    await expect(
+      page.getByText("Without it the model only knows your time zone and region."),
+    ).toContainText("Nothing here uses location services.");
+    await expect(page.getByTestId("ask-context-off")).toHaveCount(0);
+  });
+
+  test("shows the exact text that would be sent, read only", async ({ page }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+    await expect(contextPreview(page)).toHaveAttribute("readonly", "");
+    await expect(contextPreview(page)).toHaveClass(/font-mono/);
+    // It can be selected and copied, not changed.
+    await contextPreview(page).focus();
+    await page.keyboard.type("x");
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+    await expect(
+      page.getByText("This is the exact text that goes with a question asked now."),
+    ).toContainText("The app in front is read when you ask");
+  });
+
+  test("a switch saves its group and the preview follows", async ({ page }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+
+    await contextSwitch(page, "Computer").click();
+    await expect(contextSwitch(page, "Computer")).not.toBeChecked();
+    await expect.poll(async () => (await lastSave(page))?.context).toEqual({
+      date_time: true,
+      computer: false,
+      front_app: true,
+      locale: true,
+      place: "",
+    });
+    await expect(contextPreview(page)).not.toHaveValue(/Northwind/);
+    await expect(contextPreview(page)).toHaveValue(/^Date: Wednesday 11 November 2026\n/);
+    await expect(contextPreview(page)).toHaveValue(/Keyboard layout: Danish$/);
+    // The rest of the block is saved as it was.
+    expect(await lastSave(page)).toMatchObject({ enabled: true, web_search: false, model: null });
+
+    await contextSwitch(page, "Date and time").click();
+    await contextSwitch(page, "Language and region").click();
+    await contextSwitch(page, "App in front").click();
+    await expect.poll(async () => (await lastSave(page))?.context).toEqual({
+      date_time: false,
+      computer: false,
+      front_app: false,
+      locale: false,
+      place: "",
+    });
+    // Nothing is told, and the pane says so.
+    await expect(contextPreview(page)).toHaveValue("");
+    await expect(contextPreview(page)).toHaveAttribute(
+      "placeholder",
+      "Nothing. Every switch is off and no place is given.",
+    );
+    // The note about the app in front goes with its switch.
+    await expect(
+      page.getByText("This is the exact text that goes with a question asked now."),
+    ).not.toContainText("app in front");
+
+    await contextSwitch(page, "Date and time").click();
+    await expect(contextPreview(page)).toHaveValue(
+      "Date: Wednesday 11 November 2026\nLocal time: 14:32\nTime zone: Europe/Copenhagen (UTC+01:00)",
+    );
+  });
+
+  test("the place is saved when the field is left, not while typing, and leads the preview", async ({
+    page,
+  }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+    const saves = await askCalls(page, "ask_set");
+
+    await placeField(page).fill("  Aarhus,   Denmark ");
+    expect(await askCalls(page, "ask_set")).toBe(saves);
+    await placeField(page).blur();
+    await expect.poll(async () => (await lastSave(page))?.context.place).toBe("Aarhus, Denmark");
+    await expect(placeField(page)).toHaveValue("Aarhus, Denmark");
+    await expect(contextPreview(page)).toHaveValue(
+      `Where the person is: Aarhus, Denmark\n${FULL_PREVIEW}`,
+    );
+
+    // Enter saves as well; emptying the field takes the place away.
+    await placeField(page).fill("");
+    await placeField(page).press("Enter");
+    await expect.poll(async () => (await lastSave(page))?.context.place).toBe("");
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+    // No more than core keeps.
+    await expect(placeField(page)).toHaveAttribute("maxlength", "120");
+  });
+
+  test("a stored place and stored switches show as stored", async ({ page }) => {
+    await seedAsk(page, {
+      settings: { enabled: true, context: { locale: false, place: "Odense" } },
+    });
+    await page.goto("/");
+    await openAsk(page);
+    await expect(placeField(page)).toHaveValue("Odense");
+    await expect(contextSwitch(page, "Language and region")).not.toBeChecked();
+    await expect(contextSwitch(page, "Computer")).toBeChecked();
+    await expect(contextPreview(page)).toHaveValue(/^Where the person is: Odense\nDate: /);
+    await expect(contextPreview(page)).not.toHaveValue(/Language:/);
+  });
+
+  test("refresh reads the facts again", async ({ page }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+    const reads = await askCalls(page, "ask_context_preview");
+
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect.poll(() => askCalls(page, "ask_context_preview")).toBe(reads + 1);
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+  });
+
+  test("while Ask is off the controls wait and the pane says nothing is sent", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openAsk(page);
+    await expect(askSwitch(page)).not.toBeChecked();
+
+    await expect(page.getByTestId("ask-context-off")).toHaveText(
+      "Ask is switched off, so nothing is sent. Switch Ask on to change what the model is told.",
+    );
+    for (const name of GROUPS) {
+      await expect(contextSwitch(page, name)).toBeDisabled();
+      // What is stored still shows.
+      await expect(contextSwitch(page, name)).toBeChecked();
+    }
+    await expect(placeField(page)).toBeDisabled();
+    // What would be sent can still be looked at.
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+
+    await askSwitch(page).click();
+    await expect(page.getByTestId("ask-context-off")).toHaveCount(0);
+    await expect(contextSwitch(page, "Computer")).toBeEnabled();
+    await expect(placeField(page)).toBeEnabled();
+  });
+
+  test("a change made elsewhere shows on the switches, the place and the preview", async ({
+    page,
+  }) => {
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+    await expect(contextPreview(page)).toHaveValue(FULL_PREVIEW);
+
+    // The headless CLI rewrites the block; Rust announces it.
+    await emitAskChanged(page, {
+      enabled: true,
+      context: { date_time: false, computer: false, front_app: true, locale: false, place: "Skagen" },
+    });
+    await expect(contextSwitch(page, "Computer")).not.toBeChecked();
+    await expect(contextSwitch(page, "App in front")).toBeChecked();
+    await expect(placeField(page)).toHaveValue("Skagen");
+    await expect(contextPreview(page)).toHaveValue("Where the person is: Skagen");
+  });
+
+  test("a preview that cannot be read says so and leaves the rest working", async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owAskContextFail?: boolean }).__owAskContextFail = true;
+    });
+    await seedAsk(page, { settings: { enabled: true } });
+    await page.goto("/");
+    await openAsk(page);
+
+    await expect(contextPreview(page)).toHaveValue("");
+    await expect(contextPreview(page)).toHaveAttribute(
+      "placeholder",
+      "The preview could not be read.",
+    );
+    await contextSwitch(page, "Computer").click();
+    await expect.poll(async () => (await lastSave(page))?.context.computer).toBe(false);
+  });
+
+  test("a block without a context (an older shell) reads as every group on", async ({ page }) => {
+    await page.addInitScript(() => {
+      // What `ask_get` answered before the context existed.
+      (window as unknown as { __owAskStored?: unknown }).__owAskStored = {
+        enabled: true,
+        web_search: false,
+        instructions: "",
+        model: null,
+        effort: null,
+        timeout_ms: 60000,
+      };
+    });
+    await page.goto("/");
+    await openAsk(page);
+    for (const name of GROUPS) {
+      await expect(contextSwitch(page, name)).toBeChecked();
+    }
+    await expect(placeField(page)).toHaveValue("");
+  });
+});
+
 // --- asks in the history -------------------------------------------
 
 interface SeedEntry {
@@ -471,6 +752,115 @@ const WITH_ASK: SeedEntry[] = [
     app_name: null,
   },
 ];
+
+// "Turn on web search" in the answer window calls
+// `open_settings_window` with the Ask pane and its Web search row;
+// Rust brings the main window forward and sends `ow_navigate` in its
+// object form. This is the main window's side of that.
+test.describe("ask pane: opened from the answer window", () => {
+  // Shorter than the pane, so the Web search row starts out below
+  // the fold.
+  test.use({ viewport: { width: 1000, height: 420 } });
+
+  const webSearchRow = (page: Page) => page.locator("#settings-ask-web-search");
+
+  async function waitForNavigateListener(page: Page) {
+    await page.waitForSelector('[data-testid="sidebar-item-home"]');
+    await page.waitForFunction(() => window.__owListeners("ow_navigate") > 0);
+  }
+
+  test("the event opens the Ask pane with the Web search row in view", async ({ page }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+
+    // Opened by hand, the pane starts at its top and the row is
+    // further down than this window shows.
+    await openAsk(page);
+    await expect(webSearchRow(page)).toBeVisible();
+    await expect(webSearchRow(page)).not.toBeInViewport({ ratio: 1 });
+
+    // From Home, as when the answer window sends the person here.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toHaveCount(0);
+    await page.evaluate(() =>
+      window.__owEmit("ow_navigate", { view: "settings", pane: "ask", focus: "web-search" }),
+    );
+    await expect(page.getByRole("tab", { name: "Ask", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+    await expect(webSearchSwitch(page)).toBeInViewport({ ratio: 1 });
+    // The row is the one with the switch, and it can be used at once.
+    await expect(webSearchRow(page).getByText("Web search", { exact: true })).toBeVisible();
+    await webSearchSwitch(page).click();
+    await expect.poll(async () => (await lastSave(page))?.web_search).toBe(true);
+  });
+
+  test("the command the link calls leads there, and works again while the pane is open", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+    const open = () =>
+      page.evaluate(() =>
+        (
+          window as unknown as {
+            __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<unknown> };
+          }
+        ).__TAURI_INTERNALS__.invoke("open_settings_window", { pane: "ask", focus: "web-search" }),
+      );
+
+    await open();
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toBeVisible();
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+
+    // Scrolled back to the top of the pane, the link brings the row
+    // back.
+    await page.getByRole("heading", { name: "Ask", exact: true }).scrollIntoViewIfNeeded();
+    await expect(webSearchRow(page)).not.toBeInViewport({ ratio: 1 });
+    await open();
+    await expect(webSearchRow(page)).toBeInViewport({ ratio: 1 });
+  });
+
+  test("a pane without a row, an unknown pane and the plain names still work", async ({ page }) => {
+    await page.goto("/");
+    await waitForNavigateListener(page);
+
+    await page.evaluate(() => window.__owEmit("ow_navigate", { view: "settings", pane: "ask" }));
+    await expect(page.getByRole("heading", { name: "Ask", exact: true })).toBeVisible();
+
+    // A pane this window does not have: Settings, where it was.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await page.evaluate(() =>
+      window.__owEmit("ow_navigate", { view: "settings", pane: "billing", focus: "web-search" }),
+    );
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "General", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    // The string the tray sends, and the command without arguments.
+    await page.evaluate(() => window.__owEmit("ow_navigate", "main"));
+    await expect(page.getByRole("heading", { name: "Settings" })).toHaveCount(0);
+    await page.evaluate(() =>
+      (
+        window as unknown as {
+          __TAURI_INTERNALS__: { invoke: (cmd: string) => Promise<unknown> };
+        }
+      ).__TAURI_INTERNALS__.invoke("open_settings_window"),
+    );
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "General", exact: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // A view that does not exist changes nothing.
+    await page.evaluate(() => window.__owEmit("ow_navigate", { view: "nowhere", pane: "ask" }));
+    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  });
+});
 
 test.describe("history: asks", () => {
   test("an ask on Home is marked, shows the question, and has the answer one click away", async ({

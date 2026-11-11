@@ -50,7 +50,7 @@ pub use crate::diagnostics::recognizer_info;
 #[cfg(feature = "ask")]
 pub use crate::ask::{
     AskBackend, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup, AskSnapshot,
-    AskStatus, CancelFlag, ScreenState, VisionChoice,
+    AskStatus, AskSuggestion, CancelFlag, ScreenState, VisionChoice,
 };
 #[cfg(feature = "vision")]
 pub use crate::vision::{Decision as VisionDecision, NoScreenshot, PermissionState, Screenshot};

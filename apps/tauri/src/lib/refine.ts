@@ -15,6 +15,9 @@ export interface RefineSettings {
   timeout_ms: number;
   min_words: number;
   drift_guard: boolean;
+  // Refine and Ask never write an em dash or an en dash. On unless
+  // the person switched it off.
+  no_long_dashes: boolean;
   claude_cli: { model: string; effort: RefineEffort; path: string | null };
   // `effort: null` = no effort is sent (most servers do not take one).
   openai: { base_url: string; model: string; effort: RefineEffort | null };

@@ -248,10 +248,33 @@ done
 
     /// Write the fake next to the scratch config and return its path.
     fn fake_cli(cfg: &Config) -> String {
+        script(cfg, "claude", FAKE)
+    }
+
+    /// The fake, answering a question that needed the web the way the
+    /// prompt asks for: the marker on a first line of its own (split
+    /// over two pieces, as a stream may), then the answer.
+    fn fake_cli_that_needs_the_web(cfg: &Config) -> String {
+        let marked = FAKE
+            // `echo` turns the `\n` of the JSON below into a line
+            // break in some shells; `printf '%s'` never does.
+            .replace("  echo '", r"  printf '%s\n' '")
+            .replace(r#""text":"The capital of Norway ""#, r#""text":"NEEDS_WEB_""#)
+            .replace(r#""text":"is Oslo.""#, r#""text":"SEARCH\nI cannot check the weather from here.""#)
+            .replace(
+                r#""result":"The capital of Norway is Oslo.""#,
+                r#""result":"NEEDS_WEB_SEARCH\nI cannot check the weather from here.""#,
+            );
+        assert_eq!(marked.matches("NEEDS_WEB_").count(), 2, "the fake changed shape");
+        assert!(!marked.contains("  echo '{"), "the fake changed shape");
+        script(cfg, "claude-web", &marked)
+    }
+
+    fn script(cfg: &Config, name: &str, body: &str) -> String {
         let dir = cfg.dir.join("bin");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("claude");
-        std::fs::write(&path, FAKE).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.display().to_string()
     }
@@ -356,6 +379,52 @@ done
         assert_eq!(record["effort"], "low");
         assert_eq!(record["web_search"], false);
         assert!(record["destination"].as_str().is_some_and(|d| d.contains("Anthropic")), "{record}");
+        // An ordinary answer suggests nothing; the field is there.
+        assert!(record.as_object().unwrap().contains_key("suggestion"), "{record}");
+        assert_eq!(record["suggestion"], Value::Null);
+    }
+
+    #[test]
+    fn an_answer_that_needed_the_web_says_how_to_switch_web_search_on() {
+        let cfg = Config::new("needs-web");
+        let claude = fake_cli_that_needs_the_web(&cfg);
+        const HINT: &str = "web search is off, so this answer could not look anything up. Turn it on with: \
+openwhisper ask config --web-search true, or pass --web-search";
+
+        // Web search is off (the default): the prompt asks for the
+        // marker, and the record carries what it meant, not the
+        // marker.
+        let record = cfg.json(&["ask", "run", "how will the weather be today", "--claude-path", &claude]);
+        assert_eq!(record["suggestion"], "web-search");
+        assert_eq!(record["answer"], "I cannot check the weather from here.");
+        assert_eq!(record["web_search"], false);
+        assert!(recorded(&cfg, "system.txt").contains("a first line that is exactly NEEDS_WEB_SEARCH"));
+        assert!(!record.to_string().contains("NEEDS_WEB"), "{record}");
+
+        // For people: the answer alone on stdout, streamed or not,
+        // and the way to switch web search on, on stderr.
+        for flags in [&[][..], &["--no-stream"][..]] {
+            let mut args = vec!["ask", "run", "how will the weather be today", "--claude-path", &claude];
+            args.extend_from_slice(flags);
+            let out = cfg.spawn(&args);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stderr}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "I cannot check the weather from here.\n", "{flags:?}");
+            assert!(stderr.contains(HINT), "{stderr}");
+            assert!(!stderr.contains("NEEDS_WEB"), "{stderr}");
+        }
+
+        // An ordinary answer gets no such line.
+        let plain = fake_cli(&cfg);
+        let out = cfg.spawn(&["ask", "run", "what is the capital of norway", "--claude-path", &plain]);
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("web search is off"));
+
+        // With web search on the rule is not in the prompt, and a
+        // marker would be ordinary text.
+        let record = cfg.json(&["ask", "run", "how will the weather be today", "--web-search", "--claude-path", &claude]);
+        assert_eq!(record["suggestion"], Value::Null);
+        assert_eq!(record["answer"], "NEEDS_WEB_SEARCH\nI cannot check the weather from here.");
+        assert!(!recorded(&cfg, "system.txt").contains("NEEDS_WEB_SEARCH"));
     }
 
     /// The newest rows of the diagnostics table, through the CLI.
@@ -471,6 +540,7 @@ done
         assert_eq!(report["results"][0]["name"], "fact-en");
         assert_eq!(report["results"][0]["passed"], true);
         assert_eq!(report["results"][0]["answer"], "The capital of Norway is Oslo.");
+        assert_eq!(report["results"][0]["suggestion"], Value::Null);
         assert_eq!(report["latency_ms"]["first_text"]["answers"], 1);
         assert_eq!(report["latency_ms"]["total"]["answers"], 1);
         assert_eq!(report["model"], "sonnet");
@@ -487,6 +557,35 @@ done
         assert!(stdout.contains("first text min"), "{stdout}");
 
         assert!(cfg.fails(&["ask", "eval", "--only", "nope", "--claude-path", &claude]).contains("no eval case starts with"));
+
+        // The cases about the web search suggestion: a fake that
+        // marks every answer passes the ones that needed the web and
+        // fails the ones that did not.
+        let marking = fake_cli_that_needs_the_web(&cfg);
+        let out = cfg.spawn(&["--json", "ask", "eval", "--only", "web-", "--claude-path", &marking]);
+        let report: Value = serde_json::from_slice(&out.stdout).expect("a JSON report");
+        assert_eq!((report["passed"].as_u64(), report["total"].as_u64()), (Some(6), Some(12)), "{report}");
+        for result in report["results"].as_array().unwrap() {
+            let name = result["name"].as_str().unwrap();
+            assert_eq!(result["suggestion"], "web-search", "{name}");
+            assert_eq!(result["passed"], name.starts_with("web-needed-"), "{name}");
+            assert_eq!(result["answer"], "I cannot check the weather from here.", "{name}");
+        }
+        // On a backend without a web search to suggest they are not run.
+        let err = cfg.fails(&[
+            "ask",
+            "eval",
+            "--only",
+            "web-",
+            "--backend",
+            "openai-compatible",
+            "--base-url",
+            "http://localhost:9/v1",
+            "--model",
+            "m",
+        ]);
+        assert!(err.contains("no eval case starts with \"web-\""), "{err}");
+        assert!(!err.contains("web-needed"), "{err}");
         // Without a backend that is ready, no case is run.
         assert!(cfg.fails(&["ask", "eval", "--claude-path", "/nonexistent/claude"]).contains("is not ready"));
     }

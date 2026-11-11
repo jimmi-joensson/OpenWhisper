@@ -337,7 +337,7 @@ pub fn backend_for(settings: &RefineSettings) -> Box<dyn Refiner> {
 /// and the current dictionary terms.
 pub fn compose_prompt(settings: &RefineSettings) -> Prompt {
     let matcher = crate::dictionary::current_matcher();
-    Prompt::compose(&settings.instructions, matcher.prompt_terms())
+    Prompt::compose_with(&settings.instructions, matcher.prompt_terms(), prompt::PromptOptions::of(settings))
 }
 
 /// Run `text` through `backend` and apply every safety net: the
@@ -421,7 +421,9 @@ pub fn refine_with(
             };
             match verdict {
                 Ok(()) => RefineOutcome {
-                    text: crate::transcript::finalize_refined(&cleaned),
+                    // The guard has judged the text as the model
+                    // wrote it; only now are its long dashes replaced.
+                    text: crate::transcript::finalize_refined_with(&cleaned, settings.no_long_dashes),
                     raw: text.to_string(),
                     status: RefineStatus::Refined,
                     detail: String::new(),
@@ -517,11 +519,12 @@ impl ModeRun {
                 }
             }
         }
+        let options = prompt::PromptOptions::of(&settings);
         let prompt = if mode.rewrites() {
             settings.instructions = mode.instructions.trim().to_string();
-            Prompt::compose_mode(&mode.name, &mode.instructions, terms)
+            Prompt::compose_mode_with(&mode.name, &mode.instructions, terms, options)
         } else {
-            Prompt::compose(&settings.instructions, terms)
+            Prompt::compose_with(&settings.instructions, terms, options)
         };
         Self {
             settings,
@@ -1039,6 +1042,101 @@ mod tests {
         assert_eq!(calls.lock().unwrap().refined, vec![SAID.trim().to_string()]);
     }
 
+    /// What a model might return for [`SAID`] with an aside set off
+    /// by em dashes and a range written with an en dash.
+    const DASHED: &str = "I think we should move the meeting with Jeppe \u{2014} to Thursday \u{2014} at 10\u{2013}12.";
+
+    #[test]
+    fn refined_text_has_no_long_dashes_by_default() {
+        let (_, mut stub) = stub_with(|_| Ok(DASHED.into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "I think we should move the meeting with Jeppe - to Thursday - at 10-12. ");
+        // What was said is kept as it was said.
+        assert_eq!(out.raw, SAID);
+    }
+
+    #[test]
+    fn with_the_switch_off_the_refined_text_keeps_its_dashes() {
+        let settings = RefineSettings { no_long_dashes: false, ..on() };
+        let (_, mut stub) = stub_with(|_| Ok(DASHED.into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &settings, SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, format!("{DASHED} "));
+    }
+
+    #[test]
+    fn a_mode_and_a_spoken_instruction_lose_their_long_dashes_too() {
+        let prompt = Prompt::compose_mode("Formal", "Rewrite it in a formal tone.", &[]);
+        let (_, mut stub) = stub_with(|_| Ok("We should \u{2013} I believe \u{2013} move the meeting.".into()));
+        let out = refine_with(&mut stub, &prompt, &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "We should - I believe - move the meeting. ");
+
+        let (_, mut stub) =
+            stub_with(|_| Ok("[instruction: make it formal]\nThe meeting\u{2014}with Jeppe\u{2014}moves.".into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.instruction, "make it formal");
+        assert_eq!(out.text, "The meeting-with Jeppe-moves. ");
+    }
+
+    #[test]
+    fn a_transcript_that_is_typed_as_said_is_never_touched() {
+        // A dash in what was said (a dictionary term, say) survives
+        // every path that does not use the model's text.
+        let said = "so the range is ten \u{2013} twelve and we move the meeting to thursday ";
+        // Rejected by the guard.
+        let (_, mut stub) = stub_with(|_| Ok("Here is a poem about ranges \u{2014} and meetings \u{2014} for you to enjoy today.".into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+        assert_eq!(out.status, RefineStatus::Rejected);
+        assert_eq!(out.text, said);
+        // Failed, timed out, too short to send.
+        let (_, mut stub) = stub_with(|_| Err(RefineError::Timeout));
+        assert_eq!(refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said).text, said);
+        let (_, mut stub) = stub_with(|_| Ok("unused".into()));
+        let short = "ten \u{2013} twelve ";
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), short);
+        assert_eq!((out.status, out.text.as_str()), (RefineStatus::SkippedShort, short));
+        // And with Refine off nothing is looked at at all.
+        assert_eq!(RefineOutcome::disabled(said).text, said);
+    }
+
+    #[test]
+    fn the_guard_judges_the_text_before_its_dashes_are_replaced() {
+        // A good cleanup that sets an aside off with dashes passes
+        // the strict guard however the dashes are written, and the
+        // text it turns into passes as well: replacing a dash can
+        // neither fail a good cleanup nor let a bad one through.
+        let said = "the report which by the way is late needs a review before friday";
+        for answer in [
+            "The report \u{2014} which by the way is late \u{2014} needs a review before Friday.",
+            "The report\u{2014} which by the way is late\u{2014} needs a review before Friday.",
+            "The report, which by the way is late, needs a review before Friday \u{2013}",
+        ] {
+            assert_eq!(guard::check(said, answer, true), Ok(()), "{answer}");
+            let replaced = crate::dashes::normalize(answer);
+            assert_eq!(guard::check(said, &replaced, true), Ok(()), "{replaced}");
+            let (_, mut stub) = stub_with(move |_| Ok(answer.into()));
+            let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+            assert_eq!(out.status, RefineStatus::Refined, "{answer}");
+            assert!(!crate::dashes::has_long_dash(&out.text), "{}", out.text);
+        }
+        // Right at the length limit: the text as the model wrote it
+        // is what is measured, so the two blanks a replaced dash can
+        // add do not push a cleanup over it.
+        let said = "one two three four";
+        let limit = (said.chars().count() as f64 * 1.5) as usize + 30;
+        let answer = format!("One two three four{}\u{2014}", "!".repeat(limit - said.chars().count() - 1));
+        assert_eq!(answer.chars().count(), limit);
+        assert_eq!(guard::check(said, &answer, true), Ok(()));
+        assert!(crate::dashes::normalize(&answer).chars().count() > limit);
+        let (_, mut stub) = stub_with(move |_| Ok(answer.clone()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert!(out.text.ends_with(" - "), "{}", out.text);
+    }
+
     #[test]
     fn one_call_carries_instructions_terms_and_transcript_as_data() {
         let (calls, mut stub) = stub_with(|t| Ok(t.to_string()));
@@ -1329,8 +1427,17 @@ Friday because there's a release on Thursday."
         };
         let run = ModeRun::with_terms(&settings, &choice(&modes_with("dictation"), &settings), &[]);
         assert_eq!(run.settings, settings);
-        assert_eq!(run.prompt, Prompt::compose("Use British spelling.", &[]));
+        // The cleanup prompt, with the dash rule the settings ask for
+        // by default.
+        let dashes = prompt::PromptOptions { no_long_dashes: true };
+        assert_eq!(run.prompt, Prompt::compose_with("Use British spelling.", &[], dashes));
+        assert!(run.prompt.system().contains(prompt::NO_LONG_DASHES_RULE));
         assert!(!run.prompt.is_rewrite());
+        // With the switch off it is the prompt as it always was.
+        let plain = RefineSettings { no_long_dashes: false, ..settings.clone() };
+        let run = ModeRun::with_terms(&plain, &choice(&modes_with("dictation"), &plain), &[]);
+        assert_eq!(run.prompt, Prompt::compose("Use British spelling.", &[]));
+        let run = ModeRun::with_terms(&settings, &choice(&modes_with("dictation"), &settings), &[]);
         assert_eq!(run.mode, ModeUse::default());
         assert!(run.mode.is_builtin());
     }
@@ -1475,7 +1582,7 @@ Friday because there's a release on Thursday."
         let modes = crate::modes::select(&modes, "careful").unwrap();
         let run = ModeRun::with_terms(&settings, &choice(&modes, &settings), &[]);
         assert!(!run.prompt.is_rewrite());
-        assert_eq!(run.prompt, Prompt::compose("", &[]));
+        assert_eq!(run.prompt, Prompt::compose_with("", &[], prompt::PromptOptions { no_long_dashes: true }));
         assert_eq!(run.settings.claude_cli.model, "opus");
         assert_eq!(run.mode.name, "Careful");
     }

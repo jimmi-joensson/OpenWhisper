@@ -151,8 +151,20 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
     void invoke(command, { id }).catch(() => {});
   };
 
+  // "Turn on web search": the main window comes forward on the Ask
+  // pane, at the Web search row. This window stays as it is.
+  const openWebSearchSetting = () => {
+    void invoke("open_settings_window", { pane: "ask", focus: "web-search" }).catch(() => {});
+  };
+
   const busy = askIsBusy(phase);
   const showAnswer = hasAnswer && phase !== "cancelled";
+  // The model marked the question as one that needed the web, and
+  // web search is off. The sentence and the link are the app's own:
+  // nothing the model wrote is shown for it, and nothing it writes
+  // ever becomes a link. Not for an ask that failed or was cancelled.
+  const suggestWebSearch =
+    ask.suggestion === "web-search" && (phase === "answering" || phase === "done");
   const status = statusLine(ask);
   const source = sourceLine(ask);
   // No screenshot although one was wanted, with a reason to show.
@@ -203,6 +215,21 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
 
       <CardFooter className="shrink-0 flex-col items-stretch gap-2 text-xs text-muted-foreground">
         {ask.notice && <p data-testid="answer-notice">{ask.notice}</p>}
+        {suggestWebSearch && (
+          <p data-testid="answer-suggestion">
+            Web search is off, so this answer could not look anything up.{" "}
+            {/* Underlined always: this window is never the active
+                one, so a hover state cannot be what marks the link. */}
+            <Button
+              variant="link"
+              size="xs"
+              className="h-auto p-0 align-baseline underline"
+              onClick={openWebSearchSetting}
+            >
+              Turn on web search
+            </Button>
+          </p>
+        )}
         {/* Vision (TASK-98): a screenshot was wanted and there is
             none. Core's sentence says why (an app that is never
             captured is in front, no permission, no display). */}

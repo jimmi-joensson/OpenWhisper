@@ -3054,6 +3054,7 @@ dependencies = [
  "cpal",
  "dirs 5.0.1",
  "hound",
+ "iana-time-zone",
  "keyring",
  "ndarray",
  "num_cpus",

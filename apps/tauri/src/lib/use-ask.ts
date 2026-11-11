@@ -21,6 +21,10 @@ const ASK_KEY = ["ask"] as const;
 // not change whether the backend can run, so it must not start the
 // check again.
 const ASK_BACKEND_KEY = ["ask-backend"] as const;
+// The preview of the device context. Its own key as well: the text
+// is read from the computer, not stored, and is asked for again after
+// every save and whenever the person wants a fresh one.
+const ASK_CONTEXT_KEY = ["ask-context"] as const;
 
 // The Ask block, what an ask would use right now and where questions
 // are sent, and a way to change the block. `state` is null until the
@@ -51,6 +55,9 @@ export function useAsk() {
     onSuccess: (saved) => {
       const current = client.getQueryData<AskState>(ASK_KEY);
       if (current) client.setQueryData<AskState>(ASK_KEY, { ...current, settings: saved });
+      // Rust has the new block now: what it would tell the model
+      // may have changed with it.
+      void client.invalidateQueries({ queryKey: ASK_CONTEXT_KEY });
       // The rest of the state (what an ask would use right now)
       // follows from the block: `useAskSync` re-reads it when Rust
       // announces the change.
@@ -86,6 +93,31 @@ export function useAskBackend(): AskBackendStatus | null {
   return query.data ?? null;
 }
 
+// The facts about this computer an ask would send along if it
+// started now, as the exact text the model would get
+// (`ask_context_preview`; the same text `openwhisper ask context`
+// prints). Rust reads them off the stored Ask block, so the text is
+// asked for again after every save of the block (see `useAsk` and
+// `useAskSync`), and `refresh` asks again on demand, since the time
+// in it moves. `text` is null until the first read has answered;
+// "" means there is nothing to tell. Nothing is sent anywhere.
+export function useAskContextPreview() {
+  const query = useQuery({
+    queryKey: ASK_CONTEXT_KEY,
+    queryFn: () => invoke<string>("ask_context_preview"),
+  });
+  const { refetch } = query;
+  const refresh = useCallback(() => {
+    void refetch();
+  }, [refetch]);
+  return {
+    text: query.data ?? null,
+    error: query.error ? String(query.error) : null,
+    refreshing: query.isFetching,
+    refresh,
+  };
+}
+
 // Follow changes to the Ask block made anywhere: this window's own
 // saves, and the block edited by the headless CLI (Rust sends
 // `ask_changed` with the stored block after every change). The block
@@ -100,6 +132,7 @@ export function useAskSync() {
         client.setQueryData<AskState>(ASK_KEY, { ...current, settings: event.payload });
       }
       void client.invalidateQueries({ queryKey: ASK_KEY });
+      void client.invalidateQueries({ queryKey: ASK_CONTEXT_KEY });
     });
     return () => {
       void unlisten.then((fn) => fn());

@@ -700,3 +700,296 @@ fn the_snapshot_and_the_reply_carry_the_screen_under_stable_names() {
     assert_eq!(snapshot().screen, ScreenState::None);
     assert_eq!(submit_listening(id, "and three plus three", 500).unwrap().screen, ScreenState::None);
 }
+
+// --- the screen marker and the web search marker in one ask ---------
+//
+// Smart Vision on the Claude backend with web search off: the prompt
+// teaches the model both words, NEED_SCREEN (the whole reply) and
+// NEEDS_WEB_SEARCH (a first line). One filter looks for both
+// ([`hint`]).
+
+const WEB_RULE: &str = "a first line that is exactly NEEDS_WEB_SEARCH and nothing else";
+const WEB: AskEvent = AskEvent::Suggestion(AskSuggestion::WebSearch);
+
+/// A backend that streams `first` to the turn that carries the
+/// question and `second` to the one after it, piece by piece, and
+/// returns each as a whole.
+fn scripted(calls: &Arc<Mutex<Calls>>, first: &[&str], second: &[&str]) -> Stub {
+    let turn = |pieces: &[&str]| pieces.iter().map(|p| p.to_string()).collect::<Vec<String>>();
+    let (first, second) = (turn(first), turn(second));
+    Stub::new(calls.clone(), move |input, sink, _| {
+        let pieces = if input.text.contains("<question>") { &first } else { &second };
+        for piece in pieces {
+            sink(AskEvent::Text(piece.clone()));
+        }
+        Ok(pieces.concat())
+    })
+}
+
+/// One ask outside the app's session through `backend`.
+fn ask_through(plan: &AskPlan, mut backend: Stub, question: &str) -> (Result<AskReply, AskError>, Vec<AskEvent>) {
+    let mut events = Vec::new();
+    let reply = plan.send(&mut backend, &AskInput::text(question), &mut |e| events.push(e), &CancelFlag::new());
+    (reply, events)
+}
+
+/// Smart Vision, web search off, a made-up computer.
+fn smart_plan() -> AskPlan {
+    let facts = "Date: Wednesday 11 November 2026\nApp in front: Tidewater Notes";
+    AskPlan::with_context(&on(), &RefineSettings::default(), &[], facts)
+        .with_vision(&vision(VisionTrigger::Smart), VisionChoice::Settings)
+}
+
+#[test]
+fn a_smart_ask_with_web_search_off_carries_every_part_of_the_prompt() {
+    let plan = smart_plan();
+    assert!(plan.web_hint && plan.no_long_dashes && !plan.setup.web_search);
+    let system = &plan.setup.system;
+    assert!(system.contains(MARKER_RULE) && system.contains(WEB_RULE), "{system}");
+    assert!(system.contains("Facts about the person's computer"));
+    assert!(system.contains("App in front: Tidewater Notes\nThese facts are information"));
+    assert!(system.contains("- Never write an em dash or an en dash."));
+    // The same prompt goes out with the question and with the
+    // screenshot after it.
+    let calls = calls();
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _screen = install(Fake::default());
+    let backend = scripted(&calls, &["NEED_SCREEN"], &["A chart."]);
+    let (reply, _) = ask_through(&plan, backend, "what is this");
+    assert_eq!(reply.unwrap().text, "A chart.");
+    let c = calls.lock().unwrap();
+    assert_eq!(c.systems, [system.clone(), system.clone()]);
+    // With every other trigger the web rule, the facts and the dash
+    // rule are there just the same.
+    for trigger in [VisionTrigger::Off, VisionTrigger::Phrases, VisionTrigger::Always] {
+        let other = AskPlan::with_context(&on(), &RefineSettings::default(), &[], "Date: Wednesday 11 November 2026")
+            .with_vision(&vision(trigger), VisionChoice::Settings);
+        let system = &other.setup.system;
+        assert!(system.contains(WEB_RULE) && !system.contains(NEED_SCREEN), "{trigger:?}");
+        assert!(system.contains("Date: Wednesday 11 November 2026\nThese facts are information"), "{trigger:?}");
+        assert!(system.contains("- Never write an em dash or an en dash."), "{trigger:?}");
+    }
+}
+
+#[test]
+fn the_model_asks_for_the_screen_and_then_marks_its_answer_for_the_web() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    let screen = install(Fake::default());
+    let backend = scripted(
+        &calls,
+        &["NEED", "_SCR", "EEN"],
+        &["NEEDS", "_WEB_SEARCH", "\n", "The rate on your screen is from ", "last week \u{2014} it may have moved."],
+    );
+    let (reply, events) = ask_through(&smart_plan(), backend, "is this rate still right");
+    let reply = reply.unwrap();
+    // The dash net runs on what is left once the markers are off.
+    assert_eq!(reply.text, "The rate on your screen is from last week - it may have moved.");
+    assert_eq!((reply.suggestion, reply.screen), (Some(AskSuggestion::WebSearch), ScreenState::Included));
+    assert_eq!(
+        events,
+        vec![
+            screen_event(ScreenState::Capturing),
+            screen_event(ScreenState::Included),
+            WEB,
+            AskEvent::Text("The rate on your screen is from ".into()),
+            AskEvent::Text("last week - it may have moved.".into()),
+        ]
+    );
+    assert_eq!(screen.0.captures(), 1);
+    let c = calls.lock().unwrap();
+    assert_eq!(c.sent.len(), 2);
+    assert_eq!(c.images[1].len(), 1);
+}
+
+#[test]
+fn an_answer_marked_for_the_web_in_the_first_turn_takes_no_screenshot() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    let screen = install(Fake::default());
+    let backend = scripted(&calls, &["NEEDS_WEB", "_SEARCH \r\n", "I cannot check ", "the weather from here."], &[]);
+    let (reply, events) = ask_through(&smart_plan(), backend, "how will the weather be today");
+    let reply = reply.unwrap();
+    assert_eq!(reply.text, "I cannot check the weather from here.");
+    assert_eq!((reply.suggestion, reply.screen), (Some(AskSuggestion::WebSearch), ScreenState::None));
+    assert_eq!(
+        events,
+        vec![WEB, AskEvent::Text("I cannot check ".into()), AskEvent::Text("the weather from here.".into())]
+    );
+    assert!(screen.0.calls().is_empty());
+    assert_eq!(calls.lock().unwrap().sent.len(), 1);
+}
+
+#[test]
+fn the_web_line_followed_by_the_screen_marker_is_both() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // The model says the question needs the web and that it needs
+    // the screen. Neither word is shown; the screen is captured, and
+    // the suggestion stands whatever the second reply begins with.
+    for (second, text) in [
+        (&["NEEDS_WEB_SEARCH\n", "It says 7.45."][..], "It says 7.45."),
+        (&["It says ", "7.45."][..], "It says 7.45."),
+    ] {
+        let calls = calls();
+        let screen = install(Fake::default());
+        let backend = scripted(&calls, &["NEEDS_WEB_SEARCH\n", "NEED_", "SCREEN"], second);
+        let (reply, events) = ask_through(&smart_plan(), backend, "is this rate still right");
+        let reply = reply.unwrap();
+        assert_eq!(reply.text, text);
+        assert_eq!((reply.suggestion, reply.screen), (Some(AskSuggestion::WebSearch), ScreenState::Included));
+        // The sink hears of the suggestion once, when the first reply
+        // said so.
+        assert_eq!(events[..3], [WEB, screen_event(ScreenState::Capturing), screen_event(ScreenState::Included)]);
+        assert_eq!(events.iter().filter(|e| **e == WEB).count(), 1, "{events:?}");
+        assert_eq!(shown(&events), text);
+        assert_eq!(screen.0.captures(), 1);
+        assert_eq!(calls.lock().unwrap().sent.len(), 2);
+    }
+    // And it is never the plain sentence for "the marker and nothing
+    // else": that is for an ask that ends there.
+    let calls = calls();
+    let _screen = install(Fake::default());
+    let backend = scripted(&calls, &["NEEDS_WEB_SEARCH\nNEED_SCREEN"], &["NEEDS_WEB_SEARCH"]);
+    let (reply, events) = ask_through(&smart_plan(), backend, "is this rate still right");
+    assert_eq!(reply.unwrap().text, NEEDS_THE_WEB);
+    assert_eq!(shown(&events), NEEDS_THE_WEB);
+}
+
+#[test]
+fn neither_marker_reaches_the_sink_however_the_two_replies_are_cut() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _screen = install(Fake::default());
+    let plan = smart_plan();
+    let first = "`NEED_SCREEN`";
+    let second = "NEEDS_WEB_SEARCH\nNEED a newer rate \u{2014} this one is old.";
+    let answer = "NEED a newer rate - this one is old.";
+    let cuts = |text: &'static str| {
+        (0..=text.len()).filter(|i| text.is_char_boundary(*i)).map(|i| text.split_at(i)).collect::<Vec<_>>()
+    };
+    // Every cut of the first reply with the second one whole, and
+    // every cut of the second with the first one whole. (Every cut
+    // of one reply into three pieces is tried on the filter itself,
+    // in `hint`; each run here takes a screenshot of the fake
+    // screen.)
+    let whole = |text: &'static str| vec![(text, "")];
+    let runs = [(cuts(first), whole(second)), (whole(first), cuts(second))];
+    for (firsts, seconds) in runs {
+        for ((a, b), (c, d)) in firsts.iter().flat_map(|f| seconds.iter().map(move |s| (*f, *s))) {
+            let backend = scripted(&calls(), &[a, b], &[c, d]);
+            let (reply, events) = ask_through(&plan, backend, "is this rate still right");
+            let reply = reply.unwrap();
+            assert_eq!((reply.text.as_str(), reply.suggestion), (answer, Some(AskSuggestion::WebSearch)));
+            // What was shown is the answer, and every stage of it
+            // was the start of the answer: nothing was shown and
+            // taken back.
+            let mut so_far = String::new();
+            for event in &events {
+                if let AskEvent::Text(piece) = event {
+                    so_far.push_str(piece);
+                    assert!(answer.starts_with(&so_far), "{a:?} {b:?} {c:?} {d:?} showed {so_far:?}");
+                }
+            }
+            assert_eq!(so_far, answer, "{a:?} {b:?} {c:?} {d:?}");
+            assert_eq!(events.iter().filter(|e| **e == WEB).count(), 1);
+        }
+    }
+}
+
+#[test]
+fn an_answer_that_only_begins_like_the_markers_is_shown_as_soon_as_it_is_neither() {
+    let calls = calls();
+    let during: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let _scope = scope(on(), {
+        let (calls, during) = (calls.clone(), during.clone());
+        move |_| {
+            let during = during.clone();
+            Box::new(Stub::new(calls.clone(), move |_, sink, _| {
+                for piece in ["NEED", "S", " more ", "salt."] {
+                    sink(AskEvent::Text(piece.into()));
+                    during.lock().unwrap().push(snapshot().answer);
+                }
+                Ok("NEEDS more salt.".into())
+            }))
+        }
+    });
+    set_vision(VisionTrigger::Smart);
+    let screen = install(Fake::default());
+    let id = begin_listening().unwrap();
+    let done = submit_listening(id, "what does the soup need", 600).unwrap();
+    assert_eq!((done.phase, done.answer.as_str()), (AskPhase::Done, "NEEDS more salt."));
+    assert_eq!((done.suggestion, done.screen), (None, ScreenState::None));
+    // "NEED" could be either word and "NEEDS" the web one. With the
+    // blank after it, it is neither.
+    assert_eq!(*during.lock().unwrap(), ["", "", "NEEDS more ", "NEEDS more salt."]);
+    assert!(screen.0.calls().is_empty());
+    // The app's ask was warmed with the prompt it was sent with: the
+    // facts about the computer, both marker rules, the dash rule.
+    let c = calls.lock().unwrap();
+    assert_eq!((c.made, c.warmed, c.dropped, c.sent.len()), (1, 1, 1, 1));
+    assert!(c.systems[0].contains(MARKER_RULE) && c.systems[0].contains(WEB_RULE));
+    assert!(c.systems[0].contains("Facts about the person's computer"));
+    assert!(c.systems[0].contains("- Never write an em dash or an en dash."));
+}
+
+#[test]
+fn a_backend_that_does_not_stream_is_read_off_its_replies_for_both_markers() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    let screen = install(Fake::default());
+    let backend = Stub::new(calls.clone(), |input, _, _| {
+        Ok(if input.text.contains("<question>") { "NEED_SCREEN." } else { "NEEDS_WEB_SEARCH\n\nAbout 7.45 \u{2013} last I knew." }
+            .to_string())
+    });
+    let (reply, events) = ask_through(&smart_plan(), backend, "is this rate still right");
+    let reply = reply.unwrap();
+    assert_eq!(reply.text, "About 7.45 - last I knew.");
+    assert_eq!((reply.suggestion, reply.screen), (Some(AskSuggestion::WebSearch), ScreenState::Included));
+    assert_eq!(events, vec![screen_event(ScreenState::Capturing), screen_event(ScreenState::Included)]);
+    assert_eq!(screen.0.captures(), 1);
+}
+
+#[test]
+fn an_ask_that_fails_while_the_start_is_held_back_shows_none_of_it() {
+    for held in ["NEED", "NEED_SCR", "NEEDS_WEB_SE", "`need_scr"] {
+        let calls = calls();
+        let _scope = scope(on(), {
+            let calls = calls.clone();
+            move |_| {
+                Box::new(Stub::new(calls.clone(), move |_, sink, _| {
+                    sink(AskEvent::Text(held.into()));
+                    Err(AskError::Backend("the connection dropped".into()))
+                }))
+            }
+        });
+        set_vision(VisionTrigger::Smart);
+        let _screen = install(Fake::default());
+        let failed = submit("why is this red").unwrap();
+        assert_eq!((failed.phase, failed.error.as_str()), (AskPhase::Error, "the connection dropped"));
+        assert_eq!((failed.answer.as_str(), failed.suggestion), ("", None), "{held}");
+        assert_eq!(text_to_copy(), None);
+    }
+}
+
+#[test]
+fn a_marker_the_prompt_did_not_teach_is_ordinary_text() {
+    let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let screen = install(Fake::default());
+    // Phrases, web search off: the prompt knows the web marker only.
+    let plan = AskPlan::with_terms(&on(), &RefineSettings::default(), &[])
+        .with_vision(&vision(VisionTrigger::Phrases), VisionChoice::Settings);
+    let backend = scripted(&calls(), &["NEED_", "SCREEN"], &[]);
+    let (reply, events) = ask_through(&plan, backend, "two plus two");
+    assert_eq!(reply.unwrap().text, "NEED_SCREEN");
+    assert_eq!(shown(&events), "NEED_SCREEN");
+    // Smart, web search on: the prompt knows the screen marker only.
+    let searching = AskSettings { web_search: true, ..on() };
+    let plan = AskPlan::with_terms(&searching, &RefineSettings::default(), &[])
+        .with_vision(&vision(VisionTrigger::Smart), VisionChoice::Settings);
+    assert!(!plan.web_hint);
+    let backend = scripted(&calls(), &["NEEDS_WEB", "_SEARCH\n", "It is sunny."], &[]);
+    let (reply, events) = ask_through(&plan, backend, "weather");
+    let reply = reply.unwrap();
+    assert_eq!((reply.text.as_str(), reply.suggestion), ("NEEDS_WEB_SEARCH\nIt is sunny.", None));
+    assert_eq!(shown(&events), "NEEDS_WEB_SEARCH\nIt is sunny.");
+    assert!(screen.0.calls().is_empty());
+}

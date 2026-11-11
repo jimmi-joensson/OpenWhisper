@@ -33,8 +33,36 @@
 //! is text in, text out within a few seconds. An answer is long, so
 //! it streams ([`AskEvent`]); it can be cancelled ([`CancelFlag`]);
 //! and a backend is a conversation that can take more than one turn
-//! ([`AskBackend`]), which is how the screen will be sent after the
-//! question in TASK-98.
+//! ([`AskBackend`]), which is how the screen is sent after the
+//! question when the model asks for it.
+//!
+//! **The screen (Vision, TASK-98).** An ask can carry a screenshot of
+//! the display the person is working on. Whether it does is decided
+//! here, on the machine, from the Vision settings and the question's
+//! own words ([`crate::settings::VisionSettings`], [`VisionChoice`]):
+//!
+//! - no capture: the ask is what it always was;
+//! - capture (a phrase matched, or every ask carries the screen): the
+//!   screenshot is taken and goes out with the question;
+//! - smart, no phrase: the question goes out as text, with one extra
+//!   rule in the prompt: reply [`NEED_SCREEN`] and nothing else when
+//!   the screen is needed. Only then is the screen captured and sent
+//!   as a second turn of the same conversation. That marker never
+//!   reaches the panel: text is held back until it is clear that the
+//!   reply is not it.
+//!
+//! When a screenshot was wanted and could not be taken (an app on the
+//! never-capture list is in front, no permission, no display), the
+//! ask goes on as text, the snapshot says why ([`ScreenState`],
+//! [`AskSnapshot::screen_notice`]), and the model is told why, so the
+//! answer says that the screen was not seen instead of guessing.
+//!
+//! The image exists from the capture until the backend call that
+//! sends it returns, in memory only. This module is the only code
+//! that can ask for one: [`crate::vision::capture_for_ask`] takes an
+//! [`AskCaptureToken`], which only this module can make. The
+//! dictation pipeline ends in [`submit_listening`] with a transcript
+//! and has no other way in.
 //!
 //! Entry points:
 //!
@@ -52,7 +80,8 @@
 //! - the plain function for everything else (the CLI, the eval set):
 //!   [`answer`], or [`AskPlan`] when the backend should be warmed
 //!   first ([`AskPlan::send_and_record`] to keep what the app keeps
-//!   of an ask). No global state.
+//!   of an ask). No global state. Such an ask does not look at the
+//!   screen unless its caller says so ([`AskPlan::with_vision`]).
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -72,13 +101,20 @@ pub mod claude_cli;
 pub mod eval;
 pub mod openai_compat;
 pub mod prompt;
+mod screen;
 
 pub use crate::refine::CallUsage;
+pub use prompt::ScreenPrompt;
+pub use screen::{AskCaptureToken, NEED_SCREEN, ScreenState, VisionChoice};
+
+use crate::settings::VisionSettings;
+use screen::{Shot, Step};
 
 // --- what goes in and what comes out -------------------------------
 
-/// An image sent along with a question. Empty until the screen is
-/// sent (TASK-98); the wire format of both backends is in place.
+/// An image sent along with a question: the screenshot of an ask
+/// that includes the screen (TASK-98). It lives until the backend
+/// call that sends it returns.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AskImage {
     /// MIME type, e.g. `image/png`.
@@ -118,6 +154,11 @@ pub enum AskEvent {
     Searching { query: String },
     /// That search is back; the model carries on.
     SearchDone,
+    /// What is happening with the screen: it is being captured, a
+    /// screenshot goes out with the question, or there is none and
+    /// `notice` says why (one sentence for the person). Never carries
+    /// the image.
+    Screen { state: ScreenState, notice: String },
 }
 
 /// A finished answer.
@@ -141,6 +182,14 @@ pub struct AskReply {
     /// made ("web search is not available with this backend"). Empty
     /// most of the time.
     pub notice: String,
+    /// What became of the screen in this ask: `included` when a
+    /// screenshot went out with the question, `blocked` or
+    /// `unavailable` when one was wanted and there is none, `none`
+    /// when the ask never involved the screen.
+    pub screen: ScreenState,
+    /// Why there is no screenshot, for the person. Empty unless
+    /// `screen` is `blocked` or `unavailable`.
+    pub screen_notice: String,
 }
 
 /// Why there is no answer.
@@ -316,6 +365,8 @@ impl<'a> Turn<'a> {
             usage,
             warm_lead_ms: warm_lead.map(|d| d.as_millis() as u64),
             notice: notice.to_string(),
+            screen: ScreenState::None,
+            screen_notice: String::new(),
         }
     }
 }
@@ -348,6 +399,23 @@ pub struct AskPlan {
     pub notice: String,
     claude_cli: ClaudeCliSettings,
     openai: OpenAiSettings,
+    /// What the system prompt is made of, to make it again once it is
+    /// known whether a screenshot goes along.
+    instructions: String,
+    terms: Vec<String>,
+    today: String,
+    /// Whether and when this ask includes the screen.
+    vision: screen::AskVision,
+}
+
+/// What an ask has learned about the screen so far.
+#[derive(Default)]
+struct ScreenSeen {
+    state: ScreenState,
+    /// For the person; empty unless a capture was refused.
+    notice: String,
+    /// For the model, when a capture was refused.
+    for_model: Option<String>,
 }
 
 impl AskPlan {
@@ -374,7 +442,62 @@ impl AskPlan {
             notice: notice.to_string(),
             claude_cli: refine.claude_cli.clone(),
             openai: refine.openai.clone(),
+            instructions: ask.instructions.clone(),
+            terms: terms.to_vec(),
+            today,
+            vision: screen::AskVision::default(),
         }
+    }
+
+    /// The same plan with the screen in play (TASK-98). A plan starts
+    /// without it ([`VisionChoice::None`]): an ask outside the app
+    /// never looks at the screen unless its caller says so here.
+    ///
+    /// - [`VisionChoice::Settings`]: as `vision` says. Its trigger
+    ///   decides per question ([`crate::vision::decide`]); to try
+    ///   another trigger, pass settings with that trigger set.
+    /// - [`VisionChoice::Force`]: this ask takes a screenshot
+    ///   (`openwhisper ask run --screen`).
+    /// - [`VisionChoice::None`]: no screenshot, whatever `vision` says.
+    ///
+    /// The never-capture list of `vision` and every other safeguard
+    /// of [`crate::vision::capture_for_ask`] apply to all of them.
+    ///
+    /// [`AskPlan::setup`] becomes the setup a backend is best warmed
+    /// with: the prompt for what the settings alone say will happen.
+    /// When a question turns out otherwise (a phrase matched, so a
+    /// screenshot goes along after all), [`AskPlan::send`] uses the
+    /// prompt for that, and a backend warmed for the other one starts
+    /// over by itself.
+    ///
+    /// Without the cargo feature `vision` the settings never capture,
+    /// and a forced capture ends as "no screenshot" with a reason.
+    pub fn with_vision(mut self, vision: &VisionSettings, choice: VisionChoice) -> Self {
+        self.vision = screen::AskVision { choice, settings: vision.clone().cleaned() };
+        self.setup.system = self.system_for(self.screen_prompt(false));
+        self
+    }
+
+    /// Whether this plan may include the screen, as given to
+    /// [`AskPlan::with_vision`].
+    pub fn vision_choice(&self) -> VisionChoice {
+        self.vision.choice
+    }
+
+    /// What the prompt says about the screen: by what the settings
+    /// alone say will happen, or, when they expect no screenshot and
+    /// there is one after all, the prompt for a screenshot.
+    fn screen_prompt(&self, has_image: bool) -> ScreenPrompt {
+        match self.vision.expected() {
+            Step::AskModel => ScreenPrompt::OnRequest,
+            Step::Capture => ScreenPrompt::Attached,
+            Step::NoCapture if has_image => ScreenPrompt::Attached,
+            Step::NoCapture => ScreenPrompt::None,
+        }
+    }
+
+    fn system_for(&self, screen: ScreenPrompt) -> String {
+        prompt::system_prompt_for(&self.instructions, &self.terms, self.setup.web_search, &self.today, screen)
     }
 
     /// The plan for these settings and the current dictionary.
@@ -416,8 +539,32 @@ impl AskPlan {
     /// Ask `question` through `backend`: the question is fenced
     /// ([`prompt::user_message`]), the answer streams into `sink`.
     /// `question.text` is the question as heard or typed.
+    ///
+    /// With the screen in play ([`AskPlan::with_vision`]) this is
+    /// also where the screenshot is taken and sent; see the module
+    /// docs. The sink then also gets [`AskEvent::Screen`], and the
+    /// reply says what became of the screen ([`AskReply::screen`]).
+    /// Images the caller puts in `question.images` are sent as they
+    /// are and stand for the screen: the prompt is the one for an ask
+    /// with a screenshot, and nothing is captured on top.
     pub fn send(
         &self,
+        backend: &mut dyn AskBackend,
+        question: &AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+    ) -> Result<AskReply, AskError> {
+        // A screenshot may only be taken while this guard lives.
+        let _ask = screen::OneShot::begin();
+        self.converse(None, backend, question, sink, cancel)
+    }
+
+    /// One ask from the question to the answer: one turn, or two when
+    /// the model asked for the screen. `session` is the id of the
+    /// app's ask this is, `None` outside the app's session.
+    fn converse(
+        &self,
+        session: Option<u64>,
         backend: &mut dyn AskBackend,
         question: &AskInput,
         sink: &mut dyn FnMut(AskEvent),
@@ -426,18 +573,68 @@ impl AskPlan {
         if question.text.trim().is_empty() && question.images.is_empty() {
             return Err(AskError::Backend(NO_QUESTION.to_string()));
         }
-        let input = AskInput { text: prompt::user_message(&question.text), images: question.images.clone() };
-        let result = backend.send(&self.setup, &input, sink, cancel, self.timeout);
+        let started = Instant::now();
+        let mut seen = ScreenSeen::default();
+        let mut images = question.images.clone();
+        let step = if images.is_empty() { self.vision.decide(&question.text) } else { Step::NoCapture };
+        if step == Step::Capture {
+            images.extend(self.capture(session, &mut seen, sink));
+            if cancel.is_cancelled() {
+                return Err(AskError::Cancelled);
+            }
+        }
+        let had_image = !images.is_empty();
+        let kind = self.screen_prompt(had_image);
+        let setup = AskSetup { system: self.system_for(kind), ..self.setup.clone() };
+        // Only where the prompt taught the model the marker can the
+        // reply be one.
+        let gated = kind == ScreenPrompt::OnRequest;
+        let text = match &seen.for_model {
+            Some(why) => prompt::user_message_with_note(&question.text, &prompt::no_screenshot_note(why)),
+            None => prompt::user_message(&question.text),
+        };
+        let first = self.turn(backend, &setup, AskInput { text, images }, sink, cancel, gated);
+        let mut turns = 1;
+        let result = first.and_then(|(reply, wants_screen)| {
+            if !wants_screen {
+                return Ok(reply);
+            }
+            // The model cannot answer without the screen. Capture it
+            // now, unless that was already tried for this ask.
+            let follow_up = if had_image {
+                AskInput::text(prompt::SCREEN_ALREADY_SENT)
+            } else if let Some(why) = &seen.for_model {
+                AskInput::text(prompt::no_screen_follow_up(why))
+            } else {
+                match self.capture(session, &mut seen, sink) {
+                    Some(image) => AskInput { text: prompt::SCREEN_FOLLOWS.to_string(), images: vec![image] },
+                    None => AskInput::text(prompt::no_screen_follow_up(seen.for_model.as_deref().unwrap_or_default())),
+                }
+            };
+            if cancel.is_cancelled() {
+                return Err(AskError::Cancelled);
+            }
+            turns = 2;
+            let before = started.elapsed();
+            let (second, again) = self.turn(backend, &setup, follow_up, sink, cancel, true)?;
+            if again {
+                // Asked for the screen twice: there is no answer.
+                return Err(AskError::Backend(NO_ANSWER.to_string()));
+            }
+            Ok(both_turns(reply, second, before, started.elapsed()))
+        });
         // Lengths only, never the text: verbose logs end up in bug
         // reports.
         crate::verbose_log!(
-            "[ow.ask] backend={} ok={} chars_in={} chars_out={} first_text_ms={:?} ms={:?}",
+            "[ow.ask] backend={} ok={} chars_in={} chars_out={} first_text_ms={:?} ms={:?} turns={} screen={}",
             backend.id(),
             result.is_ok(),
             question.text.trim().chars().count(),
             result.as_ref().map_or(0, |r| r.text.chars().count()),
             result.as_ref().ok().and_then(|r| r.first_text_ms),
-            result.as_ref().ok().map(|r| r.elapsed_ms)
+            result.as_ref().ok().map(|r| r.elapsed_ms),
+            turns,
+            seen.state.as_str()
         );
         let mut reply = result?;
         if reply.text.is_empty() {
@@ -446,7 +643,76 @@ impl AskPlan {
         if reply.notice.is_empty() {
             reply.notice = self.notice.clone();
         }
+        reply.screen = seen.state;
+        reply.screen_notice = seen.notice;
         Ok(reply)
+    }
+
+    /// Take the screenshot for this ask and say on the sink what is
+    /// happening. `None` when there is none; `seen` then holds why.
+    fn capture(
+        &self,
+        session: Option<u64>,
+        seen: &mut ScreenSeen,
+        sink: &mut dyn FnMut(AskEvent),
+    ) -> Option<AskImage> {
+        sink(AskEvent::Screen { state: ScreenState::Capturing, notice: String::new() });
+        // The proof that an ask is asking. Made here, used once.
+        let token = match session {
+            Some(id) => AskCaptureToken::for_session(id),
+            None => AskCaptureToken::for_one_shot(),
+        };
+        let (image, state, notice, for_model) = match screen::take(&token, &self.vision.settings) {
+            Shot::Image(image) => (Some(image), ScreenState::Included, String::new(), None),
+            Shot::Missing { state, notice, for_model } => (None, state, notice, Some(for_model)),
+        };
+        seen.state = state;
+        seen.notice = notice.clone();
+        seen.for_model = for_model;
+        sink(AskEvent::Screen { state, notice });
+        image
+    }
+
+    /// One turn. `input` is taken by value and dropped the moment the
+    /// backend call returns: a screenshot in it does not outlive the
+    /// request that sent it. With `gated`, the marker is kept from the
+    /// sink; the flag in the result says that the reply was the
+    /// marker.
+    fn turn(
+        &self,
+        backend: &mut dyn AskBackend,
+        setup: &AskSetup,
+        input: AskInput,
+        sink: &mut dyn FnMut(AskEvent),
+        cancel: &CancelFlag,
+        gated: bool,
+    ) -> Result<(AskReply, bool), AskError> {
+        if !gated {
+            let result = backend.send(setup, &input, sink, cancel, self.timeout);
+            drop(input);
+            return result.map(|reply| (reply, false));
+        }
+        let mut gate = screen::MarkerGate::new();
+        let result = backend.send(
+            setup,
+            &input,
+            &mut |event| {
+                if let Some(event) = gate.pass(event) {
+                    sink(event);
+                }
+            },
+            cancel,
+            self.timeout,
+        );
+        drop(input);
+        let reply = result?;
+        if gate.saw_marker() || screen::is_marker(&reply.text) {
+            return Ok((reply, true));
+        }
+        if let Some(event) = gate.flush() {
+            sink(event);
+        }
+        Ok((reply, false))
     }
 
     /// [`AskPlan::send`], and then what the app keeps of an ask: its
@@ -478,6 +744,38 @@ impl AskPlan {
         };
         outcome.record(history);
         result
+    }
+}
+
+/// The reply of an ask that took two turns (the model asked for the
+/// screen, then answered): the answer of the second, the time and the
+/// tokens of both. `before` is how long after the question the second
+/// turn was sent, `total` the whole time.
+fn both_turns(first: AskReply, second: AskReply, before: Duration, total: Duration) -> AskReply {
+    let usage = match (first.usage, second.usage) {
+        (Some(a), Some(b)) => Some(CallUsage {
+            tokens_in: a.tokens_in + b.tokens_in,
+            tokens_cached: a.tokens_cached + b.tokens_cached,
+            tokens_out: a.tokens_out + b.tokens_out,
+            // The Claude CLI reports the cost of the conversation so
+            // far with every turn, so the later figure holds both.
+            cost_usd: match (a.cost_usd, b.cost_usd) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, y) => y.or(x),
+            },
+            plan: b.plan.or(a.plan),
+        }),
+        (a, b) => b.or(a),
+    };
+    AskReply {
+        text: second.text,
+        first_text_ms: second.first_text_ms.map(|ms| ms + before.as_millis() as u64),
+        elapsed_ms: total.as_millis() as u64,
+        usage,
+        warm_lead_ms: first.warm_lead_ms,
+        notice: if second.notice.is_empty() { first.notice } else { second.notice },
+        screen: ScreenState::None,
+        screen_notice: String::new(),
     }
 }
 
@@ -646,6 +944,15 @@ pub struct AskSnapshot {
     /// From sending the question to the first text.
     pub first_text_ms: Option<u64>,
     pub usage: Option<CallUsage>,
+    /// What is happening with the screen in this ask: `capturing`
+    /// while the screenshot is taken (show it on the pill),
+    /// `included` once one goes out with the question, `blocked` or
+    /// `unavailable` when one was wanted and there is none, `none`
+    /// otherwise. Stays as it ended when the ask is done.
+    pub screen: ScreenState,
+    /// Why there is no screenshot, as one sentence for the person.
+    /// Empty unless `screen` is `blocked` or `unavailable`.
+    pub screen_notice: String,
     /// Goes up on every change, so a shell can emit only on change.
     pub version: u64,
 }
@@ -773,7 +1080,7 @@ pub fn warm_listening(id: u64) {
         return;
     }
     let started = Instant::now();
-    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    let plan = session_plan();
     let mut backend = plan.backend();
     backend.warm(&plan.setup);
     crate::verbose_log!(
@@ -789,6 +1096,20 @@ pub fn warm_listening(id: u64) {
         }
     });
     drop(slot);
+}
+
+/// The plan of the app's ask as the settings are right now, the
+/// Vision settings included.
+fn session_plan() -> AskPlan {
+    AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings())
+        .with_vision(&crate::settings::current_vision_settings(), VisionChoice::Settings)
+}
+
+/// The app's ask `id` is with the model right now. What a capture
+/// token of that ask is checked against.
+#[cfg_attr(not(feature = "vision"), allow(dead_code))]
+pub(crate) fn is_running(id: u64) -> bool {
+    read(|s| s.running(id))
 }
 
 /// [`mark_listening`] and [`warm_listening`] in one call, on the
@@ -878,11 +1199,20 @@ fn run(id: u64, question: &str, warm: Option<Warm>) -> AskSnapshot {
                 s.snap.phase = AskPhase::Error;
                 s.snap.error = STOPPED.to_string();
                 s.snap.searching = false;
+                settle_screen(&mut s.snap);
                 s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
             }
         });
     }
     snapshot()
+}
+
+/// The ask ended without an answer: a capture that was under way is
+/// not any more.
+fn settle_screen(snap: &mut AskSnapshot) {
+    if snap.screen == ScreenState::Capturing {
+        snap.screen = ScreenState::None;
+    }
 }
 
 /// [`run`] without the net under it.
@@ -895,7 +1225,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
         drop(late);
         return;
     }
-    let plan = AskPlan::new(&crate::settings::current_ask_settings(), &crate::settings::current_refine_settings());
+    let plan = session_plan();
     // The backend warmed while the person talked is used when it was
     // warmed for exactly this plan, which is every ask where no
     // setting or dictionary term changed meanwhile.
@@ -942,10 +1272,14 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     s.snap.search_query = query;
                 }
                 AskEvent::SearchDone => s.snap.searching = false,
+                AskEvent::Screen { state, notice } => {
+                    s.snap.screen = state;
+                    s.snap.screen_notice = notice;
+                }
             }
         });
     };
-    let result = plan.send(backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
+    let result = plan.converse(Some(id), backend.as_mut(), &AskInput::text(question), &mut sink, &cancel);
     // One ask is one conversation: the process goes with the answer.
     drop(backend);
     let elapsed_ms = sent.elapsed().as_millis() as u64;
@@ -967,14 +1301,18 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                         s.snap.notice = reply.notice.clone();
                         s.snap.first_text_ms = s.snap.first_text_ms.or(reply.first_text_ms);
                         s.snap.usage = reply.usage.clone();
+                        s.snap.screen = reply.screen;
+                        s.snap.screen_notice = reply.screen_notice.clone();
                         s.snap.phase = AskPhase::Done;
                         true
                     }
                     Err(AskError::Cancelled) => {
+                        settle_screen(&mut s.snap);
                         s.snap.phase = AskPhase::Cancelled;
                         false
                     }
                     Err(e) => {
+                        settle_screen(&mut s.snap);
                         s.snap.error = error_text(e, &plan);
                         s.snap.phase = AskPhase::Error;
                         false
@@ -1043,7 +1381,8 @@ impl Outcome<'_> {
             self.elapsed_ms,
         ));
         if let (true, true, Ok(reply)) = (history, self.accepted, self.result) {
-            keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms);
+            let screen = reply.screen == ScreenState::Included;
+            keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms, screen);
         }
     }
 }
@@ -1102,8 +1441,10 @@ fn run_record(
 
 /// With transcript history on, keep the finished ask: the question as
 /// the entry's text, the answer under it ([`crate::history`]).
-/// Cancelled and failed asks are not kept.
-fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64) {
+/// Cancelled and failed asks are not kept. `screen`: a screenshot
+/// went out with the question, which the entry says (the image itself
+/// is kept nowhere).
+fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, screen: bool) {
     let settings = crate::settings::current_history_settings();
     let Some(dir) = crate::history::current_dir() else {
         return;
@@ -1119,6 +1460,7 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64) {
             mode: "",
             kind: crate::history::KIND_ASK,
             answer: Some(answer),
+            screen,
         };
         if let Err(e) = crate::history::append(&dir, &entry) {
             eprintln!("[history] could not save the ask: {e}");
@@ -1161,6 +1503,7 @@ fn cancel_current(only: Option<u64>) -> bool {
                 s.cancel.cancel();
                 s.snap.phase = AskPhase::Cancelled;
                 s.snap.searching = false;
+                settle_screen(&mut s.snap);
                 s.snap.elapsed_ms = s.sent.take().map_or(0, |t| t.elapsed().as_millis() as u64);
                 (true, None)
             }
@@ -1278,6 +1621,7 @@ pub(crate) mod test_support {
             }
             crate::settings::set_ask_settings_cache(AskSettings::default());
             crate::settings::set_refine_settings_cache(RefineSettings::default());
+            crate::settings::set_vision_settings_cache(VisionSettings::default());
         }
     }
 
@@ -1298,6 +1642,7 @@ pub(crate) mod test_support {
         }
         crate::settings::set_ask_settings_cache(settings);
         crate::settings::set_refine_settings_cache(RefineSettings::default());
+        crate::settings::set_vision_settings_cache(VisionSettings::default());
         Scope { _guard: guard }
     }
 
@@ -1320,6 +1665,9 @@ pub(crate) mod test_support {
         pub dropped: usize,
         pub last_system: String,
         pub last_images: usize,
+        /// Per turn: the system prompt and the sizes of the images.
+        pub systems: Vec<String>,
+        pub images: Vec<Vec<usize>>,
     }
 
     type Script =
@@ -1376,6 +1724,8 @@ pub(crate) mod test_support {
                 c.sent.push(input.text.clone());
                 c.last_system = setup.system.clone();
                 c.last_images = input.images.len();
+                c.systems.push(setup.system.clone());
+                c.images.push(input.images.iter().map(|image| image.data.len()).collect());
             }
             let text = (self.script)(input, sink, cancel)?;
             Ok(AskReply {
@@ -1385,6 +1735,7 @@ pub(crate) mod test_support {
                 usage: Some(CallUsage { tokens_in: 900, tokens_cached: 800, tokens_out: 40, cost_usd: Some(0.002), plan: None }),
                 warm_lead_ms: Some(2500),
                 notice: String::new(),
+                ..AskReply::default()
             })
         }
     }
@@ -1400,3 +1751,5 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "vision"))]
+mod screen_tests;

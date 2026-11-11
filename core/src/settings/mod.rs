@@ -47,6 +47,11 @@
 //!   effort and timeout of Ask ([`AskSettings`], TASK-97). Off by
 //!   default. The backend is the one in `refine`. Raw JSON in the
 //!   envelope for the same reason as `refine`.
+//! - `vision`: when an ask includes a screenshot, the phrases that
+//!   ask for one and the apps that are never captured
+//!   ([`VisionSettings`], TASK-98). Raw JSON in the envelope for the
+//!   same reason as `refine`; the block itself is read field by field
+//!   and settles every doubt on the careful side.
 //!
 //! Migration: the legacy `hotkey` (single-slot) field is read on first
 //!  load after upgrade and folded into the current `hotkeys` shape;
@@ -93,6 +98,12 @@ mod modes;
 pub use modes::{
     AppDefault, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, MODE_INSTRUCTIONS_MAX_CHARS, MODE_NAME_MAX_CHARS,
     MODES_MAX, Mode, ModesSettings, app_key, mode_name_key, mode_slug,
+};
+
+mod vision;
+pub use vision::{
+    NeverCaptureApp, VISION_APP_FIELD_MAX_CHARS, VISION_NEVER_CAPTURE_MAX, VISION_PHRASE_MAX_CHARS,
+    VISION_PHRASES_MAX, VisionSettings, VisionTrigger, default_never_capture, default_phrases,
 };
 
 mod refine;
@@ -269,6 +280,8 @@ struct SettingsFile {
     modes: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ask: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vision: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +438,7 @@ static REFINE_CURRENT: Mutex<Option<RefineSettings>> = Mutex::new(None);
 static HISTORY_CURRENT: Mutex<Option<HistorySettings>> = Mutex::new(None);
 static MODES_CURRENT: Mutex<Option<ModesSettings>> = Mutex::new(None);
 static ASK_CURRENT: Mutex<Option<AskSettings>> = Mutex::new(None);
+static VISION_CURRENT: Mutex<Option<VisionSettings>> = Mutex::new(None);
 
 /// Process-global mirror of `pill.follow_active_screen`. The watcher
 /// thread reads this lock-free on every 500 ms tick — a `Mutex` would
@@ -626,6 +640,7 @@ fn save_settings_locked(path: &Path, settings: HotkeySettings) -> Result<(), Str
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = CURRENT.lock() {
@@ -671,6 +686,7 @@ pub fn save_stats_settings(path: &Path, settings: StatsSettings) -> Result<(), S
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = STATS_CURRENT.lock() {
@@ -718,6 +734,7 @@ pub fn save_audio_settings(path: &Path, settings: AudioSettings) -> Result<(), S
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = AUDIO_CURRENT.lock() {
@@ -765,6 +782,7 @@ pub fn save_behavior_settings(
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = BEHAVIOR_CURRENT.lock() {
@@ -793,6 +811,7 @@ pub fn save_pill_settings(path: &Path, settings: PillSettings) -> Result<(), Str
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     FOLLOW_ACTIVE_SCREEN.store(settings.follow_active_screen, Ordering::Relaxed);
@@ -843,6 +862,7 @@ pub fn save_performance_settings(
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     KEEP_MODELS_WARM.store(settings.keep_models_warm, Ordering::Relaxed);
@@ -918,6 +938,7 @@ pub fn save_refine_settings(path: &Path, settings: RefineSettings) -> Result<Ref
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = REFINE_CURRENT.lock() {
@@ -987,6 +1008,7 @@ pub fn save_history_settings(path: &Path, settings: HistorySettings) -> Result<H
         history: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
         modes: file.modes.or_else(current_modes_json),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = HISTORY_CURRENT.lock() {
@@ -1057,6 +1079,7 @@ pub fn save_modes_settings(path: &Path, settings: ModesSettings) -> Result<Modes
         history: file.history.or_else(current_history_json),
         modes: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
         ask: file.ask.or_else(current_ask_json),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = MODES_CURRENT.lock() {
@@ -1127,9 +1150,84 @@ pub fn save_ask_settings(path: &Path, settings: AskSettings) -> Result<AskSettin
         history: file.history.or_else(current_history_json),
         modes: file.modes.or_else(current_modes_json),
         ask: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+        vision: file.vision.or_else(current_vision_json),
     };
     write_file(path, &merged)?;
     if let Ok(mut g) = ASK_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    Ok(settings)
+}
+
+/// The Vision block as last loaded or saved in this process; the
+/// defaults (phrases, built-in lists) when nothing was loaded yet.
+/// Read when an ask is sent, so the shell loads it at boot and again
+/// after every change, whoever made it.
+pub fn current_vision_settings() -> VisionSettings {
+    VISION_CURRENT.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+}
+
+/// Seed the Vision cache without touching disk. For shells that
+/// resolve settings some other way, and for tests.
+pub fn set_vision_settings_cache(settings: VisionSettings) {
+    if let Ok(mut g) = VISION_CURRENT.lock() {
+        *g = Some(settings.cleaned());
+    }
+}
+
+fn current_vision_json() -> Option<serde_json::Value> {
+    let current = VISION_CURRENT.lock().ok().and_then(|g| g.clone())?;
+    serde_json::to_value(current).ok()
+}
+
+/// Read the Vision block from disk and cache it. Always re-reads,
+/// like [`load_refine_settings`]: the headless CLI (`openwhisper
+/// vision config`) edits the same block. A missing block yields the
+/// defaults. A block that is not an object at all reads as Vision
+/// **off**: what the person chose cannot be told, so nothing is
+/// captured until they choose again.
+pub fn load_vision_settings(path: &Path) -> VisionSettings {
+    let file = read_file(path);
+    let settings = match file.vision {
+        None => VisionSettings::default(),
+        Some(v) => serde_json::from_value::<VisionSettings>(v)
+            .unwrap_or(VisionSettings { trigger: VisionTrigger::Off, ..VisionSettings::default() }),
+    }
+    .cleaned();
+    if let Ok(mut g) = VISION_CURRENT.lock() {
+        *g = Some(settings.clone());
+    }
+    settings
+}
+
+/// Persist the Vision block (cleaned, see [`VisionSettings::cleaned`])
+/// and update the cache. Returns what was written.
+pub fn save_vision_settings(path: &Path, settings: VisionSettings) -> Result<VisionSettings, String> {
+    let settings = settings.cleaned();
+    let _saving = saving();
+    let file = read_file(path);
+    let hotkeys = file.hotkeys.or_else(current_settings);
+    let audio = file.audio.or_else(current_audio_settings);
+    let behavior = file.behavior.or_else(current_behavior_settings);
+    let pill = file.pill.or_else(|| Some(current_pill_settings()));
+    let stats = file.stats.or_else(current_stats_settings);
+    let performance = file.performance.or_else(current_performance_settings);
+    let merged = SettingsFile {
+        hotkey: None,
+        hotkeys,
+        audio,
+        behavior,
+        pill,
+        stats,
+        performance,
+        refine: file.refine.or_else(current_refine_json),
+        history: file.history.or_else(current_history_json),
+        modes: file.modes.or_else(current_modes_json),
+        ask: file.ask.or_else(current_ask_json),
+        vision: Some(serde_json::to_value(&settings).map_err(|e| format!("serialize: {e}"))?),
+    };
+    write_file(path, &merged)?;
+    if let Ok(mut g) = VISION_CURRENT.lock() {
         *g = Some(settings.clone());
     }
     Ok(settings)
@@ -1177,7 +1275,7 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
 }
 
 /// Serializes the tests, in any module, that set the process-wide
-/// Refine, modes or Ask cache and then rely on what is in it.
+/// Refine, modes, Ask or Vision cache and then rely on what is in it.
 #[cfg(test)]
 pub(crate) static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1391,6 +1489,67 @@ mod tests {
         update_hotkey_slot(&path, HotkeyTarget::CycleMode, HotkeyConfig::chord("KeyM", &["Ctrl"])).unwrap();
         assert_eq!(read().ask, None);
 
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+    }
+
+    #[test]
+    fn vision_block_saves_loads_and_rides_through_other_saves() {
+        let _hotkeys = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        // A file from before Vision existed: the defaults.
+        std::fs::write(&path, r#"{"stats":{"user_wpm":70},"ask":{"enabled":true}}"#).unwrap();
+        assert_eq!(load_vision_settings(&path), VisionSettings::default());
+
+        let vision = VisionSettings {
+            trigger: VisionTrigger::Smart,
+            phrases: Some(vec!["  on my screen ".into(), "On My Screen".into()]),
+            never_capture: Some(vec![NeverCaptureApp::new("Com.Example.Vault", "Vault")]),
+        };
+        let written = save_vision_settings(&path, vision).unwrap();
+        assert_eq!(written.phrases.as_deref(), Some(&["on my screen".to_string()][..]));
+        assert_eq!(written.never_capture.as_ref().unwrap()[0].id, "com.example.vault");
+        assert_eq!(current_vision_settings(), written);
+        assert_eq!(load_vision_settings(&path), written);
+
+        // Saves of other blocks keep it, and it keeps theirs.
+        save_stats_settings(&path, StatsSettings { user_wpm: 55 }).unwrap();
+        save_modes_settings(&path, ModesSettings::default()).unwrap();
+        save_refine_settings(&path, RefineSettings::default()).unwrap();
+        save_ask_settings(&path, AskSettings::default()).unwrap();
+        update_hotkey_slot(&path, HotkeyTarget::Cancel, default_cancel_hotkey()).unwrap();
+        let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let kept: VisionSettings = serde_json::from_value(on_disk.vision.unwrap()).unwrap();
+        assert_eq!(kept, written);
+        assert_eq!(on_disk.stats.unwrap().user_wpm, 55);
+        // And a save of the Vision block keeps the others.
+        save_vision_settings(&path, VisionSettings::default()).unwrap();
+        assert_eq!(read_file(&path).stats.unwrap().user_wpm, 55);
+        assert!(read_file(&path).ask.is_some());
+
+        // One broken field does not cost the block: the trigger the
+        // person chose still holds, the list is the built-in one.
+        std::fs::write(&path, r#"{"vision":{"trigger":"off","phrases":17},"stats":{"user_wpm":70}}"#).unwrap();
+        let loaded = load_vision_settings(&path);
+        assert_eq!((loaded.trigger, loaded.phrases.clone()), (VisionTrigger::Off, None));
+        // A block that is not an object, or a trigger nobody knows:
+        // nothing is captured, and the siblings are left alone.
+        for raw in [r#"{"vision":"always","stats":{"user_wpm":70}}"#, r#"{"vision":{"trigger":"nonstop"},"stats":{"user_wpm":70}}"#] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(load_vision_settings(&path).trigger, VisionTrigger::Off, "{raw}");
+            assert_eq!(read_file(&path).stats.unwrap().user_wpm, 70);
+        }
+
+        set_vision_settings_cache(VisionSettings::default());
+        set_ask_settings_cache(AskSettings::default());
+        set_modes_settings_cache(ModesSettings::default());
+        set_refine_settings_cache(RefineSettings::default());
         if let Ok(mut g) = CURRENT.lock() {
             *g = None;
         }

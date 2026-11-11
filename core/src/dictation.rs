@@ -950,6 +950,7 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
                 mode: &mode,
                 kind: "",
                 answer: None,
+                screen: false,
             };
             if let Err(e) = crate::history::append(&dir, &entry) {
                 eprintln!("[history] could not save the dictation: {e}");

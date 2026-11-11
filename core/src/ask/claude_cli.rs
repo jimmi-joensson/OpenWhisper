@@ -565,6 +565,47 @@ done
         assert_eq!(args[refine.len()..], ["--include-partial-messages", "--permission-mode", "default"]);
     }
 
+    /// Load-bearing for Vision (TASK-98): an ask can carry a
+    /// screenshot, and a screenshot must never be written to disk.
+    /// Without `--no-session-persistence` the Claude CLI keeps every
+    /// conversation in a session file under its config folder, the
+    /// image included (base64, in full), and also drops a temporary
+    /// PNG of it. With the flag neither was found on disk (checked
+    /// by a run against the real CLI, TASK-98 notes). The flag is one
+    /// of Refine's lean flags and arrives here through
+    /// `refine_cli::spawn_args`; this test is here so that nobody
+    /// takes it out there, or reorders things here, without learning
+    /// what it protects.
+    #[test]
+    fn a_conversation_that_may_carry_a_screenshot_is_never_persisted_by_the_cli() {
+        for web_search in [false, true] {
+            for effort in [None, Some(RefineEffort::Low), Some(RefineEffort::High)] {
+                let setup = AskSetup { effort, ..setup(web_search) };
+                let args = spawn_args(&setup, Path::new("/tmp/prompt.txt"));
+                assert_eq!(
+                    args.iter().filter(|a| *a == "--no-session-persistence").count(),
+                    1,
+                    "--no-session-persistence must be passed, once: {args:?}"
+                );
+                // Nothing that would bring a session back in.
+                for flag in ["--resume", "--continue", "-c", "-r", "--session-id", "--fork-session"] {
+                    assert!(!args.iter().any(|a| a == flag), "{flag} in {args:?}");
+                }
+            }
+        }
+        // And an image really is sent the way that flag covers: as a
+        // block on stdin, never as a path to a file of ours.
+        let line = user_line(&AskInput {
+            text: "what is this".into(),
+            images: vec![AskImage { media_type: "image/png".into(), data: vec![1, 2, 3] }],
+        });
+        let sent: Value = serde_json::from_str(&line).unwrap();
+        let block = &sent["message"]["content"][0];
+        assert_eq!((block["type"].as_str(), block["source"]["type"].as_str()), (Some("image"), Some("base64")));
+        assert_eq!(block["source"]["data"], "AQID");
+        assert!(!line.contains("/tmp") && !line.contains("file://"));
+    }
+
     #[test]
     fn web_search_adds_exactly_the_two_websearch_flags() {
         let plain = spawn_args(&setup(false), Path::new("/tmp/p.txt"));

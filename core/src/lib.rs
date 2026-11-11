@@ -25,6 +25,8 @@ pub mod store;
 pub mod telemetry;
 pub mod transcript;
 pub mod verbose;
+#[cfg(feature = "vision")]
+pub mod vision;
 
 #[cfg(feature = "macos-shell")]
 #[swift_bridge::bridge]

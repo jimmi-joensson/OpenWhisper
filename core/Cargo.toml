@@ -24,7 +24,7 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer", "refine", "focus", "ask"]
+tauri = ["recognizer", "refine", "focus", "ask", "vision"]
 # Refine (TASK-93): optional language-model cleanup after transcription,
 # through the user's Claude Code CLI or an OpenAI-compatible endpoint.
 # Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
@@ -36,6 +36,20 @@ refine = ["dep:ureq", "dep:keyring"]
 # dependency. `base64` carries images to the model (the screen, in
 # TASK-98).
 ask = ["refine", "dep:base64"]
+# Vision (TASK-98): an ask can carry a screenshot of the display the
+# person is working on. Capture, the never-capture layers and the
+# in-memory PNG live in `core::vision`; nothing is ever written to
+# disk. Needs `ask` (a screenshot exists only inside an ask) and
+# `focus` (which app is in front). The settings types are not gated.
+vision = [
+    "ask",
+    "focus",
+    "dep:png",
+    "dep:block2",
+    "dep:objc2-core-foundation",
+    "dep:objc2-core-graphics",
+    "dep:objc2-screen-capture-kit",
+]
 # Focus context (TASK-94): which app is frontmost and its window title.
 # Its own feature so the SwiftUI staticlib flavor does not pull in the
 # platform bindings it never calls.
@@ -115,6 +129,10 @@ ureq = { version = "2.12", default-features = false, features = ["tls"], optiona
 # Ask (feature `ask`): images travel to the model base64-encoded, in
 # both wire formats. Already in the lockfile through other crates.
 base64 = { version = "0.22", optional = true }
+# Vision (feature `vision`): the screenshot is encoded as PNG in
+# memory. Pure Rust, MIT OR Apache-2.0, already in the lockfile
+# through the Tauri shell.
+png = { version = "0.18", optional = true }
 # SHA-256 pin on the model archive (see recognizer/download.rs MODEL_SHA256).
 sha2 = { version = "0.10", optional = true }
 tar = { version = "0.4", optional = true }
@@ -171,8 +189,16 @@ keyring = { version = "3", optional = true, default-features = false, features =
 # types for the Accessibility calls. Same versions as the Tauri shell.
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSString", "NSArray", "NSError", "NSDictionary", "NSValue", "NSEnumerator"] }
 core-foundation = { version = "0.10", optional = true }
+# Vision: ScreenCaptureKit for the capture (an app can be left out of
+# the image itself), CoreGraphics for the window list, the displays
+# and the Screen Recording permission. All objc2 crates are
+# Zlib OR Apache-2.0 OR MIT; block2 is MIT.
+block2 = { version = "0.6", optional = true }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2", "CFArray", "CFDictionary", "CFString", "CFNumber", "CFData", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2", "CGError", "CGImage", "CGDataProvider", "CGDirectDisplay", "CGWindow", "CGColorSpace"] }
+objc2-screen-capture-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "libc", "SCShareableContent", "SCScreenshotManager", "SCStream", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
 
 # Refine API key storage: Windows Credential Manager.
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -74,6 +74,11 @@ moved it: see `history.folder` in `settings.json`.
   into an app. Its text is the question, and the `> Answer:` quote
   under it is what the model answered. It has no app in its heading:
   the answer was shown in a panel, not typed anywhere.
+- `screen=yes` on that same line (`<!-- extra: kind=ask; screen=yes -->`)
+  means the question was sent together with a screenshot of the
+  person's screen, so "this error" or "this message" in it refers to
+  something that was on screen then. The screenshot itself is not
+  kept anywhere.
 - To find something they said, search the folder, for example
   `rg -i "release plan" history/`. A day's file is named after its
   date, so "what did I say this morning" is today's file.

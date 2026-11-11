@@ -15,6 +15,7 @@ import { useDictation } from "./lib/use-dictation";
 import { useHistorySync } from "./lib/use-history";
 import { useModesSync } from "./lib/use-modes";
 import { useAskSync } from "./lib/use-ask";
+import { useVisionSync } from "./lib/use-vision";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
 import { usePermissionsStatus } from "./lib/use-permissions-status";
@@ -152,6 +153,8 @@ function App() {
   useModesSync();
   // And the Ask settings, which the headless CLI can change as well.
   useAskSync();
+  // And the Vision settings (when an ask includes the screen).
+  useVisionSync();
 
   const goBack = useCallback(() => setRoute("home"), []);
 

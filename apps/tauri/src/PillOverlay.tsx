@@ -7,12 +7,19 @@ import {
   type PillState,
   type PillStatus,
 } from "./lib/pill-state";
+import { ASK_TICK_EVENT, type AskScreen, type AskSnapshot } from "./lib/ask";
 import { MODES_CHANGED_EVENT, type ModesChanged } from "./lib/modes";
 import "./PillOverlay.css";
 
 // How long the name of the mode stays up after the user switches mode
 // (the hotkey, the tray menu, the select on Home). Then it fades out.
 const MODE_LABEL_MS = 1500;
+
+// What the label says while an ask looks at the screen (Vision,
+// TASK-98), and how long it stays up once the screenshot has gone out
+// with the question. While the capture itself runs it stays up.
+const SCREEN_LABEL = "Screen";
+const SCREEN_LABEL_AFTER_MS = 1000;
 
 // Outer capsule width per state. Height (22) and radius (11) stay fixed.
 // Inner SVG canvas is fixed at PILL_INNER_W × PILL_INNER_H; the capsule has
@@ -179,8 +186,14 @@ export function PillOverlay() {
   });
 
   const capsuleRef = useRef<HTMLDivElement>(null);
-  const modeLabelRef = useRef<HTMLDivElement>(null);
-  const modeLabelTimerRef = useRef<number | undefined>(undefined);
+  // The one label above the capsule. It shows the name of the mode
+  // after a switch and "Screen" while an ask looks at the screen;
+  // whichever came last is what it says.
+  const labelRef = useRef<HTMLDivElement>(null);
+  const labelTimerRef = useRef<number | undefined>(undefined);
+  // The screen state of the ask on the last tick, to act on changes
+  // only (ticks repeat about four times a second while an ask runs).
+  const askScreenRef = useRef<AskScreen>("none");
   const rectRefs = useRef<(SVGRectElement | null)[]>(
     Array.from({ length: PARTICLE_COUNT }, () => null),
   );
@@ -219,27 +232,68 @@ export function PillOverlay() {
     };
   }, []);
 
-  // Mode switched: show the new mode's name above the capsule for a
-  // moment. The label is written straight to the DOM (text + a data
-  // attribute the CSS fades on) and timed from a ref, so it causes no
-  // React render and touches neither the capsule nor its state machine.
+  // The label above the capsule. It is written straight to the DOM
+  // (text + data attributes the CSS fades on) and timed from a ref, so
+  // it causes no React render and touches neither the capsule nor its
+  // state machine. Two things show in it:
+  //
+  // - Mode switched: the new mode's name, for a moment.
+  // - An ask looks at the screen (Vision): "Screen" for as long as the
+  //   capture runs and a second after the screenshot went out with
+  //   the question. Every capture is visible here while it happens.
   useEffect(() => {
-    const unlisten = listen<ModesChanged>(MODES_CHANGED_EVENT, (event) => {
+    // `stayMs` null: up until something else hides or replaces it.
+    const show = (text: string, kind: "mode" | "screen", stayMs: number | null) => {
+      const label = labelRef.current;
+      if (!label) return;
+      label.textContent = text;
+      label.dataset.kind = kind;
+      label.dataset.visible = "true";
+      window.clearTimeout(labelTimerRef.current);
+      if (stayMs !== null) {
+        labelTimerRef.current = window.setTimeout(() => {
+          label.dataset.visible = "false";
+        }, stayMs);
+      }
+    };
+    // Only the screen label is taken down from here: a mode name that
+    // replaced it runs on its own timer.
+    const hideScreen = () => {
+      const label = labelRef.current;
+      if (!label || label.dataset.kind !== "screen") return;
+      window.clearTimeout(labelTimerRef.current);
+      label.dataset.visible = "false";
+    };
+
+    const unlistenModes = listen<ModesChanged>(MODES_CHANGED_EVENT, (event) => {
       const name = event.payload.switched_to;
-      const label = modeLabelRef.current;
       // Other changes to the modes (one added, edited, deleted) are
       // not a switch and show nothing.
-      if (!name || !label) return;
-      label.textContent = name;
-      label.dataset.visible = "true";
-      window.clearTimeout(modeLabelTimerRef.current);
-      modeLabelTimerRef.current = window.setTimeout(() => {
-        label.dataset.visible = "false";
-      }, MODE_LABEL_MS);
+      if (name) show(name, "mode", MODE_LABEL_MS);
     });
+
+    const unlistenAsk = listen<AskSnapshot>(ASK_TICK_EVENT, (event) => {
+      const screen = event.payload.screen ?? "none";
+      const before = askScreenRef.current;
+      if (screen === before) return;
+      askScreenRef.current = screen;
+      if (screen === "capturing") {
+        show(SCREEN_LABEL, "screen", null);
+      } else if (screen === "included") {
+        // Also when the capture was over before a tick showed it.
+        show(SCREEN_LABEL, "screen", SCREEN_LABEL_AFTER_MS);
+      } else if (before === "capturing") {
+        // No screenshot after all (an app that is never captured is
+        // in front, no permission), or the ask was stopped. The
+        // answer panel says why.
+        hideScreen();
+      }
+    });
+
     return () => {
-      window.clearTimeout(modeLabelTimerRef.current);
-      unlisten.then((fn) => fn());
+      window.clearTimeout(labelTimerRef.current);
+      unlistenModes.then((fn) => fn());
+      unlistenAsk.then((fn) => fn());
     };
   }, []);
 
@@ -536,7 +590,7 @@ export function PillOverlay() {
   return (
     <div className="pill-root">
       <div
-        ref={modeLabelRef}
+        ref={labelRef}
         className="pill-mode-label"
         data-testid="pill-mode-label"
         data-visible="false"

@@ -42,7 +42,10 @@ const COPIED_SHOWN_MS = 1200;
 const FOLLOW_SLACK_PX = 24;
 
 // The answer window of Ask (TASK-97): what the person asked, where
-// the ask stands, and the answer with Copy, Insert and Dismiss.
+// the ask stands, and the answer with Copy, Insert and Dismiss. With
+// Vision (TASK-98) it also says what became of the screen: that it
+// is being looked at, that it was included, or why it was not. Only
+// ever in words: the picture itself never comes to this window.
 //
 // Everything shown comes from core's ask snapshot: `ask_snapshot`
 // once on mount, so a window that loads late shows the current ask,
@@ -152,6 +155,9 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   const showAnswer = hasAnswer && phase !== "cancelled";
   const status = statusLine(ask);
   const source = sourceLine(ask);
+  // No screenshot although one was wanted, with a reason to show.
+  const noScreen =
+    (ask.screen === "blocked" || ask.screen === "unavailable") && ask.screen_notice !== "";
 
   return (
     <Card
@@ -197,10 +203,22 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
 
       <CardFooter className="shrink-0 flex-col items-stretch gap-2 text-xs text-muted-foreground">
         {ask.notice && <p data-testid="answer-notice">{ask.notice}</p>}
-        <div className="flex items-end justify-between gap-2">
-          <p className="min-w-0 flex-1" data-testid="answer-source">
-            {source}
+        {/* Vision (TASK-98): a screenshot was wanted and there is
+            none. Core's sentence says why (an app that is never
+            captured is in front, no permission, no display). */}
+        {noScreen && (
+          <p data-testid="answer-screen-notice" data-screen={ask.screen}>
+            {ask.screen_notice}
           </p>
+        )}
+        <div className="flex items-end justify-between gap-2">
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <p data-testid="answer-source">{source}</p>
+            {/* The question went out with a picture of the screen. */}
+            {ask.screen === "included" && (
+              <p data-testid="answer-screen-included">Screen included</p>
+            )}
+          </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {(phase === "done" || phase === "error") && (
               <Button
@@ -244,6 +262,11 @@ function statusLine(ask: AskSnapshot): { text: string; working: boolean } | null
       return { text: "Listening", working: false };
     case "thinking":
     case "answering":
+      // The screen is being captured for this ask (Vision, TASK-98).
+      // It takes a moment at most; the pill shows it too.
+      if (ask.screen === "capturing") {
+        return { text: "Looking at your screen", working: true };
+      }
       if (ask.searching) {
         const query = ask.search_query.trim();
         return {

@@ -667,6 +667,8 @@ mod tests {
                 "notice",
                 "phase",
                 "question",
+                "screen",
+                "screen_notice",
                 "search_query",
                 "searching",
                 "started_at_ms",
@@ -678,6 +680,10 @@ mod tests {
         assert_eq!(value["phase"], "answering");
         assert_eq!(value["answer"], "A tap is");
         assert_eq!(value["first_text_ms"], serde_json::Value::Null);
+        // What became of the screen is a word too, and never an
+        // image: an ask that did not involve the screen says "none".
+        assert_eq!(value["screen"], "none");
+        assert_eq!(value["screen_notice"], "");
         assert_eq!(serde_json::to_value(AskPhase::Idle).unwrap(), "idle");
     }
 

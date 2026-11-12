@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import {
   Activity,
   BookA,
+  Bot,
   Boxes,
   FileAudio,
   Home,
@@ -27,6 +28,7 @@ const SETTINGS_PANE_ICONS: Record<SettingsPaneId, LucideIcon> = {
   refine: Sparkles,
   modes: Layers,
   ask: MessageCircleQuestionMark,
+  agent: Bot,
 };
 
 export type Route = "home" | "history" | "transcribe" | "settings" | "diagnostics";

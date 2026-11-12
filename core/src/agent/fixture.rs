@@ -109,8 +109,9 @@ pub fn tools() -> Vec<ToolInfo> {
     ]
 }
 
-/// The tools as `tools/list` answers.
-fn tool_list() -> Value {
+/// The tools as `tools/list` answers: the five, and after them one
+/// more for every name in `extra` (see [`serve_with`]).
+fn tool_list(extra: &[String]) -> Value {
     let text = json!({ "type": "string" });
     let tool = |name: &str, description: &str, properties: Value, required: &[&str], annotations: Value| {
         json!({
@@ -120,7 +121,7 @@ fn tool_list() -> Value {
             "annotations": annotations,
         })
     };
-    json!([
+    let mut tools = json!([
         tool(
             READ_THREAD,
             "Read a message thread of the team chat by its id. Without an id: the thread that is open. Read-only.",
@@ -156,7 +157,19 @@ fn tool_list() -> Value {
             &["message_id"],
             json!({ "destructiveHint": true, "title": "Delete Message" }),
         ),
-    ])
+    ]);
+    if let Some(list) = tools.as_array_mut() {
+        for name in extra {
+            list.push(tool(
+                name,
+                "A made-up tool with an unusual name. Returns the word ok. Read-only.",
+                json!({}),
+                &[],
+                json!({ "readOnlyHint": true }),
+            ));
+        }
+    }
+    tools
 }
 
 /// One call the fixture received, as its log has it.
@@ -199,7 +212,7 @@ fn text_result(text: &str, is_error: bool) -> Value {
 }
 
 /// What a call returns. Canned, and the same whatever the arguments.
-fn answer(tool: &str, scenario: &str) -> Value {
+fn answer(tool: &str, scenario: &str, extra: &[String]) -> Value {
     match tool {
         READ_THREAD if scenario == "failing" => text_result("The team chat did not answer. Try again later.", true),
         READ_THREAD => text_result(&thread_text(scenario).unwrap_or_else(|| THREAD.to_string()), false),
@@ -210,6 +223,7 @@ fn answer(tool: &str, scenario: &str) -> Value {
         CREATE_DRAFT => text_result("ok: draft saved in Drafts (id d-1). Nothing was sent.", false),
         SEND_MESSAGE => text_result("ok: message sent (id m-2)", false),
         DELETE_MESSAGE => text_result("ok: message deleted", false),
+        other if extra.iter().any(|name| name == other) => text_result("ok", false),
         other => text_result(&format!("unknown tool {other}"), true),
     }
 }
@@ -218,7 +232,23 @@ fn answer(tool: &str, scenario: &str) -> Value {
 /// on `output`, and append every `tools/call` to the log at `log`.
 /// Returns when `input` ends. An unknown `scenario` behaves like
 /// `plain`.
-pub fn serve(input: impl BufRead, mut output: impl Write, log: &Path, scenario: &str) -> io::Result<()> {
+pub fn serve(input: impl BufRead, output: impl Write, log: &Path, scenario: &str) -> io::Result<()> {
+    serve_with(input, output, log, scenario, &[])
+}
+
+/// [`serve`] with more tools: one for every name in `extra_tools`,
+/// listed after the five, said to be read-only, and answering `ok`.
+/// The name is whatever the test wants a connection to call a tool,
+/// which is the point: a connection is free to name a tool
+/// `list,mcp__teamchat`, and the eval set and the tests use this to
+/// see what an ask makes of such a name.
+pub fn serve_with(
+    input: impl BufRead,
+    mut output: impl Write,
+    log: &Path,
+    scenario: &str,
+    extra_tools: &[String],
+) -> io::Result<()> {
     for line in input.lines() {
         let line = line?;
         let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
@@ -231,12 +261,12 @@ pub fn serve(input: impl BufRead, mut output: impl Write, log: &Path, scenario: 
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
             })),
-            Some("tools/list") => Ok(json!({ "tools": tool_list() })),
+            Some("tools/list") => Ok(json!({ "tools": tool_list(extra_tools) })),
             Some("tools/call") => {
                 let tool = message["params"]["name"].as_str().unwrap_or("");
                 let args = message["params"].get("arguments").cloned().unwrap_or(json!({}));
                 log_call(log, tool, &args)?;
-                Ok(answer(tool, scenario))
+                Ok(answer(tool, scenario, extra_tools))
             }
             Some("ping") => Ok(json!({})),
             _ => Err(json!({ "code": -32601, "message": "no such method" })),
@@ -304,7 +334,7 @@ mod tests {
 
     #[test]
     fn what_it_lists_and_what_a_listing_of_it_would_say_are_the_same_tools_of_the_three_kinds() {
-        let listed = tool_list();
+        let listed = tool_list(&[]);
         let info = tools();
         assert_eq!(info.len(), listed.as_array().unwrap().len());
         for (tool, listed) in info.iter().zip(listed.as_array().unwrap()) {
@@ -315,6 +345,29 @@ mod tests {
         }
         let kinds: Vec<ToolKind> = info.iter().map(kind_of).collect();
         assert_eq!(kinds, [ToolKind::Read, ToolKind::Read, ToolKind::Draft, ToolKind::Act, ToolKind::Act]);
+    }
+
+    #[test]
+    fn it_can_be_given_more_tools_under_any_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.jsonl");
+        let comma = "list,mcp__teamchat".to_string();
+        let requests = [
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            call(2, &comma, json!({})),
+            call(3, "not_there", json!({})),
+        ];
+        let input: String = requests.iter().map(|r| format!("{r}\n")).collect();
+        let mut output = Vec::new();
+        serve_with(input.as_bytes(), &mut output, &log, "plain", std::slice::from_ref(&comma)).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let listed = replies[0]["result"]["tools"].as_array().unwrap();
+        assert_eq!(listed.len(), 6);
+        assert_eq!(listed[5]["name"], comma.as_str());
+        assert_eq!(listed[5]["annotations"]["readOnlyHint"], true);
+        assert_eq!(replies[1]["result"]["content"][0]["text"], "ok");
+        assert_eq!(replies[2]["result"]["isError"], true);
+        assert_eq!(read_log(&log).len(), 2);
     }
 
     #[test]

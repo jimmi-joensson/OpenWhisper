@@ -10,6 +10,14 @@ import type { RefineInfo } from "@/lib/refine";
 // Text longer than this is folded to a few lines until expanded.
 const FOLD_AT_CHARS = 280;
 
+// How a tool call of a stored ask ended, in words. The keys are the
+// outcomes core writes (`HistoryTool::outcome`).
+const TOOL_OUTCOMES: Record<string, string> = {
+  done: "done",
+  failed: "failed",
+  denied: "not run",
+};
+
 // The dictation that just finished, when it is in the list: its row
 // also shows the dictionary fixes and what Refine did, which are only
 // known for this one.
@@ -64,6 +72,7 @@ function HistoryRow({
   const [copied, setCopied] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
   const [showAnswer, setShowAnswer] = useState(false);
+  const [showTools, setShowTools] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const long = entry.text.length > FOLD_AT_CHARS;
   const app = entry.app_name ?? entry.app_id;
@@ -72,6 +81,9 @@ function HistoryRow({
   // is one click away, like the original of a refined dictation.
   const ask = isAskEntry(entry);
   const answer = ask ? entry.answer : null;
+  // An ask that used tools (Agent, TASK-99): which ones, and how each
+  // call ended. Never what a tool was given or what it returned.
+  const tools = ask ? (entry.tools ?? []) : [];
   // Copy takes what is being read: the answer while it is shown,
   // otherwise the row text.
   const copiesAnswer = answer !== null && showAnswer;
@@ -110,6 +122,11 @@ function HistoryRow({
               Screen
             </Badge>
           )}
+          {tools.length > 0 && (
+            <Badge variant="outline" data-testid="history-row-tools">
+              {tools.length === 1 ? "1 tool call" : `${tools.length} tool calls`}
+            </Badge>
+          )}
         </div>
         <p
           className="ow-history-row__text ow-selectable"
@@ -129,7 +146,7 @@ function HistoryRow({
         {entry.mode && !notes?.refine.mode && (
           <ModeMarker name={entry.mode} testId="history-row-mode" />
         )}
-        {(long || (original && !notes) || answer !== null) && (
+        {(long || (original && !notes) || answer !== null || tools.length > 0) && (
           <div className="ow-history-row__links">
             {long && (
               <button
@@ -161,6 +178,16 @@ function HistoryRow({
                 {showAnswer ? "Hide answer" : "Show answer"}
               </button>
             )}
+            {tools.length > 0 && (
+              <button
+                type="button"
+                className="ow-transcript-row__refine-toggle"
+                aria-expanded={showTools}
+                onClick={() => setShowTools((v) => !v)}
+              >
+                {showTools ? "Hide tools" : "Show tools"}
+              </button>
+            )}
           </div>
         )}
         {original && !notes && showOriginal && (
@@ -178,6 +205,20 @@ function HistoryRow({
           >
             {answer}
           </p>
+        )}
+        {tools.length > 0 && showTools && (
+          <ul
+            className="ow-transcript-row__original ow-selectable flex flex-col gap-0.5"
+            aria-label="Tools this ask used"
+            data-testid="history-row-tool-list"
+          >
+            {tools.map((tool, i) => (
+              <li key={i} data-testid="history-row-tool" data-outcome={tool.outcome}>
+                <span className="font-mono">{tool.tool}</span> in {tool.connection}:{" "}
+                {TOOL_OUTCOMES[tool.outcome] ?? tool.outcome}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
       <div className="ow-history-row__actions ow-hover-reveal">

@@ -9,7 +9,19 @@
 //! Claude Code 2.1.322 on a setup with 34 connections: 3 to 5
 //! seconds, no tokens. The person's own hooks do not run for it
 //! (`disableAllHooks` in a settings file passed for this one
-//! process).
+//! process), and it reads the person's own settings only
+//! (`--setting-sources user`): the project and local settings of
+//! whatever folder the process happens to start in, with their hooks
+//! and their servers, are not loaded. Seen with Claude Code 2.1.322
+//! against a made-up setup: with `user`, a user-scope server is
+//! still listed, a project's and a folder's own are not.
+//!
+//! **A listing starts what it lists, so it lists only what the
+//! person switched on.** Listing a connection means connecting to
+//! it, and for one of the person's own entries that means running
+//! its command. An entry that is switched off is therefore not part
+//! of a listing: adding one runs nothing, and its tools show up once
+//! it is enabled and the connections are refreshed.
 //!
 //! **What a listing knows, and where it goes.** For each connection
 //! the CLI also returns how it is reached (a command, a URL, an id).
@@ -33,8 +45,12 @@
 //! `--strict-mcp-config`, so a connection that is not enabled does
 //! not exist for the model. A connection of the person's Claude Code
 //! that has not been listed since this process started has no
-//! details in memory; the run then fails and says to refresh, rather
-//! than start without it.
+//! details in memory. An ask in the app leaves such a connection out
+//! and says so in a notice ([`super::AgentRun::for_ask_with_notice`]);
+//! a run that is handed one all the same fails and says to refresh,
+//! rather than start without it. Names are compared the same way
+//! everywhere, ignoring case ([`name_key`]): in a merge, in memory
+//! and for a run.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -155,8 +171,17 @@ impl fmt::Debug for Details {
     }
 }
 
-/// Details by connection name, from the last listing in this
-/// process. Not persisted anywhere.
+/// A connection's name for comparing: trimmed, in lower case. The
+/// one way names are matched: a listing against the settings
+/// ([`merge_listing`]), the details in memory, and a run's lookup of
+/// them. The settings keep each name once by the same rule
+/// ([`AgentSettings::cleaned`]).
+pub fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// Details by connection name ([`name_key`]), from the last listing
+/// in this process. Not persisted anywhere.
 static DETAILS: LazyLock<Mutex<HashMap<String, Details>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn details<R>(f: impl FnOnce(&mut HashMap<String, Details>) -> R) -> R {
@@ -164,10 +189,11 @@ fn details<R>(f: impl FnOnce(&mut HashMap<String, Details>) -> R) -> R {
 }
 
 /// Whether this process knows how to reach the Claude connection
-/// `name`: it was in a listing since the process started. A shell
-/// uses it to tell whether a refresh is due before an ask.
+/// `name` (compared ignoring case, [`name_key`]): it was in a
+/// listing since the process started. A shell uses it to tell
+/// whether a refresh is due before an ask.
 pub fn is_listed(name: &str) -> bool {
-    details(|map| map.contains_key(name))
+    details(|map| map.contains_key(&name_key(name)))
 }
 
 /// Forget every connection's details. After this, a run with a
@@ -176,20 +202,25 @@ pub fn forget_listing() {
     details(HashMap::clear);
 }
 
+/// The details map is one per process: tests that fill it or clear
+/// it take turns.
+#[cfg(test)]
+pub(crate) static DETAILS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Put a Claude connection's details into memory without a listing.
 /// For tests.
 #[cfg(all(test, unix))]
 pub(crate) fn remember_for_test(name: &str, config: Value) {
-    details(|map| map.insert(name.to_string(), Details(config)));
+    details(|map| map.insert(name_key(name), Details(config)));
 }
 
 // --- listing -------------------------------------------------------
 
-/// The arguments of a listing process. No prompt, no model, no
-/// built-in tool; `settings_file` switches the person's hooks off for
-/// this one process. `--tools` takes a list, so it is followed by
-/// another flag.
-pub fn list_args(settings_file: &Path) -> Vec<String> {
+/// What every listing process is started with. No prompt, no model,
+/// no built-in tool; `settings_file` switches the person's hooks off
+/// for this one process. `--tools` takes a list, so it is followed
+/// by another flag.
+fn base_list_args(settings_file: &Path) -> Vec<String> {
     let file = settings_file.display().to_string();
     [
         "-p",
@@ -212,10 +243,21 @@ pub fn list_args(settings_file: &Path) -> Vec<String> {
     .collect()
 }
 
-/// [`list_args`] for the person's own entries: only the connections
-/// in `config_file`, and none of their Claude Code setup.
+/// The arguments of a listing of the person's Claude Code. Of their
+/// settings only their own are read (`--setting-sources user`): not
+/// the project's and not the folder's, whatever folder the process
+/// starts in. See the module docs for what that was seen to do.
+pub fn list_args(settings_file: &Path) -> Vec<String> {
+    let mut args = base_list_args(settings_file);
+    args.extend(["--setting-sources", "user"].iter().map(|s| (*s).to_string()));
+    args
+}
+
+/// The arguments of a listing of the person's own entries: only the
+/// connections in `config_file`, and none of their Claude Code
+/// setup.
 pub fn list_custom_args(settings_file: &Path, config_file: &Path) -> Vec<String> {
-    let mut args = list_args(settings_file);
+    let mut args = base_list_args(settings_file);
     let config = config_file.display().to_string();
     args.extend(
         ["--strict-mcp-config", "--mcp-config", config.as_str(), "--setting-sources", ""].iter().map(|s| (*s).to_string()),
@@ -409,10 +451,14 @@ fn tools_of(server: &Value) -> Vec<ToolInfo> {
         .into_iter()
         .flatten()
         .filter_map(|tool| {
-            let name = tool["name"].as_str()?.trim();
+            // The name exactly as the connection gave it: a name
+            // that was tidied would be another tool's name. One
+            // that cannot be used stays in the list, marked as such
+            // where it is shown (`policy::unusable_reason`).
+            let name = tool["name"].as_str()?;
             let notes = &tool["annotations"];
             let flag = |short: &str, hint: &str| notes[short].as_bool().or_else(|| notes[hint].as_bool());
-            (!name.is_empty()).then(|| ToolInfo {
+            (!name.trim().is_empty()).then(|| ToolInfo {
                 name: name.to_string(),
                 title: tool["title"].as_str().or_else(|| notes["title"].as_str()).unwrap_or("").to_string(),
                 read_only: flag("readOnly", "readOnlyHint"),
@@ -500,10 +546,14 @@ fn list_claude_connections_with(
     let servers = list_raw(&bin, list_args(&quiet.0), wait)?;
     drop(quiet);
     let own = user_servers(config_file);
-    let found: HashMap<String, Details> = servers
-        .iter()
-        .filter_map(|server| Some((server["name"].as_str()?.trim().to_string(), details_of(server, &own)?)))
-        .collect();
+    let mut found: HashMap<String, Details> = HashMap::new();
+    for server in &servers {
+        if let (Some(name), Some(details)) = (server["name"].as_str(), details_of(server, &own)) {
+            // Of two names that differ only by case the first counts,
+            // as it does in the settings.
+            found.entry(name_key(name)).or_insert(details);
+        }
+    }
     // The whole map at once: a connection that is gone from the
     // person's setup is gone from here too.
     details(|map| *map = found);
@@ -512,21 +562,22 @@ fn list_claude_connections_with(
     Ok(listing)
 }
 
-/// List the tools of the person's own entries (`connections`, the
-/// custom ones among them), enabled or not, the same way: a CLI
-/// process that is given only these, gets no prompt, and is asked
-/// what it sees. Empty without any custom entry; no process is
-/// started then.
+/// List the tools of the person's own entries that are switched on
+/// (`connections`, the enabled custom ones among them), the same
+/// way: a CLI process that is given only these, gets no prompt, and
+/// is asked what it sees. Empty without any enabled custom entry; no
+/// process is started then.
+///
+/// **Only the enabled ones.** Listing an entry runs its command (or
+/// dials its URL). An entry the person added and has not switched on
+/// is not started by anything, a listing included.
 pub fn list_custom_connections(
     cli: &ClaudeCliSettings,
     connections: &[AgentConnection],
     wait: Duration,
 ) -> Result<Vec<ListedConnection>, AgentError> {
-    let custom: Vec<AgentConnection> = connections
-        .iter()
-        .filter(|c| c.kind == AgentConnectionKind::Custom)
-        .map(|c| AgentConnection { enabled: true, ..c.clone() })
-        .collect();
+    let custom: Vec<AgentConnection> =
+        connections.iter().filter(|c| c.kind == AgentConnectionKind::Custom && c.enabled).cloned().collect();
     if custom.is_empty() {
         return Ok(Vec::new());
     }
@@ -548,6 +599,10 @@ fn find_binary(cli: &ClaudeCliSettings) -> Result<PathBuf, AgentError> {
 ///   tools, and gets the tool list of the listing. When the listing
 ///   could not see its tools (not connected right now), the list
 ///   from before stays.
+/// - A tick for a tool the connection no longer lists is dropped,
+///   on every connection.
+/// - Names are compared ignoring case ([`name_key`]), the way the
+///   details in memory are keyed.
 /// - A connection that is new arrives switched off with nothing
 ///   ticked.
 /// - A Claude connection that is gone from the listing stays only
@@ -559,10 +614,10 @@ fn find_binary(cli: &ClaudeCliSettings) -> Result<PathBuf, AgentError> {
 ///   their tool lists are updated.
 pub fn merge_listing(settings: &AgentSettings, listing: &[ListedConnection], claude_listed: bool) -> AgentSettings {
     let mut merged = settings.clone();
-    let key = |name: &str| name.trim().to_lowercase();
     let in_listing = |c: &AgentConnection| {
         listing.iter().find(|l| {
-            key(&l.name) == key(&c.name) && (l.source == ConnectionSource::Custom) == (c.kind == AgentConnectionKind::Custom)
+            name_key(&l.name) == name_key(&c.name)
+                && (l.source == ConnectionSource::Custom) == (c.kind == AgentConnectionKind::Custom)
         })
     };
     merged.connections.retain(|c| {
@@ -578,9 +633,18 @@ pub fn merge_listing(settings: &AgentSettings, listing: &[ListedConnection], cla
         {
             connection.tools = found.tools.clone();
         }
+        // A tick is for a tool the connection is known to have. One
+        // whose tool is gone is dropped here and now: left in the
+        // file it would be invisible, and live again the day a tool
+        // of that name came back.
+        let listed: Vec<&str> = connection.tools.iter().map(|tool| tool.name.as_str()).collect();
+        connection.allowed_tools.retain(|ticked| listed.contains(&ticked.as_str()));
     }
     for found in listing.iter().filter(|l| l.source != ConnectionSource::Custom) {
-        let known = merged.connections.iter().any(|c| c.kind == AgentConnectionKind::Claude && key(&c.name) == key(&found.name));
+        let known = merged
+            .connections
+            .iter()
+            .any(|c| c.kind == AgentConnectionKind::Claude && name_key(&c.name) == name_key(&found.name));
         if !known {
             merged.connections.push(AgentConnection {
                 name: found.name.clone(),
@@ -593,43 +657,97 @@ pub fn merge_listing(settings: &AgentSettings, listing: &[ListedConnection], cla
     merged.cleaned()
 }
 
-/// What a refresh found and saved.
+/// What one listing of everything found. Nothing in it is saved.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct Refreshed {
-    /// The Agent block as it was saved.
-    pub settings: AgentSettings,
-    /// Every connection that was listed, the person's own entries
-    /// included, with its state.
-    pub listing: Vec<ListedConnection>,
+pub struct Listing {
+    /// Every connection that was listed: the person's Claude Code's,
+    /// and their own entries that are switched on, with its state.
+    pub connections: Vec<ListedConnection>,
     /// Why the person's own entries could not be listed; empty when
-    /// they were, or when there are none.
+    /// they were, or when none is switched on.
     pub custom_error: String,
     pub elapsed_ms: u64,
 }
 
-/// List everything, merge it into the Agent block of the settings
-/// file at `path` and save it: what the refresh button and
-/// `openwhisper agent connections --refresh` do. The block is read
-/// from the file right before it is merged, so a change made while
-/// the listing ran is kept.
+/// List everything and save nothing: the connections of the person's
+/// Claude Code ([`list_claude_connections`]) and, of the entries in
+/// `settings`, their own that are switched on
+/// ([`list_custom_connections`]). Takes seconds.
+///
+/// This is the half of a refresh that takes time and touches no
+/// file. A shell runs it without its settings lock, then takes the
+/// lock, reads the block as it is by then, merges
+/// ([`merge_listing`], which is pure) and saves. [`refresh`] is the
+/// two together for a caller without a lock of its own.
+///
+/// When the person's own entries cannot be listed, the listing still
+/// counts ([`Listing::custom_error`] says why); when Claude Code's
+/// connections cannot be listed, it is an error.
+pub fn list_all(settings: &AgentSettings, cli: &ClaudeCliSettings, wait: Duration) -> Result<Listing, AgentError> {
+    list_all_with(settings, cli, wait, claude_config_file().as_deref())
+}
+
+/// [`list_all`] with Claude Code's config file given.
+fn list_all_with(
+    settings: &AgentSettings,
+    cli: &ClaudeCliSettings,
+    wait: Duration,
+    config_file: Option<&Path>,
+) -> Result<Listing, AgentError> {
+    let started = Instant::now();
+    let mut connections = list_claude_connections_with(cli, wait, config_file)?;
+    let (custom, custom_error) = match list_custom_connections(cli, &settings.connections, wait) {
+        Ok(custom) => (custom, String::new()),
+        Err(e) => (Vec::new(), e.to_string()),
+    };
+    connections.extend(custom);
+    Ok(Listing { connections, custom_error, elapsed_ms: started.elapsed().as_millis() as u64 })
+}
+
+/// What a refresh found and saved.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Refreshed {
+    /// The Agent block as it was saved. Serialized without the
+    /// values of a custom connection's environment
+    /// ([`AgentSettings::for_output`]).
+    #[serde(serialize_with = "crate::settings::serialize_agent_settings_for_output")]
+    pub settings: AgentSettings,
+    /// Every connection that was listed, the person's own entries
+    /// that are switched on included, with its state.
+    pub listing: Vec<ListedConnection>,
+    /// Why the person's own entries could not be listed; empty when
+    /// they were, or when none is switched on.
+    pub custom_error: String,
+    pub elapsed_ms: u64,
+}
+
+/// List everything ([`list_all`]), merge it into the Agent block of
+/// the settings file at `path` and save it: what `openwhisper agent
+/// connections --refresh` does. The block is read from the file
+/// right before it is merged, so a change made while the listing ran
+/// is kept.
+///
+/// Between that read and the save nothing holds a lock, so a caller
+/// that changes the block from other threads (the desktop app) uses
+/// [`list_all`] and [`merge_listing`] under its own lock instead.
 ///
 /// When the person's own entries cannot be listed, the refresh still
 /// counts ([`Refreshed::custom_error`] says why); when Claude Code's
 /// connections cannot be listed, nothing is saved.
 pub fn refresh(path: &Path, cli: &ClaudeCliSettings, wait: Duration) -> Result<Refreshed, AgentError> {
     let started = Instant::now();
-    let mut listing = list_claude_connections(cli, wait)?;
     let before = crate::settings::load_agent_settings(path);
-    let (custom, custom_error) = match list_custom_connections(cli, &before.connections, wait) {
-        Ok(custom) => (custom, String::new()),
-        Err(e) => (Vec::new(), e.to_string()),
-    };
-    listing.extend(custom);
+    let listing = list_all(&before, cli, wait)?;
     // Read again: the listing took seconds.
     let current = crate::settings::load_agent_settings(path);
-    let merged = merge_listing(&current, &listing, true);
+    let merged = merge_listing(&current, &listing.connections, true);
     let settings = crate::settings::save_agent_settings(path, merged).map_err(AgentError::Failed)?;
-    Ok(Refreshed { settings, listing, custom_error, elapsed_ms: started.elapsed().as_millis() as u64 })
+    Ok(Refreshed {
+        settings,
+        listing: listing.connections,
+        custom_error: listing.custom_error,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 // --- the connections of one run ------------------------------------
@@ -694,9 +812,16 @@ how to reach it. Open the Agent settings and refresh, or run: openwhisper agent 
 /// is not there the run fails ([`AgentError::NotListed`]) rather
 /// than start without it.
 ///
-/// The file is private to this user (mode 0600 on unix), lies in the
-/// temp folder, and is removed when the returned value is dropped.
+/// The file is private to this user (made new with mode 0600 on
+/// unix, under a name that cannot be guessed), lies in the temp
+/// folder, and is removed when the returned value is dropped. When
+/// the process is killed before that, the next ask, agent run or
+/// `openwhisper agent` command removes it
+/// ([`refine_cli::sweep_stale_private_files`]).
 pub fn write_run_config(connections: &[AgentConnection]) -> Result<RunConfig, AgentError> {
+    // A file like this one that a killed process left behind can
+    // hold tokens: it goes before a new one is written.
+    refine_cli::sweep_stale_private_files();
     let mut servers = serde_json::Map::new();
     let mut seen = std::collections::HashSet::new();
     for connection in connections.iter().filter(|c| c.enabled) {
@@ -706,7 +831,7 @@ pub fn write_run_config(connections: &[AgentConnection]) -> Result<RunConfig, Ag
         let entry = match connection.kind {
             AgentConnectionKind::Custom => custom_entry(connection)
                 .ok_or_else(|| AgentError::Failed(format!("The connection \"{}\" has no command and no URL.", connection.name)))?,
-            AgentConnectionKind::Claude => details(|map| map.get(&connection.name).map(|d| d.0.clone()))
+            AgentConnectionKind::Claude => details(|map| map.get(&name_key(&connection.name)).map(|d| d.0.clone()))
                 .ok_or_else(|| AgentError::NotListed(refresh_first(&connection.name)))?,
         };
         servers.insert(connection.name.clone(), entry);
@@ -791,9 +916,7 @@ done
         ])
     }
 
-    /// The details map is one per process: tests that fill it or
-    /// clear it take turns.
-    static DETAILS_LOCK: Mutex<()> = Mutex::new(());
+    use super::DETAILS_TEST_LOCK as DETAILS_LOCK;
 
     #[test]
     fn a_listing_sends_no_prompt_waits_for_pending_and_keeps_details_in_memory_only() {
@@ -849,6 +972,10 @@ done
         for flag in ["-p", "--input-format stream-json", "--no-session-persistence", "--permission-mode default", "--settings "] {
             assert!(args.contains(flag), "{flag} missing in {args}");
         }
+        // Of the person's settings only their own: not a project's
+        // and not a folder's, with their hooks and their servers.
+        assert!(args.trim_end().ends_with("--setting-sources user"), "{args}");
+        assert_eq!(args.matches("--setting-sources").count(), 1, "{args}");
         assert!(!args.contains("--model") && !args.contains("--strict-mcp-config"), "{args}");
         assert_eq!(fs::read_to_string(dir.path().join("settings-arg.json")).unwrap(), r#"{"disableAllHooks":true}"#);
 
@@ -862,6 +989,8 @@ done
         // server, and not with a header of a file entry that only
         // shares a plugin server's name.
         assert!(is_listed("team-chat") && is_listed("claude.ai Docs") && is_listed("plugin:helper:notes"));
+        // By the same rule a merge matches names with: ignoring case.
+        assert!(is_listed("Team-Chat") && is_listed(" CLAUDE.AI docs ") && !is_listed("team chat"));
         let chat = details(|map| map["team-chat"].0.clone());
         assert_eq!(chat["env"]["CHAT_TOKEN"], SECRET);
         assert_eq!(chat["command"], "chat-server");
@@ -1015,10 +1144,20 @@ done"#,
             "tools": [ { "name": "read_thread", "annotations": { "readOnly": true } } ],
         }]);
         let cli = fake_cli(dir.path(), &listing_script(&answer, &answer));
-        // Listed whether or not it is enabled: the person ticks
-        // tools before they switch it on.
-        let listing =
-            list_custom_connections(&cli, &[own("chat", false), claude("claude.ai Docs", true)], Duration::from_secs(10)).unwrap();
+        // An entry that is switched off is not listed: listing it
+        // would run its command, and nothing has said it may. No
+        // process is started at all.
+        let off = list_custom_connections(&cli, &[own("chat", false), claude("claude.ai Docs", true)], Duration::from_secs(10)).unwrap();
+        assert!(off.is_empty());
+        assert!(!dir.path().join("args.txt").exists(), "a listing started a connection that is switched off");
+        // Switched on, it is; one next to it that is off is not in
+        // the file the CLI is given.
+        let listing = list_custom_connections(
+            &cli,
+            &[own("chat", true), own("other", false), claude("claude.ai Docs", true)],
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert_eq!(listing.len(), 1);
         assert_eq!((listing[0].source, listing[0].state), (ConnectionSource::Custom, ConnectionState::Connected));
         let args = fs::read_to_string(dir.path().join("args.txt")).unwrap();
@@ -1030,6 +1169,128 @@ done"#,
         // No custom entry: no process at all.
         let nobody = ClaudeCliSettings { path: Some("/nonexistent/claude".into()), ..ClaudeCliSettings::default() };
         assert_eq!(list_custom_connections(&nobody, &[claude("x", true)], Duration::from_secs(1)), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_name_is_matched_the_same_way_in_a_merge_in_memory_and_for_a_run() {
+        let _lock = DETAILS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        forget_listing();
+        // The listing spelled it one way, the settings another: a
+        // merge takes them for the same connection...
+        let settings = AgentSettings {
+            connections: vec![AgentConnection { allowed_tools: vec!["search".into()], ..claude("Claude.ai DOCS", true) }],
+            ..AgentSettings::default()
+        };
+        let listing = [found("claude.ai Docs", ConnectionSource::Account, ConnectionState::Connected, &["search"])];
+        let merged = merge_listing(&settings, &listing, true);
+        assert_eq!(merged.connections.len(), 1);
+        assert_eq!(merged.connections[0].tools, [ToolInfo::new("search")]);
+        // ...and so does the lookup of how to reach it, for the run.
+        remember_for_test("claude.ai Docs", json!({ "type": "http", "url": "https://example.com/docs" }));
+        assert!(is_listed(&merged.connections[0].name));
+        let config = write_run_config(&merged.connections).expect("the connection the merge matched can be started");
+        let file: Value = serde_json::from_slice(&fs::read(config.path()).unwrap()).unwrap();
+        // Under the name the settings have.
+        assert_eq!(file["mcpServers"]["Claude.ai DOCS"]["url"], "https://example.com/docs");
+        assert_eq!(name_key("  Claude.ai DOCS "), "claude.ai docs");
+        forget_listing();
+    }
+
+    #[test]
+    fn listing_everything_saves_nothing_and_starts_only_what_is_switched_on() {
+        let _lock = DETAILS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), &listing_script(&servers("connected"), &servers("connected")));
+        // One of the person's own entries, switched off: adding it
+        // has run nothing, and a listing does not either.
+        let off = AgentSettings { connections: vec![own("mine", false)], ..AgentSettings::default() };
+        let listing = list_all_with(&off, &cli, Duration::from_secs(10), None).unwrap();
+        assert_eq!(listing.connections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["claude.ai Docs", "plugin:helper:notes", "team-chat"]);
+        assert_eq!(listing.custom_error, "");
+        assert!(!dir.path().join("mcp-arg.json").exists(), "a listing started an entry that is switched off");
+        // The pure half: merged by the caller, under its own lock.
+        let merged = merge_listing(&off, &listing.connections, true);
+        assert_eq!(merged.connections.len(), 4);
+        let mine = merged.connections.iter().find(|c| c.name == "mine").unwrap();
+        assert!(mine.tools.is_empty() && !mine.enabled);
+        // Switched on, it is started and listed.
+        let on = AgentSettings { connections: vec![own("mine", true), own("other", false)], ..AgentSettings::default() };
+        let listing = list_all_with(&on, &cli, Duration::from_secs(10), None).unwrap();
+        let given: Value = serde_json::from_slice(&fs::read(dir.path().join("mcp-arg.json")).unwrap()).unwrap();
+        assert_eq!(given["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), ["mine"]);
+        assert!(listing.connections.iter().any(|c| c.source == ConnectionSource::Custom));
+        // Nothing of how a connection is reached is in what a
+        // listing or a refresh serializes to.
+        let refreshed = Refreshed { settings: on, listing: listing.connections.clone(), custom_error: String::new(), elapsed_ms: 1 };
+        let printed = format!("{} {}", serde_json::to_string(&listing).unwrap(), serde_json::to_string(&refreshed).unwrap());
+        assert!(printed.contains("CHAT_TOKEN"), "{printed}");
+        assert!(!printed.contains(SECRET), "{printed}");
+        forget_listing();
+    }
+
+    #[test]
+    fn a_tick_for_a_tool_that_is_gone_is_dropped_when_a_listing_is_merged() {
+        let ticked = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let tools = |names: &[&str]| names.iter().map(|n| ToolInfo::new(n)).collect::<Vec<_>>();
+        let settings = AgentSettings {
+            connections: vec![
+                AgentConnection {
+                    allowed_tools: ticked(&["read_thread", "forward_all", "send_message"]),
+                    tools: tools(&["read_thread", "forward_all", "send_message"]),
+                    ..claude("team-chat", true)
+                },
+                // Not connected right now: its list stays, and with
+                // it the ticks for what is on the list. A tick for
+                // something that is not on it goes here too.
+                AgentConnection {
+                    allowed_tools: ticked(&["list_issues", "never_listed"]),
+                    tools: tools(&["list_issues"]),
+                    ..claude("Tracker", true)
+                },
+                // Not part of this listing at all.
+                AgentConnection { allowed_tools: ticked(&["old", "kept"]), tools: tools(&["kept"]), ..own("mine", false) },
+            ],
+            ..AgentSettings::default()
+        };
+        let listing = [
+            found("team-chat", ConnectionSource::User, ConnectionState::Connected, &["read_thread", "send_message", "search"]),
+            found("Tracker", ConnectionSource::Account, ConnectionState::NeedsAuth, &[]),
+        ];
+        let merged = merge_listing(&settings, &listing, true);
+        let allowed = |name: &str| merged.connections.iter().find(|c| c.name == name).unwrap().allowed_tools.clone();
+        assert_eq!(allowed("team-chat"), ["read_thread", "send_message"]);
+        assert_eq!(allowed("Tracker"), ["list_issues"]);
+        assert_eq!(allowed("mine"), ["kept"]);
+        // The tool comes back under its old name: it is listed, and
+        // not ticked. The tick did not lie in wait for it.
+        let back = [found("team-chat", ConnectionSource::User, ConnectionState::Connected, &["read_thread", "forward_all"])];
+        let again = merge_listing(&merged, &back, true);
+        let chat = again.connections.iter().find(|c| c.name == "team-chat").unwrap();
+        assert!(chat.tool("forward_all").is_some());
+        assert_eq!(chat.allowed_tools, ["read_thread"]);
+        assert!(!crate::agent::policy::plan_tools(&again).allowed.iter().any(|t| t.contains("forward_all")));
+    }
+
+    #[test]
+    fn a_tool_name_is_listed_exactly_as_the_connection_gave_it() {
+        let server = json!({
+            "name": "notes", "status": "connected",
+            "tools": [
+                { "name": "list" },
+                { "name": "list,mcp__teamchat", "annotations": { "readOnlyHint": true } },
+                { "name": " list " },
+                { "name": "\nlist" },
+                { "name": "" },
+                { "name": "   " },
+                { "title": "No name" },
+            ],
+        });
+        let names: Vec<String> = tools_of(&server).into_iter().map(|t| t.name).collect();
+        // Nothing is tidied into another tool's name; only a tool
+        // without any name is dropped.
+        assert_eq!(names, ["list", "list,mcp__teamchat", " list ", "\nlist"]);
+        let usable: Vec<bool> = names.iter().map(|n| crate::settings::tool_name_is_usable(n)).collect();
+        assert_eq!(usable, [true, false, false, false]);
     }
 
     fn found(name: &str, source: ConnectionSource, state: ConnectionState, tools: &[&str]) -> ListedConnection {

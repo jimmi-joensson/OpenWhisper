@@ -148,8 +148,8 @@ pub use crate::refine::CallUsage;
 pub use prompt::ScreenPrompt;
 pub use screen::{AskCaptureToken, NEED_SCREEN, ScreenState, StandIn, VisionChoice};
 pub use steps::{
-    AskConfirm, AskStep, CONFIRM_INPUT_MAX_CHARS, ConfirmDecision, ConfirmOutcome, ContextSource, STEP_LINE_MAX_CHARS,
-    StepState, ToolKind, answer_confirm,
+    AskConfirm, AskStep, CONFIRM_ARM_MS, CONFIRM_INPUT_MAX_CHARS, ConfirmAnswer, ConfirmDecision, ConfirmOutcome,
+    ContextSource, STEP_LINE_MAX_CHARS, StepState, ToolKind, answer_confirm, answer_confirm_as_person, safe_to_show,
 };
 
 use crate::settings::VisionSettings;
@@ -574,6 +574,10 @@ struct Trace {
     screen: ScreenState,
     steps: Vec<AskStep>,
     context_source: ContextSource,
+    /// The answer as far as it reached the sink: the whole of it
+    /// when the ask finished, the part that had arrived when it did
+    /// not.
+    text: String,
 }
 
 /// The markers one turn of an ask looks for in the reply.
@@ -992,6 +996,8 @@ impl AskPlan {
         // the markers are taken off: they are looked for in the text
         // as the model wrote it.
         let mut dashes = self.no_long_dashes.then(crate::dashes::Normalizer::new);
+        // The answer as far as it reaches the sink.
+        let mut arrived = String::new();
         let result = {
             let mut out = |event: AskEvent| {
                 if let AskEvent::Step(step) = &event {
@@ -1001,16 +1007,23 @@ impl AskPlan {
                     (Some(dashes), AskEvent::Text(piece)) => {
                         let piece = dashes.push(&piece);
                         if !piece.is_empty() {
+                            arrived.push_str(&piece);
                             sink(AskEvent::Text(piece));
                         }
                     }
-                    (_, event) => sink(event),
+                    (_, event) => {
+                        if let AskEvent::Text(piece) = &event {
+                            arrived.push_str(piece);
+                        }
+                        sink(event);
+                    }
                 }
             };
             self.exchange(session, backend, question, &mut out, cancel, &mut seen, &mut turns)
         };
         // A dash the text ended on, also when the ask failed midway.
         if let Some(rest) = dashes.as_mut().map(crate::dashes::Normalizer::finish).filter(|rest| !rest.is_empty()) {
+            arrived.push_str(&rest);
             sink(AskEvent::Text(rest));
         }
         let result = result.map(|mut reply| {
@@ -1037,13 +1050,18 @@ impl AskPlan {
             screen: seen.state,
             context_source: self.context_source(seen.state, !question.images.is_empty()),
             steps,
+            text: arrived,
         };
         let result = result.and_then(|mut reply| {
             if reply.text.is_empty() {
                 return Err(AskError::Backend(NO_ANSWER.to_string()));
             }
+            // What the backend had to say about this answer, and
+            // what was known before the ask began.
             if reply.notice.is_empty() {
                 reply.notice = self.notice.clone();
+            } else if !self.notice.is_empty() && !reply.notice.contains(&self.notice) {
+                reply.notice = format!("{} {}", reply.notice, self.notice);
             }
             reply.screen = seen.state;
             reply.screen_notice = seen.notice;
@@ -1552,13 +1570,20 @@ fn agent_is_on() -> bool {
 /// from a terminal must be gone for the ask that comes next), and
 /// with `front` as the app the person is working in. An ask that is
 /// not an agent ask (`crate::agent::AgentRun::for_ask`) comes back
-/// unchanged.
+/// unchanged, except for a notice when a connection it would have
+/// used has not been looked up since the app started.
 #[cfg(feature = "agent")]
 fn with_session_agent(plan: AskPlan, front: Option<&(String, String)>) -> AskPlan {
     let settings = crate::settings::fresh_agent_settings();
     let front = front.map(|(id, name)| crate::agent::FrontApp::new(id, name));
-    let run = crate::agent::AgentRun::for_ask(&settings, plan.backend, front.as_ref());
-    plan.with_agent(run)
+    // A connection that has not been looked up in this process is
+    // left out, and the ask says so: it does not fail for it.
+    let (run, left_out) = crate::agent::AgentRun::for_ask_with_notice(&settings, plan.backend, front.as_ref());
+    let mut plan = plan.with_agent(run);
+    if !left_out.is_empty() {
+        plan.notice = if plan.notice.is_empty() { left_out } else { format!("{} {left_out}", plan.notice) };
+    }
+    plan
 }
 
 #[cfg(not(feature = "agent"))]
@@ -2092,8 +2117,11 @@ struct Outcome<'a> {
 }
 
 impl Outcome<'_> {
-    /// Write the diagnostics row and, with `history`, keep an
-    /// accepted answer in the transcript history.
+    /// Write the diagnostics row and, with `history`, keep the ask
+    /// in the transcript history: an accepted answer always, and an
+    /// ask that failed, timed out or was cancelled when a tool had
+    /// run in it by then (with what there is of the answer, marked
+    /// as incomplete, and how each call stood).
     fn record(&self, history: bool) {
         let status = match self.result {
             Ok(_) if self.accepted => "answered",
@@ -2112,10 +2140,30 @@ impl Outcome<'_> {
             self.at_ms,
             self.elapsed_ms,
         ));
-        if let (true, true, Ok(reply)) = (history, self.accepted, self.result) {
+        if !history {
+            return;
+        }
+        if let (true, Ok(reply)) = (self.accepted, self.result) {
             let screen = reply.screen == ScreenState::Included;
             keep_in_history(self.question, &reply.text, self.at_ms, self.spoken_ms, screen, &reply.steps);
+            return;
         }
+        // No answer that counted. An ask without tools then leaves
+        // nothing. One in which a tool ran, or may have run, is kept
+        // all the same: something was done in the person's name, and
+        // the history is where they look for what.
+        let ran = |step: &AskStep| matches!(step.state, StepState::Running | StepState::Done | StepState::Failed);
+        if !self.trace.steps.iter().any(ran) {
+            return;
+        }
+        let (so_far, why) = match self.result {
+            Ok(reply) => (reply.text.trim(), "The ask was cancelled before it finished.".to_string()),
+            Err(AskError::Cancelled) => (self.trace.text.trim(), "The ask was cancelled before it finished.".to_string()),
+            Err(e) => (self.trace.text.trim(), format!("The ask did not finish: {}", error_text(e, self.plan))),
+        };
+        let answer = if so_far.is_empty() { format!("(No answer. {why})") } else { format!("{so_far}\n\n(Incomplete. {why})") };
+        let screen = self.trace.screen == ScreenState::Included;
+        keep_in_history(self.question, &answer, self.at_ms, self.spoken_ms, screen, &self.trace.steps);
     }
 }
 
@@ -2184,13 +2232,17 @@ fn run_record(
     }
 }
 
-/// With transcript history on, keep the finished ask: the question as
-/// the entry's text, the answer under it ([`crate::history`]).
-/// Cancelled and failed asks are not kept. `screen`: a screenshot
-/// went out with the question, which the entry says (the image itself
-/// is kept nowhere). `steps`: the tool calls of an agent ask, of
-/// which the entry keeps the tool and how the call ended, never its
-/// input or its result.
+/// With transcript history on, keep the ask: the question as the
+/// entry's text, the answer under it ([`crate::history`]). A
+/// cancelled or failed ask is kept only when a tool ran in it
+/// ([`Outcome::record`] decides, and makes the answer text say that
+/// it is incomplete). `screen`: a screenshot went out with the
+/// question, which the entry says (the image itself is kept
+/// nowhere). `steps`: the tool calls of an agent ask, of which the
+/// entry keeps the tool and how the call ended, never its input or
+/// its result. A call that was still running when the ask ended is
+/// kept as `result_not_known`; one that still waited for a yes did
+/// not run, and is kept as `denied`.
 fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, screen: bool, steps: &[AskStep]) {
     let settings = crate::settings::current_history_settings();
     let Some(dir) = crate::history::current_dir() else {
@@ -2201,7 +2253,11 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, scr
         .map(|step| crate::history::HistoryTool {
             connection: step.connection.clone(),
             tool: step.tool.clone(),
-            outcome: step.state.as_str().to_string(),
+            outcome: match step.state {
+                StepState::Running => crate::history::TOOL_RESULT_NOT_KNOWN.to_string(),
+                StepState::Waiting => StepState::Denied.as_str().to_string(),
+                state => state.as_str().to_string(),
+            },
         })
         .collect();
     if settings.enabled {
@@ -2321,6 +2377,14 @@ pub fn fail_listening(id: u64, reason: &str) -> bool {
 /// that arrives late (the confirm ran out of time, the ask was
 /// cancelled or replaced) changes nothing, and neither does a second
 /// answer to the same confirm.
+///
+/// Neither does a click that arrives **too early**: a yes within
+/// [`CONFIRM_ARM_MS`] of the confirm coming up was on its way before
+/// the person could have read it (a click meant for the confirm
+/// before, a double click). It is refused, returns `false`, and the
+/// confirm stays open. [`AskConfirm::armed_in_ms`] on the snapshot
+/// says how long that still is, so the panel can show the button as
+/// not yet active.
 pub fn confirm_allow(ask_id: u64, request_id: &str) -> bool {
     confirm_answer(ask_id, request_id, ConfirmDecision::Allow)
 }
@@ -2337,7 +2401,10 @@ fn confirm_answer(ask_id: u64, request_id: &str, decision: ConfirmDecision) -> b
         let on_show = s.snap.id == ask_id
             && s.snap.phase == AskPhase::Confirming
             && s.snap.confirm.as_ref().is_some_and(|c| c.request_id == request_id);
-        if !on_show || !steps::answer_confirm(request_id, decision) {
+        // A person's answer: a yes that comes before the confirm
+        // has been on show for a moment is refused, and the confirm
+        // stays open (`steps::CONFIRM_ARM_MS`).
+        if !on_show || steps::answer_confirm_as_person(request_id, decision) != steps::ConfirmAnswer::Taken {
             return false;
         }
         // At once, so the panel closes the confirm and a second
@@ -2355,6 +2422,11 @@ pub fn snapshot() -> AskSnapshot {
         let mut snap = s.snap.clone();
         if let Some(sent) = s.sent.filter(|_| snap.phase.is_running()) {
             snap.elapsed_ms = sent.elapsed().as_millis() as u64;
+        }
+        // Read off the clock like the elapsed time: how long until a
+        // yes to the confirm counts.
+        if let Some(confirm) = snap.confirm.as_mut() {
+            confirm.armed_in_ms = steps::confirm_armed_in_ms(&confirm.request_id).unwrap_or(0);
         }
         snap
     })

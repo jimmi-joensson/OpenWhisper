@@ -53,7 +53,10 @@ fn connection_lines(run: &AgentRun) -> String {
         if parts.is_empty() {
             continue;
         }
-        out.push_str(&format!("- Connection \"{}\": {}.\n", connection.name, parts.join("; ")));
+        // A name is not ours: nothing in it may read as a line of
+        // the prompt.
+        let name = crate::ask::safe_to_show(&connection.name, false);
+        out.push_str(&format!("- Connection \"{name}\": {}.\n", parts.join("; ")));
     }
     out
 }
@@ -103,7 +106,7 @@ ids or raw results unless they ask.\n",
     );
     if let Some(route) = &run.route {
         let app = if name_app && !route.app_name.is_empty() {
-            format!("The app the person is working in right now is {}", route.app_name)
+            format!("The app the person is working in right now is {}", crate::ask::safe_to_show(&route.app_name, false))
         } else {
             "The app the person is working in right now".to_string()
         };
@@ -113,7 +116,7 @@ what they are looking at or working on there (\"this thread\", \"this message\",
 that connection's tools to find it and answer from what they return. For this app, that takes the place of \
 seeing their screen: do not say that you cannot see it, and do not ask them to paste it, before you have \
 looked.\n",
-            route.connection
+            crate::ask::safe_to_show(&route.connection, false)
         ));
     }
     out

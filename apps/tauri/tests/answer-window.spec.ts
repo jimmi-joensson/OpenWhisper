@@ -3,6 +3,8 @@ import {
   emitAskTick,
   expect,
   waitForAskTickListener,
+  type MockAskConfirm,
+  type MockAskStep,
 } from "./fixtures/tauri-shim";
 
 type Page = import("@playwright/test").Page;
@@ -804,5 +806,525 @@ test.describe("answer window: the card", () => {
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     expect(await animation()).toBe("answer-card-fade");
+  });
+});
+
+// --- an ask with tools (Agent, TASK-99) ----------------------------------
+//
+// The steps and the confirm are core's (`AskSnapshot::steps` and
+// `confirm`); the panel shows them and answers the confirm with two
+// commands. Connections, tools and people are made up.
+
+function step(given: Partial<MockAskStep> & Pick<MockAskStep, "id" | "state">): MockAskStep {
+  return {
+    connection: "teamchat",
+    tool: "read_thread",
+    title: "Read thread",
+    kind: "read",
+    input_summary: 'channel: "general"',
+    outcome: "",
+    ...given,
+  };
+}
+
+const SEND: MockAskStep = step({
+  id: "s2",
+  state: "waiting",
+  tool: "send_message",
+  title: "Send message",
+  kind: "act",
+  input_summary: 'to: "Bo", text: "See you at ten."',
+});
+
+const CONFIRM: MockAskConfirm = {
+  request_id: "r1",
+  step_id: "s2",
+  connection: "teamchat",
+  tool: "send_message",
+  title: "Send message",
+  input: '{\n  "to": "Bo",\n  "text": "See you at ten."\n}',
+  input_cut: false,
+  timeout_s: 120,
+};
+
+const READ_DONE = step({ id: "s1", state: "done", outcome: "3 messages" });
+
+const steps = (page: Page) => page.getByTestId("answer-step");
+const confirmCard = (page: Page) => page.getByTestId("answer-confirm");
+
+// The two answers to a confirm, as the shim recorded them.
+async function confirmCalls(page: Page) {
+  return (await callsWithArgs(page)).filter((c) => c.cmd.startsWith("ask_confirm_"));
+}
+
+async function confirming(page: Page, given: Partial<Parameters<typeof emitAskTick>[1]> = {}) {
+  await emitAskTick(page, {
+    id: 7,
+    phase: "confirming",
+    question: "tell Bo I will be there at ten",
+    steps: [READ_DONE, SEND],
+    confirm: CONFIRM,
+    ...given,
+  });
+  await expect(confirmCard(page)).toBeVisible();
+}
+
+test.describe("answer window: the steps of an ask with tools", () => {
+  test("each step shows its tool, its connection, its input on one line and where it stands", async ({
+    page,
+  }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "thinking",
+      question: "what did Anna say",
+      steps: [
+        step({ id: "a", state: "done", outcome: "3 messages" }),
+        step({
+          id: "b",
+          state: "failed",
+          tool: "search_messages",
+          title: "Search messages",
+          input_summary: 'query: "Anna"',
+          outcome: "The connection did not answer.",
+        }),
+        step({
+          id: "c",
+          state: "denied",
+          tool: "delete_message",
+          title: "Delete message",
+          kind: "act",
+          input_summary: 'id: "m-17"',
+          outcome: "You said no.",
+        }),
+        step({
+          id: "d",
+          state: "waiting",
+          tool: "send_message",
+          title: "Send message",
+          kind: "act",
+          input_summary: 'to: "Anna"',
+        }),
+        step({ id: "e", state: "running", connection: "tracker", tool: "list_issues", title: "" }),
+      ],
+    });
+    await expect(steps(page)).toHaveCount(5);
+    const words = await steps(page).evaluateAll((els) =>
+      els.map((el) => [
+        el.getAttribute("data-state"),
+        el.querySelector('[data-testid="answer-step-title"]')?.textContent,
+        el.querySelector('[data-testid="answer-step-connection"]')?.textContent,
+        el.querySelector('[data-testid="answer-step-state"]')?.textContent,
+      ]),
+    );
+    expect(words).toEqual([
+      ["done", "Read thread", "teamchat", "Done"],
+      ["failed", "Search messages", "teamchat", "Failed"],
+      ["denied", "Delete message", "teamchat", "Not run"],
+      ["waiting", "Send message", "teamchat", "Waiting for you"],
+      // No title: the tool's own name.
+      ["running", "list_issues", "tracker", "Running"],
+    ]);
+    await expect(steps(page).nth(0).getByTestId("answer-step-input")).toHaveText(
+      'channel: "general"',
+    );
+    await expect(steps(page).nth(3)).toHaveAttribute("data-kind", "act");
+    // Why a call failed or did not run is said; what a call that
+    // worked returned is not shown.
+    await expect(steps(page).nth(0).getByTestId("answer-step-outcome")).toHaveCount(0);
+    await expect(steps(page).nth(1).getByTestId("answer-step-outcome")).toHaveText(
+      "The connection did not answer.",
+    );
+    await expect(steps(page).nth(2).getByTestId("answer-step-outcome")).toHaveText("You said no.");
+    // Only the step that runs has a spinner.
+    await expect(steps(page).nth(4).locator('[data-slot="spinner"], [role="status"]')).toHaveCount(1);
+    await expect(steps(page).nth(0).locator('[data-slot="spinner"], [role="status"]')).toHaveCount(0);
+  });
+
+  test("steps show as they happen, above the answer that follows", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, { phase: "thinking", question: "what did Anna say" });
+    await expect(steps(page)).toHaveCount(0);
+    await expect(page.getByTestId("answer-steps")).toHaveCount(0);
+
+    await emitAskTick(page, {
+      phase: "thinking",
+      question: "what did Anna say",
+      steps: [step({ id: "a", state: "running" })],
+    });
+    await expect(steps(page)).toHaveCount(1);
+    await expect(steps(page).nth(0).getByTestId("answer-step-state")).toHaveText("Running");
+    await expect(page.getByTestId("answer-status")).toHaveText("Thinking");
+
+    await emitAskTick(page, {
+      phase: "answering",
+      question: "what did Anna say",
+      steps: [step({ id: "a", state: "done", outcome: "3 messages" })],
+      answer: "Anna said the release is on Friday.",
+    });
+    await expect(steps(page).nth(0).getByTestId("answer-step-state")).toHaveText("Done");
+    await expect(page.getByTestId("answer-text")).toHaveText("Anna said the release is on Friday.");
+    const stepBox = await steps(page).nth(0).boundingBox();
+    const textBox = await page.getByTestId("answer-text").boundingBox();
+    expect(stepBox && textBox && stepBox.y + stepBox.height <= textBox.y).toBe(true);
+  });
+
+  test("many steps scroll inside the card, which stays in the window", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "done",
+      question: "go through the channel",
+      steps: Array.from({ length: 24 }, (_, i) =>
+        step({ id: `s${i}`, state: "done", input_summary: `page: ${i + 1}` }),
+      ),
+      answer: "Nothing new in the channel.",
+    });
+    await expect(steps(page)).toHaveCount(24);
+    await expect(button(page, "Insert")).toBeVisible();
+    const b = await card(page).boundingBox();
+    expect(b && b.y >= 0 && b.y + b.height <= WINDOW.height).toBe(true);
+    const overflow = await page
+      .getByTestId("answer-scroll")
+      .evaluate((el) => el.scrollHeight - el.clientHeight);
+    expect(overflow).toBeGreaterThan(0);
+    // Pinned to the end: the answer is in view.
+    await expect(page.getByTestId("answer-text")).toBeInViewport();
+  });
+
+  test("what a tool was given is shown as text, never as markup", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "thinking",
+      steps: [
+        step({
+          id: "a",
+          state: "failed",
+          title: "<b>Read</b>",
+          input_summary: '<img src=x onerror="window.__owPwned = true">',
+          outcome: "<script>window.__owPwned = true</script>",
+        }),
+      ],
+    });
+    await expect(steps(page).nth(0).getByTestId("answer-step-title")).toHaveText("<b>Read</b>");
+    await expect(steps(page).nth(0).getByTestId("answer-step-input")).toHaveText(
+      '<img src=x onerror="window.__owPwned = true">',
+    );
+    await expect(steps(page).locator("img, script, b")).toHaveCount(0);
+    expect(await recorded(page, "__owPwned")).toBeUndefined();
+  });
+
+  test("an ask without tools shows no steps and no confirm", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, { phase: "done", question: "what is a tap", answer: "A short press." });
+    await expect(page.getByTestId("answer-steps")).toHaveCount(0);
+    await expect(confirmCard(page)).toHaveCount(0);
+    await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
+  });
+});
+
+test.describe("answer window: the confirm", () => {
+  test("shows the tool, the connection, the whole input and how long it waits", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await expect(page.getByTestId("answer-panel")).toHaveAttribute("data-phase", "confirming");
+    await expect(page.getByTestId("answer-confirm-title")).toHaveText(
+      "Allow Send message on teamchat?",
+    );
+    // The tool by its own name too, next to the name it shows.
+    await expect(page.getByTestId("answer-confirm-what")).toHaveText(
+      "send_message would run with exactly this input:",
+    );
+    // The input exactly as core gave it, line breaks and all, in a
+    // monospace font.
+    const input = page.getByTestId("answer-confirm-input");
+    expect(await input.evaluate((el) => el.textContent)).toBe(CONFIRM.input);
+    expect(await input.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre-wrap");
+    expect(await input.evaluate((el) => getComputedStyle(el).fontFamily)).toMatch(/mono/i);
+    await expect(page.getByTestId("answer-confirm-cut")).toHaveCount(0);
+    await expect(page.getByTestId("answer-confirm-timeout")).toHaveText(
+      "No answer within 120 seconds counts as no.",
+    );
+    // The step it is about waits.
+    await expect(steps(page).nth(1).getByTestId("answer-step-state")).toHaveText("Waiting for you");
+    // The ask can still be stopped; nothing can be inserted yet.
+    await expect(button(page, "Cancel")).toBeVisible();
+    await expect(button(page, "Insert")).toHaveCount(0);
+    // Nothing was answered by showing it.
+    expect(await confirmCalls(page)).toEqual([]);
+  });
+
+  test("Allow answers with the ask and the request, and the ask goes on", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await button(page, "Allow").click();
+    await expect(confirmCard(page)).toHaveCount(0);
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_allow", args: { askId: 7, requestId: "r1" } },
+    ]);
+    await expect(page.getByTestId("answer-panel")).toHaveAttribute("data-phase", "thinking");
+    await expect(steps(page).nth(1).getByTestId("answer-step-state")).toHaveText("Running");
+  });
+
+  test("Deny answers with the ask and the request, and the step did not run", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await button(page, "Deny").click();
+    await expect(confirmCard(page)).toHaveCount(0);
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+    ]);
+    await expect(steps(page).nth(1)).toHaveAttribute("data-state", "denied");
+    await expect(steps(page).nth(1).getByTestId("answer-step-state")).toHaveText("Not run");
+    await expect(steps(page).nth(1).getByTestId("answer-step-outcome")).toHaveText("You said no.");
+  });
+
+  test("Deny is the button that stands out, and no key allows", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    // Deny is the filled button, Allow the outlined one.
+    await expect(button(page, "Deny")).toHaveAttribute("data-variant", "default");
+    await expect(button(page, "Allow")).toHaveAttribute("data-variant", "outline");
+    // Deny comes first for the keyboard and sits last on screen,
+    // where the main button of the panel is.
+    const order = await confirmCard(page)
+      .getByRole("button")
+      .evaluateAll((els) => els.map((el) => el.textContent?.trim()));
+    expect(order).toEqual(["Deny", "Allow"]);
+    const deny = await button(page, "Deny").boundingBox();
+    const allow = await button(page, "Allow").boundingBox();
+    expect(deny && allow && deny.x > allow.x).toBe(true);
+    // Neither is a submit button, and nothing has the focus: Enter
+    // and Space answer nothing.
+    for (const name of ["Deny", "Allow"]) {
+      await expect(button(page, name)).toHaveAttribute("type", "button");
+    }
+    expect(await confirmCard(page).locator("form").count()).toBe(0);
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Space");
+    await page.waitForTimeout(150);
+    expect(await confirmCalls(page)).toEqual([]);
+    await expect(confirmCard(page)).toBeVisible();
+  });
+
+  test("an input that was cut says so plainly", async ({ page }) => {
+    await open(page);
+    await confirming(page, {
+      confirm: { ...CONFIRM, input: '{\n  "text": "' + "a".repeat(300), input_cut: true },
+    });
+    await expect(page.getByTestId("answer-confirm-cut")).toHaveText(
+      "The input is longer than what is shown. You would allow something you cannot see in full.",
+    );
+  });
+
+  test("a long input scrolls in itself and the buttons stay inside the window", async ({ page }) => {
+    await open(page);
+    const lines = Array.from({ length: 60 }, (_, i) => `  "line_${i + 1}": "value ${i + 1}",`);
+    await confirming(page, {
+      question:
+        "tell Bo I will be there at ten and ask whether the room on the second floor is still free then",
+      notice: "Web search is not available with this backend.",
+      context_source: { kind: "connection", name: "teamchat" },
+      steps: [
+        READ_DONE,
+        step({ id: "x", state: "done", tool: "search_messages", title: "Search messages" }),
+        SEND,
+      ],
+      confirm: { ...CONFIRM, input: `{\n${lines.join("\n")}\n}`, input_cut: true },
+    });
+    const b = await card(page).boundingBox();
+    expect(b && b.y >= 0 && b.y + b.height <= WINDOW.height).toBe(true);
+    for (const name of ["Deny", "Allow", "Cancel"]) {
+      const box = await button(page, name).boundingBox();
+      expect(box && box.y >= 0 && box.y + box.height <= WINDOW.height, name).toBe(true);
+      await expect(button(page, name)).toBeInViewport({ ratio: 1 });
+    }
+    // The whole input is there, and it scrolls where it is.
+    const input = page.getByTestId("answer-confirm-input");
+    await expect(input).toBeInViewport();
+    const inner = await input.evaluate((el) => ({
+      overflow: el.scrollHeight - el.clientHeight,
+      overflowY: getComputedStyle(el).overflowY,
+      text: el.textContent ?? "",
+    }));
+    expect(inner.overflow).toBeGreaterThan(0);
+    expect(inner.overflowY).toBe("auto");
+    expect(inner.text).toContain('"line_60": "value 60"');
+    // Every line of the card is whole: only the input gives way.
+    for (const id of ["answer-confirm-title", "answer-confirm-what", "answer-confirm-timeout", "answer-confirm-cut"]) {
+      await expect(page.getByTestId(id)).toBeInViewport({ ratio: 1 });
+      const line = await page
+        .getByTestId(id)
+        .evaluate((el) => ({ shown: el.clientHeight, needed: el.scrollHeight }));
+      expect(line.shown, id).toBeGreaterThanOrEqual(line.needed);
+    }
+    // The notes of the footer step aside while the confirm shows.
+    await expect(page.getByTestId("answer-notice")).toHaveCount(0);
+    await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
+    // The confirm is answered from where it is.
+    await button(page, "Deny").click();
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+    ]);
+  });
+
+  test("the input is text, whatever is in it", async ({ page }) => {
+    await open(page);
+    await confirming(page, {
+      confirm: {
+        ...CONFIRM,
+        title: "<i>Send</i>",
+        input: '{\n  "text": "<img src=x onerror=\\"window.__owPwned = true\\">"\n}',
+      },
+    });
+    await expect(page.getByTestId("answer-confirm-title")).toHaveText(
+      "Allow <i>Send</i> on teamchat?",
+    );
+    await expect(page.getByTestId("answer-confirm-input")).toContainText("<img src=x");
+    await expect(confirmCard(page).locator("img, i")).toHaveCount(0);
+    expect(await recorded(page, "__owPwned")).toBeUndefined();
+  });
+
+  test("a second confirm of the same ask is asked again, with its own request", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await button(page, "Deny").click();
+    await expect(confirmCard(page)).toHaveCount(0);
+    // The model tries another tool that acts.
+    await confirming(page, {
+      steps: [
+        READ_DONE,
+        { ...SEND, state: "denied", outcome: "You said no." },
+        step({
+          id: "s3",
+          state: "waiting",
+          tool: "delete_message",
+          title: "Delete message",
+          kind: "act",
+          input_summary: 'id: "m-17"',
+        }),
+      ],
+      confirm: {
+        ...CONFIRM,
+        request_id: "r2",
+        step_id: "s3",
+        tool: "delete_message",
+        title: "Delete message",
+        input: '{\n  "id": "m-17"\n}',
+      },
+    });
+    await expect(page.getByTestId("answer-confirm-title")).toHaveText(
+      "Allow Delete message on teamchat?",
+    );
+    await button(page, "Deny").click();
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r2" } },
+    ]);
+  });
+
+  test("a short input is shown whole, and the notes of the footer come back after", async ({
+    page,
+  }) => {
+    await open(page);
+    await confirming(page, {
+      notice: "Web search is not available with this backend.",
+      context_source: { kind: "connection", name: "teamchat" },
+    });
+    // Four lines of input, none of them scrolled away.
+    const input = page.getByTestId("answer-confirm-input");
+    expect(await input.evaluate((el) => el.scrollHeight - el.clientHeight)).toBe(0);
+    await expect(page.getByTestId("answer-notice")).toHaveCount(0);
+    await button(page, "Deny").click();
+    await expect(page.getByTestId("answer-notice")).toHaveText(
+      "Web search is not available with this backend.",
+    );
+    await expect(page.getByTestId("answer-context-source")).toHaveText(
+      "Using the teamchat connection instead of the screen",
+    );
+  });
+
+  test("a confirm that ran out of time closes by itself", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    // Core: no answer in time is a no, and the ask goes on.
+    await emitAskTick(page, {
+      id: 7,
+      phase: "thinking",
+      question: "tell Bo I will be there at ten",
+      steps: [
+        READ_DONE,
+        { ...SEND, state: "denied", outcome: "You did not answer in time, so it was not done." },
+      ],
+      confirm: null,
+    });
+    await expect(confirmCard(page)).toHaveCount(0);
+    await expect(steps(page).nth(1).getByTestId("answer-step-outcome")).toHaveText(
+      "You did not answer in time, so it was not done.",
+    );
+    expect(await confirmCalls(page)).toEqual([]);
+  });
+
+  test("Cancel while a confirm waits stops the ask, and the tool did not run", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await button(page, "Cancel").click();
+    await expect(page.getByTestId("answer-panel")).toHaveAttribute("data-phase", "cancelled");
+    await expect(confirmCard(page)).toHaveCount(0);
+    await expect(steps(page).nth(1)).toHaveAttribute("data-state", "denied");
+    expect((await callsWithArgs(page)).map((c) => c.cmd)).toEqual(["ask_cancel"]);
+    expect((await callsWithArgs(page))[0].args).toEqual({ id: 7 });
+  });
+});
+
+test.describe("answer window: where the ask looked", () => {
+  test("says when a connection was used instead of the screen", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "thinking",
+      question: "what did Anna say",
+      context_source: { kind: "connection", name: "teamchat" },
+    });
+    await expect(page.getByTestId("answer-context-source")).toHaveText(
+      "Using the teamchat connection instead of the screen",
+    );
+    await emitAskTick(page, {
+      phase: "done",
+      question: "what did Anna say",
+      answer: "The release is on Friday.",
+      context_source: { kind: "connection", name: "teamchat" },
+    });
+    await expect(page.getByTestId("answer-context-source")).toHaveText(
+      "Used the teamchat connection instead of the screen",
+    );
+    await expect(page.getByTestId("answer-screen-included")).toHaveCount(0);
+  });
+
+  test("a screenshot that was asked for as well is said too", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "done",
+      question: "look at my screen, what did Anna say",
+      answer: "The release is on Friday.",
+      screen: "included",
+      context_source: { kind: "connection", name: "teamchat" },
+    });
+    await expect(page.getByTestId("answer-context-source")).toHaveText(
+      "Used the teamchat connection",
+    );
+    await expect(page.getByTestId("answer-screen-included")).toHaveText("Screen included");
+  });
+
+  test("an ask that looked at the screen, or nowhere, has no such line", async ({ page }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "done",
+      answer: "A file is missing.",
+      screen: "included",
+      context_source: { kind: "screen" },
+    });
+    await expect(page.getByTestId("answer-screen-included")).toBeVisible();
+    await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
+    await emitAskTick(page, { phase: "done", answer: "A short press." });
+    await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
   });
 });

@@ -86,7 +86,7 @@ impl ClaudeCliAsk {
     fn spawn(&self, setup: &AskSetup) -> Result<Process, AskError> {
         let bin = find_binary(&self.settings)?;
         let reader = Box::new(PlainReader { web_search: setup.web_search });
-        Process::spawn(&bin, setup, |prompt_file| spawn_args(setup, prompt_file), reader, None)
+        Process::spawn(&bin, setup, |prompt_file| Ok(spawn_args(setup, prompt_file)), reader, None, false)
     }
 }
 
@@ -231,6 +231,13 @@ pub(crate) trait Reader: Send {
     fn decided(&mut self, _request_id: &str, _outcome: ConfirmOutcome) -> Vec<AskEvent> {
         Vec::new()
     }
+
+    /// The turn has its answer: something the person should know
+    /// about how it was made that only shows at the end. Used when
+    /// no line of the turn brought a notice ([`Line::Notice`]).
+    fn final_notice(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// The reader of an ask without tools: [`read_line`].
@@ -298,26 +305,53 @@ pub(crate) struct Process {
     /// cleans up after itself when dropped (an ask with tools keeps
     /// its private connection file here).
     _keep: Option<Box<dyn std::any::Any + Send>>,
+    /// The process was started in a process group of its own (unix,
+    /// an ask with tools): ending it ends the group, so the local
+    /// servers of its connections go with it.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    own_group: bool,
 }
 
 impl Process {
     /// Start the CLI at `bin` for one conversation. `args` makes the
     /// argument list, given the file the system prompt was written
-    /// to; `reader` says what the lines mean; `keep` is dropped with
-    /// the process.
+    /// to (an error from it stops the start); `reader` says what the
+    /// lines mean; `keep` is dropped with the process. With
+    /// `own_group` (unix only; an ask with tools) the process gets a
+    /// process group of its own, which is ended as a whole when the
+    /// process is: see [`refine_cli::kill_process_group`]. A plain
+    /// ask passes `false` and is started exactly as before.
     pub(crate) fn spawn(
         bin: &Path,
         setup: &AskSetup,
-        args: impl FnOnce(&Path) -> Vec<String>,
+        args: impl FnOnce(&Path) -> Result<Vec<String>, AskError>,
         reader: Box<dyn Reader>,
         keep: Option<Box<dyn std::any::Any + Send>>,
+        own_group: bool,
     ) -> Result<Self, AskError> {
+        // What an earlier process of this app left behind when it
+        // was killed goes before a new file is written.
+        refine_cli::sweep_stale_private_files();
         let prompt_file = refine_cli::write_prompt_file("Ask", &setup.system)?;
+        let args = match args(&prompt_file) {
+            Ok(args) => args,
+            Err(e) => {
+                let _ = fs::remove_file(&prompt_file);
+                return Err(e);
+            }
+        };
         let mut cmd = refine_cli::command(bin);
-        cmd.args(args(&prompt_file))
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        let own_group = own_group && cfg!(unix);
+        #[cfg(unix)]
+        if own_group {
+            use std::os::unix::process::CommandExt;
+            // The group's id is the process's own id.
+            cmd.process_group(0);
+        }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -373,6 +407,7 @@ impl Process {
             mid_turn: false,
             reader,
             _keep: keep,
+            own_group,
         })
     }
 
@@ -487,6 +522,9 @@ impl Process {
                     });
                     self.turns += 1;
                     self.mid_turn = false;
+                    if notice.is_empty() {
+                        notice = self.reader.final_notice().unwrap_or_default();
+                    }
                     return Ok(turn.finish(usage, warm_lead, &notice));
                 }
                 Line::Other => {}
@@ -502,11 +540,15 @@ impl Process {
     /// Answer one [`Permission`]: at once, or after the person did.
     /// Returns how long the person was waited on.
     ///
-    /// While a confirm waits, this looks at the cancel flag and the
-    /// confirm's own clock every [`POLL`]. A cancel is a no: the CLI
-    /// is told so, and then the turn ends as cancelled, which kills
-    /// the process. The tool cannot have run in between: the CLI
-    /// does not start it before it has an answer.
+    /// While a confirm waits, this looks at the cancel flag, the
+    /// confirm's own clock and the process every [`POLL`]. A cancel
+    /// is a no: the CLI is told so, and then the turn ends as
+    /// cancelled, which kills the process. The tool cannot have run
+    /// in between: the CLI does not start it before it has an
+    /// answer. A CLI that stops while the confirm waits closes the
+    /// confirm at once ([`ConfirmOutcome::Gone`]): the person is not
+    /// left to answer a question nobody is waiting on, and the turn
+    /// ends with what the process said.
     fn decide(
         &mut self,
         permission: Permission,
@@ -551,9 +593,25 @@ impl Process {
                     if asked.elapsed() >= patience || asked >= deadline {
                         break ConfirmOutcome::TimedOut;
                     }
+                    // The CLI is gone: nobody waits for this answer.
+                    if matches!(self.child.try_wait(), Ok(Some(_))) {
+                        break ConfirmOutcome::Gone;
+                    }
                     thread::sleep(POLL);
                 };
                 drop(waiting);
+                if outcome == ConfirmOutcome::Gone {
+                    turn.event(AskEvent::ConfirmClosed { request_id: request_id.clone(), outcome });
+                    self.reader.decided(&request_id, outcome).into_iter().for_each(|event| turn.event(event));
+                    // Let the stderr reader finish, then say why.
+                    thread::sleep(Duration::from_millis(150));
+                    return Err(match self.exit_error() {
+                        AskError::Backend(said) => {
+                            AskError::Backend(format!("Claude Code stopped while it waited for your answer, so nothing was run. {said}"))
+                        }
+                        other => other,
+                    });
+                }
                 let response = match outcome {
                     ConfirmOutcome::Allowed => json!({
                         "type": "control_response",
@@ -565,7 +623,9 @@ impl Process {
                         },
                     }),
                     ConfirmOutcome::TimedOut => deny(&request_id, DENIED_BY_TIMEOUT),
-                    ConfirmOutcome::Denied | ConfirmOutcome::Cancelled => deny(&request_id, DENIED_BY_PERSON),
+                    ConfirmOutcome::Denied | ConfirmOutcome::Cancelled | ConfirmOutcome::Gone => {
+                        deny(&request_id, DENIED_BY_PERSON)
+                    }
                 };
                 let written = self.respond(&response);
                 turn.event(AskEvent::ConfirmClosed { request_id: request_id.clone(), outcome });
@@ -615,6 +675,12 @@ impl Drop for Process {
         // under it too: behind a `claude.cmd` shim the CLI is a
         // grandchild that a plain kill does not reach.
         drop(self.stdin.take());
+        // An ask with tools: everything the CLI started goes with
+        // it. The group is the CLI's own, so nothing else is in it.
+        #[cfg(unix)]
+        if self.own_group {
+            refine_cli::kill_process_group(self.child.id());
+        }
         refine_cli::end_process(&mut self.child, self.mid_turn);
         let _ = fs::remove_file(&self.prompt_file);
     }

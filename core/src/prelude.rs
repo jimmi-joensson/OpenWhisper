@@ -51,12 +51,13 @@ pub use crate::diagnostics::{
 pub use crate::diagnostics::recognizer_info;
 #[cfg(feature = "agent")]
 pub use crate::agent::{
-    AgentError, AgentRun, ConnectionSource, ConnectionState, FrontApp, ListedConnection, ToolPlan,
+    AgentError, AgentRun, ConnectionSource, ConnectionState, FrontApp, ListedConnection, Listing, ToolPlan, ToolProblem,
 };
 #[cfg(feature = "ask")]
 pub use crate::ask::{
     AskBackend, AskConfirm, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup,
-    AskSnapshot, AskStatus, AskStep, AskSuggestion, CancelFlag, ConfirmDecision, ConfirmOutcome, ContextSource,
+    AskSnapshot, AskStatus, AskStep, AskSuggestion, CancelFlag, ConfirmAnswer, ConfirmDecision, ConfirmOutcome,
+    ContextSource,
     ScreenState, StepState, ToolKind, VisionChoice,
 };
 #[cfg(feature = "vision")]

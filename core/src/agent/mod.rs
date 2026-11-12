@@ -42,7 +42,20 @@
 //!   acts without the person.
 //! - **Every call is shown.** Each tool call is a step on the ask's
 //!   snapshot as it happens ([`crate::ask::AskStep`]), and the
-//!   history entry lists the tools an ask used.
+//!   history entry lists the tools an ask used, also when the ask
+//!   did not finish.
+//! - **Names and text are not ours.** A tool's name comes from its
+//!   connection, and so does everything a tool returns. A name that
+//!   cannot be handed to the CLI safely makes its tool unusable
+//!   ([`policy::unusable_reason`]); the names that are handed over
+//!   are spelled the CLI's way ([`policy::normalize_name`]) and held
+//!   against what the CLI really started with before the model can
+//!   call anything ([`claude`]); and whatever is shown of a call is
+//!   made safe to show first ([`crate::ask::safe_to_show`]).
+//! - **A yes is for what was shown.** A confirm carries the whole
+//!   input or is not raised at all, and a yes counts only once the
+//!   confirm has been on show for a moment
+//!   ([`crate::ask::CONFIRM_ARM_MS`]).
 //!
 //! **The connection before the screen.** When the app in front has a
 //! connection the ask can use ([`AgentRun::route`], from the app
@@ -57,7 +70,7 @@
 
 use std::fmt;
 
-use crate::settings::{AgentConnection, AgentSettings, RefineBackendKind};
+use crate::settings::{AgentConnection, AgentConnectionKind, AgentSettings, RefineBackendKind};
 
 pub mod claude;
 pub mod connections;
@@ -67,10 +80,17 @@ pub mod policy;
 pub mod prompt;
 
 pub use connections::{
-    ConnectionSource, ConnectionState, LIST_WAIT, ListedConnection, Refreshed, RunConfig, list_claude_connections,
-    list_custom_connections, merge_listing, refresh, write_run_config,
+    ConnectionSource, ConnectionState, LIST_WAIT, ListedConnection, Listing, Refreshed, RunConfig, list_all,
+    list_claude_connections, list_custom_connections, merge_listing, refresh, write_run_config,
 };
-pub use policy::{PlannedTool, ToolKind, ToolPlan, classify, plan_tools};
+pub use policy::{PlannedTool, ToolKind, ToolPlan, ToolProblem, classify, plan_tools, unusable_reason};
+
+/// Remove what an earlier process of this app left in the temp
+/// folder when it was killed before it could clean up: the
+/// connection file of an agent run (it can hold tokens) and the
+/// prompt file of an ask, and nothing else. See
+/// [`crate::refine::claude_cli::sweep_stale_private_files`].
+pub use crate::refine::claude_cli::sweep_stale_private_files as sweep_stale_files;
 
 /// Why something about the connections did not work.
 #[non_exhaustive]
@@ -196,11 +216,59 @@ impl AgentRun {
     /// [`AgentRun::new`] for an ask in the app: only while Agent is
     /// switched on and the backend is the Claude CLI. `None` means
     /// the ask runs as a plain ask.
+    ///
+    /// A connection of the person's Claude Code that this process
+    /// has not looked up is left out
+    /// ([`AgentRun::for_ask_with_notice`], which also says so).
     pub fn for_ask(settings: &AgentSettings, backend: RefineBackendKind, front: Option<&FrontApp>) -> Option<Self> {
+        Self::for_ask_with_notice(settings, backend, front).0
+    }
+
+    /// [`AgentRun::for_ask`], and what to tell the person about it.
+    ///
+    /// A connection of the person's Claude Code can only be started
+    /// once this process has looked it up (how it is reached is kept
+    /// in memory, never on disk: [`connections`]). One that is
+    /// enabled and has a tool the ask could call, but has not been
+    /// looked up since the app started, does not stop the ask: it is
+    /// left out, the ask runs with the connections that remain, or
+    /// as a plain ask when none does, and the notice (the second
+    /// value, empty when there is nothing to say) names it and says
+    /// to refresh. A question that needs no connection at all is
+    /// answered either way.
+    pub fn for_ask_with_notice(
+        settings: &AgentSettings,
+        backend: RefineBackendKind,
+        front: Option<&FrontApp>,
+    ) -> (Option<Self>, String) {
         if !settings.enabled || backend == RefineBackendKind::OpenaiCompatible {
-            return None;
+            return (None, String::new());
         }
-        Self::new(settings, front)
+        let mut settings = settings.clone().cleaned();
+        // The connections that would bring a tool, and cannot be
+        // started.
+        let wanted: Vec<String> = policy::planned_tools(&settings).into_iter().map(|t| t.connection).collect();
+        let unknown = |c: &AgentConnection| {
+            c.enabled && c.kind == AgentConnectionKind::Claude && wanted.contains(&c.name) && !connections::is_listed(&c.name)
+        };
+        let left_out: Vec<String> = settings.connections.iter().filter(|c| unknown(c)).map(|c| c.name.clone()).collect();
+        settings.connections.retain(|c| !unknown(c));
+        let shown = |name: &String| format!("\"{}\"", crate::ask::safe_to_show(name, false));
+        let notice = match left_out.as_slice() {
+            [] => String::new(),
+            [one] => format!(
+                "The connection {} has not been looked up since the app started, so this answer was made without it. \
+Refresh the connections in the Agent settings to use it.",
+                shown(one)
+            ),
+            many => format!(
+                "{} connections have not been looked up since the app started ({}), so this answer was made without them. \
+Refresh the connections in the Agent settings to use them.",
+                many.len(),
+                many.iter().map(shown).collect::<Vec<_>>().join(", ")
+            ),
+        };
+        (Self::new(&settings, front), notice)
     }
 
     /// The planned tool with this full name (`mcp__connection__tool`).
@@ -256,9 +324,12 @@ mod tests {
     use super::*;
     use crate::settings::{AppConnection, ToolInfo};
 
+    /// One of the person's own entries: it needs no listing to be
+    /// started.
     fn chat(name: &str, enabled: bool, ticked: &[&str]) -> AgentConnection {
         AgentConnection {
             name: name.into(),
+            kind: AgentConnectionKind::Custom,
             enabled,
             allowed_tools: ticked.iter().map(|t| t.to_string()).collect(),
             tools: vec![
@@ -266,8 +337,66 @@ mod tests {
                 ToolInfo::new("create_draft"),
                 ToolInfo::new("send_message"),
             ],
-            ..AgentConnection::default()
+            custom: Some(crate::settings::CustomServer { command: "/opt/example/chat-server".into(), ..Default::default() }),
         }
+    }
+
+    /// A connection of the person's Claude Code with the same tools.
+    fn of_claude(name: &str, ticked: &[&str]) -> AgentConnection {
+        AgentConnection { kind: AgentConnectionKind::Claude, custom: None, ..chat(name, true, ticked) }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_connection_that_was_not_looked_up_is_left_out_of_an_ask_and_named_in_a_notice() {
+        let _lock = connections::DETAILS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        connections::forget_listing();
+        let claude = RefineBackendKind::ClaudeCli;
+        let s = settings(vec![
+            chat("chat", true, &["read_thread"]),
+            of_claude("claude.ai Docs", &["read_thread"]),
+            // Enabled, but nothing of it could run: not missed.
+            of_claude("claude.ai Idle", &[]),
+            of_claude("claude.ai Sender", &["send_message"]),
+        ]);
+        // Nothing was looked up since the app started: the ask still
+        // runs, with the connection that can be started, and says
+        // which one it went without.
+        let (run, notice) = AgentRun::for_ask_with_notice(&s, claude, None);
+        let run = run.expect("an ask with the remaining connection");
+        assert_eq!(run.connections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["chat"]);
+        assert_eq!(run.tools.allowed, ["mcp__chat__read_thread"]);
+        assert!(!run.tools.disallowed.iter().any(|t| t.contains("claude_ai")), "{:?}", run.tools.disallowed);
+        assert_eq!(
+            notice,
+            "The connection \"claude.ai Docs\" has not been looked up since the app started, so this answer was made without it. \
+Refresh the connections in the Agent settings to use it."
+        );
+        assert_eq!(AgentRun::for_ask(&s, claude, None), Some(run));
+        // The run can be started: nothing in it needs a listing.
+        assert!(connections::write_run_config(&AgentRun::for_ask(&s, claude, None).unwrap().connections).is_ok());
+
+        // Only connections that were not looked up: a plain ask,
+        // which says why it has no tools. Two are named.
+        let only = AgentSettings {
+            drafts_only: false,
+            ..settings(vec![of_claude("claude.ai Docs", &["read_thread"]), of_claude("claude.ai Sender", &["send_message"])])
+        };
+        let (run, notice) = AgentRun::for_ask_with_notice(&only, claude, None);
+        assert_eq!(run, None);
+        assert!(notice.starts_with("2 connections have not been looked up since the app started (\"claude.ai Docs\", \"claude.ai Sender\")"), "{notice}");
+
+        // Looked up (in any spelling of its name): it is in the run
+        // and there is nothing to say.
+        connections::remember_for_test("Claude.ai DOCS", serde_json::json!({ "type": "http", "url": "https://example.com/docs" }));
+        let (run, notice) = AgentRun::for_ask_with_notice(&s, claude, None);
+        assert_eq!(run.unwrap().connections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["chat", "claude.ai Docs"]);
+        assert_eq!(notice, "");
+        // Agent off, or another backend: no run and nothing to say.
+        let off = AgentSettings { enabled: false, ..s.clone() };
+        assert_eq!(AgentRun::for_ask_with_notice(&off, claude, None), (None, String::new()));
+        assert_eq!(AgentRun::for_ask_with_notice(&s, RefineBackendKind::OpenaiCompatible, None), (None, String::new()));
+        connections::forget_listing();
     }
 
     fn settings(connections: Vec<AgentConnection>) -> AgentSettings {

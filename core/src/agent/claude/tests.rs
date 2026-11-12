@@ -23,12 +23,27 @@ use std::time::Instant;
 
 const SECRET: &str = "tok-made-up-321";
 
-/// A fake `claude`: a shell script standing in for the real CLI.
+/// A fake `claude`: a shell script standing in for the real CLI,
+/// which starts with exactly the tools [`run`] lets the model call.
 fn fake_cli(dir: &Path, body: &str) -> ClaudeCliSettings {
+    fake_cli_with_init(dir, STARTED_AS_PLANNED, body)
+}
+
+/// What the CLI says it started with when everything is as [`run`]
+/// planned it: the connection up, the three ticked tools there, the
+/// two that were taken away gone.
+const STARTED_AS_PLANNED: &str = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"chat","status":"connected"}],"tools":["mcp__chat__read_thread","mcp__chat__create_draft","mcp__chat__send_message"]}"#;
+
+/// [`fake_cli`] with the line the CLI says it started with given.
+fn fake_cli_with_init(dir: &Path, init: &str, body: &str) -> ClaudeCliSettings {
     let path = dir.join("claude");
-    fs::write(&path, format!("#!/bin/sh\n{PRELUDE}\n{body}\n")).unwrap();
+    fs::write(&path, format!("#!/bin/sh\n{}\n{body}\n", PRELUDE.replace("INIT_LINE", init))).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     ClaudeCliSettings { path: Some(path.display().to_string()), ..ClaudeCliSettings::default() }
+}
+
+fn spawn_args_ok(setup: &AskSetup, run: &AgentRun, config_file: &Path, system_prompt_file: &Path) -> Vec<String> {
+    spawn_args(setup, run, config_file, system_prompt_file).expect("every name on the lists is plain")
 }
 
 /// Every script starts the same way: record the arguments and the
@@ -44,7 +59,7 @@ prev=""; for a in "$@"; do
 done
 read -r question
 printf '%s\n' "$question" > "$here/question.txt"
-echo '{"type":"system","subtype":"init","mcp_servers":[{"name":"chat","status":"connected"}]}'
+echo 'INIT_LINE'
 say() {
   echo '{"type":"stream_event","event":{"type":"message_start"}}'
   echo "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"$1\"}}}"
@@ -196,7 +211,7 @@ fn alive(pid: &str) -> bool {
 
 #[test]
 fn the_arguments_of_an_agent_ask_are_pinned() {
-    let args = spawn_args(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/prompt.txt"));
+    let args = spawn_args_ok(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/prompt.txt"));
     assert_eq!(
         args,
         [
@@ -255,18 +270,18 @@ fn every_flag_that_takes_a_list_is_followed_by_a_flag_and_an_empty_list_is_left_
             }
         }
     };
-    let full = spawn_args(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let full = spawn_args_ok(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     follows_a_list(&full);
     // Only a send ticked: nothing runs by itself, so no allow list.
     let mut only_acts = run();
     only_acts.tools.allowed.clear();
-    let args = spawn_args(&setup(false), &only_acts, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let args = spawn_args_ok(&setup(false), &only_acts, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     assert!(!args.iter().any(|a| a == "--allowedTools"), "{args:?}");
     follows_a_list(&args);
     // Everything ticked: nothing to take away.
     let mut all = run();
     all.tools.disallowed.clear();
-    let args = spawn_args(&setup(false), &all, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let args = spawn_args_ok(&setup(false), &all, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
     follows_a_list(&args);
     // The question is never an argument.
@@ -275,8 +290,8 @@ fn every_flag_that_takes_a_list_is_followed_by_a_flag_and_an_empty_list_is_left_
 
 #[test]
 fn web_search_stays_the_asks_own_setting() {
-    let off = spawn_args(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
-    let on = spawn_args(&setup(true), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let off = spawn_args_ok(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let on = spawn_args_ok(&setup(true), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     let tools = on.iter().position(|a| a == "--tools").unwrap();
     assert_eq!(on[tools + 1], "WebSearch");
     let allowed = on.iter().position(|a| a == "--allowedTools").unwrap();
@@ -289,7 +304,7 @@ fn web_search_stays_the_asks_own_setting() {
     // No effort the CLI does not have.
     let mut minimal = setup(false);
     minimal.effort = Some(RefineEffort::Minimal);
-    assert!(spawn_args(&minimal, &run(), Path::new("/a"), Path::new("/b")).join(" ").contains("--effort low"));
+    assert!(spawn_args_ok(&minimal, &run(), Path::new("/a"), Path::new("/b")).join(" ").contains("--effort low"));
 }
 
 // --- a call that runs ----------------------------------------------
@@ -403,7 +418,9 @@ fn a_confirm_that_is_allowed_hands_the_input_back_unchanged_and_the_tool_runs() 
         (confirm.request_id.as_str(), confirm.step_id.as_str(), confirm.connection.as_str(), confirm.tool.as_str()),
         ("req-claude-allow", "toolu_send", "chat", "send_message")
     );
-    assert_eq!((confirm.title.as_str(), confirm.timeout_s, confirm.input_cut), ("Send Message", 120, false));
+    assert_eq!((confirm.title.as_str(), confirm.timeout_s), ("Send Message", 120));
+    // As it is raised, a person's yes does not count yet.
+    assert_eq!(confirm.armed_in_ms, crate::ask::CONFIRM_ARM_MS);
     let expected: Value = serde_json::from_str(SEND_INPUT).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&confirm.input).unwrap(), expected);
 
@@ -495,7 +512,8 @@ fn a_cancel_while_a_confirm_waits_is_a_no_and_ends_the_process() {
     let started = Instant::now();
     let (reply, events) = send(&mut agent, LONG, |_, cancel| cancel.cancel());
     assert_eq!(reply, Err(AskError::Cancelled));
-    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    // Far below the 30 s the CLI would sleep, with room for a busy machine.
+    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
     assert_eq!(closed_of(&events), [("req-claude-cancel".to_string(), ConfirmOutcome::Cancelled)]);
     assert_eq!(
         steps_of(&events).last().unwrap(),
@@ -539,7 +557,9 @@ done_with "I could not do that."
         let started = Instant::now();
         let (reply, events) = send(&mut agent, LONG, |_, _| panic!("{case}: the person must not be asked"));
         assert_eq!(reply.unwrap().text, "I could not do that.", "{case}");
-        assert!(started.elapsed() < Duration::from_secs(3), "{case}: it waited");
+        // No wait for a person: far below the confirm timeout, with
+        // room for a busy machine.
+        assert!(started.elapsed() < Duration::from_secs(9), "{case}: it waited");
         let answer = answer_file(dir.path(), "answer.txt");
         assert_eq!(answer["response"]["response"]["behavior"], "deny", "{case}");
         assert_eq!(answer["response"]["response"]["message"], NOT_AVAILABLE, "{case}");
@@ -642,7 +662,7 @@ sleep 30
 fn a_connection_that_is_down_is_said_in_the_notice() {
     let dir = tempfile::tempdir().unwrap();
     let body = r#"
-echo '{"type":"system","subtype":"init","mcp_servers":[{"name":"chat","status":"failed"}]}'
+echo '{"type":"system","subtype":"init","mcp_servers":[{"name":"chat","status":"failed"}],"tools":[]}'
 say "I could not reach the chat."
 done_with "I could not reach the chat."
 "#;
@@ -700,6 +720,375 @@ fn a_warmed_agent_process_answers_and_reports_its_head_start() {
     assert!(!dir.path().join("question.txt").exists(), "nothing is sent before there is a question");
     let (reply, _) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
     assert!(reply.unwrap().warm_lead_ms.unwrap() >= 150);
+}
+
+// --- the plan held against what the CLI started with ----------------
+
+/// One init line: the connection `chat` in `state`, with `tools`.
+fn init_line(state: &str, tools: &[&str]) -> String {
+    json!({ "type": "system", "subtype": "init", "mcp_servers": [{ "name": "chat", "status": state }], "tools": tools }).to_string()
+}
+
+/// A CLI that would call the send without asking, were it left to
+/// run: what an ask is stopped before.
+const WOULD_SEND: &str = r#"
+sleep 1
+touch "$here/went-on.txt"
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_send","name":"mcp__chat__send_message","input":{"to":"all@example.com","body":"x"}}]}}'
+echo '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_send","type":"tool_result","content":[{"type":"text","text":"ok: message sent (id m-2)"}]}]}}'
+say "Sent."
+done_with "Sent."
+"#;
+
+#[test]
+fn an_ask_ends_before_anything_runs_when_the_cli_and_the_plan_disagree_about_a_name() {
+    let planned = ["mcp__chat__read_thread", "mcp__chat__create_draft", "mcp__chat__send_message"];
+    let cases: [(&str, String, &str); 5] = [
+        // The CLI spells the connection's tools another way: what
+        // the plan allows is not there, and what is there is on no
+        // list.
+        (
+            "another spelling",
+            init_line("connected", &["mcp__chat_x__read_thread", "mcp__chat_x__send_message", "mcp__chat_x__delete_message"]),
+            "The connection \"chat\" does not have a tool under the name this app expected (mcp__chat__read_thread)",
+        ),
+        // One planned tool is missing.
+        (
+            "a tool missing",
+            init_line("connected", &planned[1..]),
+            "The connection \"chat\" does not have a tool under the name this app expected (mcp__chat__read_thread)",
+        ),
+        // A tool that was taken away is still offered to the model.
+        (
+            "a tool not taken away",
+            init_line("connected", &[planned[0], planned[1], planned[2], "mcp__chat__delete_message"]),
+            "The connection \"chat\" still offered a tool that was taken out of this ask (mcp__chat__delete_message)",
+        ),
+        // A tool of a connection the run was never given.
+        (
+            "a connection nobody asked for",
+            init_line("connected", &[planned[0], planned[1], planned[2], "mcp__mail__send_mail"]),
+            "Claude Code started with a tool of a connection this ask did not ask for (mcp__mail__send_mail)",
+        ),
+        // A CLI that does not say what it started with.
+        (
+            "no list of tools",
+            r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"chat","status":"connected"}]}"#.to_string(),
+            "Claude Code did not say which tools it started with",
+        ),
+    ];
+    for (case, init, says) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = ClaudeAgent::new(fake_cli_with_init(dir.path(), &init, WOULD_SEND), run());
+        let started = Instant::now();
+        let (reply, events) = send(&mut agent, LONG, |_, _| panic!("{case}: nothing to confirm"));
+        match reply {
+            Err(AskError::Backend(message)) => {
+                assert!(message.starts_with(says), "{case}: {message}");
+                assert!(message.ends_with("so the ask was stopped before anything ran. Refresh the connections in the Agent settings and ask again."), "{case}: {message}");
+            }
+            other => panic!("{case}: {other:?}"),
+        }
+        // With no step, and the process is gone before it got to
+        // its tool call: the script would have left a file behind a
+        // second after it said what it started with. (How long the
+        // script took to start is not ours to bound: a new script
+        // is checked by the system first, one at a time.)
+        assert!(started.elapsed() < Duration::from_secs(8), "{case}: {:?}", started.elapsed());
+        assert!(events.is_empty(), "{case}: {events:?}");
+        assert!(agent.process.is_none(), "{case}");
+        thread::sleep(Duration::from_millis(1200));
+        assert!(!dir.path().join("went-on.txt").exists(), "{case}: the CLI went on after the ask was stopped");
+    }
+}
+
+#[test]
+fn a_tool_the_connection_has_grown_since_it_was_listed_is_said_and_can_never_run() {
+    let dir = tempfile::tempdir().unwrap();
+    // Everything as planned, and one tool more that no list knows.
+    let init = init_line(
+        "connected",
+        &["mcp__chat__read_thread", "mcp__chat__create_draft", "mcp__chat__send_message", "mcp__chat__forward_everything"],
+    );
+    // The model reaches for it; the CLI, which has it on no list,
+    // asks first.
+    let body = r#"
+echo '{"type":"control_request","request_id":"req-claude-grown","request":{"subtype":"can_use_tool","tool_name":"mcp__chat__forward_everything","input":{"to":"all@example.com"},"tool_use_id":"toolu_new"}}'
+read -r answer
+printf '%s\n' "$answer" > "$here/answer.txt"
+say "I could not do that."
+done_with "I could not do that."
+"#;
+    let mut agent = ClaudeAgent::new(fake_cli_with_init(dir.path(), &init, body), run());
+    let (reply, events) = send(&mut agent, LONG, |_, _| panic!("the person must not be asked about a tool they never saw"));
+    let reply = reply.unwrap();
+    assert_eq!(
+        reply.notice,
+        "\"chat\" has tools this app has not seen yet. They cannot be used until you refresh the connections in the Agent settings."
+    );
+    let answer = answer_file(dir.path(), "answer.txt");
+    assert_eq!(answer["response"]["response"]["behavior"], "deny");
+    assert_eq!(
+        steps_of(&events),
+        [("forward_everything".to_string(), StepState::Denied, "Not available in this ask.".to_string())]
+    );
+    // And it is on no list that would let it run by itself.
+    let args = fs::read_to_string(dir.path().join("args.txt")).unwrap();
+    assert!(!args.contains("forward_everything"), "{args}");
+}
+
+#[test]
+fn a_connection_still_starting_when_the_answer_came_is_said_unless_it_was_heard_of() {
+    // Still coming up when the CLI said what it had: its tools are
+    // not there yet, which is not a disagreement.
+    let pending = init_line("pending", &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let body = "say \"Hello.\"\ndone_with \"Hello.\"";
+    let mut agent = ClaudeAgent::new(fake_cli_with_init(dir.path(), &pending, body), run());
+    let (reply, _) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
+    assert_eq!(
+        reply.unwrap().notice,
+        "The connection \"chat\" was still starting when this was answered, so the answer may have been made without it. Ask again in a moment."
+    );
+    // It came up in time: a tool of it was called. Nothing to say.
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = ClaudeAgent::new(fake_cli_with_init(dir.path(), &pending, READS_THE_THREAD), run());
+    let (reply, events) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
+    assert_eq!(reply.unwrap().notice, "");
+    assert_eq!(steps_of(&events).len(), 2);
+}
+
+// --- names that are not plain ---------------------------------------
+
+#[test]
+fn a_name_that_is_not_plain_never_reaches_the_command_line() {
+    // The plan never holds such a name. Should one get there all
+    // the same, there are no arguments and no process.
+    for (list, entry) in [
+        ("allowed", "mcp__notes__list,mcp__chat"),
+        ("allowed", "mcp__notes__read thread"),
+        ("allowed", "mcp__notes__get*"),
+        ("allowed", "mcp__notes__a(b)"),
+        ("allowed", "mcp__notes__tab\tname"),
+        ("allowed", ""),
+        ("disallowed", "mcp__chat__send,mcp__notes"),
+        ("disallowed", "mcp__chat__caf\u{e9}"),
+    ] {
+        let mut run = run();
+        match list {
+            "allowed" => run.tools.allowed.push(entry.to_string()),
+            _ => run.tools.disallowed.push(entry.to_string()),
+        }
+        match spawn_args(&setup(false), &run, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt")) {
+            Err(AskError::Backend(message)) => {
+                assert!(message.starts_with("A tool name that cannot be handed to Claude Code safely"), "{entry:?}: {message}");
+                assert!(message.contains(if list == "allowed" { "--allowedTools" } else { "--disallowedTools" }), "{message}");
+            }
+            other => panic!("{entry:?}: {other:?}"),
+        }
+        // Through the backend: an error, and the CLI was not started.
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = ClaudeAgent::new(fake_cli(dir.path(), WOULD_SEND), run);
+        let (reply, events) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
+        assert!(matches!(reply, Err(AskError::Backend(_))), "{entry:?}: {reply:?}");
+        assert!(events.is_empty());
+        thread::sleep(Duration::from_millis(100));
+        assert!(!dir.path().join("args.txt").exists(), "{entry:?}: the CLI was started");
+    }
+    // The comma name of a real settings block: gone before the plan.
+    let settings = AgentSettings {
+        drafts_only: false,
+        connections: vec![
+            AgentConnection {
+                name: "notes".into(),
+                allowed_tools: vec!["list,mcp__chat".into(), "list".into()],
+                tools: vec![
+                    crate::settings::ToolInfo { read_only: Some(true), ..crate::settings::ToolInfo::new("list,mcp__chat") },
+                    crate::settings::ToolInfo::new("list"),
+                ],
+                ..chat(AgentConnectionKind::Custom)
+            },
+            AgentConnection { allowed_tools: vec![fixture::READ_THREAD.into()], ..chat(AgentConnectionKind::Custom) },
+        ],
+        ..AgentSettings::default()
+    };
+    let run = AgentRun::new(&settings, None).unwrap();
+    let args = spawn_args_ok(&setup(false), &run, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+    let allowed = &args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+    assert_eq!(allowed, "mcp__notes__list,mcp__chat__read_thread");
+    let entries: Vec<&str> = allowed.split(',').collect();
+    assert!(!entries.contains(&"mcp__chat"), "an entry that names the whole connection: {allowed}");
+    let disallowed = &args[args.iter().position(|a| a == "--disallowedTools").unwrap() + 1];
+    assert!(disallowed.split(',').any(|entry| entry == "mcp__chat__send_message"), "{disallowed}");
+}
+
+// --- what a confirm shows --------------------------------------------
+
+/// The CLI asks about a send whose input is the JSON in the file
+/// `input.json` next to it, and records the answer.
+const ASKS_WITH_INPUT_FILE: &str = r#"
+input="$(cat "$here/input.json")"
+printf '%s\n' "{\"type\":\"control_request\",\"request_id\":\"ID\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"mcp__chat__send_message\",\"display_name\":\"Send Message\",\"input\":$input,\"tool_use_id\":\"toolu_send\"}}"
+read -r answer
+printf '%s\n' "$answer" > "$here/answer.txt"
+say "Done."
+done_with "Done."
+"#;
+
+#[test]
+fn a_confirm_shows_the_whole_input_and_a_yes_sends_it_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    // A body long enough that a cut text would have ended inside
+    // it, with the recipient after it by the order of the keys; a
+    // right-to-left override in the recipient, an escape sequence
+    // and an invisible character in the body.
+    let body = format!("Hello Bo,\n\u{1b}[2J{}\u{200b}Regards", "The room is confirmed for Thursday. ".repeat(250));
+    let input = json!({ "body": body, "to": "\u{202e}moc.elpmaxe@lla", "subject": "Room" });
+    fs::write(dir.path().join("input.json"), input.to_string()).unwrap();
+    let mut agent =
+        ClaudeAgent::new(fake_cli(dir.path(), &ASKS_WITH_INPUT_FILE.replace("ID", "req-claude-whole")), run());
+    let mut shown = Vec::new();
+    let (reply, events) = send(&mut agent, LONG, |confirm, _| {
+        shown.push(confirm.clone());
+        assert!(answer_confirm(&confirm.request_id, ConfirmDecision::Allow));
+    });
+    assert_eq!(reply.unwrap().text, "Done.");
+    let confirm = &shown[0];
+    assert!(confirm.input.chars().count() > 8000, "{}", confirm.input.len());
+    // All of it: the text reads back as exactly the input.
+    assert_eq!(serde_json::from_str::<Value>(&confirm.input).unwrap(), input);
+    // Who and what first, the long body last.
+    let at = |key: &str| confirm.input.find(&format!("\"{key}\":")).unwrap();
+    assert!(at("subject") < at("to") && at("to") < at("body"), "{}", &confirm.input[..200]);
+    assert!(at("to") < 100);
+    // Nothing in what is shown can change how it is shown.
+    assert!(confirm.input.is_ascii());
+    assert!(confirm.input.contains("\\u202emoc.elpmaxe@lla"), "{}", &confirm.input[..200]);
+    assert!(confirm.input.contains("\\u001b[2J") && confirm.input.contains("\\u200bRegards"));
+    // What the tool is handed is the input as it came, every byte.
+    let answer = answer_file(dir.path(), "answer.txt");
+    assert_eq!(answer["response"]["response"]["behavior"], "allow");
+    assert_eq!(answer["response"]["response"]["updatedInput"], input);
+    assert_eq!(answer["response"]["response"]["updatedInput"]["to"].as_str().unwrap(), "\u{202e}moc.elpmaxe@lla");
+    assert_eq!(answer["response"]["response"]["updatedInput"]["body"].as_str().unwrap(), body);
+    // The step's one line is safe to show as well.
+    let AskEvent::Step(step) = events.iter().find(|e| matches!(e, AskEvent::Step(_))).unwrap() else { unreachable!() };
+    assert!(step.input_summary.contains("\\u{1B}[2J"), "{}", step.input_summary);
+    assert!(!step.input_summary.contains('\u{1b}') && !step.input_summary.contains('\u{202e}'));
+}
+
+#[test]
+fn an_input_too_large_to_show_in_full_is_refused_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = json!({ "to": "all@example.com", "body": "x".repeat(crate::ask::CONFIRM_INPUT_MAX_CHARS + 1) });
+    fs::write(dir.path().join("input.json"), input.to_string()).unwrap();
+    let mut agent =
+        ClaudeAgent::new(fake_cli(dir.path(), &ASKS_WITH_INPUT_FILE.replace("ID", "req-claude-large")), run());
+    let (reply, events) = send(&mut agent, LONG, |_, _| panic!("a confirm that cannot show everything must not be raised"));
+    assert_eq!(reply.unwrap().text, "Done.");
+    let answer = answer_file(dir.path(), "answer.txt");
+    assert_eq!(answer["response"]["response"]["behavior"], "deny");
+    assert_eq!(answer["response"]["response"]["message"], TOO_LARGE_TO_CONFIRM);
+    assert!(answer["response"]["response"].get("updatedInput").is_none());
+    assert!(confirms_of(&events).is_empty() && closed_of(&events).is_empty());
+    let steps = steps_of(&events);
+    assert_eq!(steps.len(), 1);
+    assert_eq!((steps[0].0.as_str(), steps[0].1), ("send_message", StepState::Denied));
+    assert!(steps[0].2.starts_with("Its input is too large to show you in full (") && steps[0].2.ends_with("so it was not run."), "{}", steps[0].2);
+}
+
+#[test]
+fn what_a_tool_or_the_cli_says_is_made_safe_before_it_is_a_step() {
+    let dir = tempfile::tempdir().unwrap();
+    // A result with a sequence that clears a terminal, a display
+    // name with a right-to-left override, and a tool nobody planned
+    // whose name carries an escape.
+    let body = r#"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_read","name":"mcp__chat__read_thread","input":{"thread_id":"T\u001b[1mX"}}]},"tool_use_meta":[{"id":"toolu_read","display_name":"Read \u202eThread"}]}'
+printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_read","type":"tool_result","content":[{"type":"text","text":"ok\u001b[2J\u001b[H\u0007 Anna\u202e: hi\u200b"}]}]}}'
+printf '%s\n' '{"type":"control_request","request_id":"req-claude-esc","request":{"subtype":"can_use_tool","tool_name":"mcp__chat__wipe\u001b[2Jall","display_name":"Wipe \u202eAll","input":{"x":"y"},"tool_use_id":"toolu_x"}}'
+read -r answer
+say "Done."
+done_with "Done."
+"#;
+    let mut agent = ClaudeAgent::new(fake_cli(dir.path(), body), run());
+    let (reply, events) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
+    assert_eq!(reply.unwrap().text, "Done.");
+    let steps: Vec<&AskStep> = events.iter().filter_map(|e| if let AskEvent::Step(step) = e { Some(step) } else { None }).collect();
+    assert_eq!(steps.len(), 3);
+    // A tool the plan knows keeps the title its listing gave it.
+    assert_eq!(steps[0].title, "Read Thread");
+    assert_eq!(steps[2].title, "Wipe \\u{202E}All");
+    assert_eq!(steps[0].input_summary, "thread_id: T\\u{1B}[1mX");
+    assert_eq!(steps[1].outcome, "ok\\u{1B}[2J\\u{1B}[H\\u{7} Anna\\u{202E}: hi\\u{200B}");
+    assert_eq!(steps[2].tool, "wipe\\u{1B}[2Jall");
+    for step in steps {
+        let all = format!("{} {} {} {} {}", step.connection, step.tool, step.title, step.input_summary, step.outcome);
+        assert!(!all.chars().any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{200b}')), "{all:?}");
+    }
+}
+
+// --- a confirm whose CLI is gone, and what a CLI leaves behind --------
+
+#[test]
+fn a_cli_that_stops_while_a_confirm_waits_closes_the_confirm_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // It asks, and then it dies without waiting for the answer.
+    let body = r#"
+echo '{"type":"control_request","request_id":"req-claude-gone","request":{"subtype":"can_use_tool","tool_name":"mcp__chat__send_message","display_name":"Send Message","input":{"to":"bo@example.com","body":"Room confirmed"},"tool_use_id":"toolu_send"}}'
+sleep 0.3
+echo 'the connection broke' >&2
+exit 1
+"#;
+    let mut agent = ClaudeAgent::new(fake_cli(dir.path(), body), run());
+    let started = Instant::now();
+    // Nobody answers: without the check this would wait out the
+    // confirm's two minutes (the ask's own clock stands still while
+    // a confirm waits).
+    let (reply, events) = send(&mut agent, LONG, |_, _| {});
+    assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+    match reply {
+        Err(AskError::Backend(message)) => {
+            assert!(message.starts_with("Claude Code stopped while it waited for your answer, so nothing was run."), "{message}");
+            assert!(message.contains("the connection broke"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(closed_of(&events), [("req-claude-gone".to_string(), ConfirmOutcome::Gone)]);
+    assert_eq!(
+        steps_of(&events).last().unwrap(),
+        &("send_message".to_string(), StepState::Denied, "Claude Code stopped before you answered, so it was not run.".to_string())
+    );
+    // The confirm is closed: a late click finds nothing.
+    assert!(!answer_confirm("req-claude-gone", ConfirmDecision::Allow));
+}
+
+#[test]
+fn a_cancel_takes_what_the_cli_started_with_it_when_it_has_a_group_of_its_own() {
+    // The CLI starts something that does not end by itself when the
+    // CLI goes (a local server of a connection that ignores its
+    // input closing), then waits on a confirm.
+    let body = format!(
+        "sleep 300 &\necho $! > \"$here/child-pid.txt\"\n{}",
+        asks_to_send("req-claude-group", "sleep 30").replace("req-claude-group", "REQ")
+    );
+    for (own_group, survives) in [(true, false), (false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let request = format!("req-claude-group-{own_group}");
+        let mut agent = ClaudeAgent::new(fake_cli(dir.path(), &body.replace("REQ", &request)), run()).in_own_group(own_group);
+        let (reply, _) = send(&mut agent, LONG, |_, cancel| cancel.cancel());
+        assert_eq!(reply, Err(AskError::Cancelled));
+        let cli = fs::read_to_string(dir.path().join("pid.txt")).unwrap().trim().to_string();
+        let child = fs::read_to_string(dir.path().join("child-pid.txt")).unwrap().trim().to_string();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while (alive(&cli) || (!survives && alive(&child))) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(&cli), "the CLI survived the cancel");
+        assert_eq!(alive(&child), survives, "own group: {own_group}");
+        // Tidy up what the old way leaves behind.
+        let _ = Command::new("kill").args(["-KILL", &child]).stderr(Stdio::null()).status();
+    }
 }
 
 // --- through the plan ----------------------------------------------

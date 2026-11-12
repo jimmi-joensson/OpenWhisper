@@ -753,8 +753,8 @@ mod tests {
                 tool: "send_message".into(),
                 title: "Send message".into(),
                 input: "{\n  \"to\": \"Bo\"\n}".into(),
-                input_cut: false,
                 timeout_s: 120,
+                armed_in_ms: 600,
             }),
             context_source: ContextSource::Connection { name: "teamchat".into() },
             ..AskSnapshot::default()

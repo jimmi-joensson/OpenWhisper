@@ -1579,6 +1579,79 @@ Draft a reply to Anna saying Thursday works.
     assert_eq!(list(dir.path(), "", 50, 0).entries.len(), 2);
 }
 
+/// An ask that failed or was cancelled after a tool had run is kept
+/// (TASK-99 review). It has to be read by apps that never heard of
+/// it, so it is written exactly like an ask with tools that
+/// finished: the same two comment lines, the same two quotes. What
+/// differs is only text inside them.
+#[test]
+fn an_ask_that_did_not_finish_is_written_like_any_ask_with_tools() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 12);
+    let used = [
+        tool("Team chat", "read_thread", "done"),
+        // As core hands it over, and spelled out: one word either way.
+        tool("Team chat", "create_draft", TOOL_RESULT_NOT_KNOWN),
+        tool("Team chat", "send_message", "result not known"),
+    ];
+    let answer = "Let me prepare that.\n\n(Incomplete. The ask was cancelled before it finished.)";
+    let written = add_ask_with_tools(dir.path(), at(date, 9, 5, 7), "Draft a reply to Anna.", answer, &used);
+    assert!(written.is_ask());
+    assert_eq!(written.answer.as_deref(), Some(answer));
+    let outcomes: Vec<&str> = written.tools.iter().map(|t| t.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["done", "result_not_known", "result_not_known"]);
+
+    let expected = "\
+---
+date: 2026-11-12
+entries: 1
+words: 5
+apps: []
+---
+
+## 09:05:07
+<!-- id: 20261112T090507 words: 5 seconds: 3.4 -->
+<!-- extra: kind=ask; tools=3 -->
+
+Draft a reply to Anna.
+
+> Answer: Let me prepare that.
+>
+> (Incomplete. The ask was cancelled before it finished.)
+
+> Tools: read_thread in Team chat: done
+> create_draft in Team chat: result_not_known
+> send_message in Team chat: result_not_known
+";
+    assert_eq!(read(dir.path(), date), expected);
+    // It reads back whole, by the list and by its id.
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written.clone()]);
+    assert_eq!(get(dir.path(), &written.id), Some(written.clone()));
+
+    // What an app from before Agent looks for is where it always
+    // was: the heading, then the one comment line it knows, and
+    // nothing in the entry that it would take for another entry.
+    let file = read(dir.path(), date);
+    let lines: Vec<&str> = file.lines().collect();
+    let heading = lines.iter().position(|l| HEADING.is_match(l)).expect("heading");
+    assert_eq!(lines[heading + 1], "<!-- id: 20261112T090507 words: 5 seconds: 3.4 -->");
+    assert!(META.is_match(lines[heading + 1]));
+    assert!(!META.is_match(lines[heading + 2]) && EXTRA.is_match(lines[heading + 2]));
+    assert_eq!(lines.iter().filter(|l| HEADING.is_match(l)).count(), 1);
+    assert_eq!(lines.iter().filter(|l| META.is_match(l)).count(), 1);
+
+    // Only the bracket line, when nothing of the answer had arrived.
+    let bare = add_ask_with_tools(
+        dir.path(),
+        at(date, 9, 6, 0),
+        "Send Bo the notes.",
+        "(No answer. The ask did not finish: No answer within 60 seconds.)",
+        &used[..1],
+    );
+    assert_eq!(bare.answer.as_deref(), Some("(No answer. The ask did not finish: No answer within 60 seconds.)"));
+    assert_eq!(list(dir.path(), "", 50, 0).entries.len(), 2);
+}
+
 #[test]
 fn an_ask_without_tools_is_written_byte_for_byte_as_before_agent() {
     let dir = tempdir().unwrap();

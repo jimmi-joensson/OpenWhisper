@@ -380,30 +380,192 @@ pub(crate) fn write_prompt_file(feature: &str, system: &str) -> Result<PathBuf, 
 }
 
 /// Write `contents` to a new file in the temp folder that only this
-/// user can read (mode 0600 on unix), named
-/// `openwhisper-<stem>-<pid>-<n>.<ext>`. The caller removes it. Used
-/// for what a CLI process is handed in a file: the system prompt,
-/// and the connections of an ask with tools (`crate::agent`).
+/// user can read, named `openwhisper-<stem>-<pid>-<random>.<ext>`.
+/// The caller removes it. Used for what a CLI process is handed in a
+/// file: the system prompt, and the connections of an ask with tools
+/// (`crate::agent`), which can hold tokens.
+///
+/// The file is made new, never opened over one that is there
+/// (`create_new`: a file or a link somebody put under that name is
+/// an error, not a place to write to), under a name nobody can
+/// guess ahead of time, and on unix with mode 0600 from the moment
+/// it exists.
 pub(crate) fn write_private_file(stem: &str, ext: &str, contents: &[u8]) -> std::io::Result<PathBuf> {
+    write_private_file_in(&std::env::temp_dir(), stem, ext, contents)
+}
+
+/// A part of a file name that cannot be guessed. The standard
+/// library seeds every `RandomState` from the system's randomness;
+/// that is where this comes from, so no new dependency is needed.
+fn random_part() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let part = |salt: u64| {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(salt);
+        hasher.finish()
+    };
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = format!("openwhisper-{stem}-{}-{}.{ext}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed));
-    let path = std::env::temp_dir().join(name);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    format!("{:016x}{:016x}", part(SEQ.fetch_add(1, Ordering::Relaxed)), part(u64::from(std::process::id())))
+}
+
+/// [`write_private_file`] into `dir`.
+fn write_private_file_in(dir: &Path, stem: &str, ext: &str, contents: &[u8]) -> std::io::Result<PathBuf> {
+    let mut taken = None;
+    for _ in 0..8 {
+        let name = format!("openwhisper-{stem}-{}-{}.{ext}", std::process::id(), random_part());
+        let path = dir.join(name);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(contents) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(e);
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => taken = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(taken.unwrap_or_else(|| std::io::Error::other("no free file name")))
+}
+
+/// The private files that are swept when their process is gone: the
+/// connections of an agent run (they can hold tokens) and the system
+/// prompt of an ask. Nothing else is ever removed by a sweep.
+const SWEPT_STEMS: [&str; 2] = ["agent-run", "ask"];
+
+/// The process id in the name of one of the private files a sweep
+/// looks at (`openwhisper-agent-run-<pid>-<x>.<ext>`,
+/// `openwhisper-ask-<pid>-<x>.<ext>`). `None` for any other name.
+fn owner_of(file_name: &str) -> Option<u32> {
+    let rest = file_name.strip_prefix("openwhisper-")?;
+    let tail = SWEPT_STEMS.iter().find_map(|stem| rest.strip_prefix(stem)?.strip_prefix('-'))?;
+    let (pid, more) = tail.split_once('-')?;
+    let well_formed = !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && more.contains('.')
+        && more.chars().all(|c| c.is_ascii_alphanumeric() || c == '.');
+    if well_formed { pid.parse().ok() } else { None }
+}
+
+/// Remove the private files in `dir` that a process left behind:
+/// files named like the ones [`write_private_file`] makes for an
+/// agent run or an ask, whose process (its id is in the name) is not
+/// this one and, by `alive`, no longer runs. Returns how many were
+/// removed. Anything else in the folder is left alone, and so is
+/// anything that is not a plain file.
+fn sweep_private_files_in(dir: &Path, alive: &dyn Fn(u32) -> bool) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(owner_of) else {
+            continue;
+        };
+        // Never a link or a folder; never this process's own.
+        if pid == std::process::id() || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        if !alive(pid) && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether a process with this id runs right now. When that cannot
+/// be told, the answer is yes: a sweep then leaves the file alone.
+fn process_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        // `kill -0` signals nothing; it only asks. No dependency
+        // for the system call is in this build, so the tool is run.
+        match Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(out) if out.status.success() => true,
+            // Gone only when the tool says so; "not permitted" means
+            // it runs and is somebody else's.
+            Ok(out) => !String::from_utf8_lossy(&out.stderr).contains("No such process"),
+            Err(_) => true,
+        }
     }
-    options.open(&path).and_then(|mut f| f.write_all(contents))?;
-    // A file of that name left behind by an earlier process with the
-    // same id keeps the mode it was made with: set it again.
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        use std::os::windows::process::CommandExt;
+        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        match Command::new(system.join("System32").join("tasklist.exe"))
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            // CREATE_NO_WINDOW
+            .creation_flags(0x0800_0000)
+            .output()
+        {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")),
+            _ => true,
+        }
     }
-    Ok(path)
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Remove what an earlier process of this app left in the temp
+/// folder when it was killed before it could clean up (a crash, a
+/// force quit, a SIGTERM): the connection file of an agent run, which
+/// can hold tokens, and the prompt file of an ask. Only files whose
+/// process is gone; see [`sweep_private_files_in`]. Returns how many
+/// were removed.
+///
+/// Called before an ask or an agent run writes a new file of its
+/// own, and by the `openwhisper agent` commands. It reads the temp
+/// folder, so within one process it runs at most once a minute.
+pub fn sweep_stale_private_files() -> usize {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+            return 0;
+        }
+        *last = Some(Instant::now());
+    }
+    sweep_private_files_in(&std::env::temp_dir(), &process_is_alive)
+}
+
+/// The folder a CLI process is started in: a neutral one, with
+/// nothing project-specific to pick up. The temp folder, except on
+/// Windows, where the temp folder's path holds the person's account
+/// name and the CLI puts its working directory into what the model
+/// sees: there it is the folder `%PUBLIC%` names, when that is set
+/// and is a folder.
+fn neutral_dir() -> PathBuf {
+    neutral_dir_from(cfg!(windows), std::env::var_os("PUBLIC").map(PathBuf::from), std::env::temp_dir(), &|p| p.is_dir())
+}
+
+/// [`neutral_dir`] with everything it looks at handed in.
+fn neutral_dir_from(windows: bool, public: Option<PathBuf>, temp: PathBuf, is_dir: &dyn Fn(&Path) -> bool) -> PathBuf {
+    match public.filter(|p| windows && !p.as_os_str().is_empty() && is_dir(p)) {
+        Some(public) => public,
+        None => temp,
+    }
 }
 
 /// A `Command` for the CLI at `bin`: a neutral working directory, a
@@ -412,7 +574,7 @@ pub(crate) fn write_private_file(stem: &str, ext: &str, contents: &[u8]) -> std:
 pub(crate) fn command(bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
     // A neutral directory: nothing project-specific to pick up.
-    cmd.current_dir(std::env::temp_dir());
+    cmd.current_dir(neutral_dir());
     // An npm-installed `claude` is a script that needs `node`. A
     // desktop app started from Finder has a bare PATH, so add the
     // binary's own folder and the usual tool folders.
@@ -473,6 +635,30 @@ pub(crate) fn end_process(child: &mut Child, mid_turn: bool) {
     let _ = mid_turn;
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// End every process in the process group `pgid`: a CLI that was
+/// started in a group of its own (`Command::process_group(0)`, so the
+/// group's id is the CLI's process id) and everything it started,
+/// the local servers of its connections among them. Killing only the
+/// CLI leaves those running when they do not end by themselves.
+///
+/// Through `kill(1)`, like [`process_is_alive`]: no dependency for
+/// the system call is in this build. Only an ask with tools starts
+/// its CLI this way (`crate::agent::claude`); Refine and a plain ask
+/// do not, and never get here.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pgid: u32) {
+    // 0 and 1 would mean "my own group" and "everything".
+    if pgid <= 1 {
+        return;
+    }
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Force-end the process `pid` and every process under it, without a
@@ -1104,6 +1290,127 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello ther
         )
         .unwrap();
         assert_eq!(path.to_str().unwrap(), "/opt/homebrew/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn a_private_file_is_new_unguessable_and_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let one = write_private_file_in(dir.path(), "agent-run", "json", b"{\"token\":\"made-up\"}").unwrap();
+        let two = write_private_file_in(dir.path(), "agent-run", "json", b"{}").unwrap();
+        assert_ne!(one, two);
+        assert_eq!(fs::read(&one).unwrap(), b"{\"token\":\"made-up\"}");
+        for path in [&one, &two] {
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            let name = path.file_name().unwrap().to_str().unwrap();
+            // The process id, so a sweep can tell whose it is, and
+            // then a part nobody can guess: not a counter.
+            let prefix = format!("openwhisper-agent-run-{}-", std::process::id());
+            let random = name.strip_prefix(&prefix).and_then(|rest| rest.strip_suffix(".json")).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(random.len(), 32, "{name}");
+            assert!(random.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+            assert_eq!(owner_of(name), Some(std::process::id()));
+        }
+        // The random parts share nothing obvious.
+        let tail = |p: &PathBuf| p.file_name().unwrap().to_str().unwrap().rsplit('-').next().unwrap().to_string();
+        assert_ne!(tail(&one)[..16], tail(&two)[..16]);
+        // In the real temp folder, the same.
+        let real = write_private_file("ask", "txt", b"prompt").unwrap();
+        assert!(real.starts_with(std::env::temp_dir()));
+        assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::remove_file(&real).unwrap();
+    }
+
+    #[test]
+    fn a_private_file_is_never_written_over_something_that_is_already_there() {
+        // What `create_new` buys: a name that exists, as a file or
+        // as a link to somewhere else, is an error.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("somewhere-else.txt");
+        fs::write(&target, "untouched").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        assert_eq!(options.open(&link).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(options.open(&target).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+        // A folder that cannot be written to is an error, not a panic.
+        assert!(write_private_file_in(&dir.path().join("missing"), "ask", "txt", b"x").is_err());
+    }
+
+    #[test]
+    fn a_sweep_removes_what_a_dead_process_left_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = std::process::id();
+        let dead = 4_000_001;
+        let living = 4_000_002;
+        let put = |name: &str| {
+            fs::write(dir.path().join(name), "x").unwrap();
+            name.to_string()
+        };
+        let swept = [
+            put(&format!("openwhisper-agent-run-{dead}-0123456789abcdef.json")),
+            put(&format!("openwhisper-ask-{dead}-0123456789abcdef.txt")),
+            // The names of the version before: a counter.
+            put(&format!("openwhisper-agent-run-{dead}-7.json")),
+        ];
+        let kept = [
+            put(&format!("openwhisper-agent-run-{living}-0123456789abcdef.json")),
+            put(&format!("openwhisper-ask-{own}-0123456789abcdef.txt")),
+            // Not one of the two kinds, or not this app's at all.
+            put(&format!("openwhisper-agent-list-{dead}-0123456789abcdef.json")),
+            put(&format!("openwhisper-refine-{dead}-0123456789abcdef.txt")),
+            put(&format!("openwhisper-agent-eval-{dead}")),
+            put(&format!("openwhisper-ask-{dead}.txt")),
+            put(&format!("openwhisper-ask-notapid-0123.txt")),
+            put(&format!("openwhisper-ask-{dead}-../../x.txt").replace('/', "_")),
+            put(&format!("other-agent-run-{dead}-0123456789abcdef.json")),
+            put("notes.txt"),
+        ];
+        // A folder and a link under a matching name stay too.
+        let folder = format!("openwhisper-ask-{dead}-aaaa.d");
+        fs::create_dir(dir.path().join(&folder)).unwrap();
+        let link = format!("openwhisper-ask-{dead}-bbbb.txt");
+        std::os::unix::fs::symlink(dir.path().join("notes.txt"), dir.path().join(&link)).unwrap();
+
+        let removed = sweep_private_files_in(dir.path(), &|pid| pid != dead);
+        assert_eq!(removed, swept.len());
+        for name in &swept {
+            assert!(!dir.path().join(name).exists(), "{name} is still there");
+        }
+        for name in kept.iter().chain([&folder, &link]) {
+            assert!(dir.path().join(name).symlink_metadata().is_ok(), "{name} was removed");
+        }
+        // Nothing left to do the second time.
+        assert_eq!(sweep_private_files_in(dir.path(), &|pid| pid != dead), 0);
+        assert_eq!(sweep_private_files_in(&dir.path().join("missing"), &|_| false), 0);
+    }
+
+    #[test]
+    fn a_process_is_alive_until_it_is_reaped() {
+        assert!(process_is_alive(std::process::id()));
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        assert!(process_is_alive(pid));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!process_is_alive(pid));
+    }
+
+    #[test]
+    fn the_cli_starts_in_the_public_folder_on_windows_only_and_only_when_it_is_there() {
+        let temp = PathBuf::from("/tmp/made-up-temp");
+        let public = PathBuf::from("/made-up/Public");
+        let there = |_: &Path| true;
+        let missing = |_: &Path| false;
+        assert_eq!(neutral_dir_from(true, Some(public.clone()), temp.clone(), &there), public);
+        assert_eq!(neutral_dir_from(true, Some(public.clone()), temp.clone(), &missing), temp);
+        assert_eq!(neutral_dir_from(true, None, temp.clone(), &there), temp);
+        assert_eq!(neutral_dir_from(true, Some(PathBuf::new()), temp.clone(), &there), temp);
+        // Everywhere else it is the temp folder, whatever is set.
+        assert_eq!(neutral_dir_from(false, Some(public), temp.clone(), &there), temp);
+        assert_eq!(neutral_dir(), std::env::temp_dir());
     }
 
     #[test]

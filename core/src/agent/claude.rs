@@ -26,6 +26,27 @@
 //! nothing after it can be read as one more tool. The question never
 //! rides on the command line: it goes in on stdin.
 //!
+//! **The names on the lists are checked twice.** A tool's name comes
+//! from its connection, and a name with a comma in it would be read
+//! as two entries. Such a tool never gets into the plan
+//! ([`super::policy::unusable_reason`]); and should a name that is
+//! not made of plain characters reach [`spawn_args`] all the same,
+//! there are no arguments: the ask ends with an error before a
+//! process exists.
+//!
+//! **The plan is checked against what the CLI really started with**
+//! ([`AgentReader::init`]). The first thing the CLI prints for a
+//! question is the list of tools it has. For every connection that
+//! is up, each tool the plan lets the model call must be on it under
+//! the name this app worked out, and no tool the plan took away may
+//! be on it. When that does not hold, this app and the CLI disagree
+//! about a name, which means the two lists did not do what they were
+//! made for: the ask ends there with an error that names the
+//! connection, before the model can call anything. (A tool the
+//! connection has grown since it was last listed is a different
+//! thing: it is on no list, so the CLI asks about it and the answer
+//! is no.)
+//!
 //! **What the lines mean** ([`AgentReader`]). On top of the answer's
 //! text:
 //!
@@ -38,15 +59,21 @@
 //! - a `control_request` `can_use_tool`: the CLI asks whether a tool
 //!   may run, and waits. For a tool that is on the confirm list the
 //!   person is asked ([`crate::ask::AskEvent::Confirm`]) and the
-//!   answer is theirs; a yes hands the input back exactly as it was
-//!   shown. For any other tool the answer is no, at once, without
-//!   bothering the person: the model was not supposed to have it.
+//!   answer is theirs; a yes hands the input back exactly as it
+//!   came. The confirm shows the whole input; an input too long for
+//!   that is refused without asking. For any other tool the answer
+//!   is no, at once, without bothering the person: the model was not
+//!   supposed to have it.
+//!
+//! Everything a step or a confirm shows (names, the input, what came
+//! back) is made safe to show first ([`steps::safe_to_show`]).
 //!
 //! Measured with Claude Code 2.1.322, Sonnet at low effort and a
 //! local test connection (TASK-99 notes): about 3.5 s for an ask with
 //! one tool call, 4 to 4.5 s with two.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::time::Duration;
 
@@ -64,17 +91,44 @@ use crate::settings::{ClaudeCliSettings, RefineEffort};
 pub const NOT_AVAILABLE: &str = "This tool is not available in this ask, so it was not run. Do not try it again or \
 in another way. Tell the person that it was not done.";
 
+/// What the model is told when the input of a call is too long to
+/// be shown in a confirm.
+pub const TOO_LARGE_TO_CONFIRM: &str = "The input of this call is too large to be shown to the person for \
+confirmation, so it was not run. Do not try it again as it is. Tell the person that it was not done, and why.";
+
 /// The Claude Code CLI as the [`AskBackend`] of an agent ask.
 pub struct ClaudeAgent {
     /// Only [`ClaudeCliSettings::path`] is used.
     settings: ClaudeCliSettings,
     run: AgentRun,
     process: Option<Process>,
+    /// Whether the CLI gets a process group of its own. `None`: it
+    /// does unless this process sits at a terminal
+    /// ([`at_a_terminal`]).
+    own_group: Option<bool>,
+}
+
+/// This process has a terminal on its input, its output or its error
+/// output: it was started by a person at a shell (`openwhisper agent
+/// run`). Ctrl-C there goes to every process of the terminal's
+/// group, and that is how the CLI under this one is stopped; in a
+/// group of its own it would not hear it. The desktop app has no
+/// terminal.
+fn at_a_terminal() -> bool {
+    std::io::stdin().is_terminal() || std::io::stdout().is_terminal() || std::io::stderr().is_terminal()
 }
 
 impl ClaudeAgent {
     pub fn new(settings: ClaudeCliSettings, run: AgentRun) -> Self {
-        Self { settings, run, process: None }
+        Self { settings, run, process: None, own_group: None }
+    }
+
+    /// Say whether the CLI gets a process group of its own, instead
+    /// of leaving it to whether this process sits at a terminal.
+    #[cfg(test)]
+    pub(crate) fn in_own_group(mut self, yes: bool) -> Self {
+        self.own_group = Some(yes);
+        self
     }
 
     fn spawn(&self, setup: &AskSetup) -> Result<Process, AskError> {
@@ -90,6 +144,9 @@ impl ClaudeAgent {
             reader,
             // The file lives as long as the process and goes with it.
             Some(Box::new(config)),
+            // On cancel or a timeout, the local servers of the
+            // connections go with the CLI (unix).
+            self.own_group.unwrap_or_else(|| !at_a_terminal()),
         )
     }
 }
@@ -119,9 +176,33 @@ impl AskBackend for ClaudeAgent {
     }
 }
 
+/// Every entry of a list of tool names is made of plain characters
+/// only (ASCII letters, digits, `_`, `-`): nothing in it can end the
+/// entry, start another, or mean something to the CLI's rules (a
+/// comma, a space, `*`, a bracket). The plan never holds anything
+/// else; this is the last look before the names leave the process.
+fn check_list(flag: &str, entries: &[String]) -> Result<(), AskError> {
+    let plain = |entry: &&String| !entry.is_empty() && entry.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    match entries.iter().find(|entry| !plain(entry)) {
+        None => Ok(()),
+        Some(entry) => Err(AskError::Backend(format!(
+            "A tool name that cannot be handed to Claude Code safely was about to be ({flag}: \"{}\"), so the ask was \
+stopped before it started. Refresh the connections in the Agent settings and ask again.",
+            steps::one_line(entry, 80)
+        ))),
+    }
+}
+
 /// The arguments of one agent ask. See the module docs for what each
-/// is there for.
-pub fn spawn_args(setup: &AskSetup, run: &AgentRun, config_file: &Path, system_prompt_file: &Path) -> Vec<String> {
+/// is there for. An error when a name on one of the two lists is not
+/// made of plain characters ([`check_list`]): then nothing is
+/// started.
+pub fn spawn_args(
+    setup: &AskSetup,
+    run: &AgentRun,
+    config_file: &Path,
+    system_prompt_file: &Path,
+) -> Result<Vec<String>, AskError> {
     // The Claude CLI has no "minimal" level.
     let effort = match setup.effort {
         None | Some(RefineEffort::Minimal) => RefineEffort::Low,
@@ -131,6 +212,8 @@ pub fn spawn_args(setup: &AskSetup, run: &AgentRun, config_file: &Path, system_p
     if setup.web_search {
         allowed.insert(0, claude_cli::WEB_SEARCH_TOOL.to_string());
     }
+    check_list("--allowedTools", &allowed)?;
+    check_list("--disallowedTools", &run.tools.disallowed)?;
     let mut args: Vec<String> = [
         "-p",
         "--model",
@@ -180,7 +263,7 @@ pub fn spawn_args(setup: &AskSetup, run: &AgentRun, config_file: &Path, system_p
         .iter()
         .map(|s| (*s).to_string()),
     );
-    args
+    Ok(args)
 }
 
 /// What the lines of an agent ask mean, and the steps so far.
@@ -193,20 +276,52 @@ struct AgentReader {
     /// Connection names by the way the CLI spells them in a tool's
     /// full name.
     connections: HashMap<String, String>,
+    /// The connections of the run, by name, in order.
+    names: Vec<String>,
+    /// Every tool the plan lets the model call (the allowed ones and
+    /// the ones that ask first), and every tool it took away, with
+    /// the connection each belongs to.
+    visible: Vec<(String, String)>,
+    hidden: Vec<(String, String)>,
+    /// Connections that were still coming up when the CLI said what
+    /// it started with, and have not been heard of since.
+    pending: Vec<String>,
     /// Every step so far, by its id.
     steps: HashMap<String, AskStep>,
     /// The step a confirm is about, by the confirm's request id.
     confirms: HashMap<String, String>,
 }
 
+/// Names for a sentence: `"a"`, or `"a", "b"`. Safe to show.
+fn quoted(names: &[String]) -> String {
+    names.iter().map(|name| format!("\"{}\"", steps::one_line(name, 80))).collect::<Vec<_>>().join(", ")
+}
+
 impl AgentReader {
     fn new(run: &AgentRun, web_search: bool) -> Self {
+        let allowed: HashSet<&String> = run.tools.allowed.iter().chain(&run.tools.confirm).collect();
+        let disallowed: HashSet<&String> = run.tools.disallowed.iter().collect();
+        let (mut visible, mut hidden) = (Vec::new(), Vec::new());
+        for connection in &run.connections {
+            for tool in &connection.tools {
+                let full = policy::full_tool_name(&connection.name, &tool.name);
+                if allowed.contains(&full) {
+                    visible.push((full, connection.name.clone()));
+                } else if disallowed.contains(&full) {
+                    hidden.push((full, connection.name.clone()));
+                }
+            }
+        }
         Self {
             web_search,
             confirm_timeout_s: run.confirm_timeout_s,
             max_turns: run.max_turns,
             tools: run.planned.iter().map(|t| (t.full_name.clone(), t.clone())).collect(),
             connections: run.connections.iter().map(|c| (policy::server_key(&c.name), c.name.clone())).collect(),
+            names: run.connections.iter().map(|c| c.name.clone()).collect(),
+            visible,
+            hidden,
+            pending: Vec::new(),
             steps: HashMap::new(),
             confirms: HashMap::new(),
         }
@@ -230,11 +345,14 @@ impl AgentReader {
                 (connection, tool.to_string(), shown.unwrap_or(tool).to_string(), ToolKind::Act)
             }
         };
+        // None of the three names is ours: each is made safe to
+        // show, on one line.
+        let shown = |text: &str| steps::one_line(text, steps::STEP_LINE_MAX_CHARS);
         AskStep {
             id: id.to_string(),
-            connection,
-            tool,
-            title,
+            connection: shown(&connection),
+            tool: shown(&tool),
+            title: shown(&title),
             kind,
             input_summary: steps::input_summary(input),
             state,
@@ -280,6 +398,10 @@ impl AgentReader {
                     .find(|meta| meta["id"].as_str() == Some(id))
                     .and_then(|meta| meta["display_name"].as_str());
                 let step = self.step(id, name, display, &block["input"], StepState::Running);
+                // A connection whose tool is called is up.
+                if let Some(planned) = self.tools.get(name) {
+                    self.pending.retain(|pending| *pending != planned.connection);
+                }
                 events.push(self.record(step));
             } else if claude_cli::check_tool(block, self.web_search)? {
                 events.push(AskEvent::Searching { query: block["input"]["query"].as_str().unwrap_or("").to_string() });
@@ -333,25 +455,118 @@ impl AgentReader {
         }
     }
 
-    /// The process is up: say so when a connection of this run is
-    /// not.
-    fn init(&self, v: &Value) -> Line {
-        let down: Vec<&str> = v["mcp_servers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|server| matches!(server["status"].as_str(), Some("failed" | "needs-auth" | "disabled")))
-            .filter_map(|server| server["name"].as_str())
-            .collect();
-        match down.as_slice() {
-            [] => Line::Other,
-            [one] => Line::Notice(format!("The connection \"{one}\" could not be reached, so this answer was made without it.")),
-            many => Line::Notice(format!(
+    /// The process is up and says what it started with: its
+    /// connections with their state, and its tools.
+    ///
+    /// This is where the plan is held against the CLI (see the
+    /// module docs). For every connection of the run that is up:
+    ///
+    /// - a tool the plan lets the model call is not among the CLI's
+    ///   tools under the name this app worked out: the names do not
+    ///   agree, so the list that allows it allowed nothing, or
+    ///   something else;
+    /// - a tool the plan took away is among them: the list that
+    ///   takes tools away did not take it.
+    ///
+    /// Either one ends the ask here, with the connection named,
+    /// before the model has called anything. So does a line that
+    /// does not list the tools at all, and a tool of a connection
+    /// that is not one of this run's.
+    ///
+    /// Not an error, and said in a notice: a connection that is down
+    /// (the answer is made without it), and a tool that is on none
+    /// of the plan's lists because the connection has it only since
+    /// it was last listed. Such a tool is not allowed anywhere, so
+    /// the CLI asks before it runs, and that is answered with a no
+    /// ([`AgentReader::can_use_tool`]). A connection that is still
+    /// coming up is remembered and said at the end, should nothing
+    /// have been heard of it by then ([`Reader::final_notice`]).
+    fn init(&mut self, v: &Value) -> Result<Line, AskError> {
+        let stopped = |why: String| {
+            Err(AskError::Backend(format!(
+                "{why}, so the ask was stopped before anything ran. Refresh the connections in the Agent settings and ask again."
+            )))
+        };
+        let Some(tools) = v["tools"].as_array() else {
+            return stopped("Claude Code did not say which tools it started with".to_string());
+        };
+        let started: HashSet<&str> = tools.iter().filter_map(Value::as_str).filter(|name| name.starts_with("mcp__")).collect();
+        let state_of = |name: &str| {
+            v["mcp_servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|server| server["name"].as_str() == Some(name))
+                .and_then(|server| server["status"].as_str())
+        };
+        let (mut down, mut pending) = (Vec::new(), Vec::new());
+        for name in &self.names {
+            match state_of(name) {
+                Some("connected") => {
+                    let of_this = |list: &[(String, String)], want_started: bool| -> Vec<String> {
+                        list.iter()
+                            .filter(|(full, connection)| connection == name && started.contains(full.as_str()) == want_started)
+                            .map(|(full, _)| full.clone())
+                            .collect()
+                    };
+                    let missing = of_this(&self.visible, false);
+                    let offered = of_this(&self.hidden, true);
+                    if let Some(tool) = missing.first() {
+                        return stopped(format!(
+                            "The connection {} does not have a tool under the name this app expected ({})",
+                            quoted(std::slice::from_ref(name)),
+                            steps::one_line(tool, 100)
+                        ));
+                    }
+                    if let Some(tool) = offered.first() {
+                        return stopped(format!(
+                            "The connection {} still offered a tool that was taken out of this ask ({})",
+                            quoted(std::slice::from_ref(name)),
+                            steps::one_line(tool, 100)
+                        ));
+                    }
+                }
+                Some("pending") => pending.push(name.clone()),
+                // Failed, needs a sign-in, switched off, or not
+                // started at all.
+                _ => down.push(name.clone()),
+            }
+        }
+        // What the CLI has that the plan has never heard of.
+        let known: HashSet<&str> = self.visible.iter().chain(&self.hidden).map(|(full, _)| full.as_str()).collect();
+        let mut grown: Vec<String> = Vec::new();
+        for tool in started.iter().filter(|tool| !known.contains(*tool)) {
+            let owner = self.connections.iter().find(|(key, _)| tool.starts_with(&format!("mcp__{key}__")));
+            match owner {
+                Some((_, name)) if !grown.contains(name) => grown.push(name.clone()),
+                Some(_) => {}
+                None => {
+                    return stopped(format!(
+                        "Claude Code started with a tool of a connection this ask did not ask for ({})",
+                        steps::one_line(tool, 100)
+                    ));
+                }
+            }
+        }
+        grown.sort();
+        self.pending = pending;
+        let notice = match (down.as_slice(), grown.as_slice()) {
+            ([], []) => return Ok(Line::Other),
+            ([one], _) => {
+                format!("The connection {} could not be reached, so this answer was made without it.", quoted(std::slice::from_ref(one)))
+            }
+            ([], grown) => format!(
+                "{} {} tools this app has not seen yet. They cannot be used until you refresh the connections in the Agent settings.",
+                quoted(grown),
+                if grown.len() == 1 { "has" } else { "have" }
+            ),
+            (many, _) => format!(
                 "{} connections could not be reached ({}), so this answer was made without them.",
                 many.len(),
-                many.join(", ")
-            )),
-        }
+                quoted(many)
+            ),
+        };
+        Ok(Line::Notice(notice))
     }
 
     /// The CLI asks whether a tool may run.
@@ -388,8 +603,17 @@ impl AgentReader {
             step.outcome = "Not available in this ask.".to_string();
             return Verdict::Deny { message: NOT_AVAILABLE.to_string(), events: vec![self.record(step)] };
         }
+        // The person says yes to what they can see, and a confirm
+        // shows all of it or is not raised.
+        let shown = match steps::confirm_input(input) {
+            Ok(shown) => shown,
+            Err(total) => {
+                let mut step = self.step(id, name, display, input, StepState::Denied);
+                step.outcome = format!("Its input is too large to show you in full ({total} characters), so it was not run.");
+                return Verdict::Deny { message: TOO_LARGE_TO_CONFIRM.to_string(), events: vec![self.record(step)] };
+            }
+        };
         let step = self.step(id, name, display, input, StepState::Waiting);
-        let (shown, cut) = steps::confirm_input(input);
         let confirm = AskConfirm {
             request_id: request_id.to_string(),
             step_id: step.id.clone(),
@@ -397,8 +621,8 @@ impl AgentReader {
             tool: step.tool.clone(),
             title: step.title.clone(),
             input: shown,
-            input_cut: cut,
             timeout_s: self.confirm_timeout_s,
+            armed_in_ms: steps::CONFIRM_ARM_MS,
         };
         self.confirms.insert(request_id.to_string(), step.id.clone());
         Verdict::Confirm { confirm, input: input.clone(), events: vec![self.record(step)] }
@@ -416,7 +640,7 @@ impl Reader for AgentReader {
             Some("user") => Ok(self.tool_results(&v)),
             Some("system") => Ok(match v["subtype"].as_str() {
                 Some("permission_denied") => self.denied_by_cli(&v),
-                Some("init") => self.init(&v),
+                Some("init") => self.init(&v)?,
                 _ => Line::Other,
             }),
             // A tool call that starts: one of the connections' tools
@@ -449,10 +673,26 @@ impl Reader for AgentReader {
             ConfirmOutcome::Denied => (StepState::Denied, "You said no."),
             ConfirmOutcome::TimedOut => (StepState::Denied, "No answer in time, so it was not done."),
             ConfirmOutcome::Cancelled => (StepState::Denied, "Cancelled before it ran."),
+            ConfirmOutcome::Gone => (StepState::Denied, "Claude Code stopped before you answered, so it was not run."),
         };
         step.state = state;
         step.outcome = said.to_string();
         vec![AskEvent::Step(step.clone())]
+    }
+
+    fn final_notice(&mut self) -> Option<String> {
+        match self.pending.as_slice() {
+            [] => None,
+            [one] => Some(format!(
+                "The connection {} was still starting when this was answered, so the answer may have been made without it. Ask again in a moment.",
+                quoted(std::slice::from_ref(one))
+            )),
+            many => Some(format!(
+                "{} connections were still starting when this was answered ({}), so the answer may have been made without them. Ask again in a moment.",
+                many.len(),
+                quoted(many)
+            )),
+        }
     }
 }
 

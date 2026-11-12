@@ -57,6 +57,11 @@ pub const AGENT_MAX_TURNS_MAX: u32 = 40;
 pub const AGENT_CONNECTIONS_MAX: usize = 100;
 pub const AGENT_TOOLS_MAX: usize = 500;
 pub const AGENT_NAME_MAX_CHARS: usize = 120;
+/// The longest name a tool can have and still be used. Claude Code
+/// drops a tool whose full name (`mcp__connection__tool`) is longer
+/// than this (seen with Claude Code 2.1.322), so a longer own name
+/// can never be called.
+pub const AGENT_TOOL_NAME_MAX_CHARS: usize = 128;
 /// Most app-to-connection entries kept.
 pub const AGENT_APP_CONNECTIONS_MAX: usize = 200;
 /// A custom connection: most arguments and variables, and the longest
@@ -107,6 +112,47 @@ impl ToolInfo {
     pub fn new(name: &str) -> Self {
         Self { name: name.to_string(), ..Self::default() }
     }
+
+    /// [`tool_name_is_usable`] for this tool.
+    pub fn has_usable_name(&self) -> bool {
+        tool_name_is_usable(&self.name)
+    }
+}
+
+/// Whether a tool with this name can be used at all: 1 to
+/// [`AGENT_TOOL_NAME_MAX_CHARS`] characters, each a letter or digit
+/// of ASCII, `_`, `.` or `-`.
+///
+/// The names of the tools an ask may and may not use are handed to
+/// Claude Code as lists on its command line, and a tool's name comes
+/// from its connection, which is not ours. A name with a comma in it
+/// would be read as two entries (`list,mcp__teamchat` would allow a
+/// whole other connection), and a space, `*` or `(` means something
+/// to the CLI's rules as well. So a name with anything else in it is
+/// not passed on in any form: the tool stays in the listing, marked
+/// as unusable so the person sees why, and it can never be ticked,
+/// never be on a list, and never be named in the prompt. The same
+/// check guards every way a name comes in: a listing, the settings
+/// file ([`AgentSettings::cleaned`]) and `openwhisper agent allow`.
+pub fn tool_name_is_usable(name: &str) -> bool {
+    let count = name.chars().count();
+    (1..=AGENT_TOOL_NAME_MAX_CHARS).contains(&count)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// A tool's name as it is kept. A usable name is kept exactly: it is
+/// what the connection calls the tool, and one changed character is
+/// another tool. A name that cannot be used is kept for showing
+/// only, cut at [`AGENT_TOOL_NAME_MAX_CHARS`] with an ellipsis (which
+/// also keeps a name that was cut from ever passing for a usable
+/// one).
+fn kept_tool_name(name: &str) -> String {
+    if tool_name_is_usable(name) || name.chars().count() <= AGENT_TOOL_NAME_MAX_CHARS {
+        return name.to_string();
+    }
+    let mut cut: String = name.chars().take(AGENT_TOOL_NAME_MAX_CHARS).collect();
+    cut.push('\u{2026}');
+    cut
 }
 
 /// How a custom connection is reached: a command with its arguments
@@ -164,9 +210,10 @@ pub struct AgentConnection {
 }
 
 impl AgentConnection {
-    /// The tool `name` is ticked.
+    /// The tool `name` is ticked. Never true for a name that cannot
+    /// be used ([`tool_name_is_usable`]).
     pub fn allows(&self, name: &str) -> bool {
-        self.allowed_tools.iter().any(|t| t == name)
+        tool_name_is_usable(name) && self.allowed_tools.iter().any(|t| t == name)
     }
 
     /// The listed tool `name`, if the connection has one.
@@ -266,6 +313,98 @@ impl Default for AgentSettings {
     }
 }
 
+// --- the block for showing: no values of the environment ------------
+
+/// A custom connection for showing or printing: [`CustomServer`]
+/// with the **names** of its environment variables and none of their
+/// values. There is no way from this type back to a value.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CustomServerView {
+    pub command: String,
+    pub args: Vec<String>,
+    /// The names of the variables, in order. Never a value.
+    pub env: Vec<String>,
+    pub url: String,
+}
+
+/// [`AgentConnection`] for showing or printing.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AgentConnectionView {
+    pub name: String,
+    pub kind: AgentConnectionKind,
+    pub enabled: bool,
+    pub allowed_tools: Vec<String>,
+    pub tools: Vec<ToolInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom: Option<CustomServerView>,
+}
+
+/// The Agent block for showing or printing ([`AgentSettings::for_output`]):
+/// the same fields as [`AgentSettings`], except that the environment
+/// of a custom connection is the names of its variables only.
+///
+/// [`AgentSettings`] itself serializes with the values, because that
+/// is how the person's own entries are written to `settings.json`.
+/// Everything that goes anywhere else (a terminal, `--json`, a
+/// window, a log) is made from this type instead, so a token cannot
+/// leave through an output by being forgotten: the value is not in
+/// the type.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AgentSettingsView {
+    pub enabled: bool,
+    pub drafts_only: bool,
+    pub connections: Vec<AgentConnectionView>,
+    pub app_connections: Option<Vec<AppConnection>>,
+    pub confirm_timeout_s: u64,
+    pub max_turns: u32,
+}
+
+impl CustomServer {
+    /// For showing or printing: see [`CustomServerView`].
+    pub fn for_output(&self) -> CustomServerView {
+        CustomServerView {
+            command: self.command.clone(),
+            args: self.args.clone(),
+            env: self.env.keys().cloned().collect(),
+            url: self.url.clone(),
+        }
+    }
+}
+
+impl AgentConnection {
+    /// For showing or printing: see [`AgentSettingsView`].
+    pub fn for_output(&self) -> AgentConnectionView {
+        AgentConnectionView {
+            name: self.name.clone(),
+            kind: self.kind,
+            enabled: self.enabled,
+            allowed_tools: self.allowed_tools.clone(),
+            tools: self.tools.clone(),
+            custom: self.custom.as_ref().map(CustomServer::for_output),
+        }
+    }
+}
+
+impl AgentSettings {
+    /// For showing or printing: see [`AgentSettingsView`].
+    pub fn for_output(&self) -> AgentSettingsView {
+        AgentSettingsView {
+            enabled: self.enabled,
+            drafts_only: self.drafts_only,
+            connections: self.connections.iter().map(AgentConnection::for_output).collect(),
+            app_connections: self.app_connections.clone(),
+            confirm_timeout_s: self.confirm_timeout_s,
+            max_turns: self.max_turns,
+        }
+    }
+}
+
+/// For a field that holds an [`AgentSettings`] inside something that
+/// is serialized for output (`#[serde(serialize_with = ...)]`).
+pub fn serialize_agent_settings_for_output<S: serde::Serializer>(settings: &AgentSettings, serializer: S) -> Result<S::Ok, S::Error> {
+    settings.for_output().serialize(serializer)
+}
+
 fn capped(s: &str, max: usize) -> String {
     s.trim().chars().take(max).collect()
 }
@@ -302,19 +441,21 @@ impl AgentConnection {
             .tools
             .into_iter()
             .map(|mut tool| {
-                tool.name = tidy_name(&tool.name);
+                // Never tidied: see `kept_tool_name`.
+                tool.name = kept_tool_name(&tool.name);
                 tool.title = tidy_name(&tool.title);
                 tool
             })
-            .filter(|tool| !tool.name.is_empty() && seen.insert(tool.name.clone()))
+            .filter(|tool| !tool.name.trim().is_empty() && seen.insert(tool.name.clone()))
             .take(AGENT_TOOLS_MAX)
             .collect();
+        // A tick is a name that will be handed to Claude Code: only
+        // a usable one can be a tick, whatever a file says.
         let mut seen = std::collections::HashSet::new();
         self.allowed_tools = self
             .allowed_tools
-            .iter()
-            .map(|name| tidy_name(name))
-            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+            .into_iter()
+            .filter(|name| tool_name_is_usable(name) && seen.insert(name.clone()))
             .take(AGENT_TOOLS_MAX)
             .collect();
         self.custom = match self.kind {
@@ -337,9 +478,12 @@ impl AgentConnection {
 }
 
 impl AgentSettings {
-    /// The block as it is stored and used: names on one line and
-    /// capped, each connection once (the first of two with the same
-    /// name, ignoring case), custom connections that say nothing
+    /// The block as it is stored and used: connection names on one
+    /// line and capped, tool names exactly as the connection gave
+    /// them (a tick only for a name that can be used,
+    /// [`tool_name_is_usable`]), each connection once (the first of
+    /// two with the same name, ignoring case), custom connections
+    /// that say nothing
     /// about how they are reached dropped, no details on a Claude
     /// connection, the numbers within their limits, app ids in lower
     /// case and each app once.
@@ -547,6 +691,117 @@ mod tests {
         // An app nobody mapped, and no app at all.
         assert!(s.connection_for_app("com.example.editor").is_none());
         assert!(s.connection_for_app("  ").is_none());
+    }
+
+    #[test]
+    fn a_tool_name_is_usable_only_when_it_is_made_of_plain_characters() {
+        for good in ["read_thread", "getJiraIssue", "notion-search", "dots.name", "a", "x9", &"x".repeat(128)] {
+            assert!(tool_name_is_usable(good), "{good}");
+        }
+        for bad in [
+            "",
+            " ",
+            "list,mcp__teamchat",
+            "read thread",
+            "read_thread ",
+            "\nread_thread",
+            "get*",
+            "a(b)",
+            "caf\u{e9}",
+            "tab\tname",
+            "slash/name",
+            "colon:name",
+            "quote\"name",
+            "rtl\u{202e}name",
+            &"x".repeat(129),
+        ] {
+            assert!(!tool_name_is_usable(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_tool_whose_name_cannot_be_used_stays_listed_as_it_is_and_can_never_be_ticked() {
+        let comma = "list,mcp__teamchat";
+        let long = "y".repeat(300);
+        let s = AgentSettings {
+            connections: vec![AgentConnection {
+                name: "notes".into(),
+                enabled: true,
+                // As a file edited by hand, or written by an older
+                // version, could have them.
+                allowed_tools: vec![comma.into(), "list".into(), "read thread".into(), " list ".into(), long.clone()],
+                tools: vec![
+                    ToolInfo::new(comma),
+                    ToolInfo::new("list"),
+                    ToolInfo::new("read thread"),
+                    // A name with a line break is not tidied into
+                    // another tool's name.
+                    ToolInfo::new("\nlist"),
+                    ToolInfo::new(&long),
+                ],
+                ..AgentConnection::default()
+            }],
+            ..AgentSettings::default()
+        }
+        .cleaned();
+        let notes = &s.connections[0];
+        // Only the usable name is a tick.
+        assert_eq!(notes.allowed_tools, ["list"]);
+        assert!(notes.allows("list"));
+        assert!(!notes.allows(comma));
+        let names: Vec<&str> = notes.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names[..4], [comma, "list", "read thread", "\nlist"]);
+        // A very long name is cut for showing, and the cut one is
+        // not usable either.
+        assert_eq!(names[4].chars().count(), AGENT_TOOL_NAME_MAX_CHARS + 1);
+        assert!(names[4].ends_with('\u{2026}'));
+        let usable: Vec<bool> = notes.tools.iter().map(ToolInfo::has_usable_name).collect();
+        assert_eq!(usable, [false, true, false, false, false]);
+        // A tick smuggled in after cleaning still does not count.
+        let mut smuggled = notes.clone();
+        smuggled.allowed_tools.push(comma.into());
+        assert!(!smuggled.allows(comma));
+        // Cleaning twice changes nothing.
+        assert_eq!(s.clone().cleaned(), s);
+    }
+
+    #[test]
+    fn the_block_for_output_has_the_names_of_the_variables_and_no_value() {
+        let secret = "tok-made-up-456";
+        let s = AgentSettings {
+            connections: vec![AgentConnection {
+                name: "Own".into(),
+                kind: AgentConnectionKind::Custom,
+                custom: Some(CustomServer {
+                    command: "server".into(),
+                    args: vec!["--stdio".into()],
+                    env: BTreeMap::from([("CHAT_TOKEN".to_string(), secret.to_string()), ("MODE".to_string(), "test".to_string())]),
+                    ..CustomServer::default()
+                }),
+                ..AgentConnection::default()
+            }],
+            ..AgentSettings::default()
+        }
+        .cleaned();
+        // The file has the value: it is the person's own entry.
+        assert!(serde_json::to_string(&s).unwrap().contains(secret));
+        // What is shown or printed has the names only.
+        let shown = serde_json::to_value(s.for_output()).unwrap();
+        assert_eq!(shown["connections"][0]["custom"]["env"], serde_json::json!(["CHAT_TOKEN", "MODE"]));
+        assert_eq!(shown["connections"][0]["custom"]["command"], "server");
+        let text = format!("{shown} {:?}", s.for_output());
+        assert!(!text.contains(secret) && !text.contains("\"test\""), "{text}");
+        // Every other field is the block's own.
+        let mut file = serde_json::to_value(&s).unwrap();
+        file["connections"][0]["custom"]["env"] = serde_json::json!(["CHAT_TOKEN", "MODE"]);
+        assert_eq!(shown, file);
+        // Inside something else that is serialized for output.
+        #[derive(Serialize)]
+        struct Wrapper {
+            #[serde(serialize_with = "serialize_agent_settings_for_output")]
+            settings: AgentSettings,
+        }
+        assert!(!serde_json::to_string(&Wrapper { settings: s }).unwrap().contains(secret));
     }
 
     #[test]

@@ -81,9 +81,19 @@ fn confirm(request_id: &str) -> AskConfirm {
         tool: "send_message".into(),
         title: "Send Message".into(),
         input: "{\n  \"to\": \"bo@example.com\",\n  \"body\": \"Room confirmed\"\n}".into(),
-        input_cut: false,
         timeout_s: 120,
+        armed_in_ms: CONFIRM_ARM_MS,
     }
+}
+
+/// A confirm as it is on the snapshot, without the countdown.
+fn on_show(snap: &AskSnapshot) -> Option<AskConfirm> {
+    snap.confirm.clone().map(|confirm| AskConfirm { armed_in_ms: CONFIRM_ARM_MS, ..confirm })
+}
+
+/// Wait until a yes to the confirm on show counts.
+fn wait_until_armed() {
+    wait_until("a yes to the confirm counts", || snapshot().confirm.is_some_and(|confirm| confirm.armed_in_ms == 0));
 }
 
 /// A factory whose backends do what an agent backend does for "send
@@ -251,7 +261,7 @@ fn a_confirm_shows_on_the_snapshot_and_allow_lets_the_ask_finish() {
     let (asking, waiting) = ask_until_confirming("send bo a message that the room is confirmed");
     // What the panel shows while it waits: both steps, the confirm
     // with the whole input, and that a cancel would stop something.
-    assert_eq!(waiting.confirm, Some(confirm("req-session-allow")));
+    assert_eq!(on_show(&waiting), Some(confirm("req-session-allow")));
     assert_eq!(
         waiting.steps.iter().map(|s| (s.tool.as_str(), s.state)).collect::<Vec<_>>(),
         [("read_thread", StepState::Done), ("send_message", StepState::Waiting)]
@@ -271,6 +281,25 @@ fn a_confirm_shows_on_the_snapshot_and_allow_lets_the_ask_finish() {
     assert!(!confirm_deny(waiting.id + 1, "req-session-allow"));
     assert_eq!(snapshot().phase, AskPhase::Confirming);
 
+    // A click that lands the moment the confirm comes up was not
+    // meant for it: it is refused, it is not a no, and the confirm
+    // stays on show. The snapshot says how long until a yes counts.
+    let left = snapshot().confirm.expect("on show").armed_in_ms;
+    assert!(left > 0 && left <= CONFIRM_ARM_MS, "{left}");
+    assert_eq!(serde_json::to_value(snapshot()).unwrap()["confirm"]["armed_in_ms"].as_u64().map(|ms| ms > 0), Some(true));
+    assert!(!confirm_allow(waiting.id, "req-session-allow"), "a yes within the first moment must not count");
+    assert!(!confirm_allow(waiting.id, "req-session-allow"));
+    let still = snapshot();
+    assert_eq!(still.phase, AskPhase::Confirming);
+    assert_eq!(on_show(&still), Some(confirm("req-session-allow")));
+    assert_eq!(still.steps[1].state, StepState::Waiting);
+    // The countdown runs without the snapshot's version changing.
+    thread::sleep(Duration::from_millis(60));
+    let later = snapshot();
+    assert!(later.confirm.as_ref().unwrap().armed_in_ms < left, "{left}");
+    assert_eq!(later.version, still.version);
+
+    wait_until_armed();
     assert!(confirm_allow(waiting.id, "req-session-allow"));
     // At once: the confirm is gone from the snapshot, and a second
     // click finds nothing.
@@ -415,6 +444,120 @@ fn an_ask_that_fails_midway_leaves_no_step_running_or_waiting() {
     assert!(failed.steps[0].outcome.contains("not known"), "{}", failed.steps[0].outcome);
     let row = runs::recent(store, 1).unwrap().remove(0);
     assert_eq!((row.status.as_str(), row.tool_calls), ("failed", Some(1)));
+}
+
+/// The one entry in the history folder `dir`, with its file's text.
+fn only_entry(dir: &std::path::Path) -> (crate::history::HistoryEntry, String) {
+    let page = crate::history::list(dir, "", 10, 0);
+    assert_eq!(page.stored, 1, "{:?}", page.entries);
+    let entry = page.entries[0].clone();
+    let id = &entry.id;
+    let file = std::fs::read_to_string(dir.join(format!("{}/{}-{}-{}.md", &id[..4], &id[..4], &id[4..6], &id[6..8]))).unwrap();
+    (entry, file)
+}
+
+fn history_on() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    crate::settings::set_history_settings_cache(HistorySettings {
+        enabled: true,
+        retention_days: 0,
+        folder: Some(dir.path().to_string_lossy().into_owned()),
+    });
+    dir
+}
+
+#[test]
+fn an_ask_in_which_a_tool_ran_is_kept_in_history_also_when_it_did_not_finish() {
+    let _dictation = crate::dictation::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = calls();
+    let tools_of = |entry: &crate::history::HistoryEntry| -> Vec<(String, String)> {
+        entry.tools.iter().map(|t| (t.tool.clone(), t.outcome.clone())).collect()
+    };
+
+    // It failed while a draft was being saved, with some of the
+    // answer already there.
+    {
+        let _scope = scope(on(), {
+            let calls = calls.clone();
+            move |_| {
+                Box::new(Stub::new(calls.clone(), |_, sink, _| {
+                    sink(AskEvent::Step(step("s1", "read_thread", ToolKind::Read, StepState::Done, "Thread #release-plan")));
+                    sink(AskEvent::Text("Let me prepare that.".into()));
+                    sink(AskEvent::Step(step("s2", "create_draft", ToolKind::Draft, StepState::Running, "")));
+                    Err(AskError::Backend("Claude Code exited without an answer".into()))
+                }))
+            }
+        });
+        let dir = history_on();
+        let failed = submit("draft a reply to anna").unwrap();
+        assert_eq!(failed.phase, AskPhase::Error);
+        let (entry, file) = only_entry(dir.path());
+        assert!(entry.is_ask());
+        assert_eq!(entry.text, "draft a reply to anna");
+        assert_eq!(
+            entry.answer.as_deref(),
+            Some("Let me prepare that.\n\n(Incomplete. The ask did not finish: Claude Code exited without an answer)")
+        );
+        // The read is done. Of the draft nothing more is known: it
+        // may have been saved.
+        assert_eq!(tools_of(&entry), [("read_thread".into(), "done".into()), ("create_draft".into(), "result_not_known".into())]);
+        assert!(file.contains("<!-- extra: kind=ask; tools=2 -->"), "{file}");
+        assert!(file.contains("> Tools: read_thread in Team chat: done\n> create_draft in Team chat: result_not_known\n"), "{file}");
+        assert!(!file.contains("bo@example.com"), "{file}");
+    }
+
+    // It was cancelled while the send waited for a yes, after a
+    // read: the read is kept, the send did not run.
+    {
+        let _scope = scope(on(), sending(&calls, "req-session-history"));
+        let dir = history_on();
+        let (asking, _) = ask_until_confirming("send bo a message that the room is confirmed");
+        assert!(cancel());
+        assert_eq!(asking.join().unwrap().phase, AskPhase::Cancelled);
+        let (entry, _) = only_entry(dir.path());
+        assert_eq!(entry.answer.as_deref(), Some("(No answer. The ask was cancelled before it finished.)"));
+        assert_eq!(tools_of(&entry), [("read_thread".into(), "done".into()), ("send_message".into(), "denied".into())]);
+    }
+
+    // It ran out of time after a tool had failed.
+    {
+        let _scope = scope(on(), {
+            let calls = calls.clone();
+            move |_| {
+                Box::new(Stub::new(calls.clone(), |_, sink, _| {
+                    sink(AskEvent::Step(step("s1", "read_thread", ToolKind::Read, StepState::Failed, "The chat did not answer.")));
+                    Err(AskError::Timeout)
+                }))
+            }
+        });
+        let dir = history_on();
+        assert_eq!(submit("what did anna ask").unwrap().phase, AskPhase::Error);
+        let (entry, _) = only_entry(dir.path());
+        let answer = entry.answer.as_deref().unwrap();
+        assert!(answer.starts_with("(No answer. The ask did not finish: No answer within ") && answer.ends_with(" seconds.)"), "{answer}");
+        assert_eq!(tools_of(&entry), [("read_thread".into(), "failed".into())]);
+    }
+
+    // Nothing ran: a call that was refused, and an ask that failed
+    // before any call. Neither leaves an entry, as before.
+    for refused in [true, false] {
+        let _scope = scope(on(), {
+            let calls = calls.clone();
+            move |_| {
+                Box::new(Stub::new(calls.clone(), move |_, sink, _| {
+                    if refused {
+                        sink(AskEvent::Step(step("s1", "delete_message", ToolKind::Act, StepState::Denied, "Not available in this ask.")));
+                    }
+                    sink(AskEvent::Text("I could".into()));
+                    Err(AskError::Backend("Claude Code exited without an answer".into()))
+                }))
+            }
+        });
+        let dir = history_on();
+        assert_eq!(submit("delete the last message").unwrap().phase, AskPhase::Error);
+        assert_eq!(crate::history::list(dir.path(), "", 10, 0).stored, 0, "refused: {refused}");
+    }
+    crate::settings::set_history_settings_cache(HistorySettings::default());
 }
 
 #[test]

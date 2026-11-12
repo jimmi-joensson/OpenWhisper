@@ -123,9 +123,10 @@ mod agent;
 pub use agent::{
     AGENT_APP_CONNECTIONS_MAX, AGENT_CONFIRM_TIMEOUT_DEFAULT_S, AGENT_CONFIRM_TIMEOUT_MAX_S,
     AGENT_CONFIRM_TIMEOUT_MIN_S, AGENT_CONNECTIONS_MAX, AGENT_CUSTOM_FIELD_MAX_CHARS, AGENT_CUSTOM_ITEMS_MAX,
-    AGENT_MAX_TURNS_DEFAULT, AGENT_MAX_TURNS_MAX, AGENT_MAX_TURNS_MIN, AGENT_NAME_MAX_CHARS, AGENT_TOOLS_MAX,
-    AgentConnection, AgentConnectionKind, AgentSettings, AppConnection, CustomServer, ToolInfo,
-    connection_name_matches, default_app_connections,
+    AGENT_MAX_TURNS_DEFAULT, AGENT_MAX_TURNS_MAX, AGENT_MAX_TURNS_MIN, AGENT_NAME_MAX_CHARS, AGENT_TOOL_NAME_MAX_CHARS,
+    AGENT_TOOLS_MAX, AgentConnection, AgentConnectionKind, AgentConnectionView, AgentSettings, AgentSettingsView,
+    AppConnection, CustomServer, CustomServerView, ToolInfo, connection_name_matches, default_app_connections,
+    serialize_agent_settings_for_output, tool_name_is_usable,
 };
 
 mod vision;

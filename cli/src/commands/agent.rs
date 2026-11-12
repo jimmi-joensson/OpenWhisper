@@ -26,10 +26,11 @@
 //!   every tool call is printed on stderr as it happens. A tool that
 //!   sends, posts, deletes or changes something asks first:
 //!   `--confirm ask` (the default at a terminal) shows the tool and
-//!   its input and waits for y or n, `--confirm allow` and `--confirm
-//!   deny` answer for you (deny is the default when nobody can be
-//!   asked). `--json` prints one record at the end with the steps,
-//!   the confirms and how each was answered.
+//!   its whole input and waits for y or n, `--confirm allow` and
+//!   `--confirm deny` answer for you (deny is the default when nobody
+//!   can be asked; allow prints the tool and its whole input on
+//!   stderr every time it says yes). `--json` prints one record at
+//!   the end with the steps, the confirms and how each was answered.
 //! - `eval`: the eval set, live against the real backend with a test
 //!   fixture as the only connection; `--offline` only proves the
 //!   checks.
@@ -39,6 +40,20 @@
 //! may use, which tools are ticked and whether drafts only is on are
 //! always the settings': a run has exactly the tools an ask in the
 //! app would have.
+//!
+//! **What is printed.** Nothing here prints the value of a variable
+//! of a custom connection's environment, in any form: the settings
+//! are printed through the type that has only the names
+//! (`AgentSettings::for_output`). Names and text that come from a
+//! connection or a tool are printed for people through
+//! `safe_to_show`, so an escape sequence in a tool's name or result
+//! cannot clear the terminal, and a right-to-left override cannot
+//! make a confirm read as something else. With `--json` they are
+//! JSON strings, which is their own kind of safe.
+//!
+//! Every command first removes what a killed process of this app
+//! left in the temp folder (the connection file of an agent run,
+//! which can hold tokens).
 //!
 //! `fake-server` (hidden) is a test fixture and nothing else: a
 //! made-up chat tool as a connection, whose tools do nothing but
@@ -53,8 +68,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use openwhisper_core::agent::{self, AgentRun, FrontApp, connections, eval, fixture, policy};
 use openwhisper_core::ask::{
-    AskConfirm, AskEvent, AskInput, AskPlan, CancelFlag, ConfirmDecision, ConfirmOutcome, ScreenState, StepState,
-    answer_confirm,
+    AskConfirm, AskEvent, AskInput, AskPlan, CancelFlag, ConfirmAnswer, ConfirmDecision, ConfirmOutcome, ScreenState,
+    StepState, answer_confirm, answer_confirm_as_person, safe_to_show,
 };
 use openwhisper_core::settings::{
     self, AgentConnection, AgentConnectionKind, AgentSettings, AppConnection, CustomServer, RefineBackendKind,
@@ -242,9 +257,19 @@ pub struct FakeServerArgs {
     /// Which canned content the read returns.
     #[arg(long, value_name = "NAME", default_value = "plain")]
     scenario: String,
+    /// One more tool under this name, said to be read-only. Repeat
+    /// for more. For tests of tool names that are not plain.
+    #[arg(long = "extra-tool", value_name = "NAME")]
+    extra_tools: Vec<String>,
 }
 
 pub fn run(args: AgentArgs, json: bool) -> Result<()> {
+    // What a killed process of this app left in the temp folder
+    // (the connection file of a run can hold tokens) goes first.
+    // Not for the fixture: it is a connection, not the app.
+    if !matches!(args.command, AgentCommand::FakeServer(_)) {
+        agent::sweep_stale_files();
+    }
     match args.command {
         AgentCommand::Status => status(json),
         AgentCommand::Config(a) => config(a, json),
@@ -291,12 +316,20 @@ fn find<'a>(settings: &'a mut AgentSettings, name: &str) -> Result<&'a mut Agent
     })
 }
 
-/// One connection for `status`, `connections` and `tools`.
+/// A name that is not ours (a connection's, a tool's), for a line
+/// a person reads.
+fn shown(name: &str) -> String {
+    safe_to_show(name, false)
+}
+
+/// One connection for `status`, `connections` and `tools`. Nothing
+/// about how it is reached.
 fn connection_json(connection: &AgentConnection) -> serde_json::Value {
     let tools: Vec<serde_json::Value> = connection
         .tools
         .iter()
         .map(|tool| {
+            let problem = policy::unusable_reason(connection, tool);
             serde_json::json!({
                 "name": tool.name,
                 "title": tool.title,
@@ -304,6 +337,9 @@ fn connection_json(connection: &AgentConnection) -> serde_json::Value {
                 "allowed": connection.allows(&tool.name),
                 "read_only": tool.read_only,
                 "destructive": tool.destructive,
+                // A tool that cannot be used can never be ticked.
+                "usable": problem.is_none(),
+                "problem": problem.map(policy::ToolProblem::as_str),
             })
         })
         .collect();
@@ -315,6 +351,9 @@ fn connection_json(connection: &AgentConnection) -> serde_json::Value {
         // A connection of your Claude Code can only be used after it
         // was looked up in this process.
         "listed": connection.kind == AgentConnectionKind::Custom || connections::is_listed(&connection.name),
+        // One of your own entries is only looked up (which starts
+        // it) while it is switched on.
+        "looked_up": connection.kind != AgentConnectionKind::Custom || !connection.tools.is_empty(),
         "tools": tools,
     })
 }
@@ -322,13 +361,35 @@ fn connection_json(connection: &AgentConnection) -> serde_json::Value {
 fn print_connection_line(connection: &AgentConnection) {
     let ticked = connection.tools.iter().filter(|t| connection.allows(&t.name)).count();
     println!(
-        "  {:<34} {:<7} {:<4} {} of {} tools ticked",
-        connection.name,
+        "  {:<34} {:<7} {:<4} {}",
+        shown(&connection.name),
         connection.kind.as_str(),
         on_off(connection.enabled),
-        ticked,
-        connection.tools.len()
+        if connection.kind == AgentConnectionKind::Custom && connection.tools.is_empty() {
+            "not looked up yet (enable it, then refresh)".to_string()
+        } else {
+            format!("{} of {} tools ticked", ticked, connection.tools.len())
+        }
     );
+}
+
+/// What to say about one tool in a list for people: whether it is
+/// ticked and what a tick means for its kind, or why it cannot be
+/// used at all.
+fn tool_note(connection: &AgentConnection, tool: &openwhisper_core::settings::ToolInfo, drafts_only: bool, long: bool) -> String {
+    if let Some(problem) = policy::unusable_reason(connection, tool) {
+        return format!("cannot be used. {}", problem.sentence());
+    }
+    match (connection.allows(&tool.name), policy::kind_of(tool)) {
+        (false, _) if long => "not ticked",
+        (false, _) => "",
+        (true, agent::ToolKind::Act) if drafts_only => "ticked, cannot run (drafts only)",
+        (true, agent::ToolKind::Act) if long => "ticked, asks first every time",
+        (true, agent::ToolKind::Act) => "ticked, asks first",
+        (true, _) if long => "ticked, runs without asking",
+        (true, _) => "ticked",
+    }
+    .to_string()
 }
 
 fn status(json: bool) -> Result<()> {
@@ -339,7 +400,8 @@ fn status(json: bool) -> Result<()> {
     let table = settings.effective_app_connections();
     if json {
         let value = serde_json::json!({
-            "settings": settings,
+            // Without the values of a custom connection's environment.
+            "settings": settings.for_output(),
             "ready": ready,
             "message": why,
             "ask_enabled": ask.enabled,
@@ -369,13 +431,8 @@ fn status(json: bool) -> Result<()> {
         print_connection_line(connection);
         for tool in &connection.tools {
             let kind = policy::kind_of(tool);
-            let note = match (connection.allows(&tool.name), kind) {
-                (false, _) => "",
-                (true, agent::ToolKind::Act) if settings.drafts_only => "ticked, cannot run (drafts only)",
-                (true, agent::ToolKind::Act) => "ticked, asks first",
-                (true, _) => "ticked",
-            };
-            println!("      {:<5} {:<40} {}", kind.as_str(), tool.name, note);
+            let note = tool_note(connection, tool, settings.drafts_only, false);
+            println!("      {:<5} {:<40} {}", kind.as_str(), shown(&tool.name), note);
         }
     }
     println!(
@@ -387,9 +444,9 @@ fn status(json: bool) -> Result<()> {
         let reaches = settings.connection_for_app(&entry.app_id).map(|(_, c)| c.name.clone());
         println!(
             "  {:<34} {:<16} {}",
-            entry.app_id,
-            entry.connection,
-            reaches.map_or("(no enabled connection of that name)".to_string(), |name| format!("-> {name}"))
+            shown(&entry.app_id),
+            shown(&entry.connection),
+            reaches.map_or("(no enabled connection of that name)".to_string(), |name| format!("-> {}", shown(&name)))
         );
     }
     Ok(())
@@ -417,7 +474,8 @@ fn config(args: ConfigArgs, json: bool) -> Result<()> {
         settings = save(&path, settings)?;
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&settings)?);
+        // Without the values of a custom connection's environment.
+        println!("{}", serde_json::to_string_pretty(&settings.for_output())?);
         return Ok(());
     }
     println!("enabled           {}", settings.enabled);
@@ -466,8 +524,11 @@ fn connections_command(args: ConnectionsArgs, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&connection_json(added))?);
             } else {
-                println!("added {} (switched off, no tool ticked)", added.name);
-                eprintln!("next: `openwhisper agent connections --refresh` to see its tools, then `agent allow` and `agent connections enable`");
+                println!("added {} (switched off, no tool ticked)", shown(&added.name));
+                eprintln!(
+                    "nothing was started: it is looked up only once it is switched on. Next: `openwhisper agent connections enable \"{}\"`, then `agent connections --refresh` to see its tools, then `agent allow`",
+                    shown(&added.name)
+                );
             }
             return Ok(());
         }
@@ -478,7 +539,7 @@ fn connections_command(args: ConnectionsArgs, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::json!({ "removed": removed }));
             } else {
-                println!("removed {removed}");
+                println!("removed {}", shown(&removed));
             }
             return Ok(());
         }
@@ -522,7 +583,13 @@ fn connections_command(args: ConnectionsArgs, json: bool) -> Result<()> {
             return Ok(());
         }
         for found in &refreshed.listing {
-            println!("  {:<34} {:<8} {:<11} {} tools", found.name, found.source.as_str(), found.state.as_str(), found.tools.len());
+            println!(
+                "  {:<34} {:<8} {:<11} {} tools",
+                shown(&found.name),
+                found.source.as_str(),
+                found.state.as_str(),
+                found.tools.len()
+            );
         }
         println!(
             "{} connections, {} tools, listed in {:.1} s",
@@ -531,7 +598,17 @@ fn connections_command(args: ConnectionsArgs, json: bool) -> Result<()> {
             refreshed.elapsed_ms as f64 / 1000.0
         );
         if !refreshed.custom_error.is_empty() {
-            eprintln!("note: your own entries could not be listed: {}", refreshed.custom_error);
+            eprintln!("note: your own entries could not be listed: {}", shown(&refreshed.custom_error));
+        }
+        let waiting: Vec<String> = refreshed
+            .settings
+            .connections
+            .iter()
+            .filter(|c| c.kind == AgentConnectionKind::Custom && !c.enabled && c.tools.is_empty())
+            .map(|c| shown(&c.name))
+            .collect();
+        if !waiting.is_empty() {
+            eprintln!("not looked up, because switched off (looking one up starts it): {}", waiting.join(", "));
         }
         eprintln!("nothing is enabled by a refresh: see `openwhisper agent status`");
         return Ok(());
@@ -559,9 +636,10 @@ fn switch(path: &std::path::Path, mut settings: AgentSettings, name: &str, enabl
     if json {
         println!("{}", serde_json::json!({ "name": name, "enabled": enabled }));
     } else {
+        let name = shown(&name);
         println!("{name} is {}", on_off(enabled));
         if enabled && ticked == 0 {
-            eprintln!("no tool of it is ticked yet, so asks cannot use it: see `openwhisper agent tools \"{name}\"`");
+            eprintln!("no tool of it is ticked yet, so asks cannot use it: `openwhisper agent connections --refresh` looks its tools up, `openwhisper agent tools \"{name}\"` shows them");
         }
     }
     Ok(())
@@ -575,20 +653,17 @@ fn tools(name: &str, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&connection_json(&connection))?);
         return Ok(());
     }
-    println!("{} ({}, {})", connection.name, connection.kind.as_str(), on_off(connection.enabled));
+    println!("{} ({}, {})", shown(&connection.name), connection.kind.as_str(), on_off(connection.enabled));
     if connection.tools.is_empty() {
         println!("  no tools known: run `openwhisper agent connections --refresh`");
+        if connection.kind == AgentConnectionKind::Custom && !connection.enabled {
+            println!("  (one of your own entries is looked up only while it is switched on)");
+        }
     }
     for tool in &connection.tools {
         let kind = policy::kind_of(tool);
-        let ticked = connection.allows(&tool.name);
-        let what = match (ticked, kind) {
-            (false, _) => "not ticked",
-            (true, agent::ToolKind::Act) if drafts_only => "ticked, cannot run (drafts only)",
-            (true, agent::ToolKind::Act) => "ticked, asks first every time",
-            (true, _) => "ticked, runs without asking",
-        };
-        println!("  {:<5} {:<40} {}", kind.as_str(), tool.name, what);
+        let what = tool_note(&connection, tool, drafts_only, true);
+        println!("  {:<5} {:<40} {}", kind.as_str(), shown(&tool.name), what);
     }
     Ok(())
 }
@@ -598,17 +673,28 @@ fn tick(name: &str, tools: &[String], allow: bool, json: bool) -> Result<()> {
     let drafts_only = settings.drafts_only;
     let connection = find(&mut settings, name)?;
     for tool in tools {
-        if connection.tool(tool).is_none() {
-            let known: Vec<&str> = connection.tools.iter().map(|t| t.name.as_str()).collect();
+        // Taking a tick away always works: also the tick of a tool
+        // that is no longer listed.
+        if !allow && connection.allowed_tools.iter().any(|t| t == tool) {
+            continue;
+        }
+        let Some(info) = connection.tool(tool) else {
+            let known: Vec<String> = connection.tools.iter().map(|t| shown(&t.name)).collect();
             bail!(
-                "\"{tool}\" is not a tool of {}. {}",
-                connection.name,
+                "\"{}\" is not a tool of {}. {}",
+                shown(tool),
+                shown(&connection.name),
                 if known.is_empty() {
                     "Its tools are not known yet: run `openwhisper agent connections --refresh`.".to_string()
                 } else {
                     format!("Its tools are: {}", known.join(", "))
                 }
             );
+        };
+        // A tick is a name that is handed to Claude Code: a tool
+        // whose name cannot be passed on safely is never ticked.
+        if allow && let Some(problem) = policy::unusable_reason(connection, info) {
+            bail!("\"{}\" of {} cannot be ticked. {}", shown(tool), shown(&connection.name), problem.sentence());
         }
     }
     let mut notes = Vec::new();
@@ -618,9 +704,9 @@ fn tick(name: &str, tools: &[String], allow: bool, json: bool) -> Result<()> {
             connection.allowed_tools.push(tool.clone());
             if let Some(info) = connection.tool(tool).filter(|info| policy::kind_of(info) == agent::ToolKind::Act) {
                 notes.push(if drafts_only {
-                    format!("{} sends, posts, deletes or changes something: with drafts only it cannot run", info.name)
+                    format!("{} sends, posts, deletes or changes something: with drafts only it cannot run", shown(&info.name))
                 } else {
-                    format!("{} sends, posts, deletes or changes something: it asks you first, every time", info.name)
+                    format!("{} sends, posts, deletes or changes something: it asks you first, every time", shown(&info.name))
                 });
             }
         }
@@ -632,12 +718,12 @@ fn tick(name: &str, tools: &[String], allow: bool, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&connection_json(connection))?);
         return Ok(());
     }
-    println!("{}: {} of {} tools ticked", connection.name, connection.allowed_tools.len(), connection.tools.len());
+    println!("{}: {} of {} tools ticked", shown(&connection.name), connection.allowed_tools.len(), connection.tools.len());
     for note in notes {
         eprintln!("note: {note}");
     }
     if !connection.enabled && allow {
-        eprintln!("the connection is switched off: `openwhisper agent connections enable \"{}\"`", connection.name);
+        eprintln!("the connection is switched off: `openwhisper agent connections enable \"{}\"`", shown(&connection.name));
     }
     Ok(())
 }
@@ -686,7 +772,7 @@ fn apps(args: AppsArgs, json: bool) -> Result<()> {
     }
     println!("{}", if settings.app_connections.is_none() { "the built-in table:" } else { "your table:" });
     for entry in &table {
-        println!("  {:<34} {:<16} -> {}", entry.app_id, entry.app_name, entry.connection);
+        println!("  {:<34} {:<16} -> {}", shown(&entry.app_id), shown(&entry.app_name), shown(&entry.connection));
     }
     if table.is_empty() {
         println!("  (empty: no app has a connection)");
@@ -715,24 +801,116 @@ fn confirm_mode(flag: Option<&str>, can_ask: bool) -> Result<Confirm> {
     }
 }
 
-/// Show a confirm at the terminal and answer it from what is typed.
-/// On a thread of its own: the ask goes on counting the confirm's
-/// time meanwhile, and an answer typed too late finds nothing.
-fn ask_at_terminal(confirm: &AskConfirm) {
-    eprintln!();
-    eprintln!("confirm: {} wants to run on {}", confirm.tool, confirm.connection);
-    for line in confirm.input.lines() {
+/// What a line typed at the terminal did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Typed {
+    /// It answered the confirm that was on show.
+    Answered,
+    /// A yes that came before the confirm had been on show for a
+    /// moment: not taken, and the confirm still waits.
+    TooSoon,
+    /// No confirm was on show: typed before a prompt, or after the
+    /// confirm was over. It answers nothing, now or later.
+    Discarded,
+}
+
+/// The terminal of one run: the confirm that is on show, if any.
+///
+/// One thread reads stdin for the whole run ([`Terminal::start`]),
+/// and every line goes through [`Terminal::typed`] the moment it is
+/// entered. A line counts for the confirm that is on show right then
+/// and for nothing else: what was typed before a prompt was printed
+/// is read and thrown away, and so is what is typed after a confirm
+/// ran out of time. It cannot wait in a buffer and answer the next
+/// prompt.
+#[derive(Clone, Default)]
+struct Terminal {
+    on_show: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Terminal {
+    /// Start reading the terminal. The thread ends with stdin.
+    fn start() -> Self {
+        let terminal = Self::default();
+        let reader = terminal.clone();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if reader.typed(&line, &answer_confirm_as_person) == Typed::TooSoon {
+                    eprint!("that was quick: read it, then answer again. allow? [y/N] ");
+                    let _ = std::io::stderr().flush();
+                }
+            }
+        });
+        terminal
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.on_show.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A line was entered. `answer` hands a decision to the confirm
+    /// with that id (core's `answer_confirm_as_person`).
+    fn typed(&self, line: &str, answer: &dyn Fn(&str, ConfirmDecision) -> ConfirmAnswer) -> Typed {
+        let mut on_show = self.slot();
+        let Some(request_id) = on_show.clone() else {
+            return Typed::Discarded;
+        };
+        let yes = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
+        match answer(&request_id, if yes { ConfirmDecision::Allow } else { ConfirmDecision::Deny }) {
+            ConfirmAnswer::Taken => {
+                *on_show = None;
+                Typed::Answered
+            }
+            ConfirmAnswer::TooSoon => Typed::TooSoon,
+            // Over already (it ran out of time a moment ago).
+            ConfirmAnswer::NotWaiting => {
+                *on_show = None;
+                Typed::Discarded
+            }
+        }
+    }
+
+    /// Show `confirm` and take the next line for it. The prompt is
+    /// printed first: nothing typed before it is there counts.
+    fn ask(&self, confirm: &AskConfirm) {
+        eprintln!();
+        eprintln!("confirm: {} wants to run on {}", confirm.tool, confirm.connection);
+        print_input(&confirm.input);
+        eprint!("allow? [y/N] (no answer in {} s is a no) ", confirm.timeout_s);
+        let _ = std::io::stderr().flush();
+        *self.slot() = Some(confirm.request_id.clone());
+    }
+
+    /// The confirm `request_id` is over: a line typed from now on
+    /// is not for it, and not for the one after it either.
+    fn close(&self, request_id: &str) {
+        let mut on_show = self.slot();
+        if on_show.as_deref() == Some(request_id) {
+            *on_show = None;
+        }
+    }
+}
+
+/// A piece of the answer for stdout. At a terminal it is made safe
+/// to show: the model can repeat what a tool returned, and an escape
+/// sequence in that must not reach the terminal as one. Into a pipe
+/// or a file it goes as it is.
+fn for_stdout(piece: &str, terminal: bool) -> std::borrow::Cow<'_, str> {
+    if terminal { safe_to_show(piece, true).into() } else { piece.into() }
+}
+
+/// A confirm's whole input on stderr, indented. It is made safe to
+/// show by core; the lines and tabs of its layout stay.
+fn print_input(input: &str) {
+    for line in safe_to_show(input, true).lines() {
         eprintln!("    {line}");
     }
-    eprint!("allow? [y/N] (no answer in {} s is a no) ", confirm.timeout_s);
-    let _ = std::io::stderr().flush();
-    let request_id = confirm.request_id.clone();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        let yes = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
-        answer_confirm(&request_id, if yes { ConfirmDecision::Allow } else { ConfirmDecision::Deny });
-    });
 }
 
 fn run_question(args: RunArgs, json: bool) -> Result<()> {
@@ -762,6 +940,9 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         bail!("no question given: pass it as an argument or pipe it on stdin");
     }
     let confirm = confirm_mode(args.confirm.as_deref(), !from_stdin && !json && std::io::stdin().is_terminal())?;
+    // One reader of the terminal for the whole run, from before the
+    // first prompt: what is typed ahead of a prompt is thrown away.
+    let terminal = (confirm == Confirm::Ask).then(Terminal::start);
 
     let (path, agent_settings) = load()?;
     // The app in front: its name is the one in the app table.
@@ -802,7 +983,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         eprintln!(
             "tools: {} on {} ({})",
             run.planned.len(),
-            run.connections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "),
+            run.connections.iter().map(|c| shown(&c.name)).collect::<Vec<_>>().join(", "),
             if run.drafts_only {
                 "drafts only: nothing that sends, posts, deletes or changes anything".to_string()
             } else {
@@ -818,7 +999,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             }
         );
         if let Some(route) = &run.route {
-            eprintln!("context: the connection {} (the app in front is {})", route.connection, route.app_name);
+            eprintln!("context: the connection {} (the app in front is {})", shown(&route.connection), shown(&route.app_name));
         }
         if !agent_settings.enabled {
             eprintln!("note: Agent is switched off in the settings; this run uses its connections all the same");
@@ -827,6 +1008,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
     }
 
     let stream = !json && !args.no_stream;
+    let at_terminal = std::io::stdout().is_terminal();
     let mut out = std::io::stdout().lock();
     let mut last_char = '\n';
     let mut screen = ScreenState::None;
@@ -837,7 +1019,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             if let Some(c) = piece.chars().last() {
                 last_char = c;
             }
-            let _ = out.write_all(piece.as_bytes());
+            let _ = out.write_all(for_stdout(&piece, at_terminal).as_bytes());
             let _ = out.flush();
         }
         AskEvent::Step(step) => {
@@ -856,35 +1038,43 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             }
         }
         AskEvent::Confirm(request) => {
-            let answer = match confirm {
-                Confirm::Ask => {
-                    ask_at_terminal(&request);
-                    "asked"
-                }
-                Confirm::Allow => {
+            match (confirm, &terminal) {
+                (Confirm::Ask, Some(terminal)) => terminal.ask(&request),
+                (Confirm::Allow, _) => {
+                    // The flag says yes to whatever comes. What it
+                    // said yes to is on stderr every time, with
+                    // --json too: the whole input, as a person at a
+                    // prompt would have been shown it.
+                    eprintln!("confirm: {} on {} allowed by --confirm allow, with this input:", request.tool, request.connection);
+                    print_input(&request.input);
                     answer_confirm(&request.request_id, ConfirmDecision::Allow);
-                    "allow"
                 }
-                Confirm::Deny => {
+                _ => {
                     answer_confirm(&request.request_id, ConfirmDecision::Deny);
-                    "deny"
+                    if !json {
+                        eprintln!("confirm: {} on {} answered with deny", request.tool, request.connection);
+                    }
                 }
-            };
-            if !json && confirm != Confirm::Ask {
-                eprintln!("confirm: {} on {} answered with {answer}", request.tool, request.connection);
             }
             confirms.push(serde_json::json!({
                 "request_id": request.request_id,
                 "connection": request.connection,
                 "tool": request.tool,
                 "input": serde_json::from_str::<serde_json::Value>(&request.input).unwrap_or(serde_json::Value::String(request.input.clone())),
-                "input_cut": request.input_cut,
                 "outcome": serde_json::Value::Null,
             }));
         }
         AskEvent::ConfirmClosed { request_id, outcome } => {
+            // A line typed from now on is not for this confirm, and
+            // must not answer the next one.
+            if let Some(terminal) = &terminal {
+                terminal.close(&request_id);
+            }
             if !json && outcome == ConfirmOutcome::TimedOut {
                 eprintln!("\nconfirm: no answer in time, so it was not done");
+            }
+            if !json && outcome == ConfirmOutcome::Gone {
+                eprintln!("\nconfirm: Claude Code stopped before it was answered, so it was not done");
             }
             if let Some(entry) = confirms.iter_mut().find(|c| c["request_id"] == request_id.as_str()) {
                 entry["outcome"] = serde_json::json!(outcome.as_str());
@@ -895,7 +1085,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
                 match state {
                     ScreenState::Capturing => eprintln!("screen: capturing"),
                     ScreenState::Included => eprintln!("screen: included"),
-                    ScreenState::Blocked | ScreenState::Unavailable => eprintln!("screen: not included. {notice}"),
+                    ScreenState::Blocked | ScreenState::Unavailable => eprintln!("screen: not included. {}", shown(&notice)),
                     _ => {}
                 }
             }
@@ -903,7 +1093,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
                 screen = state;
             }
         }
-        AskEvent::Searching { query } if !json => eprintln!("searching the web: {query}"),
+        AskEvent::Searching { query } if !json => eprintln!("searching the web: {}", shown(&query)),
         _ => {}
     };
     let started = Instant::now();
@@ -958,10 +1148,10 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
         Ok(reply) => {
             if !json {
                 if !stream {
-                    println!("{}", reply.text);
+                    println!("{}", for_stdout(&reply.text, at_terminal));
                 }
                 if !reply.notice.is_empty() {
-                    eprintln!("note: {}", reply.notice);
+                    eprintln!("note: {}", shown(&reply.notice));
                 }
                 eprintln!(
                     "{} tool call{}, first text after {}, done in {} ms ({}, {}{})",
@@ -1146,5 +1336,138 @@ fn fake_server(args: FakeServerArgs) -> Result<()> {
     }
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
-    fixture::serve(stdin, stdout, &args.log, &args.scenario).context("serve the test fixture")
+    fixture::serve_with(stdin, stdout, &args.log, &args.scenario, &args.extra_tools).context("serve the test fixture")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// A gate like core's, for one confirm: `open` is the id that
+    /// waits, `armed` says whether a yes counts yet.
+    struct Gate {
+        open: RefCell<Option<&'static str>>,
+        armed: bool,
+        answers: RefCell<Vec<(String, ConfirmDecision)>>,
+    }
+
+    impl Gate {
+        fn new(open: Option<&'static str>, armed: bool) -> Self {
+            Self { open: RefCell::new(open), armed, answers: RefCell::new(Vec::new()) }
+        }
+
+        fn answer(&self, request_id: &str, decision: ConfirmDecision) -> ConfirmAnswer {
+            if *self.open.borrow() != Some(request_id) {
+                return ConfirmAnswer::NotWaiting;
+            }
+            if decision == ConfirmDecision::Allow && !self.armed {
+                return ConfirmAnswer::TooSoon;
+            }
+            self.answers.borrow_mut().push((request_id.to_string(), decision));
+            *self.open.borrow_mut() = None;
+            ConfirmAnswer::Taken
+        }
+    }
+
+    fn confirm(request_id: &str) -> AskConfirm {
+        AskConfirm {
+            request_id: request_id.into(),
+            step_id: "s1".into(),
+            connection: "teamchat".into(),
+            tool: "send_message".into(),
+            title: "Send Message".into(),
+            input: "{\n  \"to\": \"bo@example.com\"\n}".into(),
+            timeout_s: 120,
+            armed_in_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_line_answers_the_confirm_on_show_and_nothing_else() {
+        let terminal = Terminal::default();
+        let gate = Gate::new(Some("first"), true);
+        let answer = |id: &str, decision| gate.answer(id, decision);
+        // Typed before any prompt was printed: read and thrown away.
+        assert_eq!(terminal.typed("y\n", &answer), Typed::Discarded);
+        assert_eq!(terminal.typed("yes\n", &answer), Typed::Discarded);
+        assert!(gate.answers.borrow().is_empty());
+        // The prompt is up: the next line is its answer.
+        terminal.ask(&confirm("first"));
+        assert_eq!(terminal.typed(" Y \n", &answer), Typed::Answered);
+        assert_eq!(*gate.answers.borrow(), [("first".to_string(), ConfirmDecision::Allow)]);
+        // One line, one answer: the next line is for nobody.
+        assert_eq!(terminal.typed("y\n", &answer), Typed::Discarded);
+        assert_eq!(gate.answers.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_line_typed_after_a_confirm_ran_out_does_not_answer_the_next_one() {
+        let terminal = Terminal::default();
+        let gate = Gate::new(Some("first"), true);
+        let answer = |id: &str, decision| gate.answer(id, decision);
+        terminal.ask(&confirm("first"));
+        // Nobody answered in time: the confirm is over.
+        *gate.open.borrow_mut() = None;
+        terminal.close("first");
+        // The yes that comes now was for the first one.
+        assert_eq!(terminal.typed("y\n", &answer), Typed::Discarded);
+        // The next confirm comes up, and is still unanswered.
+        *gate.open.borrow_mut() = Some("second");
+        terminal.ask(&confirm("second"));
+        assert!(gate.answers.borrow().is_empty());
+        // Closing a confirm that is not the one on show changes nothing.
+        terminal.close("first");
+        assert_eq!(terminal.typed("n\n", &answer), Typed::Answered);
+        assert_eq!(*gate.answers.borrow(), [("second".to_string(), ConfirmDecision::Deny)]);
+
+        // The same when the close has not arrived yet: the gate
+        // says nobody waits, and the line is thrown away, not kept.
+        let terminal = Terminal::default();
+        let gate = Gate::new(None, true);
+        let answer = |id: &str, decision| gate.answer(id, decision);
+        terminal.ask(&confirm("first"));
+        assert_eq!(terminal.typed("y\n", &answer), Typed::Discarded);
+        *gate.open.borrow_mut() = Some("second");
+        assert_eq!(terminal.typed("y\n", &answer), Typed::Discarded);
+        assert!(gate.answers.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_yes_that_comes_too_soon_is_not_taken_and_anything_but_yes_is_a_no() {
+        let terminal = Terminal::default();
+        let gate = Gate::new(Some("first"), false);
+        let answer = |id: &str, decision| gate.answer(id, decision);
+        terminal.ask(&confirm("first"));
+        assert_eq!(terminal.typed("y\n", &answer), Typed::TooSoon);
+        assert!(gate.answers.borrow().is_empty());
+        // Still on show: a no is taken at any time, and an empty
+        // line is a no.
+        assert_eq!(terminal.typed("\n", &answer), Typed::Answered);
+        assert_eq!(*gate.answers.borrow(), [("first".to_string(), ConfirmDecision::Deny)]);
+        for (line, decision) in [("yes", ConfirmDecision::Allow), ("YES", ConfirmDecision::Allow), ("yep", ConfirmDecision::Deny), ("allow", ConfirmDecision::Deny), ("n", ConfirmDecision::Deny)] {
+            let terminal = Terminal::default();
+            let gate = Gate::new(Some("x"), true);
+            terminal.ask(&confirm("x"));
+            assert_eq!(terminal.typed(line, &|id: &str, d| gate.answer(id, d)), Typed::Answered, "{line}");
+            assert_eq!(gate.answers.borrow()[0].1, decision, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_answer_is_made_safe_for_a_terminal_and_left_alone_for_a_pipe() {
+        let piece = "Anna wrote:\n\tok\u{1b}[2J\u{202e}";
+        assert_eq!(for_stdout(piece, true), "Anna wrote:\n\tok\\u{1B}[2J\\u{202E}");
+        assert_eq!(for_stdout(piece, false), piece);
+        assert_eq!(shown("team\u{1b}[2Jchat\n"), "team\\u{1B}[2Jchat\\u{A}");
+    }
+
+    #[test]
+    fn the_confirm_mode_is_ask_only_where_somebody_can_be_asked() {
+        assert!(confirm_mode(None, true).is_ok_and(|mode| mode == Confirm::Ask));
+        assert!(confirm_mode(None, false).is_ok_and(|mode| mode == Confirm::Deny));
+        assert!(confirm_mode(Some("allow"), false).is_ok_and(|mode| mode == Confirm::Allow));
+        assert!(confirm_mode(Some("ask"), false).is_err());
+        assert!(confirm_mode(Some("perhaps"), true).is_err());
+    }
 }

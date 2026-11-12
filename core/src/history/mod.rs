@@ -70,7 +70,15 @@
 //! ```
 //!
 //! An ask has no app: its answer was shown, not typed anywhere. Only
-//! asks that got their whole answer are kept.
+//! asks that got their whole answer are kept, with one exception: an
+//! ask in which a tool ran and which then failed, timed out or was
+//! cancelled is kept too, because something was done in the person's
+//! name. Its answer quote is what had arrived of the answer and a
+//! line in brackets that says it is incomplete (or only that line),
+//! and a call that was still running is listed as
+//! `result_not_known`. Such an entry is written exactly like any
+//! other ask with tools, so nothing that reads the files has to know
+//! about it.
 //!
 //! An ask that used tools (Agent, TASK-99) says so: `tools=N` on the
 //! extra line, and a third quote under the answer with one line per
@@ -194,9 +202,16 @@ pub struct HistoryTool {
     /// The tool's own name.
     pub tool: String,
     /// `done`, `failed` or `denied`
-    /// ([`crate::ask::StepState::as_str`] where asks are compiled in).
+    /// ([`crate::ask::StepState::as_str`] where asks are compiled in),
+    /// or [`TOOL_RESULT_NOT_KNOWN`] for a call that was still running
+    /// when its ask ended.
     pub outcome: String,
 }
+
+/// The outcome of a tool call whose ask ended (failed, timed out,
+/// was cancelled) while the call was running: it may have gone
+/// through or not.
+pub const TOOL_RESULT_NOT_KNOWN: &str = "result_not_known";
 
 impl HistoryTool {
     /// The call as one line of the tools quote.

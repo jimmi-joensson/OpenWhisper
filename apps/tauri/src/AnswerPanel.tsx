@@ -8,7 +8,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Check, CircleAlert, Copy } from "lucide-react";
+import { Ban, Check, CircleAlert, Copy, Hand } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,21 @@ import {
   CardHeader,
 } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
-import { ASK_TICK_EVENT, askIsBusy, type AskSnapshot } from "@/lib/ask";
+import {
+  Trace,
+  TraceDescription,
+  TraceIcon,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace";
+import {
+  ASK_TICK_EVENT,
+  askIsBusy,
+  type AskConfirm,
+  type AskSnapshot,
+  type AskStep,
+  type AskStepState,
+} from "@/lib/ask";
 import { CLAUDE_MODELS } from "@/lib/refine";
 import { useStoredTheme } from "@/lib/use-theme";
 
@@ -46,6 +60,13 @@ const FOLLOW_SLACK_PX = 24;
 // Vision (TASK-98) it also says what became of the screen: that it
 // is being looked at, that it was included, or why it was not. Only
 // ever in words: the picture itself never comes to this window.
+//
+// With Agent (TASK-99) it shows every tool call of the ask as it
+// happens, and the one moment an ask waits for the person: a tool
+// that sends, posts, deletes or changes something runs only after
+// they pressed Allow on exactly that call, with its whole input in
+// front of them. What a tool was given and what it returned is text
+// from outside and is only ever shown as text.
 //
 // Everything shown comes from core's ask snapshot: `ask_snapshot`
 // once on mount, so a window that loads late shows the current ask,
@@ -97,6 +118,16 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   const { id, phase, answer, searching } = ask;
   const hasAnswer = answer.trim() !== "";
   const [copied, setCopied] = useState(false);
+  // Agent (TASK-99). A snapshot from a shell that does not know
+  // about tools has neither field.
+  const steps = ask.steps ?? [];
+  // The confirm that was just answered from here, so the card closes
+  // with the click and not a tick later.
+  const [answered, setAnswered] = useState<string | null>(null);
+  const waiting = phase === "confirming" ? (ask.confirm ?? null) : null;
+  const confirm = waiting && waiting.request_id !== answered ? waiting : null;
+  // Changes when a step is added or ends.
+  const stepsKey = steps.map((step) => `${step.id}:${step.state}`).join(" ");
 
   // Follow the newest text while it streams, unless the person has
   // scrolled up to read. Whether the view is pinned to the end is
@@ -107,11 +138,12 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   useLayoutEffect(() => {
     pinned.current = true;
     setCopied(false);
+    setAnswered(null);
   }, [id]);
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [answer, phase, searching]);
+  }, [answer, phase, searching, stepsKey]);
   const onScroll = () => {
     const el = scroller.current;
     if (!el) return;
@@ -151,6 +183,21 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
     void invoke(command, { id }).catch(() => {});
   };
 
+  // Yes or no to the tool call that waits. Both name the ask and the
+  // request, so a click can only ever answer the confirm it was made
+  // on: Rust ignores one that has run out of time or been replaced.
+  const answerConfirm = (command: "ask_confirm_allow" | "ask_confirm_deny") => {
+    if (!confirm) return;
+    const requestId = confirm.request_id;
+    setAnswered(requestId);
+    void invoke<boolean>(command, { askId: id, requestId })
+      .then((ok) => {
+        // Not taken: show the confirm again if it is still there.
+        if (!ok) setAnswered((now) => (now === requestId ? null : now));
+      })
+      .catch(() => setAnswered((now) => (now === requestId ? null : now)));
+  };
+
   // "Turn on web search": the main window comes forward on the Ask
   // pane, at the Web search row. This window stays as it is.
   const openWebSearchSetting = () => {
@@ -170,12 +217,17 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   // No screenshot although one was wanted, with a reason to show.
   const noScreen =
     (ask.screen === "blocked" || ask.screen === "unavailable") && ask.screen_notice !== "";
+  // The app in front has a connection, and the ask was pointed at
+  // that instead of the screen.
+  const usedConnection =
+    ask.context_source?.kind === "connection" ? ask.context_source.name : null;
 
   return (
     <Card
       size="sm"
       className="answer-card"
       data-testid="answer-card"
+      data-confirming={confirm ? "true" : undefined}
       role="region"
       aria-label="Answer"
     >
@@ -193,6 +245,7 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
         className="answer-body flex flex-col gap-2"
         data-testid="answer-scroll"
       >
+        {steps.length > 0 && <Steps steps={steps} />}
         {showAnswer && <AnswerText text={answer} />}
         {status && (
           <p
@@ -213,9 +266,23 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
         )}
       </CardContent>
 
+      {/* Outside the part that scrolls, so it is always in view. */}
+      {confirm && (
+        <CardContent className="answer-confirm">
+          <ConfirmCard
+            confirm={confirm}
+            onAllow={() => answerConfirm("ask_confirm_allow")}
+            onDeny={() => answerConfirm("ask_confirm_deny")}
+          />
+        </CardContent>
+      )}
+
       <CardFooter className="shrink-0 flex-col items-stretch gap-2 text-xs text-muted-foreground">
-        {ask.notice && <p data-testid="answer-notice">{ask.notice}</p>}
-        {suggestWebSearch && (
+        {/* While a confirm shows, the notes of the footer step aside:
+            the window is fixed in size, and the input to judge needs
+            the room. They are back when the confirm is answered. */}
+        {!confirm && ask.notice && <p data-testid="answer-notice">{ask.notice}</p>}
+        {!confirm && suggestWebSearch && (
           <p data-testid="answer-suggestion">
             Web search is off, so this answer could not look anything up.{" "}
             {/* Underlined always: this window is never the active
@@ -233,9 +300,19 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
         {/* Vision (TASK-98): a screenshot was wanted and there is
             none. Core's sentence says why (an app that is never
             captured is in front, no permission, no display). */}
-        {noScreen && (
+        {!confirm && noScreen && (
           <p data-testid="answer-screen-notice" data-screen={ask.screen}>
             {ask.screen_notice}
+          </p>
+        )}
+        {/* Agent (TASK-99): the app in front has a connection, so
+            the ask reads from that. No screenshot was taken, unless
+            "Screen included" below says one was asked for. A line of
+            its own: next to the buttons it would wrap. */}
+        {!confirm && usedConnection !== null && (
+          <p data-testid="answer-context-source">
+            {busy ? "Using" : "Used"} the {usedConnection} connection
+            {ask.screen === "included" ? "" : " instead of the screen"}
           </p>
         )}
         <div className="flex items-end justify-between gap-2">
@@ -245,6 +322,7 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
             {ask.screen === "included" && (
               <p data-testid="answer-screen-included">Screen included</p>
             )}
+
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {(phase === "done" || phase === "error") && (
@@ -302,6 +380,8 @@ function statusLine(ask: AskSnapshot): { text: string; working: boolean } | null
         };
       }
       return ask.phase === "thinking" ? { text: "Thinking", working: true } : null;
+    // "confirming" has no line of its own: the confirm is on screen,
+    // and the step it is about says it waits.
     case "cancelled":
       return { text: "Cancelled", working: false };
     default:
@@ -326,6 +406,142 @@ function sourceLine(ask: AskSnapshot): string {
   if (model) line += ` (${model})`;
   if (ask.web_search) line += ", web search on";
   return line;
+}
+
+// --- the tool calls of an agent ask ----------------------------------
+//
+// One line per call: what it is, on which connection, and where it
+// stands, with its input under it on one line. Everything in here
+// that came from a tool or from the model (names, the input, why a
+// call failed) is shown as text.
+
+const STEP_STATES: Record<AskStepState, string> = {
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+  denied: "Not run",
+  waiting: "Waiting for you",
+};
+
+function StepIcon({ state }: { state: AskStepState }) {
+  switch (state) {
+    case "running":
+      return <Spinner className="size-3.5 motion-reduce:animate-none" />;
+    case "done":
+      return <Check />;
+    case "failed":
+      return <CircleAlert />;
+    case "denied":
+      return <Ban />;
+    case "waiting":
+      return <Hand />;
+  }
+}
+
+function Steps({ steps }: { steps: AskStep[] }) {
+  return (
+    <Trace role="list" aria-label="Tool calls" className="gap-1.5" data-testid="answer-steps">
+      {steps.map((step) => (
+        <div
+          key={step.id}
+          role="listitem"
+          className="flex-col"
+          data-testid="answer-step"
+          data-state={step.state}
+          data-kind={step.kind}
+        >
+          <TraceLine
+            status={step.state === "failed" ? "error" : undefined}
+            className="text-[13px]"
+          >
+            <TraceIcon>
+              <StepIcon state={step.state} />
+            </TraceIcon>
+            <TraceTitle data-testid="answer-step-title">{step.title || step.tool}</TraceTitle>
+            <TraceDescription className="min-w-0 shrink truncate" data-testid="answer-step-connection">
+              {step.connection}
+            </TraceDescription>
+            <span className="shrink-0" data-testid="answer-step-state">
+              {STEP_STATES[step.state] ?? step.state}
+            </span>
+          </TraceLine>
+          {step.input_summary && (
+            <span
+              className="truncate pl-6 font-mono text-[11px] text-muted-foreground"
+              data-testid="answer-step-input"
+            >
+              {step.input_summary}
+            </span>
+          )}
+          {/* Why it failed or did not run. What a call that worked
+              returned is the model's to use, not shown here. */}
+          {step.outcome && (step.state === "failed" || step.state === "denied") && (
+            <span className="pl-6 text-xs text-muted-foreground" data-testid="answer-step-outcome">
+              {step.outcome}
+            </span>
+          )}
+        </div>
+      ))}
+    </Trace>
+  );
+}
+
+// A tool call that waits for a yes or no: which tool, on which
+// connection, and everything it would be given. Deny is the button
+// that stands out and comes first; Allow is never a default. The
+// window does not take the keyboard, so no key press answers this.
+function ConfirmCard({
+  confirm,
+  onAllow,
+  onDeny,
+}: {
+  confirm: AskConfirm;
+  onAllow: () => void;
+  onDeny: () => void;
+}) {
+  const title = confirm.title || confirm.tool;
+  return (
+    <Alert
+      role="group"
+      aria-label="Allow this tool call?"
+      className="flex min-h-0 flex-col gap-1"
+      data-testid="answer-confirm"
+    >
+      <AlertTitle className="shrink-0" data-testid="answer-confirm-title">
+        Allow {title} on {confirm.connection}?
+      </AlertTitle>
+      <AlertDescription className="flex min-h-0 flex-col gap-1 text-xs [&_p:not(:last-child)]:mb-0">
+        {/* One line, so the input below gets the room. */}
+        <p className="shrink-0 truncate" data-testid="answer-confirm-what">
+          <span className="font-mono">{confirm.tool}</span> would run with exactly this input:
+        </p>
+        <pre className="answer-confirm-input ow-selectable" data-testid="answer-confirm-input">
+          {confirm.input}
+        </pre>
+        {confirm.input_cut && (
+          <p className="shrink-0 text-destructive" data-testid="answer-confirm-cut">
+            The input is longer than what is shown. You would allow something you cannot see in
+            full.
+          </p>
+        )}
+        <div className="flex shrink-0 items-center justify-between gap-2">
+          <p data-testid="answer-confirm-timeout">
+            No answer within {confirm.timeout_s} seconds counts as no.
+          </p>
+          {/* Deny first in the document, last on screen where the
+              main button of the panel sits. */}
+          <div className="flex shrink-0 flex-row-reverse items-center gap-1.5">
+            <Button type="button" size="sm" onClick={onDeny}>
+              Deny
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={onAllow}>
+              Allow
+            </Button>
+          </div>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
 }
 
 // --- the answer text -------------------------------------------------

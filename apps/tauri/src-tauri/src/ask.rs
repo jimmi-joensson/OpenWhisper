@@ -8,6 +8,13 @@
 //!
 //! The same ask is reachable headless through `openwhisper ask …`.
 //!
+//! An ask can use tools (Agent, TASK-99). Nothing in here changes for
+//! that: core's session gives the ask its tools from the Agent block
+//! when it starts, and the steps, the confirm it may wait on and
+//! where it looked are fields of the same snapshot. The two answers
+//! to a confirm (`ask_confirm_allow`, `ask_confirm_deny`) are in
+//! `agent.rs`, with the Agent settings.
+//!
 //! # The answer window
 //!
 //! A third window, label [`ANSWER_LABEL`], declared hidden in both
@@ -534,11 +541,12 @@ pub(crate) fn place_window(app: &AppHandle, spot: &PillSpot) {
 mod tests {
     use super::*;
 
-    const ALL_PHASES: [AskPhase; 7] = [
+    const ALL_PHASES: [AskPhase; 8] = [
         AskPhase::Idle,
         AskPhase::Listening,
         AskPhase::Thinking,
         AskPhase::Answering,
+        AskPhase::Confirming,
         AskPhase::Done,
         AskPhase::Error,
         AskPhase::Cancelled,
@@ -551,7 +559,8 @@ mod tests {
             .filter(|p| window_should_show(*p, false))
             .map(AskPhase::as_str)
             .collect();
-        assert_eq!(shown, ["listening", "thinking", "answering", "done", "error", "cancelled"]);
+        // `confirming` too: the confirm is answered in this window.
+        assert_eq!(shown, ["listening", "thinking", "answering", "confirming", "done", "error", "cancelled"]);
     }
 
     #[test]
@@ -625,7 +634,9 @@ mod tests {
     #[test]
     fn a_running_ask_ticks_about_four_times_a_second() {
         let ms = Duration::from_millis;
-        for phase in [AskPhase::Listening, AskPhase::Thinking, AskPhase::Answering] {
+        // An ask that waits on a confirm is still running: the time
+        // it has left to be answered moves.
+        for phase in [AskPhase::Listening, AskPhase::Thinking, AskPhase::Answering, AskPhase::Confirming] {
             assert!(!tick_due(Some((3, ms(200))), &snap(phase, 3)), "{phase:?}");
             assert!(tick_due(Some((3, ms(250))), &snap(phase, 3)), "{phase:?}");
         }
@@ -677,6 +688,8 @@ mod tests {
             [
                 "answer",
                 "backend",
+                "confirm",
+                "context_source",
                 "effort",
                 "elapsed_ms",
                 "error",
@@ -691,6 +704,7 @@ mod tests {
                 "search_query",
                 "searching",
                 "started_at_ms",
+                "steps",
                 "suggestion",
                 "usage",
                 "version",
@@ -709,6 +723,74 @@ mod tests {
         let marked = AskSnapshot { suggestion: Some(ask::AskSuggestion::WebSearch), ..AskSnapshot::default() };
         assert_eq!(serde_json::to_value(marked).unwrap()["suggestion"], "web-search");
         assert_eq!(serde_json::to_value(AskPhase::Idle).unwrap(), "idle");
+        // Agent (TASK-99): an ask without tools has no steps, waits
+        // on nothing and looked nowhere.
+        assert_eq!(value["steps"], serde_json::json!([]));
+        assert_eq!(value["confirm"], serde_json::Value::Null);
+        assert_eq!(value["context_source"], serde_json::json!({ "kind": "none" }));
+    }
+
+    #[test]
+    fn the_tick_payload_of_an_ask_with_tools_has_its_steps_its_confirm_and_its_source() {
+        use openwhisper_core::ask::{AskConfirm, AskStep, ContextSource, StepState, ToolKind};
+        let value = serde_json::to_value(AskSnapshot {
+            id: 4,
+            phase: AskPhase::Confirming,
+            steps: vec![AskStep {
+                id: "s1".into(),
+                connection: "teamchat".into(),
+                tool: "send_message".into(),
+                title: "Send message".into(),
+                kind: ToolKind::Act,
+                input_summary: "to Bo: see you at ten".into(),
+                state: StepState::Waiting,
+                outcome: String::new(),
+            }],
+            confirm: Some(AskConfirm {
+                request_id: "r1".into(),
+                step_id: "s1".into(),
+                connection: "teamchat".into(),
+                tool: "send_message".into(),
+                title: "Send message".into(),
+                input: "{\n  \"to\": \"Bo\"\n}".into(),
+                input_cut: false,
+                timeout_s: 120,
+            }),
+            context_source: ContextSource::Connection { name: "teamchat".into() },
+            ..AskSnapshot::default()
+        })
+        .unwrap();
+        // The fields `AskStep`, `AskConfirm` and `AskContextSource`
+        // in src/lib/ask.ts mirror.
+        assert_eq!(value["phase"], "confirming");
+        assert_eq!(
+            value["steps"][0],
+            serde_json::json!({
+                "id": "s1",
+                "connection": "teamchat",
+                "tool": "send_message",
+                "title": "Send message",
+                "kind": "act",
+                "input_summary": "to Bo: see you at ten",
+                "state": "waiting",
+                "outcome": "",
+            })
+        );
+        assert_eq!(
+            value["confirm"],
+            serde_json::json!({
+                "request_id": "r1",
+                "step_id": "s1",
+                "connection": "teamchat",
+                "tool": "send_message",
+                "title": "Send message",
+                "input": "{\n  \"to\": \"Bo\"\n}",
+                "input_cut": false,
+                "timeout_s": 120,
+            })
+        );
+        assert_eq!(value["context_source"], serde_json::json!({ "kind": "connection", "name": "teamchat" }));
+        assert_eq!(serde_json::to_value(ContextSource::Screen).unwrap(), serde_json::json!({ "kind": "screen" }));
     }
 
     #[test]

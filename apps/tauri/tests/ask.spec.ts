@@ -92,7 +92,8 @@ test.describe("ask pane", () => {
     await page.goto("/");
     await openAsk(page);
     const tabs = await page.getByRole("tab").allTextContents();
-    expect(tabs.slice(-2)).toEqual(["Modes", "Ask"]);
+    // Agent (TASK-99) comes after it: it only works inside an ask.
+    expect(tabs.slice(-3)).toEqual(["Modes", "Ask", "Agent"]);
     await expect(page.getByRole("tab", { name: "Ask", exact: true })).toHaveAttribute(
       "aria-selected",
       "true",

@@ -200,32 +200,76 @@ fn said_a_phrase(_settings: &VisionSettings, _question: &str) -> Step {
     Step::NoCapture
 }
 
-/// An image that stands in for the screen in an eval
-/// ([`super::AskPlan::with_screen_stand_in`]): where an ask would
-/// take a screenshot it takes a copy of this, and how often it did
-/// is counted. Made of synthetic pixels by whoever builds it; with
-/// one in a plan, the real screen is not captured by that plan.
-#[derive(Clone, Debug)]
-pub(crate) struct StandIn {
-    image: AskImage,
+/// What stands in for the screen in an eval or a scenario run
+/// ([`super::AskPlan::with_screen_stand_in`]). With one in a plan,
+/// the real screen is not captured by that plan. Two kinds:
+///
+/// - an image ([`StandIn::new`]): where an ask would take a
+///   screenshot it takes a copy of this. Made of synthetic pixels by
+///   whoever builds it;
+/// - a platform ([`StandIn::platform`]): the ask goes through every
+///   step of a real capture ([`crate::vision::capture_for_ask`]), but
+///   against this platform in place of the operating system. For what
+///   an ask does when there is no permission, a protected app is in
+///   front, or no display is on.
+///
+/// How often the ask reached for the screen is counted either way.
+#[derive(Clone)]
+pub struct StandIn {
+    source: Source,
     taken: std::sync::Arc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+enum Source {
+    Image(AskImage),
+    #[cfg(feature = "vision")]
+    Platform(std::sync::Arc<dyn crate::vision::Platform + Send + Sync>),
+}
+
+/// Never the image, never the platform: which kind, and the count.
+impl std::fmt::Debug for StandIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.source {
+            Source::Image(_) => "image",
+            #[cfg(feature = "vision")]
+            Source::Platform(_) => "platform",
+        };
+        write!(f, "StandIn({kind}, taken {})", self.taken())
+    }
+}
+
 impl StandIn {
-    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
-    pub(crate) fn new(image: AskImage) -> Self {
-        Self { image, taken: std::sync::Arc::new(AtomicUsize::new(0)) }
+    /// `image` in place of every screenshot.
+    pub fn new(image: AskImage) -> Self {
+        Self { source: Source::Image(image), taken: std::sync::Arc::new(AtomicUsize::new(0)) }
     }
 
-    /// How many times an ask took the image in place of a capture.
-    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
-    pub(crate) fn taken(&self) -> usize {
+    /// `platform` in place of the operating system, for every
+    /// capture of the plan.
+    #[cfg(feature = "vision")]
+    pub fn platform(platform: std::sync::Arc<dyn crate::vision::Platform + Send + Sync>) -> Self {
+        Self { source: Source::Platform(platform), taken: std::sync::Arc::new(AtomicUsize::new(0)) }
+    }
+
+    /// How many times an ask reached for the screen and got this
+    /// instead: the image was taken, or a capture was tried against
+    /// the platform.
+    pub fn taken(&self) -> usize {
         self.taken.load(Ordering::SeqCst)
     }
 
-    pub(super) fn take(&self) -> AskImage {
+    /// What the ask gets in place of a capture of the real screen.
+    #[cfg_attr(not(feature = "vision"), allow(unused_variables))]
+    pub(super) fn shot(&self, token: &AskCaptureToken, settings: &VisionSettings, name_app: bool) -> Shot {
         self.taken.fetch_add(1, Ordering::SeqCst);
-        self.image.clone()
+        match &self.source {
+            Source::Image(image) => Shot::Image(image.clone()),
+            #[cfg(feature = "vision")]
+            Source::Platform(platform) => {
+                shot_of(crate::vision::capture_with(&**platform, token, settings), name_app)
+            }
+        }
     }
 }
 
@@ -273,7 +317,13 @@ pub(super) enum Shot {
 /// the person always does.
 #[cfg(feature = "vision")]
 pub(super) fn take(token: &AskCaptureToken, settings: &VisionSettings, name_app: bool) -> Shot {
-    match crate::vision::capture_for_ask(token, settings) {
+    shot_of(crate::vision::capture_for_ask(token, settings), name_app)
+}
+
+/// What a capture came to, as the ask sees it.
+#[cfg(feature = "vision")]
+fn shot_of(captured: Result<crate::vision::Screenshot, crate::vision::NoScreenshot>, name_app: bool) -> Shot {
+    match captured {
         Ok(shot) => Shot::Image(shot.into_ask_image()),
         Err(no) => Shot::Missing {
             state: if no.is_blocked() { ScreenState::Blocked } else { ScreenState::Unavailable },

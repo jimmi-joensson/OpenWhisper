@@ -71,7 +71,7 @@ pub enum AskCommand {
 
 /// Per-invocation overrides of the saved settings. Nothing here is
 /// written back.
-#[derive(Args, Debug, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct Overrides {
     /// Backend to use: claude-cli or openai-compatible. Saved in the
     /// Refine settings; Ask uses the same one.
@@ -79,12 +79,12 @@ pub struct Overrides {
     backend: Option<String>,
     /// Model for the selected backend.
     #[arg(long)]
-    model: Option<String>,
+    pub(super) model: Option<String>,
     /// Effort for the selected backend: low, medium, high, xhigh or
     /// max (OpenAI-compatible also: minimal, and "none" to send no
     /// effort at all).
     #[arg(long)]
-    effort: Option<String>,
+    pub(super) effort: Option<String>,
     /// Timeout in milliseconds (doubled with web search).
     #[arg(long)]
     timeout_ms: Option<u64>,
@@ -264,8 +264,13 @@ fn settings_path() -> Result<PathBuf> {
 /// The saved Ask and Refine blocks with `overrides` applied (not
 /// persisted).
 pub(super) fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
-    let path = settings_path()?;
-    apply(settings::load_ask_settings(&path), settings::load_refine_settings(&path), overrides)
+    load_from(&settings_path()?, overrides)
+}
+
+/// [`load`] from the settings file at `path`: for a caller that has
+/// a config folder of its own (`openwhisper scenarios`).
+pub(super) fn load_from(path: &std::path::Path, overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
+    apply(settings::load_ask_settings(path), settings::load_refine_settings(path), overrides)
 }
 
 /// A model or effort override goes where the selected backend reads

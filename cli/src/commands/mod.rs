@@ -8,6 +8,7 @@ pub mod memory;
 pub mod modes;
 pub mod recognizer_info;
 pub mod refine;
+pub mod scenarios;
 pub mod settings;
 pub mod transcribe;
 pub mod vision;

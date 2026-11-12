@@ -146,9 +146,7 @@ pub(crate) mod wipe;
 
 pub use crate::refine::CallUsage;
 pub use prompt::ScreenPrompt;
-pub use screen::{AskCaptureToken, NEED_SCREEN, ScreenState, VisionChoice};
-#[cfg(feature = "agent")]
-pub(crate) use screen::StandIn;
+pub use screen::{AskCaptureToken, NEED_SCREEN, ScreenState, StandIn, VisionChoice};
 pub use steps::{
     AskConfirm, AskStep, CONFIRM_INPUT_MAX_CHARS, ConfirmDecision, ConfirmOutcome, ContextSource, STEP_LINE_MAX_CHARS,
     StepState, ToolKind, answer_confirm,
@@ -781,13 +779,14 @@ impl AskPlan {
         self.routed_to.as_deref()
     }
 
-    /// The same plan with `image` standing in for the screen: where
-    /// the ask would take a screenshot, it takes this image instead,
-    /// and the real screen is never captured. For the eval sets,
+    /// The same plan with `stand_in` in place of the screen: where
+    /// the ask would take a screenshot, it takes the stand-in's image
+    /// or captures from the stand-in's platform instead
+    /// ([`StandIn`]), and the real screen is never captured. For the
+    /// eval sets and the scenario runs (`openwhisper scenarios`),
     /// which must see what an ask does about the screen without
     /// looking at anybody's.
-    #[cfg_attr(not(feature = "agent"), allow(dead_code))]
-    pub(crate) fn with_screen_stand_in(mut self, stand_in: screen::StandIn) -> Self {
+    pub fn with_screen_stand_in(mut self, stand_in: screen::StandIn) -> Self {
         self.stand_in = Some(stand_in);
         self
     }
@@ -1137,19 +1136,18 @@ impl AskPlan {
         sink: &mut dyn FnMut(AskEvent),
     ) -> Option<AskImage> {
         sink(AskEvent::Screen { state: ScreenState::Capturing, notice: String::new() });
-        if let Some(stand_in) = &self.stand_in {
-            // An eval: its own image, and the real screen is left
-            // alone.
-            seen.state = ScreenState::Included;
-            sink(AskEvent::Screen { state: ScreenState::Included, notice: String::new() });
-            return Some(stand_in.take());
-        }
         // The proof that an ask is asking. Made here, used once.
         let token = match session {
             Some(id) => AskCaptureToken::for_session(id),
             None => AskCaptureToken::for_one_shot(),
         };
-        let (image, state, notice, for_model) = match screen::take(&token, &self.vision.settings, self.names_front_app) {
+        let shot = match &self.stand_in {
+            // An eval or a scenario run: its own image or its own
+            // platform, and the real screen is left alone.
+            Some(stand_in) => stand_in.shot(&token, &self.vision.settings, self.names_front_app),
+            None => screen::take(&token, &self.vision.settings, self.names_front_app),
+        };
+        let (image, state, notice, for_model) = match shot {
             Shot::Image(image) => (Some(image), ScreenState::Included, String::new(), None),
             Shot::Missing { state, notice, for_model } => (None, state, notice, Some(for_model)),
         };

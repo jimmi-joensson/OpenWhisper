@@ -17,8 +17,10 @@
 //!   `--effort`, `--claude-path`, ...).
 //!
 //! The groups: `everyday` (the weather with and without web search,
-//! what day it is, which app, which computer, the same with those
-//! facts switched off, Danish, no long dashes), `spoken` (the system
+//! a web address an ask may not read, asked for and written on the
+//! screen, what day it is, which app, which computer, the same with
+//! those facts switched off, both as what the app sends and as what
+//! is answered, Danish, no long dashes), `spoken` (the system
 //! voice speaks the question, the recognizer transcribes it), `app-
 //! context` (the connection of the app in front before the screen),
 //! `modes` and `failures`.
@@ -204,8 +206,15 @@ pub struct Seen {
     /// `web-search` when the answer came with the hint that points
     /// to the web search setting. Empty otherwise.
     pub suggestion: String,
-    /// The model searched the web.
+    /// The model searched the web, or read live weather.
     pub searched: bool,
+    /// The hosts of web addresses the model tried to read and was
+    /// refused: nothing was fetched from them.
+    pub refused: Vec<String>,
+    /// What OpenWhisper itself sent, where a stand-in for the Claude
+    /// CLI wrote it down: the system prompt, then the user message.
+    /// Empty when the scenario asks the real model.
+    pub sent: String,
     /// What became of the screen: `none`, `included`, `blocked`,
     /// `unavailable`.
     pub screen: String,
@@ -235,6 +244,10 @@ pub struct Seen {
     /// known at run time: today's weekday, the name of the app in
     /// front, what this computer is.
     pub facts: Vec<String>,
+    /// What must not show at all, where that is only known at run
+    /// time: what only OpenWhisper could have told the model about
+    /// this computer, in a scenario where it was told not to.
+    pub never: Vec<String>,
     /// From the question to the end.
     pub elapsed_ms: u64,
 }
@@ -254,6 +267,8 @@ impl Seen {
             "notice": self.notice,
             "suggestion": self.suggestion,
             "searched": self.searched,
+            "refused_fetches": self.refused,
+            "sent_chars": self.sent.chars().count(),
             "screen": self.screen,
             "screen_notice": self.screen_notice,
             "steps": self.steps,
@@ -266,6 +281,7 @@ impl Seen {
             "process_gone": self.process_gone,
             "cancel_to_end_ms": self.cancel_to_end_ms,
             "facts": self.facts,
+            "never": self.never,
             "elapsed_ms": self.elapsed_ms,
         })
     }

@@ -151,12 +151,22 @@ const LONG: Duration = Duration::from_secs(10);
 fn send(
     agent: &mut ClaudeAgent,
     timeout: Duration,
+    on_confirm: impl FnMut(&AskConfirm, &CancelFlag),
+) -> (Result<AskReply, AskError>, Vec<AskEvent>) {
+    send_with(agent, &setup(false), timeout, on_confirm)
+}
+
+/// [`send`] with the setup given: for an ask with web search on.
+fn send_with(
+    agent: &mut ClaudeAgent,
+    setup: &AskSetup,
+    timeout: Duration,
     mut on_confirm: impl FnMut(&AskConfirm, &CancelFlag),
 ) -> (Result<AskReply, AskError>, Vec<AskEvent>) {
     let mut events = Vec::new();
     let cancel = CancelFlag::new();
     let result = agent.send(
-        &setup(false),
+        setup,
         &question(),
         &mut |event| {
             if let AskEvent::Confirm(confirm) = &event {
@@ -288,23 +298,218 @@ fn every_flag_that_takes_a_list_is_followed_by_a_flag_and_an_empty_list_is_left_
     assert!(!full.iter().any(|a| a.contains("question") || a.contains("room")));
 }
 
+const WEB_RULES: &str = "WebSearch,WebFetch(domain:api.open-meteo.com),WebFetch(domain:geocoding-api.open-meteo.com)";
+
 #[test]
 fn web_search_stays_the_asks_own_setting() {
     let off = spawn_args_ok(&setup(false), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     let on = spawn_args_ok(&setup(true), &run(), Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
     let tools = on.iter().position(|a| a == "--tools").unwrap();
-    assert_eq!(on[tools + 1], "WebSearch");
+    assert_eq!(on[tools + 1], "WebSearch,WebFetch");
     let allowed = on.iter().position(|a| a == "--allowedTools").unwrap();
-    assert_eq!(on[allowed + 1], "WebSearch,mcp__chat__read_thread,mcp__chat__create_draft");
+    assert_eq!(on[allowed + 1], format!("{WEB_RULES},mcp__chat__read_thread,mcp__chat__create_draft"));
     // Nothing else differs.
     let mut back = on.clone();
     back[tools + 1] = String::new();
     back[allowed + 1] = "mcp__chat__read_thread,mcp__chat__create_draft".into();
     assert_eq!(back, off);
+    // With it off the fetch tool is nowhere in the arguments.
+    assert!(!off.iter().any(|a| a.contains("WebFetch") || a.contains("WebSearch") || a.contains("open-meteo")), "{off:?}");
     // No effort the CLI does not have.
     let mut minimal = setup(false);
     minimal.effort = Some(RefineEffort::Minimal);
     assert!(spawn_args_ok(&minimal, &run(), Path::new("/a"), Path::new("/b")).join(" ").contains("--effort low"));
+}
+
+#[test]
+fn the_fetch_tool_is_only_ever_allowed_for_the_weather_hosts() {
+    // Whatever the run allows by itself: every tool, none, some.
+    let mut none = run();
+    none.tools.allowed.clear();
+    let mut all = run();
+    all.tools.disallowed.clear();
+    for run in [run(), none, all] {
+        let args = spawn_args_ok(&setup(true), &run, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt"));
+        let allowed = &args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+        // The web's entries first, exactly as a plain ask has them,
+        // then the names of the run. No entry of the run has a
+        // bracket, so a comma outside brackets is where entries end.
+        let own = run.tools.allowed.join(",");
+        assert_eq!(*allowed, if own.is_empty() { WEB_RULES.to_string() } else { format!("{WEB_RULES},{own}") });
+        let entries: Vec<&str> = allowed.split(',').collect();
+        let fetch: Vec<&str> = entries.iter().copied().filter(|entry| entry.contains("Fetch")).collect();
+        assert_eq!(fetch, ["WebFetch(domain:api.open-meteo.com)", "WebFetch(domain:geocoding-api.open-meteo.com)"]);
+        // Never the bare tool, which would allow every address.
+        assert!(!entries.contains(&"WebFetch"), "{allowed}");
+        assert!(!allowed.contains('*') && !allowed.contains(' '), "{allowed}");
+        // And the fetch tool is never taken away or named anywhere
+        // else: two arguments hold it.
+        assert_eq!(args.iter().filter(|a| a.contains("WebFetch")).count(), 2, "{args:?}");
+    }
+    // An entry like the web's own that comes from a connection is
+    // refused like every name that is not plain, with web search on
+    // and off: only this app's own entries may carry a bracket.
+    for web_search in [false, true] {
+        for entry in ["WebFetch(domain:example.com)", "WebFetch(domain:api.open-meteo.com)", "WebFetch(*)", "WebSearch,WebFetch"] {
+            let mut run = run();
+            run.tools.allowed.push(entry.to_string());
+            match spawn_args(&setup(web_search), &run, Path::new("/tmp/run.json"), Path::new("/tmp/p.txt")) {
+                Err(AskError::Backend(message)) => {
+                    assert!(message.starts_with("A tool name that cannot be handed to Claude Code safely"), "{entry}: {message}");
+                }
+                other => panic!("{entry}: {other:?}"),
+            }
+        }
+    }
+}
+
+// --- the web tools of an ask with tools ------------------------------
+
+/// The check before a fetch, as the CLI sends it.
+fn check(request_id: &str, url: &str, tool_use_id: &str) -> String {
+    json!({
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {
+            "subtype": "hook_callback",
+            "callback_id": "openwhisper-fetch",
+            "input": {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "WebFetch",
+                "tool_input": { "url": url, "prompt": "the title" },
+                "tool_use_id": tool_use_id,
+            },
+            "tool_use_id": tool_use_id,
+        },
+    })
+    .to_string()
+}
+
+/// The model reaches for the fetch tool in an ask with web search
+/// on. The first line the script took was the hello; the question
+/// follows. `ASK` is what the CLI asks before the call runs, `RESULT`
+/// what comes back for it.
+const FETCHES: &str = r#"
+printf '%s\n' "$question" > "$here/hello.txt"
+read -r question
+printf '%s\n' "$question" > "$here/question.txt"
+echo '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_f","name":"WebFetch","input":{}}}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_f","name":"WebFetch","input":{"url":"URL","prompt":"the title"}}]}}'
+ASK
+echo 'RESULT'
+say "Done."
+done_with "Done."
+"#;
+
+const FETCH_REFUSED: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"PreToolUse:WebFetch hook error: Nothing was fetched.","is_error":true,"tool_use_id":"toolu_f"}]}}"#;
+const FETCH_CAME_BACK: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_f","type":"tool_result","content":"3.2 C, overcast"}]}}"#;
+
+fn fetches(url: &str, ask: Option<&str>, result: &str) -> String {
+    let ask = ask.map_or(String::new(), |line| {
+        format!("echo '{line}'\nread -r answer\nprintf '%s\\n' \"$answer\" > \"$here/answer.txt\"")
+    });
+    FETCHES.replace("URL", url).replace("ASK", &ask).replace("RESULT", result)
+}
+
+#[test]
+fn an_ask_with_tools_reads_the_weather_like_a_plain_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = "https://api.open-meteo.com/v1/forecast?latitude=59.91&longitude=10.75&current=temperature_2m";
+    let body = fetches(url, Some(&check("req-weather", url, "toolu_f")), FETCH_CAME_BACK);
+    let mut agent = ClaudeAgent::new(fake_cli(dir.path(), &body), run());
+    let (reply, events) = send_with(&mut agent, &setup(true), LONG, |_, _| panic!("nothing to confirm"));
+    assert_eq!(reply.unwrap().text, "Done.");
+    // Shown like a search, and no step: it is not a tool of a
+    // connection.
+    assert_eq!(
+        events[..2],
+        [AskEvent::Searching { query: "weather data from open-meteo.com".into() }, AskEvent::SearchDone]
+    );
+    assert!(steps_of(&events).is_empty(), "{events:?}");
+    // The check was answered without deciding anything: the allow
+    // list lets a weather host through.
+    let answer = answer_file(dir.path(), "answer.txt");
+    assert_eq!(answer["response"], json!({ "subtype": "success", "request_id": "req-weather", "response": {} }));
+    // The CLI was told to check, before the question.
+    let hello = answer_file(dir.path(), "hello.txt");
+    assert_eq!(hello["request"]["subtype"], "initialize");
+    assert_eq!(hello["request"]["hooks"]["PreToolUse"][0]["matcher"], "WebFetch");
+    assert_eq!(hello["request"]["hooks"]["PreToolUse"][0]["onFailure"], "block");
+    assert_eq!(answer_file(dir.path(), "question.txt")["type"], "user");
+}
+
+#[test]
+fn a_fetch_of_another_address_is_denied_without_asking_the_person() {
+    let url = "https://example.com/?q=hello";
+    // Two ways the CLI can ask: the check before a fetch, which is
+    // what it does, and its question about a tool that is on no
+    // list, which is what it would do without the check.
+    let can_use_tool = json!({
+        "type": "control_request",
+        "request_id": "req-claude-fetch",
+        "request": { "subtype": "can_use_tool", "tool_name": "WebFetch", "display_name": "Fetch", "input": { "url": url, "prompt": "the title" }, "tool_use_id": "toolu_f" },
+    })
+    .to_string();
+    for (case, ask) in [("check", check("req-claude-fetch", url, "toolu_f")), ("can_use_tool", can_use_tool)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = ClaudeAgent::new(fake_cli(dir.path(), &fetches(url, Some(&ask), FETCH_REFUSED)), run());
+        let started = Instant::now();
+        let (reply, events) = send_with(&mut agent, &setup(true), LONG, |_, _| panic!("{case}: the person must not be asked"));
+        assert_eq!(reply.unwrap().text, "Done.", "{case}");
+        assert!(started.elapsed() < Duration::from_secs(9), "{case}: it waited");
+        assert!(confirms_of(&events).is_empty() && closed_of(&events).is_empty(), "{case}");
+        // The answer is a no, in the form the question takes.
+        let answer = answer_file(dir.path(), "answer.txt");
+        assert_eq!(answer["response"]["subtype"], "success", "{case}");
+        assert_eq!(answer["response"]["request_id"], "req-claude-fetch", "{case}");
+        let said = &answer["response"]["response"];
+        if case == "check" {
+            assert_eq!(said["hookSpecificOutput"]["permissionDecision"], "deny", "{case}");
+            assert_eq!(said["hookSpecificOutput"]["permissionDecisionReason"], claude_cli::FETCH_ELSEWHERE_DENIED, "{case}");
+        } else {
+            assert_eq!(said["behavior"], "deny", "{case}");
+            assert_eq!(said["message"], claude_cli::FETCH_ELSEWHERE_DENIED, "{case}");
+        }
+        // It shows as one denied step of the web, never as a search.
+        assert_eq!(
+            steps_of(&events),
+            [("WebFetch".to_string(), StepState::Denied, "An ask can only read weather data from open-meteo.com.".to_string())],
+            "{case}"
+        );
+        let step = events.iter().find_map(|event| if let AskEvent::Step(step) = event { Some(step) } else { None }).unwrap();
+        assert_eq!((step.connection.as_str(), step.kind), ("web", ToolKind::Act), "{case}");
+        assert!(step.input_summary.contains("example.com"), "{case}: {}", step.input_summary);
+        assert!(!events.iter().any(|event| matches!(event, AskEvent::Searching { .. } | AskEvent::SearchDone)), "{case}: {events:?}");
+    }
+}
+
+#[test]
+fn a_fetch_of_another_address_that_comes_back_ends_an_ask_with_tools_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = fetches("https://docs.example.com/guide?note=hello", None, FETCH_CAME_BACK);
+    let mut agent = ClaudeAgent::new(fake_cli(dir.path(), &format!("{body}\nsleep 30")), run());
+    let (reply, events) = send_with(&mut agent, &setup(true), LONG, |_, _| panic!("nothing to confirm"));
+    match reply {
+        Err(AskError::Backend(message)) => {
+            assert!(message.contains("a web address an ask may not reach (docs.example.com)"), "{message}");
+            assert!(!message.contains("note=hello"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(events.is_empty(), "{events:?}");
+    // With web search off the fetch tool is no tool of the ask: the
+    // call itself ends it.
+    let dir = tempfile::tempdir().unwrap();
+    let body = FETCHES.replace("URL", "https://api.open-meteo.com/v1/forecast").replace("ASK", "").replace("RESULT", FETCH_CAME_BACK);
+    // No hello is sent, so the script's second read would wait for
+    // ever: leave it out.
+    let body = body.lines().filter(|line| !line.starts_with("read -r question") && !line.contains("question.txt") && !line.contains("hello.txt")).collect::<Vec<_>>().join("\n");
+    let mut agent = ClaudeAgent::new(fake_cli(dir.path(), &format!("{body}\nsleep 30")), run());
+    let (reply, _) = send(&mut agent, LONG, |_, _| panic!("nothing to confirm"));
+    match reply {
+        Err(AskError::Backend(message)) => assert!(message.contains("tried to use a tool (WebFetch)"), "{message}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 // --- a call that runs ----------------------------------------------

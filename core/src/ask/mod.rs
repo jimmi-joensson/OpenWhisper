@@ -22,11 +22,12 @@
 //!   user's Claude Code CLI or an OpenAI-compatible endpoint.
 //! - **An ask never changes anything.** The model gets no tools at
 //!   all, so it can answer and nothing else. The one exception is the
-//!   built-in web search, and only while the user has switched that
-//!   on. The Claude CLI is always started with `--permission-mode
-//!   default`, so a machine whose own default is a looser mode cannot
-//!   widen this. A backend that sees the model reach for any other
-//!   tool stops and reports an error.
+//!   web, and only while the user has switched web search on: the
+//!   built-in search, and a read of live weather from two fixed hosts
+//!   and no other address ([`weather`]). The Claude CLI is always
+//!   started with `--permission-mode default`, so a machine whose own
+//!   default is a looser mode cannot widen this. A backend that sees
+//!   the model reach for any other tool stops and reports an error.
 //! - **The answer is never typed by itself.** See above.
 //!
 //! An ask also tells the model a few facts about the computer it was
@@ -141,6 +142,7 @@ pub mod hint;
 pub mod openai_compat;
 pub mod prompt;
 mod screen;
+pub mod weather;
 pub(crate) mod steps;
 pub(crate) mod wipe;
 
@@ -219,6 +221,13 @@ pub enum AskEvent {
     Searching { query: String },
     /// That search is back; the model carries on.
     SearchDone,
+    /// The model tried to read a web address an ask may not reach
+    /// (anything but the weather hosts of [`weather`]). Claude Code
+    /// refused it, so nothing was fetched, and the model answers
+    /// without it. `host` is the host it tried, safe to show. Only
+    /// from an ask without tools; in an ask with tools the refusal is
+    /// a denied step.
+    FetchRefused { host: String },
     /// What is happening with the screen: it is being captured, a
     /// screenshot goes out with the question, or there is none and
     /// `notice` says why (one sentence for the person). Never carries
@@ -381,8 +390,9 @@ pub struct AskSetup {
     /// `None` sends no effort (OpenAI-compatible only; the Claude CLI
     /// then gets low).
     pub effort: Option<RefineEffort>,
-    /// The model may use the built-in web search. No other tool
-    /// exists for an ask, whatever this says.
+    /// The model may use the built-in web search, and read live
+    /// weather from the hosts of [`weather`]. No other tool exists
+    /// for an ask, whatever this says.
     pub web_search: bool,
 }
 
@@ -514,7 +524,8 @@ pub struct AskPlan {
     pub backend: RefineBackendKind,
     pub setup: AskSetup,
     /// [`AskSettings::timeout_ms`], doubled while web search is in
-    /// use: a search alone takes 15 to 20 seconds.
+    /// use: a search alone takes 15 to 20 seconds, and an answer
+    /// about the weather (two reads, then the answer) 10 to 15.
     pub timeout: Duration,
     /// See [`AskReply::notice`].
     pub notice: String,
@@ -1388,16 +1399,51 @@ impl std::ops::Deref for AskStatus {
 /// started now, as the model would get them
 /// ([`context::DeviceContext::render`]): what `ask` switches on, read
 /// this moment, with the app in front as an ask would name it. Empty
-/// when there is nothing to tell. For a settings screen that shows
-/// the person what leaves the machine; nothing is sent anywhere.
+/// when there is nothing to tell.
 ///
 /// Asked from one of OpenWhisper's own windows, the app in front is
 /// OpenWhisper itself, which an ask never names, so the text then
 /// has no such line.
-pub fn context_preview(ask: &AskSettings) -> String {
+fn context_now(ask: &AskSettings) -> String {
     let ask = ask.clone().cleaned();
     let front_app = ask.context.front_app.then(front_app_name).flatten();
     context::gather(&ask.context, front_app.as_deref()).render()
+}
+
+/// What the model is told about this computer when an ask starts
+/// now, for a settings screen that shows the person what leaves the
+/// machine; nothing is sent anywhere. Two parts:
+///
+/// - the facts this app sends, exactly as the model gets them
+///   ([`context::DeviceContext::render`]);
+/// - under a blank line, what the backend adds by itself
+///   ([`crate::refine::added_by_backend_note`]): with the Claude
+///   backend, Claude Code tells the model the date, the operating
+///   system and a few more things whatever is switched on here. With
+///   an OpenAI-compatible endpoint there is no second part.
+///
+/// The backend is the one the app is set up with
+/// ([`crate::settings::current_refine_settings`]);
+/// [`context_preview_for`] takes it as an argument.
+pub fn context_preview(ask: &AskSettings) -> String {
+    context_preview_for(ask, crate::settings::current_refine_settings().backend)
+}
+
+/// [`context_preview`] for the backend `backend`.
+pub fn context_preview_for(ask: &AskSettings, backend: RefineBackendKind) -> String {
+    with_backend_note(&context_now(ask), backend)
+}
+
+/// `facts` as a person is shown them: with what the backend adds by
+/// itself under a blank line ([`context_preview`]). `facts` alone
+/// when the backend adds nothing.
+pub fn with_backend_note(facts: &str, backend: RefineBackendKind) -> String {
+    let note = crate::refine::added_by_backend_note(backend);
+    match (facts.trim().is_empty(), note.is_empty()) {
+        (_, true) => facts.to_string(),
+        (true, false) => note,
+        (false, false) => format!("{facts}\n\n{note}"),
+    }
 }
 
 /// Check whether an ask can run with these settings. Makes no model
@@ -1936,7 +1982,7 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
     // too short for the warm-up to finish, reads them now.
     let facts = match &warm {
         Some(warm) if warm.context_settings == ask.context => warm.plan.context.clone(),
-        _ => context_preview(&ask),
+        _ => context_now(&ask),
     };
     let terms = crate::dictionary::current_matcher();
     // The app in front, for the tools of an agent ask: the one read
@@ -2022,6 +2068,9 @@ fn run_to_end(id: u64, question: &str, warm: Option<Warm>) {
                     }
                 }
                 AskEvent::Context(source) => s.snap.context_source = source,
+                // Nothing was fetched and nothing is searching: the
+                // answer that follows says what could not be read.
+                AskEvent::FetchRefused { .. } => s.snap.searching = false,
             }
         });
     };

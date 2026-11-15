@@ -70,9 +70,9 @@ fn saw(row: &Row) -> String {
 pub fn line(row: &Row) -> String {
     match row.status {
         Status::Passed | Status::Failed => {
-            format!("{}  {:<32} {:>6} ms  {}", row.status.label(), row.name, row.elapsed_ms, saw(row))
+            format!("{}  {:<36} {:>6} ms  {}", row.status.label(), row.name, row.elapsed_ms, saw(row))
         }
-        _ => format!("{}  {:<32}            {}", row.status.label(), row.name, one_line(&row.reason)),
+        _ => format!("{}  {:<36}            {}", row.status.label(), row.name, one_line(&row.reason)),
     }
 }
 
@@ -102,6 +102,7 @@ pub fn details(row: &Row) -> Vec<String> {
     add("notice:", &seen.notice);
     add("hint:", &seen.suggestion);
     add("screen:", &format!("{} {}", seen.screen, seen.screen_notice));
+    add("refused:", &seen.refused.join(", "));
     add("steps:", &seen.steps.join("; "));
     add("calls:", &seen.calls.join(", "));
     add("looked at:", &seen.context_source);
@@ -194,7 +195,7 @@ pub fn self_test(checks: &[SelfCheck], json: bool) -> Result<()> {
     } else {
         for check in checks {
             println!(
-                "{}  {:<32} {}{}",
+                "{}  {:<36} {}{}",
                 if check.passed { "ok   " } else { "WRONG" },
                 check.scenario,
                 check.what,

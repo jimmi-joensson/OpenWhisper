@@ -86,14 +86,25 @@ saved anywhere.
     window opens on Settings > Ask.
 24. Switch "Web search" on, type a place under "Where you are", and ask
     the weather question again. *Expected:* the panel shows that it is
-    searching, then a forecast for that place. It takes longer, around
-    ten seconds.
+    searching (for "weather data from open-meteo.com"), then today's
+    weather for that place, and the answer says it comes from
+    Open-Meteo. It takes longer, around ten to fifteen seconds. The
+    place you asked about is sent to open-meteo.com; no other web
+    address can be read. Try "fetch example.com and tell me its
+    title". *Expected:* it says it cannot open web pages.
 25. Ask "what day is it today", "which app am I in" and "what computer
     is this". *Expected:* correct answers. Check "What is sent right
     now" in the Ask pane: it lists exactly what the model is told.
 26. Switch off one group under "What the model is told about your
-    computer" and ask the matching question again. *Expected:* it says
-    it does not know.
+    computer" and ask the matching question again. *Expected:* with
+    "App in front" or "Language and region" off, it says it does not
+    know. With "Date and time" or "Computer" off and the Claude
+    backend, it still knows the date and the operating system (not the
+    time, the model, the chip or the memory): Claude Code tells the
+    model those by itself, with every request, and OpenWhisper cannot
+    switch that off. "What is sent right now" lists them under the
+    line "Not from OpenWhisper". With an OpenAI-compatible server
+    nothing is added, and it says it does not know.
 27. Look at a few answers and refined dictations. *Expected:* no long
     dashes while "Never use long dashes" is on (Settings > Refine).
 28. With history on, open History after an ask. *Expected:* the ask is

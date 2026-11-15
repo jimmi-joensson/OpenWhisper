@@ -73,6 +73,41 @@ pub const ID: &str = "claude-cli";
 pub const DESTINATION: &str =
     "Anthropic (Claude), through the Claude Code app signed in on this computer";
 
+/// What Claude Code tells the model by itself, with every request
+/// that goes through it: a refined dictation, an ask, an ask with
+/// tools. None of it is in the prompt this app writes, and no switch
+/// of this app takes it away: with every part of the device context
+/// off ([`crate::settings::ContextSettings`]), a model asked "what
+/// day is it" still answered with the date, and "what computer is
+/// this" with the operating system and the version of its kernel.
+///
+/// Found by starting the CLI with the exact arguments of an ask and
+/// asking it to quote what it had been given (Claude Code 2.1.322,
+/// TASK-103 notes). In its system prompt: the working folder, the
+/// platform, the shell, the version of the operating system, the
+/// name of the model and today's date. In a message of its own: the
+/// email address of the Claude account that is signed in. Nothing
+/// that is documented takes these out with a subscription sign-in
+/// (`--bare` needs an API key; `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT` and
+/// `CLAUDE_CODE_DISABLE_ATTACHMENTS` were tried and change nothing).
+///
+/// So the app says it, in the same words everywhere
+/// ([`super::added_by_backend`]): `openwhisper ask context`, the
+/// preview of what an ask sends ([`crate::ask::context_preview`]) and
+/// the settings panes. The model is not told to pretend it does not
+/// know.
+///
+/// The working folder is not the person's: every CLI process is
+/// started in a neutral one ([`command`]).
+pub const ADDED_BY_CLAUDE_CODE: [&str; 6] = [
+    "Today's date",
+    "The operating system and its version",
+    "The shell",
+    "The name of the model",
+    "The working folder (OpenWhisper starts Claude Code in a neutral one)",
+    "The email address of the Claude account that is signed in",
+];
+
 pub(crate) const NOT_INSTALLED: &str = "Claude Code is not installed on this computer. Install it from \
 claude.com/claude-code, run `claude` once in a terminal and sign in.";
 pub(crate) const NOT_SIGNED_IN: &str =

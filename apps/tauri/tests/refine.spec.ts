@@ -36,6 +36,10 @@ test.describe("refine pane", () => {
     await expect(privacy).toContainText("Audio never leaves this computer");
     await expect(privacy).toContainText("within 5 seconds");
     await expect(privacy).toContainText("typed as transcribed");
+    // And what Claude Code adds to it by itself.
+    await expect(page.getByTestId("refine-added-by-backend")).toHaveText(
+      "Claude Code also tells the model a few things by itself: today's date, the operating system, the shell, the name of the model, the working folder (a neutral one) and the email address of your Claude account.",
+    );
   });
 
   test("turning it on saves enabled=true", async ({ page }) => {
@@ -134,6 +138,8 @@ test.describe("refine pane", () => {
     const url = page.getByRole("textbox", { name: "Server address" });
     await expect(url).toHaveValue("https://api.openai.com/v1");
     await expect(page.getByTestId("refine-privacy")).toContainText("the server at api.openai.com");
+    // Another server gets exactly what this app sends.
+    await expect(page.getByTestId("refine-added-by-backend")).toHaveCount(0);
 
     // Not ready until a model is named.
     const status = page.getByTestId("refine-backend-status");

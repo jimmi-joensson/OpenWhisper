@@ -1309,13 +1309,61 @@ fn facts_switched_off_in_the_file_do_not_go_out_with_the_next_ask() {
 
 #[test]
 fn the_preview_is_the_text_an_ask_would_send() {
+    let openai = RefineBackendKind::OpenaiCompatible;
     let place = crate::settings::ContextSettings { place: " Aarhus,  Denmark ".into(), ..context_off() };
-    assert_eq!(context_preview(&AskSettings { context: place, ..on() }), "Where the person is: Aarhus, Denmark");
-    assert_eq!(context_preview(&AskSettings { context: context_off(), ..on() }), "");
+    assert_eq!(context_preview_for(&AskSettings { context: place, ..on() }, openai), "Where the person is: Aarhus, Denmark");
+    assert_eq!(context_preview_for(&AskSettings { context: context_off(), ..on() }, openai), "");
     // Ask being off changes nothing about what would be sent.
-    let all = context_preview(&AskSettings::default());
+    let all = context_preview_for(&AskSettings::default(), openai);
     assert!(all.starts_with("Date: "), "{all}");
     assert!(all.contains("\nOperating system: "));
+    // Nothing is added for an endpoint that gets exactly what this
+    // app sends.
+    assert!(!all.contains("Claude Code") && !all.contains("\n\n"), "{all}");
+}
+
+#[test]
+fn the_preview_says_what_claude_code_adds_by_itself() {
+    let claude = RefineBackendKind::ClaudeCli;
+    let note = "Not from OpenWhisper: Claude Code tells the model these by itself, whatever is switched on here.\n\
+- Today's date\n\
+- The operating system and its version\n\
+- The shell\n\
+- The name of the model\n\
+- The working folder (OpenWhisper starts Claude Code in a neutral one)\n\
+- The email address of the Claude account that is signed in";
+    assert_eq!(crate::refine::added_by_backend_note(claude), note);
+    assert_eq!(crate::refine::added_by_backend(claude).len(), 6);
+    assert!(crate::refine::added_by_backend(RefineBackendKind::OpenaiCompatible).is_empty());
+    assert_eq!(crate::refine::added_by_backend_note(RefineBackendKind::OpenaiCompatible), "");
+    assert!(!crate::dashes::has_long_dash(note));
+
+    // With every switch off the model is still told these, and the
+    // preview does not say "nothing".
+    assert_eq!(context_preview_for(&AskSettings { context: context_off(), ..on() }, claude), note);
+    // With facts of this app's own: those first, exactly as they are
+    // sent, then a blank line, then the note.
+    let place = crate::settings::ContextSettings { place: "Aarhus, Denmark".into(), ..context_off() };
+    assert_eq!(
+        context_preview_for(&AskSettings { context: place.clone(), ..on() }, claude),
+        format!("Where the person is: Aarhus, Denmark\n\n{note}")
+    );
+    // The backend of the app, when nothing else is said: Claude Code
+    // unless Refine is set up with another one.
+    assert_eq!(
+        context_preview(&AskSettings { context: place, ..on() }),
+        context_preview_for(&AskSettings { context: place_of("Aarhus, Denmark"), ..on() }, crate::settings::current_refine_settings().backend)
+    );
+    // None of it ever reaches the prompt: an ask sends the facts and
+    // nothing of the note.
+    let ask = AskSettings { context: place_of("Aarhus, Denmark"), ..on() };
+    let plan = AskPlan::with_context(&ask, &RefineSettings::default(), &[], &context_now(&ask));
+    assert_eq!(plan.context, "Where the person is: Aarhus, Denmark");
+    assert!(!plan.setup.system.contains("Claude Code") && !plan.setup.system.contains("Not from OpenWhisper"));
+}
+
+fn place_of(place: &str) -> crate::settings::ContextSettings {
+    crate::settings::ContextSettings { place: place.into(), ..context_off() }
 }
 
 #[test]

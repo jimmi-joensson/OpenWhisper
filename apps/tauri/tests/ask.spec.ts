@@ -247,6 +247,10 @@ test.describe("ask pane", () => {
     await expect(note).toContainText("look things up on the web");
     await expect(note).toContainText("Answers take longer");
     await expect(note).toContainText("Works with the Claude backend only");
+    // What else leaves the computer with it on.
+    await expect(note).toContainText(
+      "For weather, live data is read from open-meteo.com, and the place you ask about is sent there.",
+    );
 
     await webSearchSwitch(page).click();
     await expect(webSearchSwitch(page)).toBeChecked();
@@ -475,6 +479,17 @@ test.describe("ask pane: what the model is told about the computer", () => {
     await expect(
       page.getByText("Never the network name, the IP address, the serial number"),
     ).toContainText("free disk space and whether you are online");
+    // With the Claude backend two of the switches do not keep their
+    // fact from the model, and the rows say so.
+    await expect(page.getByText("Today's date, the time and your time zone.")).toContainText(
+      "With the Claude backend, Claude Code tells the model the date itself.",
+    );
+    await expect(
+      page.getByText("Never the network name, the IP address, the serial number"),
+    ).toContainText("With the Claude backend, Claude Code tells the model the operating system itself.");
+    await expect(
+      page.getByText("This is the exact text that goes with a question asked now."),
+    ).toContainText("Under it is what Claude Code adds by itself.");
     await expect(
       page.getByText("The name of the app you are working in when you ask."),
     ).toContainText("Only the name, never the title of the window.");
@@ -491,6 +506,20 @@ test.describe("ask pane: what the model is told about the computer", () => {
       page.getByText("Without it the model only knows your time zone and region."),
     ).toContainText("Nothing here uses location services.");
     await expect(page.getByTestId("ask-context-off")).toHaveCount(0);
+  });
+
+  test("with another backend nothing is said about Claude Code", async ({ page }) => {
+    await seedAsk(page, { settings: { enabled: true }, backend: OTHER_BACKEND });
+    await page.goto("/");
+    await openAsk(page);
+
+    await expect(page.getByText("Today's date, the time and your time zone.")).toBeVisible();
+    await expect(
+      page.getByText("This is the exact text that goes with a question asked now."),
+    ).toBeVisible();
+    await expect(page.getByText("Claude Code tells the model")).toHaveCount(0);
+    await expect(page.getByText("what Claude Code adds by itself")).toHaveCount(0);
+    await expect(page.getByText("open-meteo.com")).toHaveCount(0);
   });
 
   test("shows the exact text that would be sent, read only", async ({ page }) => {

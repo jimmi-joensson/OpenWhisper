@@ -114,7 +114,13 @@ fn list_shows_every_group_with_its_scenarios() {
         "everyday-what-day",
         "everyday-which-app",
         "everyday-what-computer",
+        "everyday-web-other-address",
+        "everyday-web-order-on-screen",
+        "everyday-context-off-day-sent",
         "everyday-context-off-day",
+        "everyday-context-off-app",
+        "everyday-context-off-computer-sent",
+        "everyday-context-off-computer",
         "everyday-danish",
         "everyday-no-long-dashes",
         "spoken-english",
@@ -122,6 +128,8 @@ fn list_shows_every_group_with_its_scenarios() {
         "app-context-mapped-app",
         "app-context-unmapped-app",
         "app-context-screen-phrase",
+        "app-context-weather-with-tools",
+        "app-context-web-other-address",
         "app-context-agent-off",
         "modes-custom-mode",
         "modes-app-default-wins",
@@ -197,7 +205,7 @@ fn only_narrows_a_run_to_a_group_or_a_prefix() {
     assert_eq!(names(&modes), ["modes-custom-mode", "modes-app-default-wins", "modes-dictation-clean"]);
     let (_, spaced) = scratch.json(&["scenarios", "run", "--offline", "--only", "app context"]);
     assert!(names(&spaced).iter().all(|name| name.starts_with("app-context-")), "{:?}", names(&spaced));
-    assert_eq!(names(&spaced).len(), 4);
+    assert_eq!(names(&spaced).len(), 6);
     let (_, prefix) = scratch.json(&["scenarios", "run", "--offline", "--only", "everyday-weather"]);
     assert_eq!(names(&prefix), ["everyday-weather-web-on", "everyday-weather-web-off"]);
 
@@ -410,6 +418,29 @@ this request would exceed your rate limit\"}'; continue\n",
     }
 
     #[test]
+    fn what_the_app_sends_with_the_facts_switched_off_is_checked_without_a_model() {
+        // The two scenarios bring a stand-in of their own, which
+        // writes down what it is sent and asks nobody: they run here
+        // as they run for a person, and need no backend at all.
+        for name in ["everyday-context-off-day-sent", "everyday-context-off-computer-sent"] {
+            let scratch = Scratch::new(name);
+            let out = scratch.spawn(&["scenarios", "run", "--only", name]);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains("no scenario of this run asks a model"), "{name}: {stderr}");
+            let (code, record) = scratch.json(&["scenarios", "run", "--only", name]);
+            let row = &record["results"][0];
+            assert_eq!((code, row["status"].as_str()), (Some(0), Some("passed")), "{name}: {row}");
+            assert_eq!(row["seen"]["answer"], "A stand-in answered.", "{name}");
+            // The whole prompt was read back, and there was plenty
+            // about this computer to look for in it.
+            assert!(row["seen"]["sent_chars"].as_u64().unwrap() > 1_500, "{name}: {row}");
+            assert!(row["seen"]["never"].as_array().unwrap().len() >= 5, "{name}: {row}");
+            assert_eq!(row["seen"]["captures"], 0, "{name}");
+            scratch.decoy_is_untouched();
+        }
+    }
+
+    #[test]
     fn the_facts_about_the_computer_reach_the_model_only_while_they_are_switched_on() {
         let scratch = Scratch::new("context");
         // A stand-in that repeats the name of the app when it was told
@@ -445,16 +476,16 @@ while read -r line; do\n",
         assert!(stdout.contains("STOP  everyday-weather-web-on"), "{stdout}");
         assert!(!stdout.contains("FAIL") && !stdout.contains("PASS"), "{stdout}");
         assert!(stdout.contains("----  everyday-what-day"), "{stdout}");
-        assert!(stdout.contains("0 passed, 0 failed, 10 not run, in "), "{stdout}");
+        assert!(stdout.contains("0 passed, 0 failed, 14 not run, in "), "{stdout}");
         assert!(stdout.contains("stopped: the backend reported a spend or rate limit at \"everyday-weather-web-on\""), "{stdout}");
-        assert!(stdout.contains("10 scenarios were not run, nothing more was sent."), "{stdout}");
+        assert!(stdout.contains("14 scenarios were not run, nothing more was sent."), "{stdout}");
         assert_eq!(asked(&scratch, "claude-limited"), "1");
 
         let (code, record) = scratch.json(&["scenarios", "run", "--only", "everyday", "--claude-path", &limited]);
         assert_eq!(code, Some(2));
         assert_eq!(record["stopped"]["scenario"], "everyday-weather-web-on");
-        assert_eq!(record["stopped"]["not_run"], 10);
-        assert_eq!((record["passed"].as_u64(), record["failed"].as_u64(), record["not_run"].as_u64()), (Some(0), Some(0), Some(10)));
+        assert_eq!(record["stopped"]["not_run"], 14);
+        assert_eq!((record["passed"].as_u64(), record["failed"].as_u64(), record["not_run"].as_u64()), (Some(0), Some(0), Some(14)));
         assert_eq!(record["results"][0]["status"], "stopped");
         assert_eq!(record["results"][1]["status"], "not-run");
         assert_eq!(asked(&scratch, "claude-limited"), "2");

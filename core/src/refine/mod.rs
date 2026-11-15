@@ -817,6 +817,33 @@ pub fn backend_status(settings: &RefineSettings) -> BackendStatus {
     }
 }
 
+/// What the backend `kind` tells the model by itself, on top of
+/// everything this app sends: one short phrase per fact. The Claude
+/// Code CLI adds a few ([`claude_cli::ADDED_BY_CLAUDE_CODE`], which
+/// also says how that is known); an OpenAI-compatible endpoint gets
+/// exactly what this app sends, so the list is empty.
+pub fn added_by_backend(kind: RefineBackendKind) -> &'static [&'static str] {
+    match kind {
+        RefineBackendKind::ClaudeCli => &claude_cli::ADDED_BY_CLAUDE_CODE,
+        RefineBackendKind::OpenaiCompatible => &[],
+    }
+}
+
+/// The first line of [`added_by_backend_note`].
+pub const ADDED_BY_BACKEND_HEADING: &str =
+    "Not from OpenWhisper: Claude Code tells the model these by itself, whatever is switched on here.";
+
+/// [`added_by_backend`] as text for a person: a heading and one line
+/// per fact. Empty when the backend adds nothing.
+pub fn added_by_backend_note(kind: RefineBackendKind) -> String {
+    let facts = added_by_backend(kind);
+    if facts.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = facts.iter().map(|fact| format!("- {fact}")).collect();
+    format!("{ADDED_BY_BACKEND_HEADING}\n{}", lines.join("\n"))
+}
+
 /// The sentence both shells show while testing: what goes through the
 /// model in a connection test.
 pub const TEST_SENTENCE: &str =

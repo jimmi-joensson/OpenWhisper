@@ -1,9 +1,10 @@
 ---
 id: TASK-103.1
 title: 'Plan Task 1: Scenario runner; everyday, modes and failure groups'
-status: To Do
+status: In Review
 assignee: []
 created_date: '2026-11-11T11:50:00Z'
+updated_date: '2026-11-15T07:10:00Z'
 labels:
   - 103-impl
 dependencies: []
@@ -19,7 +20,13 @@ See doc-53 Task 1. CLI openwhisper scenarios list and run, scratch config folder
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 scenarios list and run exist with --only, --json and --offline
-- [ ] #2 The runner refuses a real config folder
-- [ ] #3 Offline self-test passes for these groups
+- [x] #1 scenarios list and run exist with --only, --json and --offline
+- [x] #2 The runner refuses a real config folder
+- [x] #3 Offline self-test passes for these groups
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Built in aea709c, extended in d9ba49c. openwhisper scenarios list and run with --only, --json, --offline and --config-dir. Scratch config folder for every run; a real config folder (or one inside it, or reached through a link) is refused. Offline self-test: 325 of 325 checks.
+<!-- SECTION:NOTES:END -->

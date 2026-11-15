@@ -44,6 +44,22 @@ export interface HistoryEntry {
   // The ask was sent with a screenshot of the screen (TASK-98). The
   // picture is not kept anywhere; this only says there was one.
   screen: boolean;
+  // The tool calls of an ask that used tools (Agent, TASK-99), in the
+  // order they were made. Empty for everything else. Never what a
+  // tool was given or what it returned.
+  tools: HistoryTool[];
+}
+
+// Mirrors `HistoryTool` in core: one tool call of a stored ask.
+export interface HistoryTool {
+  // Name of the connection the tool belongs to.
+  connection: string;
+  // The tool's own name.
+  tool: string;
+  // How it ended: "done", "failed" or "denied", or
+  // "result_not_known" for a call that was still running when its
+  // ask ended.
+  outcome: string;
 }
 
 // The entry is an ask: `text` is a question, `answer` its answer.

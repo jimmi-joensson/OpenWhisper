@@ -90,6 +90,168 @@ html:root > body > #root {
   overscroll-behavior: contain;
 }
 
+/* Text that did not come from this app: the names of a tool and of
+   its connection, what a tool was given, why a call failed. Core
+   has already replaced every character that would not show as what
+   it is (a right-to-left override among them) with a visible
+   escape, so there is nothing left in it to turn text around. This
+   is a second layer under that: the text is laid out as a piece of
+   its own, left to right, so whatever is in it cannot reorder the
+   app's own words next to it. CSS cannot undo an override inside
+   the piece itself; core's escaping is what does that. */
+.answer-untrusted {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Text that may be one long word: it breaks where it has to. */
+.answer-wrap {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The confirm of an agent ask (TASK-99): a tool call waits for a yes
+   or no. It sits between the part that scrolls and the footer, so it
+   is in view whatever the scroll position, with the step it is about
+   right above it.
+
+   The window is fixed in size, and three things never give way: the
+   names (the tool, its own name, its connection: whole, wrapped),
+   the buttons with the line about the time, and at least four lines
+   of the input. Everything else does, in this order: what is in the
+   part that scrolls (held to one line while a confirm shows, and to
+   nothing when the room is needed), then the input, down to its four
+   lines, which scrolls in itself. Only when even that is not enough
+   do the names scroll, still whole and wrapped. */
+.answer-card[data-confirming="true"] {
+  gap: 8px;
+}
+
+/* The shrink factors are far apart on purpose. A flex container
+   takes what is missing from every item that can shrink, in
+   proportion to factor times size: with factors close together the
+   names would lose a fraction of a pixel to every long input. */
+.answer-card[data-confirming="true"] .answer-body {
+  flex: 0 10000000000000 auto;
+  max-height: 36px;
+}
+
+/* The footer keeps Cancel and gives its air to the card. */
+.answer-card[data-confirming="true"] .answer-footer {
+  padding-block: 6px;
+}
+
+/* While a confirm shows, the question keeps to one line. */
+.answer-card[data-confirming="true"] .answer-question {
+  -webkit-line-clamp: 1;
+}
+
+.answer-confirm {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.answer-confirm-card {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.answer-confirm-names {
+  flex: 0 1 auto;
+  min-height: 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.answer-confirm-names > * {
+  flex: none;
+  margin: 0;
+}
+
+.answer-confirm-input {
+  /* Gives way long before the names do. Its least height is set on
+     the element: four lines, or all of a shorter input. */
+  flex: 0 10000000 auto;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--muted);
+  color: var(--card-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  /* Whole pixels, so an input that fits has nothing to scroll. */
+  line-height: 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Deny at the end where the main button of the panel sits, Allow at
+   the other end of the card, the line about the time between them:
+   a click meant for one cannot land on the other. */
+.answer-confirm-actions {
+  flex: none;
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.answer-confirm-actions > p {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  text-align: center;
+}
+
+/* Names so long that they do not fit whole in the room the card has
+   (it measures, see `ConfirmCard`): what only repeats them steps
+   aside (the question, the steps so far, the line of the step that
+   waits, where the question was sent), and the card uses the full
+   width. Cancel stays. */
+.answer-card[data-tight="true"] .answer-header,
+.answer-card[data-tight="true"] .answer-body,
+.answer-card[data-tight="true"] .answer-step-waiting,
+.answer-card[data-tight="true"] .answer-source {
+  display: none;
+}
+
+.answer-card[data-tight="true"] {
+  padding-top: 8px;
+}
+
+.answer-card[data-tight="true"] .answer-footer {
+  padding-block: 4px;
+}
+
+/* A name this long is broken where the line ends, so no line is
+   left half empty in front of it. */
+.answer-card[data-tight="true"] .answer-confirm-names .answer-untrusted {
+  word-break: break-all;
+}
+
+.answer-card[data-tight="true"] .answer-footer > div {
+  justify-content: flex-end;
+}
+
+.answer-card[data-tight="true"] .answer-confirm-card {
+  padding: 0;
+  border: 0;
+}
+
 /* The answer text. Tailwind's reset takes the margins and the list
    markers away; these put back what an answer needs. */
 .answer-md {

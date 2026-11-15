@@ -50,6 +50,17 @@
 //!   capturing anything; `vision probe` takes one screenshot the way
 //!   an ask would and prints sizes and timings, never the image;
 //!   `vision eval` runs the eval sets with synthetic images.
+//! - `agent`: an ask that can use the tool connections you already
+//!   have in your own Claude Code (TASK-99). `agent status` shows the
+//!   switch, the connections, their tools and the app table; `agent
+//!   config` sets the switch, drafts only, the confirm timeout and
+//!   the turn limit; `agent connections` lists, refreshes and edits
+//!   the connections; `agent tools`, `agent allow` and `agent
+//!   disallow` tick the tools an ask may use; `agent apps` says which
+//!   app belongs to which connection; `agent run` asks one question
+//!   with tools, shows every tool call and asks before anything that
+//!   sends, posts, deletes or changes something; `agent eval` runs
+//!   the eval set against a test fixture.
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -102,6 +113,8 @@ enum Command {
     Ask(commands::ask::AskArgs),
     /// Vision: the screenshot an ask can carry, and when it does.
     Vision(commands::vision::VisionArgs),
+    /// Agent: an ask that can use your own tool connections.
+    Agent(commands::agent::AgentArgs),
 }
 
 fn main() -> Result<()> {
@@ -119,5 +132,6 @@ fn main() -> Result<()> {
         Command::Modes(args) => commands::modes::run(args, cli.json),
         Command::Ask(args) => commands::ask::run(args, cli.json),
         Command::Vision(args) => commands::vision::run(args, cli.json),
+        Command::Agent(args) => commands::agent::run(args, cli.json),
     }
 }

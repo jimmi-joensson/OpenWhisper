@@ -1,3 +1,5 @@
+#[cfg(feature = "agent")]
+pub mod agent;
 #[cfg(feature = "ask")]
 pub mod ask;
 pub mod audio;

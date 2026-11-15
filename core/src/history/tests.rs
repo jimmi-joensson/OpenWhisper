@@ -39,6 +39,7 @@ fn add_in_mode(
             kind: "",
             answer: None,
             screen: false,
+            tools: &[],
         },
     )
     .expect("append")
@@ -60,6 +61,7 @@ fn add_ask(dir: &Path, at_ms: i64, question: &str, answer: &str) -> HistoryEntry
             kind: KIND_ASK,
             answer: Some(answer),
             screen: false,
+            tools: &[],
         },
     )
     .expect("append")
@@ -158,6 +160,7 @@ fn empty_text_is_not_stored() {
             kind: "",
             answer: None,
             screen: false,
+            tools: &[],
         },
     )
     .unwrap();
@@ -552,6 +555,7 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 kind: None,
                 answer: None,
                 screen: false,
+                tools: Vec::new(),
             },
             HistoryEntry {
                 id: "20261110T140212".into(),
@@ -566,6 +570,7 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 kind: None,
                 answer: None,
                 screen: false,
+                tools: Vec::new(),
             },
         ]
     );
@@ -907,6 +912,7 @@ fn an_answer_given_to_something_that_is_not_an_ask_is_not_stored() {
             kind: "",
             answer: Some("not an answer to anything"),
             screen: false,
+            tools: &[],
         },
     )
     .unwrap()
@@ -933,6 +939,7 @@ fn an_ask_with_an_empty_answer_or_question_is_handled() {
             kind: KIND_ASK,
             answer: Some("an answer"),
             screen: false,
+            tools: &[],
         },
     )
     .unwrap();
@@ -983,6 +990,7 @@ fn an_entry_can_hold_both_quotes_in_either_order() {
             kind: KIND_ASK,
             answer: Some("I do not know that company.\nSorry."),
             screen: false,
+            tools: &[],
         },
     )
     .unwrap()
@@ -1252,6 +1260,7 @@ fn add_ask_with_screen(dir: &Path, at_ms: i64, question: &str, answer: &str) -> 
             kind: KIND_ASK,
             answer: Some(answer),
             screen: true,
+            tools: &[],
         },
     )
     .expect("append")
@@ -1341,6 +1350,7 @@ fn the_screen_marker_means_something_in_an_ask_only() {
             kind: "",
             answer: None,
             screen: true,
+            tools: &[],
         },
     )
     .unwrap()
@@ -1455,4 +1465,350 @@ What is the capital of Norway?
     // The entry serializes with the flag, for the history view.
     let json = serde_json::to_value(&page.entries[0]).unwrap();
     assert_eq!(json["screen"], true);
+}
+
+
+// --- the tools of an ask (Agent, TASK-99) ----------------------------
+
+fn tool(connection: &str, tool: &str, outcome: &str) -> HistoryTool {
+    HistoryTool { connection: connection.into(), tool: tool.into(), outcome: outcome.into() }
+}
+
+/// Store an ask that used tools.
+fn add_ask_with_tools(dir: &Path, at_ms: i64, question: &str, answer: &str, tools: &[HistoryTool]) -> HistoryEntry {
+    append(
+        dir,
+        &NewEntry {
+            at_ms,
+            duration_ms: 3400,
+            text: question,
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some(answer),
+            screen: false,
+            tools,
+        },
+    )
+    .expect("append")
+    .expect("stored")
+}
+
+#[test]
+fn an_ask_that_used_tools_lists_them_under_the_answer_and_reads_back() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    let used = [
+        tool("Team chat", "read_thread", "done"),
+        tool("Team chat", "create_draft", "done"),
+        tool("claude.ai Docs", "send_message", "denied"),
+    ];
+    let written = add_ask_with_tools(
+        dir.path(),
+        at(date, 14, 20, 41),
+        "Draft a reply to Anna saying Thursday works.",
+        "The draft is in your drafts.\nNothing was sent.",
+        &used,
+    );
+    assert!(written.is_ask());
+    assert_eq!(written.tools, used);
+
+    let expected = "\
+---
+date: 2026-11-11
+entries: 1
+words: 8
+apps: []
+---
+
+## 14:20:41
+<!-- id: 20261111T142041 words: 8 seconds: 3.4 -->
+<!-- extra: kind=ask; tools=3 -->
+
+Draft a reply to Anna saying Thursday works.
+
+> Answer: The draft is in your drafts.
+> Nothing was sent.
+
+> Tools: read_thread in Team chat: done
+> create_draft in Team chat: done
+> send_message in claude.ai Docs: denied
+";
+    assert_eq!(read(dir.path(), date), expected);
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written.clone()]);
+    assert_eq!(get(dir.path(), &written.id), Some(written.clone()));
+    // The tools are not part of the question, its word count or the
+    // answer.
+    assert_eq!(written.word_count, 8);
+    assert_eq!(written.answer.as_deref(), Some("The draft is in your drafts.\nNothing was sent."));
+
+    // The first comment line is the line apps from before Agent look
+    // for, untouched; the extra line is not mistaken for it.
+    let file = read(dir.path(), date);
+    let lines: Vec<&str> = file.lines().collect();
+    let heading = lines.iter().position(|l| HEADING.is_match(l)).expect("heading");
+    assert_eq!(lines[heading + 1], "<!-- id: 20261111T142041 words: 8 seconds: 3.4 -->");
+    assert!(META.is_match(lines[heading + 1]));
+    assert!(!META.is_match(lines[heading + 2]));
+    assert!(EXTRA.is_match(lines[heading + 2]));
+
+    // With the screen as well, and serialized for the panel.
+    let both = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 14, 25, 0),
+            duration_ms: 2100,
+            text: "What does this say?",
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some("A reminder."),
+            screen: true,
+            tools: &used[..1],
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(read(dir.path(), date).contains("<!-- extra: kind=ask; screen=yes; tools=1 -->"));
+    let json = serde_json::to_value(&both).unwrap();
+    assert_eq!(json["tools"], serde_json::json!([{ "connection": "Team chat", "tool": "read_thread", "outcome": "done" }]));
+    assert_eq!(list(dir.path(), "", 50, 0).entries.len(), 2);
+}
+
+/// An ask that failed or was cancelled after a tool had run is kept
+/// (TASK-99 review). It has to be read by apps that never heard of
+/// it, so it is written exactly like an ask with tools that
+/// finished: the same two comment lines, the same two quotes. What
+/// differs is only text inside them.
+#[test]
+fn an_ask_that_did_not_finish_is_written_like_any_ask_with_tools() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 12);
+    let used = [
+        tool("Team chat", "read_thread", "done"),
+        // As core hands it over, and spelled out: one word either way.
+        tool("Team chat", "create_draft", TOOL_RESULT_NOT_KNOWN),
+        tool("Team chat", "send_message", "result not known"),
+    ];
+    let answer = "Let me prepare that.\n\n(Incomplete. The ask was cancelled before it finished.)";
+    let written = add_ask_with_tools(dir.path(), at(date, 9, 5, 7), "Draft a reply to Anna.", answer, &used);
+    assert!(written.is_ask());
+    assert_eq!(written.answer.as_deref(), Some(answer));
+    let outcomes: Vec<&str> = written.tools.iter().map(|t| t.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["done", "result_not_known", "result_not_known"]);
+
+    let expected = "\
+---
+date: 2026-11-12
+entries: 1
+words: 5
+apps: []
+---
+
+## 09:05:07
+<!-- id: 20261112T090507 words: 5 seconds: 3.4 -->
+<!-- extra: kind=ask; tools=3 -->
+
+Draft a reply to Anna.
+
+> Answer: Let me prepare that.
+>
+> (Incomplete. The ask was cancelled before it finished.)
+
+> Tools: read_thread in Team chat: done
+> create_draft in Team chat: result_not_known
+> send_message in Team chat: result_not_known
+";
+    assert_eq!(read(dir.path(), date), expected);
+    // It reads back whole, by the list and by its id.
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written.clone()]);
+    assert_eq!(get(dir.path(), &written.id), Some(written.clone()));
+
+    // What an app from before Agent looks for is where it always
+    // was: the heading, then the one comment line it knows, and
+    // nothing in the entry that it would take for another entry.
+    let file = read(dir.path(), date);
+    let lines: Vec<&str> = file.lines().collect();
+    let heading = lines.iter().position(|l| HEADING.is_match(l)).expect("heading");
+    assert_eq!(lines[heading + 1], "<!-- id: 20261112T090507 words: 5 seconds: 3.4 -->");
+    assert!(META.is_match(lines[heading + 1]));
+    assert!(!META.is_match(lines[heading + 2]) && EXTRA.is_match(lines[heading + 2]));
+    assert_eq!(lines.iter().filter(|l| HEADING.is_match(l)).count(), 1);
+    assert_eq!(lines.iter().filter(|l| META.is_match(l)).count(), 1);
+
+    // Only the bracket line, when nothing of the answer had arrived.
+    let bare = add_ask_with_tools(
+        dir.path(),
+        at(date, 9, 6, 0),
+        "Send Bo the notes.",
+        "(No answer. The ask did not finish: No answer within 60 seconds.)",
+        &used[..1],
+    );
+    assert_eq!(bare.answer.as_deref(), Some("(No answer. The ask did not finish: No answer within 60 seconds.)"));
+    assert_eq!(list(dir.path(), "", 50, 0).entries.len(), 2);
+}
+
+#[test]
+fn an_ask_without_tools_is_written_byte_for_byte_as_before_agent() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    let written = add_ask(dir.path(), at(date, 9, 31, 0), "What is two plus two?", "Four.");
+    assert!(written.tools.is_empty());
+    let expected = "\
+---
+date: 2026-11-11
+entries: 1
+words: 5
+apps: []
+---
+
+## 09:31:00
+<!-- id: 20261111T093100 words: 5 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+What is two plus two?
+
+> Answer: Four.
+";
+    assert_eq!(read(dir.path(), date), expected);
+    // An ask with a screenshot, and a dictation, are untouched too.
+    add_ask_with_screen(dir.path(), at(date, 9, 32, 0), "What is this?", "A dialog.");
+    let plain = add(dir.path(), at(date, 9, 33, 0), "Thanks a lot.");
+    assert!(plain.tools.is_empty());
+    let file = read(dir.path(), date);
+    assert!(file.contains("<!-- extra: kind=ask; screen=yes -->\n\nWhat is this?\n\n> Answer: A dialog.\n"), "{file}");
+    assert!(file.ends_with("## 09:33:00\n<!-- id: 20261111T093300 words: 3 seconds: 4.2 -->\n\nThanks a lot.\n"), "{file}");
+    assert!(!file.contains("tools") && !file.contains("Tools"), "{file}");
+    // Serialized, an entry without tools has an empty list.
+    assert_eq!(serde_json::to_value(&plain).unwrap()["tools"], serde_json::json!([]));
+}
+
+#[test]
+fn the_tools_quote_means_something_only_in_an_ask_that_says_it_used_tools() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    // A dictation cannot have tools, whatever it is handed.
+    let dictated = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 8, 0, 0),
+            duration_ms: 4200,
+            text: "Thanks a lot.",
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: "",
+            answer: None,
+            screen: false,
+            tools: &[tool("Team chat", "read_thread", "done")],
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(dictated.tools.is_empty());
+    assert!(!read(dir.path(), date).contains("ools"));
+
+    // Files as a person, or another version, may have left them.
+    let path = dir.path().join("2026").join("2026-11-12.md");
+    fs::write(
+        &path,
+        "\
+## 10:00:00
+<!-- id: 20261112T100000 words: 3 seconds: 4.2 -->
+
+Thanks a lot.
+
+> Tools: read_thread in Team chat: done
+
+## 10:01:00
+<!-- id: 20261112T100100 words: 3 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+What is this?
+
+> Answer: A dialog.
+
+> Tools: read_thread in Team chat: done
+
+## 10:02:00
+<!-- id: 20261112T100200 words: 3 seconds: 2.1 -->
+<!-- extra: tools=1 -->
+
+Not an ask.
+
+> Tools: read_thread in Team chat: done
+
+## 10:03:00
+<!-- id: 20261112T100300 words: 3 seconds: 2.1 -->
+<!-- extra: tools=2; kind=ask; later=thing -->
+
+What did she ask?
+
+> Tools: read_thread in Team chat: done
+> this line is not a tool call
+> send_message in Docs: at work: denied
+> Tools: delete_message in Team chat: done
+
+> Answer: Thursday.
+",
+    )
+    .unwrap();
+    let page = list(dir.path(), "", 50, 0);
+    let by_text = |text: &str| page.entries.iter().find(|e| e.text.starts_with(text)).unwrap_or_else(|| panic!("{text}"));
+    // In a dictation the line is text, as it always was.
+    let dictation = by_text("Thanks a lot.\n");
+    assert_eq!(dictation.text, "Thanks a lot.\n\n> Tools: read_thread in Team chat: done");
+    assert!(dictation.tools.is_empty());
+    // In an ask whose extra line says nothing about tools, too.
+    let quiet = by_text("What is this?");
+    // (The answer quote between them is taken out; the empty lines
+    // around it stay.)
+    assert_eq!(quiet.text, "What is this?\n\n\n> Tools: read_thread in Team chat: done");
+    assert_eq!(quiet.answer.as_deref(), Some("A dialog."));
+    assert!(quiet.tools.is_empty());
+    // The key means nothing outside an ask.
+    assert!(by_text("Not an ask.").tools.is_empty());
+    // In an ask that says so, the quote is read: keys in any order,
+    // unknown keys ignored, a line that is not a call left out, the
+    // connection's name may hold a colon, and a second line with the
+    // label inside the quote is just its next line.
+    let with = by_text("What did she ask?");
+    assert_eq!(with.text, "What did she ask?");
+    assert_eq!(with.answer.as_deref(), Some("Thursday."));
+    assert_eq!(
+        with.tools,
+        [
+            tool("Team chat", "read_thread", "done"),
+            tool("Docs: at work", "send_message", "denied"),
+            tool("Team chat", "Tools: delete_message", "done"),
+        ]
+    );
+}
+
+#[test]
+fn tool_names_cannot_break_the_quote() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 11);
+    let written = add_ask_with_tools(
+        dir.path(),
+        at(date, 15, 0, 0),
+        "What did she ask?",
+        "Thursday.",
+        &[
+            tool("Team\nchat  two", "read thread", "done\n## 16:00:00"),
+            // Nothing left of it once it is on one line: left out.
+            tool(" ", "read_thread", "done"),
+            tool("Team chat", "", "done"),
+        ],
+    );
+    assert_eq!(written.tools, [tool("Team chat two", "read_thread", "done_##_16:00:00")]);
+    let file = read(dir.path(), date);
+    assert!(file.contains("<!-- extra: kind=ask; tools=1 -->"), "{file}");
+    assert!(file.ends_with("> Tools: read_thread in Team chat two: done_##_16:00:00\n"), "{file}");
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written]);
 }

@@ -10,6 +10,7 @@ export const SETTINGS_PANES = [
   { id: "refine", label: "Refine" },
   { id: "modes", label: "Modes" },
   { id: "ask", label: "Ask" },
+  { id: "agent", label: "Agent" },
 ] as const;
 
 export type SettingsPaneId = (typeof SETTINGS_PANES)[number]["id"];

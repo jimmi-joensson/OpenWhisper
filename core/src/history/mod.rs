@@ -70,7 +70,39 @@
 //! ```
 //!
 //! An ask has no app: its answer was shown, not typed anywhere. Only
-//! asks that got their whole answer are kept.
+//! asks that got their whole answer are kept, with one exception: an
+//! ask in which a tool ran and which then failed, timed out or was
+//! cancelled is kept too, because something was done in the person's
+//! name. Its answer quote is what had arrived of the answer and a
+//! line in brackets that says it is incomplete (or only that line),
+//! and a call that was still running is listed as
+//! `result_not_known`. Such an entry is written exactly like any
+//! other ask with tools, so nothing that reads the files has to know
+//! about it.
+//!
+//! An ask that used tools (Agent, TASK-99) says so: `tools=N` on the
+//! extra line, and a third quote under the answer with one line per
+//! tool call, in the order they were made:
+//!
+//! ```markdown
+//! ## 14:20:41
+//! <!-- id: 20261110T142041 words: 9 seconds: 3.4 -->
+//! <!-- extra: kind=ask; tools=2 -->
+//!
+//! Draft a reply to Anna saying Thursday works.
+//!
+//! > Answer: The draft is in your drafts.
+//!
+//! > Tools: read_thread in Team chat: done
+//! > create_draft in Team chat: done
+//! ```
+//!
+//! Each line is the tool, the connection it belongs to, and how the
+//! call ended (`done`, `failed`, `denied`). What the tool was given
+//! and what it returned is never kept. The quote follows the rule of
+//! the answer quote: `> Tools:` is that quote only in an ask whose
+//! extra line has `tools`; anywhere else it is text. An ask without
+//! tools is written exactly as it was before Agent.
 //!
 //! The rule for the answer quote: a line that starts with `> Answer:`
 //! is the answer **only in an entry whose extra line says
@@ -132,6 +164,8 @@ pub const DEFAULT_FOLDER_NAME: &str = "history";
 const BEFORE_REFINE: &str = "> Before Refine:";
 /// Label of the quote that holds the answer of an ask.
 const ANSWER: &str = "> Answer:";
+/// Label of the quote that lists the tool calls of an ask.
+const TOOLS: &str = "> Tools:";
 
 /// [`HistoryEntry::kind`] of an ask.
 pub const KIND_ASK: &str = "ask";
@@ -151,11 +185,57 @@ const EXTRA_KIND: &str = "kind";
 /// value.
 const EXTRA_SCREEN: &str = "screen";
 const EXTRA_YES: &str = "yes";
+/// Key that says an ask used tools; its value is how many calls.
+const EXTRA_TOOLS: &str = "tools";
 static DAY_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
 static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
 static ENTRY_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})(\d{2})(\d{2})T\d{6}(?:-\d+)?$").unwrap());
+
+/// One tool call of a stored ask: which tool, and how it ended.
+/// Never what it was given or what it returned.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct HistoryTool {
+    /// Name of the connection the tool belongs to.
+    pub connection: String,
+    /// The tool's own name.
+    pub tool: String,
+    /// `done`, `failed` or `denied`
+    /// ([`crate::ask::StepState::as_str`] where asks are compiled in),
+    /// or [`TOOL_RESULT_NOT_KNOWN`] for a call that was still running
+    /// when its ask ended.
+    pub outcome: String,
+}
+
+/// The outcome of a tool call whose ask ended (failed, timed out,
+/// was cancelled) while the call was running: it may have gone
+/// through or not.
+pub const TOOL_RESULT_NOT_KNOWN: &str = "result_not_known";
+
+impl HistoryTool {
+    /// The call as one line of the tools quote.
+    fn line(&self) -> String {
+        format!("{} in {}: {}", self.tool, self.connection, self.outcome)
+    }
+
+    /// Read one line of the tools quote. `None` for a line that is
+    /// not one (edited by hand): it is left out.
+    fn parse(line: &str) -> Option<Self> {
+        let (head, outcome) = line.trim().rsplit_once(": ")?;
+        let (tool, connection) = head.split_once(" in ")?;
+        let tidy = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        Some(Self { connection: tidy(connection)?, tool: tidy(tool)?, outcome: tidy(outcome)? })
+    }
+
+    /// The call as it will read back: each part on one line, the
+    /// tool and the outcome one word each.
+    fn stored(&self) -> Option<Self> {
+        let word = |s: &str| one_line(s).replace(' ', "_");
+        let stored = Self { connection: one_line(&self.connection), tool: word(&self.tool), outcome: word(&self.outcome) };
+        Self::parse(&stored.line()).filter(|back| *back == stored)
+    }
+}
 
 /// One stored dictation, or one stored ask.
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -192,6 +272,9 @@ pub struct HistoryEntry {
     /// The ask was sent with a screenshot of the screen. The image is
     /// not kept anywhere; this only says that there was one.
     pub screen: bool,
+    /// The tool calls of an ask that used tools, in the order they
+    /// were made. Empty for everything else.
+    pub tools: Vec<HistoryTool>,
 }
 
 impl HistoryEntry {
@@ -220,6 +303,8 @@ pub struct NewEntry<'a> {
     pub answer: Option<&'a str>,
     /// The ask was sent with a screenshot. Stored only for an ask.
     pub screen: bool,
+    /// The tool calls of the ask. Stored only for an ask.
+    pub tools: &'a [HistoryTool],
 }
 
 /// A slice of the history, newest first.
@@ -414,6 +499,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     let mut mode = None;
     let mut kind = None;
     let mut screen = false;
+    let mut says_tools = false;
     if let Some(extra) = chunk.get(text_from).and_then(|l| EXTRA.captures(bare(l))) {
         for pair in extra[1].split(';') {
             let Some((key, value)) = pair.split_once('=') else {
@@ -424,6 +510,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
                 EXTRA_MODE => mode = value,
                 EXTRA_KIND => kind = value,
                 EXTRA_SCREEN => screen = value.as_deref() == Some(EXTRA_YES),
+                EXTRA_TOOLS => says_tools = value.is_some(),
                 _ => {}
             }
         }
@@ -431,10 +518,14 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     }
     // The answer quote exists in an ask only; see the module docs.
     let is_ask = kind.as_deref() == Some(KIND_ASK);
+    // And the tools quote only in an ask that says it used tools.
+    let has_tools = is_ask && says_tools;
 
     let mut text_lines: Vec<String> = Vec::new();
     let mut original_lines: Vec<String> = Vec::new();
     let mut answer_lines: Vec<String> = Vec::new();
+    let mut tool_lines: Vec<String> = Vec::new();
+    let mut had_tools = false;
     // The quote the current line continues, if any, and which quotes
     // were already seen (each label starts a quote once).
     let mut in_quote: Option<&'static str> = None;
@@ -450,7 +541,11 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
             && line.starts_with('>')
         {
             let rest = line.strip_prefix("> ").unwrap_or(&line[1..]);
-            let lines = if label == ANSWER { &mut answer_lines } else { &mut original_lines };
+            let lines = match label {
+                ANSWER => &mut answer_lines,
+                TOOLS => &mut tool_lines,
+                _ => &mut original_lines,
+            };
             lines.push(rest.to_string());
         } else if !had_original && let Some(first) = line.strip_prefix(BEFORE_REFINE) {
             in_quote = Some(BEFORE_REFINE);
@@ -460,6 +555,10 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
             in_quote = Some(ANSWER);
             had_answer = true;
             answer_lines.push(first.trim().to_string());
+        } else if has_tools && !had_tools && let Some(first) = line.strip_prefix(TOOLS) {
+            in_quote = Some(TOOLS);
+            had_tools = true;
+            tool_lines.push(first.trim().to_string());
         } else {
             in_quote = None;
             text_lines.push(unescape_line(line).to_string());
@@ -487,6 +586,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
         // Like the answer quote, the key means something in an ask
         // only.
         screen: screen && is_ask,
+        tools: tool_lines.iter().filter_map(|line| HistoryTool::parse(line)).collect(),
     })
 }
 
@@ -527,6 +627,9 @@ fn extra_pairs(entry: &HistoryEntry) -> Vec<String> {
     }
     if entry.screen {
         pairs.push(format!("{EXTRA_SCREEN}={EXTRA_YES}"));
+    }
+    if !entry.tools.is_empty() {
+        pairs.push(format!("{EXTRA_TOOLS}={}", entry.tools.len()));
     }
     pairs
 }
@@ -574,6 +677,10 @@ fn render_block(entry: &HistoryEntry, time: NaiveTime) -> String {
     }
     if let Some(answer) = &entry.answer {
         render_quote(&mut out, ANSWER, answer);
+    }
+    if !entry.tools.is_empty() {
+        let lines: Vec<String> = entry.tools.iter().map(HistoryTool::line).collect();
+        render_quote(&mut out, TOOLS, &lines.join("\n"));
     }
     out
 }
@@ -722,6 +829,12 @@ pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>
         // would not be read back as one.
         answer: new.answer.filter(|_| extra_value(new.kind) == KIND_ASK).and_then(non_empty),
         screen: new.screen && extra_value(new.kind) == KIND_ASK,
+        // Stored the way they will read back, and only for an ask.
+        tools: if extra_value(new.kind) == KIND_ASK {
+            new.tools.iter().filter_map(HistoryTool::stored).collect()
+        } else {
+            Vec::new()
+        },
     };
 
     let mut body = day.prefix.clone();

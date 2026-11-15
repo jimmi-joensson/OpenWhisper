@@ -21,6 +21,12 @@ const MODE_LABEL_MS = 1500;
 const SCREEN_LABEL = "Screen";
 const SCREEN_LABEL_AFTER_MS = 1000;
 
+// What the label says while an ask waits for the person's yes or no
+// to a tool call (Agent, TASK-99). It stays up for as long as the
+// confirm waits: the answer panel above the pill is where it is
+// answered.
+const CONFIRM_LABEL = "Confirm";
+
 // Outer capsule width per state. Height (22) and radius (11) stay fixed.
 // Inner SVG canvas is fixed at PILL_INNER_W × PILL_INNER_H; the capsule has
 // box-sizing: border-box + overflow: hidden so narrowing clips the SVG.
@@ -187,13 +193,16 @@ export function PillOverlay() {
 
   const capsuleRef = useRef<HTMLDivElement>(null);
   // The one label above the capsule. It shows the name of the mode
-  // after a switch and "Screen" while an ask looks at the screen;
-  // whichever came last is what it says.
+  // after a switch, "Screen" while an ask looks at the screen and
+  // "Confirm" while an ask waits for a yes or no; whichever came last
+  // is what it says.
   const labelRef = useRef<HTMLDivElement>(null);
   const labelTimerRef = useRef<number | undefined>(undefined);
   // The screen state of the ask on the last tick, to act on changes
   // only (ticks repeat about four times a second while an ask runs).
   const askScreenRef = useRef<AskScreen>("none");
+  // Whether the ask on the last tick was waiting on a confirm.
+  const askConfirmingRef = useRef(false);
   const rectRefs = useRef<(SVGRectElement | null)[]>(
     Array.from({ length: PARTICLE_COUNT }, () => null),
   );
@@ -241,9 +250,13 @@ export function PillOverlay() {
   // - An ask looks at the screen (Vision): "Screen" for as long as the
   //   capture runs and a second after the screenshot went out with
   //   the question. Every capture is visible here while it happens.
+  // - An ask waits for a yes or no to a tool call (Agent): "Confirm"
+  //   until it is answered, runs out of time or the ask is stopped.
+  //   A mode name shown meanwhile gives the label back when its
+  //   moment is over.
   useEffect(() => {
     // `stayMs` null: up until something else hides or replaces it.
-    const show = (text: string, kind: "mode" | "screen", stayMs: number | null) => {
+    const show = (text: string, kind: "mode" | "screen" | "confirm", stayMs: number | null) => {
       const label = labelRef.current;
       if (!label) return;
       label.textContent = text;
@@ -252,15 +265,19 @@ export function PillOverlay() {
       window.clearTimeout(labelTimerRef.current);
       if (stayMs !== null) {
         labelTimerRef.current = window.setTimeout(() => {
-          label.dataset.visible = "false";
+          // An ask still waits for a yes or no: its label was only
+          // covered for a moment (by the name of a mode that was
+          // switched to), and comes back.
+          if (askConfirmingRef.current) show(CONFIRM_LABEL, "confirm", null);
+          else label.dataset.visible = "false";
         }, stayMs);
       }
     };
-    // Only the screen label is taken down from here: a mode name that
-    // replaced it runs on its own timer.
-    const hideScreen = () => {
+    // Only a label of this kind is taken down from here: a mode name
+    // that replaced it runs on its own timer.
+    const hide = (kind: "screen" | "confirm") => {
       const label = labelRef.current;
-      if (!label || label.dataset.kind !== "screen") return;
+      if (!label || label.dataset.kind !== kind) return;
       window.clearTimeout(labelTimerRef.current);
       label.dataset.visible = "false";
     };
@@ -273,6 +290,13 @@ export function PillOverlay() {
     });
 
     const unlistenAsk = listen<AskSnapshot>(ASK_TICK_EVENT, (event) => {
+      const confirming = event.payload.phase === "confirming";
+      if (confirming !== askConfirmingRef.current) {
+        askConfirmingRef.current = confirming;
+        if (confirming) show(CONFIRM_LABEL, "confirm", null);
+        else hide("confirm");
+      }
+
       const screen = event.payload.screen ?? "none";
       const before = askScreenRef.current;
       if (screen === before) return;
@@ -286,7 +310,7 @@ export function PillOverlay() {
         // No screenshot after all (an app that is never captured is
         // in front, no permission), or the ask was stopped. The
         // answer panel says why.
-        hideScreen();
+        hide("screen");
       }
     });
 

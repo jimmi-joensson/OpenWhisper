@@ -6,6 +6,8 @@
 //! the prelude just re-exports the canonical types most consumers
 //! need together. Modules covered today:
 //!
+//! - `agent`: an ask that can use the person's own tool connections
+//!   (feature `agent`; its settings types need no feature)
 //! - `ask`: a spoken question, answered by a language model and
 //!   shown in a panel (feature `ask`)
 //! - `audio` — capture + device enumeration
@@ -47,10 +49,16 @@ pub use crate::diagnostics::{
 };
 #[cfg(feature = "recognizer")]
 pub use crate::diagnostics::recognizer_info;
+#[cfg(feature = "agent")]
+pub use crate::agent::{
+    AgentError, AgentRun, ConnectionSource, ConnectionState, FrontApp, ListedConnection, Listing, ToolPlan, ToolProblem,
+};
 #[cfg(feature = "ask")]
 pub use crate::ask::{
-    AskBackend, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup, AskSnapshot,
-    AskStatus, AskSuggestion, CancelFlag, ScreenState, VisionChoice,
+    AskBackend, AskConfirm, AskError, AskEvent, AskImage, AskInput, AskPhase, AskPlan, AskReply, AskSetup,
+    AskSnapshot, AskStatus, AskStep, AskSuggestion, CancelFlag, ConfirmAnswer, ConfirmDecision, ConfirmOutcome,
+    ContextSource,
+    ScreenState, StepState, ToolKind, VisionChoice,
 };
 #[cfg(feature = "vision")]
 pub use crate::vision::{Decision as VisionDecision, NoScreenshot, PermissionState, Screenshot};

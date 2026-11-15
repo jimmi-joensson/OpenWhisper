@@ -17,10 +17,14 @@ async (page) => {
     let nextId = 1;
     let tickCounter = 0;
 
+    // The one window this script stands in for. Commands that are
+    // only taken from another window refuse here, as in Rust.
+    const windowLabel = "main";
+
     window.__TAURI_INTERNALS__ = {
       metadata: {
-        currentWindow: { label: "main" },
-        currentWebview: { label: "main", windowLabel: "main" },
+        currentWindow: { label: windowLabel },
+        currentWebview: { label: windowLabel, windowLabel },
       },
       invoke: async (cmd, args) => {
         if (cmd === "core_version") return "0.1.0-pwcli";
@@ -111,7 +115,9 @@ async (page) => {
         // `__owAskSettings` seeds the stored block; the one ask lives
         // on `__owAskSnapshot` (set it, then
         // `__owEmit('ask_tick', window.__owAskSnapshot)`), and cancel,
-        // dismiss, insert and copy answer from it the way core does.
+        // dismiss, insert, copy and the two answers to a confirm
+        // (`ask_confirm_allow`, `ask_confirm_deny`, Agent, TASK-99)
+        // answer from it the way core does.
         if (cmd.startsWith("ask_")) {
           const w = window;
           w.__owAskCalls = [...(w.__owAskCalls ?? []), { cmd, args: args ?? {} }];
@@ -159,10 +165,34 @@ async (page) => {
             // Vision (TASK-98): what became of the screen.
             screen: "none",
             screen_notice: "",
+            // Agent (TASK-99): the tool calls of the ask, the one
+            // that waits for a yes or no, and where the ask looked.
+            steps: [],
+            confirm: null,
+            context_source: { kind: "none" },
             version,
           });
           const snap = w.__owAskSnapshot ?? idle(0);
-          const busy = ["listening", "thinking", "answering"].includes(snap.phase);
+          // `AskPhase::is_busy` in core: waiting on a confirm counts.
+          const busy = ["listening", "thinking", "answering", "confirming"].includes(snap.phase);
+          // `settle_steps` in core: an ask that ends without an answer
+          // waits on nothing, and no step stays running or waiting.
+          const settled = (steps) =>
+            (steps ?? []).map((step) =>
+              step.state === "waiting"
+                ? {
+                    ...step,
+                    state: "denied",
+                    outcome: "The ask ended before you answered, so it was not done.",
+                  }
+                : step.state === "running"
+                  ? {
+                      ...step,
+                      state: "failed",
+                      outcome: "The ask ended while this was running, so its result is not known.",
+                    }
+                  : step,
+            );
           const change = (next) => {
             w.__owAskSnapshot = next;
             window.__owEmit("ask_tick", structuredClone(next));
@@ -284,7 +314,23 @@ async (page) => {
             }
             return lines.join("\n");
           }
-          if (cmd === "ask_snapshot") return structuredClone(snap);
+          // `AskConfirm::armed_in_ms` in core: how long until a yes to
+          // this confirm counts. It counts down from the moment the
+          // confirm was raised (noted in `__owAskConfirmRaised` by
+          // whoever raised it), read off the clock like in
+          // `ask::snapshot`. A snapshot that was put there some other
+          // way says it itself.
+          const armedInMs = (confirm) => {
+            const raised = w.__owAskConfirmRaised;
+            return raised && raised.ask_id === snap.id && raised.request_id === confirm.request_id
+              ? Math.max(0, Math.ceil(raised.until - performance.now()))
+              : (confirm.armed_in_ms ?? 0);
+          };
+          if (cmd === "ask_snapshot") {
+            const now = structuredClone(snap);
+            if (now.confirm) now.confirm.armed_in_ms = armedInMs(now.confirm);
+            return now;
+          }
           if (cmd === "ask_start") {
             if (!stored.enabled) {
               throw "Ask is switched off. Switch it on in the settings to ask questions.";
@@ -304,8 +350,59 @@ async (page) => {
             change(
               snap.phase === "listening"
                 ? idle(snap.version + 1)
-                : { ...snap, phase: "cancelled", searching: false, version: snap.version + 1 },
+                : {
+                    ...snap,
+                    phase: "cancelled",
+                    searching: false,
+                    // A confirm that waited is a no from here on.
+                    confirm: null,
+                    steps: settled(snap.steps),
+                    version: snap.version + 1,
+                  },
             );
+            return true;
+          }
+          if (cmd === "ask_confirm_allow" || cmd === "ask_confirm_deny") {
+            // `check_caller` in src-tauri/src/agent.rs: a yes or no
+            // is only taken from the answer window.
+            if (windowLabel !== "answer") throw `${cmd} is not accepted from this window.`;
+            // Both arguments are required, as in Rust.
+            const { askId, requestId } = args ?? {};
+            if (typeof askId !== "number") {
+              throw `invalid args \`askId\` for command \`${cmd}\`: command ${cmd} missing required key askId`;
+            }
+            if (typeof requestId !== "string") {
+              throw `invalid args \`requestId\` for command \`${cmd}\`: command ${cmd} missing required key requestId`;
+            }
+            // `confirm_allow` and `confirm_deny` in core: only the
+            // confirm the ask is waiting on right now is answered. A
+            // click that names another ask or another request, or
+            // comes late, changes nothing.
+            const waiting = snap.phase === "confirming" ? (snap.confirm ?? null) : null;
+            if (askId !== snap.id || !waiting || waiting.request_id !== requestId) return false;
+            const allowed = cmd === "ask_confirm_allow";
+            // A yes that comes before the confirm has been on show
+            // for a moment is refused, and the confirm stays open. A
+            // no is taken at any time.
+            if (allowed && armedInMs(waiting) > 0) return false;
+            change({
+              ...snap,
+              // Back to where the ask was (`after_confirm` in core).
+              phase: snap.answer.trim() ? "answering" : "thinking",
+              confirm: null,
+              // In the app the backend says what became of the step
+              // a moment later: it runs, or it was not done.
+              steps: (snap.steps ?? []).map((step) =>
+                step.id === waiting.step_id
+                  ? {
+                      ...step,
+                      state: allowed ? "running" : "denied",
+                      outcome: allowed ? "" : "You said no.",
+                    }
+                  : step,
+              ),
+              version: snap.version + 1,
+            });
             return true;
           }
           if (cmd === "ask_dismiss") {
@@ -453,6 +550,422 @@ async (page) => {
             return (w.__owRunningApps ?? []).map((a) => ({ id: a.id.toLowerCase(), name: a.name }));
           }
           return null;
+        }
+        // Agent (TASK-99), mirroring tests/fixtures/tauri-shim.ts: the
+        // Agent pane. An in-memory Agent block that
+        // behaves like Rust (src-tauri/src/agent.rs) and is no more
+        // lenient than it:
+        // - A save is one change (`AgentPatch`): only what it names is
+        //   changed, laid over what is stored at that moment. A switch
+        //   that is left out is not changed. A window cannot add a
+        //   connection or change what one is; a field Rust does not
+        //   know is refused.
+        // - A tick is refused for a tool the connection is not known
+        //   to have, for one that cannot be used at all, and for one
+        //   that acts while drafts only is on. An untick is always
+        //   taken.
+        // - A change and a lookup are only taken from the main window,
+        //   and a lookup only runs while Agent is on, Ask is on and
+        //   the backend is Claude. Arguments Rust requires are
+        //   required here.
+        // - The connections are looked up in the background each time
+        //   Agent becomes able to use them, whichever command notices
+        //   first. The app is taken to have started long ago: what a
+        //   seed says was looked up is what the start found.
+        // - Whether an ask can use a connection (`usable`) follows
+        //   from what was looked up, never from a seed.
+        // - How a connection is reached is never in a payload.
+        // Which tool is of which kind, and whether it can be used at
+        // all, is core's decision, so a seed says it per tool
+        // (`kind`, `problem`).
+        // `__owAgentSettings` seeds the stored block and
+        // `__owAgentListing` what a lookup of the connections finds
+        // (`connections`, or `error` when it fails; without it a
+        // lookup finds what is there). `__owAgentRefreshMs` makes a
+        // lookup take that long, `__owAgentStatus` overrides what
+        // `agent_status` answers, `__owAgentSetError` makes a save
+        // fail and `__owRunningApps` are the open apps. The answer of
+        // a save can be made to arrive late with `__owAgentSetMs` and
+        // that of a lookup with `__owAgentRefreshAnswerMs` (the work
+        // is done at once either way, as in Rust; only the answer is
+        // on its way for that long), and `__owAgentAnswered` counts
+        // the answers of the two that have arrived. Every call is
+        // recorded in `__owAgentCalls`, every save in `__owAgentSaves`
+        // and every lookup that ran in `__owAgentLookups`; a change
+        // emits `agent_changed`, as Rust does. The built-in app
+        // table here is a short stand-in with made-up apps; the real
+        // one is in core/src/settings/agent.rs. Keep in step with
+        // tests/fixtures/tauri-shim.ts.
+        if (cmd.startsWith("agent_")) {
+          const w = window;
+          w.__owAgentCalls = [...(w.__owAgentCalls ?? []), { cmd, args: args ?? {} }];
+          const key = (name) => String(name ?? "").trim().toLowerCase();
+          // `tidy_name` in core: one line, single spaces.
+          const tidy = (s) => String(s ?? "").split(/\s+/).filter(Boolean).join(" ");
+          // `name_key` in core: lower case, without the prefix of an
+          // account connector, letters and digits only.
+          const nameKey = (name) =>
+            key(name)
+              .replace(/^claude\.ai /, "")
+              .replace(/[^\p{L}\p{N}]/gu, "");
+          const connection = (seed) => ({
+            name: tidy(seed.name),
+            kind: seed.kind ?? "claude",
+            enabled: seed.enabled ?? false,
+            allowed_tools: [...(seed.allowed_tools ?? [])],
+            tools: (seed.tools ?? []).map((t) => ({
+              name: String(t.name ?? ""),
+              title: t.title ?? "",
+              // A tool nobody said anything about is one that acts.
+              kind: t.kind ?? "act",
+              // Core's sentence when the tool cannot be used at all.
+              problem: t.problem ?? null,
+            })),
+            state: seed.state ?? "not-looked-up",
+            via: seed.kind === "custom" ? (seed.via ?? "command") : null,
+          });
+          const defaultApps = [
+            { app_id: "com.example.teamchat", app_name: "Teamchat", connection: "Teamchat" },
+            { app_id: "com.example.tracker", app_name: "Tracker", connection: "Tracker" },
+          ];
+          if (!w.__owAgentStored) {
+            const seed = w.__owAgentSettings ?? {};
+            w.__owAgentStored = {
+              enabled: seed.enabled ?? false,
+              drafts_only: seed.drafts_only ?? true,
+              confirm_timeout_s: seed.confirm_timeout_s ?? 120,
+              max_turns: seed.max_turns ?? 12,
+              connections: (seed.connections ?? []).map(connection),
+              app_connections: seed.app_connections ?? null,
+              listing: {
+                refreshing: false,
+                refreshed_at_ms: null,
+                error: "",
+                custom_error: "",
+                ...(seed.listing ?? {}),
+              },
+            };
+          }
+          const stored = w.__owAgentStored;
+          // The Ask switch and the backend, as the Ask shim has them.
+          const askEnabled = () => w.__owAskStored?.enabled ?? w.__owAskSettings?.enabled ?? false;
+          const backend = () =>
+            w.__owAskBackend?.backend ??
+            w.__owRefineStored?.backend ??
+            w.__owRefineSettings?.backend ??
+            "claude-cli";
+          // `check_caller` in src-tauri/src/agent.rs.
+          const onlyFromMain = () => {
+            if (windowLabel !== "main") throw `${cmd} is not accepted from this window.`;
+          };
+          // An argument Rust requires: Tauri refuses a call without it.
+          const required = (name, ok) => {
+            const value = (args ?? {})[name];
+            if (!ok(value)) {
+              throw `invalid args \`${name}\` for command \`${cmd}\`: command ${cmd} missing required key ${name}`;
+            }
+            return value;
+          };
+          // An ask can start with a connection: the person's own
+          // entry, or one of Claude Code's that a lookup found
+          // (`agent::connections::is_listed` in core).
+          const usable = (c) =>
+            c.kind === "custom" || (c.state !== "not-looked-up" && c.state !== "missing");
+          // The ticked tools of a connection that an ask could call:
+          // with drafts only, a tool that acts is not one of them,
+          // and a tool that cannot be used never is.
+          const runnable = (c) =>
+            c.tools.filter(
+              (t) =>
+                c.allowed_tools.includes(t.name) &&
+                t.problem === null &&
+                !(stored.drafts_only && t.kind === "act"),
+            );
+          const state = () => {
+            const table = stored.app_connections ?? defaultApps;
+            return structuredClone({
+              enabled: stored.enabled,
+              drafts_only: stored.drafts_only,
+              confirm_timeout_s: stored.confirm_timeout_s,
+              max_turns: stored.max_turns,
+              connections: stored.connections.map((c) => ({ ...c, usable: usable(c) })),
+              app_connections: table.map((row) => {
+                const named = (c) =>
+                  nameKey(row.connection) !== "" && nameKey(c.name) === nameKey(row.connection);
+                const known = stored.connections.find(named);
+                const used = stored.connections.find((c) => c.enabled && named(c));
+                return {
+                  ...row,
+                  known: known ? known.name : null,
+                  active: used !== undefined && runnable(used).length > 0,
+                };
+              }),
+              app_connections_builtin: stored.app_connections === null,
+              listing: stored.listing,
+            });
+          };
+          const announce = () => {
+            const now = state();
+            window.__owEmit("agent_changed", structuredClone(now));
+            return now;
+          };
+          // The answer of a save or a lookup, on its way for `ms`.
+          const answered = (answer, ms) =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                w.__owAgentAnswered = (w.__owAgentAnswered ?? 0) + 1;
+                resolve(answer);
+              }, ms ?? 0),
+            );
+          // A lookup of the connections ended (`agent::list_all` and
+          // `merge_listing` in core): what the person chose stays,
+          // the tools and the state come from what was found, a tick
+          // for a tool that is gone is dropped, a new connection
+          // arrives switched off, and one that is gone stays only
+          // when it was touched. An entry of the person's own that is
+          // switched off is never started, so it was not looked up.
+          const applyListing = () => {
+            w.__owAgentLookups = (w.__owAgentLookups ?? 0) + 1;
+            const found = w.__owAgentListing;
+            if (found?.error) {
+              stored.listing = { ...stored.listing, refreshing: false, error: found.error };
+              return;
+            }
+            const customError = found?.custom_error ?? "";
+            const notFound = (c) =>
+              c.kind !== "custom"
+                ? { ...c, state: "missing" }
+                : { ...c, state: c.enabled && customError ? "unknown" : "not-looked-up" };
+            if (found?.connections) {
+              const listed = found.connections.map(connection);
+              const inListing = (c) =>
+                listed.find((l) => key(l.name) === key(c.name) && l.kind === c.kind);
+              for (const seed of found.connections) {
+                const fresh = connection(seed);
+                const at = stored.connections.findIndex(
+                  (c) => key(c.name) === key(fresh.name) && c.kind === fresh.kind,
+                );
+                if (at >= 0) {
+                  const kept = stored.connections[at];
+                  // Its own entry, switched off: not started.
+                  if (kept.kind === "custom" && !kept.enabled) continue;
+                  stored.connections[at] = {
+                    ...kept,
+                    tools: fresh.tools.length > 0 ? fresh.tools : kept.tools,
+                    state: seed.state ?? "connected",
+                  };
+                } else if (fresh.kind === "claude") {
+                  stored.connections.push({
+                    ...fresh,
+                    enabled: false,
+                    allowed_tools: [],
+                    state: seed.state ?? "connected",
+                  });
+                }
+              }
+              stored.connections = stored.connections
+                .filter(
+                  (c) =>
+                    c.kind === "custom" ||
+                    inListing(c) !== undefined ||
+                    c.enabled ||
+                    c.allowed_tools.length > 0,
+                )
+                .map((c) =>
+                  inListing(c) !== undefined && !(c.kind === "custom" && !c.enabled) ? c : notFound(c),
+                );
+            } else {
+              // Nothing seeded: the lookup finds what is there.
+              stored.connections = stored.connections.map((c) =>
+                c.kind === "custom" && !c.enabled
+                  ? notFound(c)
+                  : { ...c, state: c.state === "not-looked-up" ? "connected" : c.state },
+              );
+            }
+            for (const c of stored.connections) {
+              c.allowed_tools = c.allowed_tools.filter((t) => c.tools.some((x) => x.name === t));
+            }
+            stored.listing = {
+              refreshing: false,
+              refreshed_at_ms: Date.now(),
+              error: "",
+              custom_error: customError,
+            };
+          };
+          // `lookup_refusal` in src-tauri/src/agent.rs.
+          const lookupRefusal = () =>
+            !stored.enabled
+              ? "Agent is switched off, so the connections were not looked up."
+              : !askEnabled()
+                ? "Ask is switched off, so the connections were not looked up. Agent only works in an ask."
+                : backend() === "openai-compatible"
+                  ? "Agent needs the Claude backend, so the connections were not looked up."
+                  : null;
+          // `lookup_due` in src-tauri/src/agent.rs: once each time
+          // Agent becomes able to use connections, whichever command
+          // notices. At the first command the app has long started:
+          // the lookup of the start, if there was one, is over.
+          const lookUpIfDue = () => {
+            const able = lookupRefusal() === null;
+            if (w.__owAgentAsked === undefined) {
+              w.__owAgentAsked = able;
+              return;
+            }
+            if (!able) {
+              w.__owAgentAsked = false;
+              return;
+            }
+            if (w.__owAgentAsked) return;
+            w.__owAgentAsked = true;
+            stored.listing = { ...stored.listing, refreshing: true };
+            setTimeout(() => {
+              applyListing();
+              announce();
+            }, w.__owAgentRefreshMs ?? 0);
+          };
+          if (cmd === "agent_get") {
+            lookUpIfDue();
+            return state();
+          }
+          if (cmd === "agent_set") {
+            onlyFromMain();
+            const patch = required("patch", (v) => typeof v === "object" && v !== null);
+            if (w.__owAgentSetError) throw w.__owAgentSetError;
+            // `deny_unknown_fields` on `AgentPatch` and
+            // `ConnectionPatch`.
+            const unknown = (given, known) =>
+              Object.keys(given).find((field) => !known.includes(field));
+            const odd =
+              unknown(patch, ["enabled", "drafts_only", "connection", "app_connections"]) ??
+              (patch.connection
+                ? unknown(patch.connection, ["name", "enabled", "tick", "untick"])
+                : undefined);
+            if (odd !== undefined) {
+              throw `invalid args \`patch\` for command \`agent_set\`: unknown field \`${odd}\``;
+            }
+            // `with_patch` in src-tauri/src/agent.rs, on a copy: a
+            // patch that is refused changes nothing.
+            const next = structuredClone(stored);
+            if (typeof patch.enabled === "boolean") next.enabled = patch.enabled;
+            if (typeof patch.drafts_only === "boolean") next.drafts_only = patch.drafts_only;
+            // `AgentSettings::cleaned` in core: ids in lower case,
+            // each app once, a row without an id or a connection
+            // dropped.
+            if (Array.isArray(patch.app_connections)) {
+              const rows = [];
+              for (const raw of patch.app_connections) {
+                const row = {
+                  app_id: tidy(raw.app_id).toLowerCase(),
+                  app_name: tidy(raw.app_name),
+                  connection: tidy(raw.connection),
+                };
+                if (!row.app_id || !row.connection || rows.some((r) => r.app_id === row.app_id)) {
+                  continue;
+                }
+                rows.push(row);
+              }
+              next.app_connections = rows;
+            } else if (patch.app_connections === null) {
+              next.app_connections = null;
+            }
+            const change = patch.connection;
+            if (change) {
+              const c = next.connections.find((x) => key(x.name) === key(change.name));
+              if (!c) throw `There is no connection called "${String(change.name ?? "").trim()}".`;
+              if (typeof change.enabled === "boolean") c.enabled = change.enabled;
+              const untick = change.untick ?? [];
+              c.allowed_tools = c.allowed_tools.filter((t) => !untick.includes(t));
+              for (const name of change.tick ?? []) {
+                if (c.allowed_tools.includes(name)) continue;
+                // `tick_refusal` in src-tauri/src/agent.rs.
+                const tool = c.tools.find((t) => t.name === name);
+                if (!tool) {
+                  throw `"${name}" is not a tool this connection is known to have. Refresh and try again.`;
+                }
+                if (tool.problem !== null) throw `"${name}" cannot be ticked. ${tool.problem}`;
+                if (next.drafts_only && tool.kind === "act") {
+                  throw `"${name}" sends, posts, deletes or changes something, so it cannot be ticked while Drafts only is on.`;
+                }
+                c.allowed_tools.push(name);
+              }
+            }
+            Object.assign(stored, next);
+            w.__owAgentSaves = [...(w.__owAgentSaves ?? []), structuredClone(patch)];
+            lookUpIfDue();
+            return answered(announce(), w.__owAgentSetMs);
+          }
+          if (cmd === "agent_refresh") {
+            onlyFromMain();
+            const refused = lookupRefusal();
+            if (refused !== null) throw refused;
+            w.__owAgentAsked = true;
+            stored.listing = { ...stored.listing, refreshing: true };
+            return new Promise((resolve) =>
+              setTimeout(() => {
+                applyListing();
+                resolve(answered(announce(), w.__owAgentRefreshAnswerMs));
+              }, w.__owAgentRefreshMs ?? 0),
+            );
+          }
+          if (cmd === "agent_status") {
+            lookUpIfDue();
+            // `agent::readiness` in core.
+            const on = stored.connections.filter((c) => c.enabled);
+            const used = on.filter((c) => runnable(c).length > 0);
+            const tools = used.flatMap(runnable);
+            const asking = tools.filter((t) => t.kind === "act").length;
+            const plural = (n) => (n === 1 ? "" : "s");
+            let ready = false;
+            let message;
+            if (!stored.enabled) {
+              message = "Agent is switched off.";
+            } else if (!askEnabled()) {
+              message = "Agent only works in an ask, and Ask is switched off.";
+            } else if (backend() === "openai-compatible") {
+              message =
+                "Agent needs the Claude backend. An OpenAI-compatible endpoint cannot use connections.";
+            } else if (on.length === 0) {
+              message = "No connection is enabled yet.";
+            } else if (tools.length === 0) {
+              message = stored.drafts_only
+                ? "No tool that can run is ticked. With drafts only, tools that send, post, delete or change something do not count."
+                : "No tool is ticked on an enabled connection.";
+            } else {
+              ready = true;
+              message = `An ask can use ${tools.length} tool${plural(tools.length)} on ${used.length} connection${plural(used.length)}.`;
+              if (stored.drafts_only) {
+                message +=
+                  " Drafts only: nothing that sends, posts, deletes or changes anything can run.";
+              } else if (asking > 0) {
+                message += ` ${asking} of them ask you first, every time.`;
+              }
+            }
+            return {
+              ready,
+              message,
+              ask_enabled: askEnabled(),
+              backend: backend(),
+              ...(w.__owAgentStatus ?? {}),
+            };
+          }
+          if (cmd === "agent_remove_connection") {
+            onlyFromMain();
+            const name = required("name", (v) => typeof v === "string");
+            const at = stored.connections.findIndex((c) => key(c.name) === key(name));
+            if (at < 0) throw `There is no connection called "${name.trim()}".`;
+            stored.connections.splice(at, 1);
+            return announce();
+          }
+          if (cmd === "agent_running_apps") {
+            return (w.__owRunningApps ?? []).map((a) => ({
+              app_id: a.id.toLowerCase(),
+              app_name: a.name,
+            }));
+          }
+          // There is no other command: a window cannot add a
+          // connection (`openwhisper agent connections add-custom`
+          // does, in a terminal).
+          throw `Command ${cmd} not found`;
         }
         if (cmd === "settings_capture_hotkey_start") {
           window.__owCaptureStartCount = (window.__owCaptureStartCount ?? 0) + 1;

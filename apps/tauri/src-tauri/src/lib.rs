@@ -16,6 +16,7 @@ use tauri::LogicalPosition;
 #[cfg(not(target_os = "macos"))]
 use tauri::PhysicalPosition;
 
+mod agent;
 mod ask;
 mod behavior;
 mod crashes;
@@ -1157,6 +1158,12 @@ pub fn run() {
             // core's cache, and on Windows keep the pill and the
             // answer panel out of screen captures.
             vision::init(app.handle());
+            // Load the Agent block (off unless the user turned it
+            // on). When Agent is on, the connections are looked up
+            // in the background, so the first ask can use them. After
+            // `vision::init`, which tells core where the settings
+            // file is.
+            agent::init(app.handle());
             // Hydrate the keep-models-warm cache before any
             // `ModelHandle::with_idle_timeout` is constructed so the
             // first handle inherits the persisted value rather than
@@ -1423,6 +1430,18 @@ pub fn run() {
             vision::vision_request_permission,
             vision::vision_open_settings,
             vision::vision_running_apps,
+            // Agent: the settings, the listing of the connections,
+            // and the two answers to a confirm in the answer panel.
+            // How a connection is reached never crosses into a
+            // window (a test in agent.rs checks the payload).
+            agent::agent_get,
+            agent::agent_set,
+            agent::agent_refresh,
+            agent::agent_status,
+            agent::agent_remove_connection,
+            agent::agent_running_apps,
+            agent::ask_confirm_allow,
+            agent::ask_confirm_deny,
             audio_get_device_state,
             audio_preview_start,
             audio_preview_stop,

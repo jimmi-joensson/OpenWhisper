@@ -15,6 +15,7 @@ import { NAVIGATE_EVENT, navigateTarget, settingsRowId } from "./lib/navigate";
 import { useDictation } from "./lib/use-dictation";
 import { useHistorySync } from "./lib/use-history";
 import { useModesSync } from "./lib/use-modes";
+import { useAgentSync } from "./lib/use-agent";
 import { useAskSync } from "./lib/use-ask";
 import { useVisionSync } from "./lib/use-vision";
 import { useGlobalHotkey } from "./lib/use-global-hotkey";
@@ -172,6 +173,9 @@ function App() {
   useAskSync();
   // And the Vision settings (when an ask includes the screen).
   useVisionSync();
+  // And the Agent settings (which connections an ask may use), which
+  // also change when a lookup of the connections ends.
+  useAgentSync();
 
   const goBack = useCallback(() => setRoute("home"), []);
 

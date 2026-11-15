@@ -24,7 +24,7 @@ macos-shell = ["dep:swift-bridge", "dep:swift-bridge-build"]
 # Tauri shell flavor — pulls in `recognizer` so STT lives in core for the
 # pure-Rust consumer. Shipped Mac SwiftUI keeps using FluidAudio and never
 # compiles sherpa-onnx.
-tauri = ["recognizer", "refine", "focus", "ask", "vision"]
+tauri = ["recognizer", "refine", "focus", "ask", "vision", "agent"]
 # Refine (TASK-93): optional language-model cleanup after transcription,
 # through the user's Claude Code CLI or an OpenAI-compatible endpoint.
 # Its own feature so the SwiftUI staticlib flavor does not grow an HTTP
@@ -46,6 +46,12 @@ ask = [
     "dep:core-foundation",
     "dep:windows",
 ]
+# Agent (TASK-99): an ask that can use the person's own tool
+# connections, through their Claude Code CLI. Needs `ask`; it uses
+# `vision` and `focus` when they are on (the screen as context, the
+# app in front) and works without them. No dependency of its own.
+# The settings block is not behind this feature.
+agent = ["ask"]
 # Vision (TASK-98): an ask can carry a screenshot of the display the
 # person is working on. Capture, the never-capture layers and the
 # in-memory PNG live in `core::vision`; nothing is ever written to

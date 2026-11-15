@@ -83,6 +83,14 @@ ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;";
 const MIGRATION_7_ASK_SCREEN: &str = "\
 ALTER TABLE refine_runs ADD COLUMN screen INTEGER;";
 
+/// Agent (TASK-99): where an ask looked for its context (`none`,
+/// `screen`, `connection:NAME`) and how many tool calls it made.
+/// Written on the row of every ask from here on. NULL for Refine
+/// runs and on rows written before this migration.
+const MIGRATION_8_ASK_TOOLS: &str = "\
+ALTER TABLE refine_runs ADD COLUMN context_source TEXT;
+ALTER TABLE refine_runs ADD COLUMN tool_calls INTEGER;";
+
 fn specs() -> Vec<M<'static>> {
     vec![
         M::up(MIGRATION_1_DICTATIONS),
@@ -92,6 +100,7 @@ fn specs() -> Vec<M<'static>> {
         M::up(MIGRATION_5_REFINE_MODE),
         M::up(MIGRATION_6_ASK_FIRST_TEXT),
         M::up(MIGRATION_7_ASK_SCREEN),
+        M::up(MIGRATION_8_ASK_TOOLS),
     ]
 }
 

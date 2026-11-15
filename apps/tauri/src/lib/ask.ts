@@ -11,6 +11,8 @@ export type AskPhase =
   | "listening"
   | "thinking"
   | "answering"
+  // A tool call waits for the person's yes or no (Agent, TASK-99).
+  | "confirming"
   | "done"
   | "error"
   | "cancelled";
@@ -54,6 +56,75 @@ export interface AskUsage {
 // needed current information from the web and web search is off.
 export type AskSuggestion = "web-search";
 
+// Mirrors `ToolKind` in core/src/ask/steps.rs: what a tool does, as
+// far as core can tell (Agent, TASK-99). "act" is everything that
+// sends, posts, deletes or changes something, and anything unknown.
+export type AskToolKind = "read" | "draft" | "act";
+
+// Mirrors `StepState` in core: where a tool call stands.
+export type AskStepState =
+  // The tool is running.
+  | "running"
+  // It ran and answered.
+  | "done"
+  // It ran and reported an error.
+  | "failed"
+  // It did not run: not allowed, the person said no or did not
+  // answer in time, or Claude Code stopped while it waited.
+  | "denied"
+  // It waits for the person's yes or no.
+  | "waiting";
+
+// Mirrors `AskStep` in core: one tool call of an ask.
+export interface AskStep {
+  // Tells one call from the next within an ask.
+  id: string;
+  // Name of the connection the tool belongs to.
+  connection: string;
+  // The tool's own name.
+  tool: string;
+  // Name to show a person; the tool's name when it has no other.
+  title: string;
+  kind: AskToolKind;
+  // The input on one line, cut short by core.
+  input_summary: string;
+  state: AskStepState;
+  // What came of it, on one line. "" while it runs or waits.
+  outcome: string;
+}
+
+// Mirrors `AskConfirm` in core: a tool call that waits for the
+// person's yes or no. Answered with `ask_confirm_allow` or
+// `ask_confirm_deny`, naming the ask and this request.
+export interface AskConfirm {
+  request_id: string;
+  // The step this is about (`AskStep.id`).
+  step_id: string;
+  connection: string;
+  tool: string;
+  title: string;
+  // The whole input as indented JSON text: never cut (core refuses a
+  // call whose input is too long to show, without asking). Short
+  // fields come first, and characters that would not show as what
+  // they are arrive as visible escapes.
+  input: string;
+  // How long the confirm waits before it counts as a no.
+  timeout_s: number;
+  // How long until a yes to this confirm counts, in milliseconds:
+  // 600 when it is raised, counting down to 0. Until then core
+  // refuses a yes and the confirm stays open, so Allow shows as not
+  // yet active. A no is taken at any time.
+  armed_in_ms: number;
+}
+
+// Mirrors `ContextSource` in core: where an ask looked for what the
+// question is about. "connection": the app in front has a connection
+// and the ask was pointed at that instead of the screen.
+export type AskContextSource =
+  | { kind: "none" }
+  | { kind: "screen" }
+  | { kind: "connection"; name: string };
+
 // Mirrors `AskSnapshot` in core: the one ask of the running app.
 // This is the whole payload of `ask_tick` and what `ask_snapshot`
 // and `ask_start` return.
@@ -92,6 +163,14 @@ export interface AskSnapshot {
   // Why there is no screenshot, as one sentence for the person; ""
   // unless `screen` is "blocked" or "unavailable".
   screen_notice: string;
+  // Agent (TASK-99): every tool call of this ask, in the order they
+  // were made. Empty for an ask without tools.
+  steps: AskStep[];
+  // The tool call that waits for the person; null when none does.
+  // Set exactly while the phase is "confirming".
+  confirm: AskConfirm | null;
+  // Where the ask looked for its context.
+  context_source: AskContextSource;
   // Goes up on every change.
   version: number;
 }
@@ -192,7 +271,14 @@ export function askSawScreen(screen: AskScreen | undefined): boolean {
   return screen === "capturing" || screen === "included";
 }
 
-// An ask is listening, thinking or answering: a cancel would stop it.
+// An ask is listening, thinking, answering or waiting on a confirm:
+// a cancel would stop it (`AskPhase::is_busy` in core). A cancel
+// while a confirm waits is a no to it.
 export function askIsBusy(phase: AskPhase): boolean {
-  return phase === "listening" || phase === "thinking" || phase === "answering";
+  return (
+    phase === "listening" ||
+    phase === "thinking" ||
+    phase === "answering" ||
+    phase === "confirming"
+  );
 }

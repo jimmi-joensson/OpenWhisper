@@ -21,11 +21,16 @@ export interface AgentTool {
   // Name to show a person. May be "".
   title: string;
   kind: AgentToolKind;
+  // Why the tool cannot be used at all, as core's sentence for the
+  // person; null when it can. Such a tool is shown, never ticked.
+  problem: string | null;
 }
 
 // Where a connection stood in the last lookup of this run of the
 // app: one of core's `ConnectionState` words, "missing" (the lookup
-// did not find it) or "not-looked-up" (there has been none yet).
+// did not find it) or "not-looked-up" (there has been none yet, or
+// it is an entry of the person's own that is switched off, which a
+// lookup never starts).
 export type AgentConnectionState =
   | "connected"
   | "needs-auth"
@@ -105,16 +110,22 @@ export interface AgentState {
   listing: AgentListing;
 }
 
-// What `agent_set` takes (`AgentChoices` in src-tauri/src/agent.rs):
-// the person's choices and nothing else. Rust lays them over the
-// block on disk; a connection that is not there cannot be added this
-// way, and what a connection is never changes with it.
-export interface AgentChoices {
-  enabled: boolean;
-  drafts_only: boolean;
-  connections: { name: string; enabled: boolean; allowed_tools: string[] }[];
-  // null = the built-in table.
-  app_connections: AgentAppConnection[] | null;
+// What `agent_set` takes (`AgentPatch` in src-tauri/src/agent.rs):
+// one change. Only what is named is changed, and Rust lays it over
+// the block as it is on disk at that moment, so a change made
+// elsewhere in the meantime (the headless CLI) is kept. A switch
+// that is left out is not changed: the only way to switch drafts
+// only off is `drafts_only: false`. A connection that is not there
+// cannot be added this way, and what a connection is never changes
+// with it.
+export interface AgentPatch {
+  enabled?: boolean;
+  drafts_only?: boolean;
+  // One connection: its switch, and tools to tick or to untick. Its
+  // other ticks stay as they are.
+  connection?: { name: string; enabled?: boolean; tick?: string[]; untick?: string[] };
+  // The whole app table; null = back to the built-in one.
+  app_connections?: AgentAppConnection[] | null;
 }
 
 // What `agent_status` returns: whether an ask would use tools right
@@ -131,15 +142,6 @@ export interface AgentStatus {
 export interface AgentRunningApp {
   app_id: string;
   app_name: string;
-}
-
-// What `agent_add_connection` takes: the person's own entry. A
-// command with its arguments, or a URL.
-export interface AgentCustomConnection {
-  name: string;
-  command: string;
-  args: string[];
-  url: string;
 }
 
 // Emitted after the Agent settings changed or a lookup ended.
@@ -188,40 +190,25 @@ export function agentAppLabel(app: { app_id: string; app_name: string }): string
   return app.app_name.trim() || app.app_id;
 }
 
-// The choices in a state: what `agent_set` gets back with one of
-// them changed.
-export function choicesOf(state: AgentState): AgentChoices {
-  return {
-    enabled: state.enabled,
-    drafts_only: state.drafts_only,
-    connections: state.connections.map((c) => ({
-      name: c.name,
-      enabled: c.enabled,
-      allowed_tools: c.allowed_tools,
-    })),
-    app_connections: state.app_connections_builtin
-      ? null
-      : state.app_connections.map(({ app_id, app_name, connection }) => ({
-          app_id,
-          app_name,
-          connection,
-        })),
-  };
-}
-
-// A state with choices shown at once, before Rust has answered with
+// A state with a change shown at once, before Rust has answered with
 // what it stored: the switches and the ticks. The app table waits for
 // the answer, since what a row leads to is core's to say.
-export function withChoices(state: AgentState, choices: AgentChoices): AgentState {
+export function withPatch(state: AgentState, patch: AgentPatch): AgentState {
+  const change = patch.connection;
   return {
     ...state,
-    enabled: choices.enabled,
-    drafts_only: choices.drafts_only,
+    enabled: patch.enabled ?? state.enabled,
+    drafts_only: patch.drafts_only ?? state.drafts_only,
     connections: state.connections.map((connection) => {
-      const choice = choices.connections.find((c) => c.name === connection.name);
-      return choice
-        ? { ...connection, enabled: choice.enabled, allowed_tools: choice.allowed_tools }
-        : connection;
+      if (!change || change.name !== connection.name) return connection;
+      const untick = change.untick ?? [];
+      const kept = connection.allowed_tools.filter((t) => !untick.includes(t));
+      const added = (change.tick ?? []).filter((t) => !kept.includes(t));
+      return {
+        ...connection,
+        enabled: change.enabled ?? connection.enabled,
+        allowed_tools: [...kept, ...added],
+      };
     }),
   };
 }

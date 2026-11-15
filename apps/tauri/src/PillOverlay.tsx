@@ -252,6 +252,8 @@ export function PillOverlay() {
   //   the question. Every capture is visible here while it happens.
   // - An ask waits for a yes or no to a tool call (Agent): "Confirm"
   //   until it is answered, runs out of time or the ask is stopped.
+  //   A mode name shown meanwhile gives the label back when its
+  //   moment is over.
   useEffect(() => {
     // `stayMs` null: up until something else hides or replaces it.
     const show = (text: string, kind: "mode" | "screen" | "confirm", stayMs: number | null) => {
@@ -263,7 +265,11 @@ export function PillOverlay() {
       window.clearTimeout(labelTimerRef.current);
       if (stayMs !== null) {
         labelTimerRef.current = window.setTimeout(() => {
-          label.dataset.visible = "false";
+          // An ask still waits for a yes or no: its label was only
+          // covered for a moment (by the name of a mode that was
+          // switched to), and comes back.
+          if (askConfirmingRef.current) show(CONFIRM_LABEL, "confirm", null);
+          else label.dataset.visible = "false";
         }, stayMs);
       }
     };

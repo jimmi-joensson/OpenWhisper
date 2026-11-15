@@ -843,14 +843,55 @@ const CONFIRM: MockAskConfirm = {
   tool: "send_message",
   title: "Send message",
   input: '{\n  "to": "Bo",\n  "text": "See you at ten."\n}',
-  input_cut: false,
   timeout_s: 120,
+  // As core raises it: a yes counts 600 ms from now.
+  armed_in_ms: 600,
 };
 
 const READ_DONE = step({ id: "s1", state: "done", outcome: "3 messages" });
 
 const steps = (page: Page) => page.getByTestId("answer-step");
 const confirmCard = (page: Page) => page.getByTestId("answer-confirm");
+
+// The card has been on show long enough: Allow is active.
+async function armed(page: Page) {
+  await expect(confirmCard(page)).toHaveAttribute("data-armed", "true");
+  await expect(button(page, "Allow")).toBeEnabled();
+}
+
+// Stop the page's clock, so nothing in it runs out by itself: a card
+// stays as it came up until the test moves the time on.
+async function stopClock(page: Page) {
+  await page.clock.install();
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
+}
+
+// A click at a point of the window, the way a hand does it: on
+// whatever is there by the time it lands.
+async function clickAt(page: Page, at: { x: number; y: number; width: number; height: number }) {
+  await page.mouse.click(at.x + at.width / 2, at.y + at.height / 2);
+}
+
+// The card has come to rest: its entrance (a fade and a small rise)
+// is over, so a box measured now is the box it keeps.
+async function atRest(page: Page) {
+  await card(page).evaluate((el) => Promise.all(el.getAnimations().map((a) => a.finished)));
+}
+
+// The box of `inner` lies inside the box of `outer`.
+function inside(
+  inner: { x: number; y: number; width: number; height: number } | null,
+  outer: { x: number; y: number; width: number; height: number } | null,
+): boolean {
+  return (
+    inner !== null &&
+    outer !== null &&
+    inner.x >= outer.x - 0.5 &&
+    inner.y >= outer.y - 0.5 &&
+    inner.x + inner.width <= outer.x + outer.width + 0.5 &&
+    inner.y + inner.height <= outer.y + outer.height + 0.5
+  );
+}
 
 // The two answers to a confirm, as the shim recorded them.
 async function confirmCalls(page: Page) {
@@ -1012,6 +1053,178 @@ test.describe("answer window: the steps of an ask with tools", () => {
     expect(await recorded(page, "__owPwned")).toBeUndefined();
   });
 
+  test("a long outcome without a place to break wraps inside the card", async ({ page }) => {
+    await open(page);
+    const outcome = `https://teamchat.example/api/v2/${"errors-".repeat(60)}end`;
+    await emitAskTick(page, {
+      phase: "thinking",
+      question: "what did Anna say",
+      steps: [step({ id: "a", state: "failed", outcome })],
+    });
+    const line = steps(page).nth(0).getByTestId("answer-step-outcome");
+    await expect(line).toHaveText(outcome);
+    await atRest(page);
+    const cardBox = await card(page).boundingBox();
+    const box = await line.boundingBox();
+    expect(box && cardBox && box.x >= cardBox.x && box.x + box.width <= cardBox.x + cardBox.width).toBe(
+      true,
+    );
+    // On several lines, and nothing to scroll sideways anywhere.
+    expect(box && box.height > 32).toBe(true);
+    const sideways = await page
+      .getByTestId("answer-scroll")
+      .evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(sideways).toBe(0);
+    expect(await card(page).evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
+  });
+
+  test("a step that was running when the ask ended says its result is not known", async ({
+    page,
+  }) => {
+    await open(page);
+    await emitAskTick(page, {
+      phase: "error",
+      question: "tell Bo I will be there at ten",
+      error: "No answer within 60 seconds.",
+      answer: "(No answer. No answer within 60 seconds.)",
+      steps: [
+        step({
+          id: "a",
+          state: "failed",
+          tool: "send_message",
+          title: "Send message",
+          kind: "act",
+          outcome: "The ask ended while this was running, so its result is not known.",
+        }),
+      ],
+    });
+    await expect(steps(page).nth(0).getByTestId("answer-step-outcome")).toHaveText(
+      "The ask ended while this was running, so its result is not known.",
+    );
+  });
+
+  test("an escaped right-to-left override is shown as the text core wrote", async ({ page }) => {
+    await open(page);
+    // Core replaces a character that would turn text around with a
+    // visible escape before anything reaches this window. What
+    // arrives is these eight plain characters.
+    const escaped = "\\u{202E}";
+    expect(escaped).toHaveLength(8);
+    await emitAskTick(page, {
+      id: 7,
+      phase: "confirming",
+      question: "tell Bo I will be there at ten",
+      steps: [
+        step({
+          id: "s1",
+          state: "failed",
+          title: `Read ${escaped}daerht`,
+          connection: `team${escaped}chat`,
+          input_summary: `channel: "${escaped}lareneg"`,
+          outcome: `No channel called ${escaped}lareneg.`,
+        }),
+        { ...SEND, title: `Send ${escaped}egassem`, input_summary: `to: "${escaped}oB"` },
+      ],
+      confirm: {
+        ...CONFIRM,
+        title: `Send ${escaped}egassem`,
+        connection: `team${escaped}chat`,
+        input: `{\n  "to": "${escaped}oB",\n  "text": "See you at ten."\n}`,
+      },
+    });
+    await expect(confirmCard(page)).toBeVisible();
+    await expect(page.getByTestId("answer-confirm-title")).toHaveText(
+      "Allow Send \\u{202E}egassem on team\\u{202E}chat?",
+    );
+    expect(await page.getByTestId("answer-confirm-input").evaluate((el) => el.textContent)).toBe(
+      '{\n  "to": "\\u{202E}oB",\n  "text": "See you at ten."\n}',
+    );
+    const first = steps(page).nth(0);
+    await expect(first.getByTestId("answer-step-title")).toHaveText("Read \\u{202E}daerht");
+    await expect(first.getByTestId("answer-step-connection")).toHaveText("team\\u{202E}chat");
+    await expect(first.getByTestId("answer-step-input")).toHaveText('channel: "\\u{202E}lareneg"');
+    await expect(first.getByTestId("answer-step-outcome")).toHaveText(
+      "No channel called \\u{202E}lareneg.",
+    );
+    // Nothing in the window holds the character itself, and nothing
+    // was unescaped on the way.
+    const raw = await page.evaluate(() => document.body.textContent?.includes("\u202E"));
+    expect(raw).toBe(false);
+  });
+
+  test("a raw override, should one ever arrive, cannot reorder the app's own words around it", async ({
+    page,
+  }) => {
+    await open(page);
+    // Core never sends this. A shim that did would meet the second
+    // layer: text from outside is laid out as a piece of its own.
+    const raw = "\u202E";
+    await emitAskTick(page, {
+      id: 7,
+      phase: "confirming",
+      question: "tell Bo I will be there at ten",
+      steps: [{ ...SEND, title: `Send${raw}`, connection: `team${raw}` }],
+      confirm: { ...CONFIRM, title: `Send${raw}`, connection: `team${raw}`, tool: `send${raw}` },
+    });
+    await expect(confirmCard(page)).toBeVisible();
+    // Where the app's own words are on screen, from left to right.
+    const order = await page.evaluate(() => {
+      const left = (root: Element, word: string): number => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const at = (node.textContent ?? "").indexOf(word);
+          if (at < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, at);
+          range.setEnd(node, at + word.length);
+          const box = range.getBoundingClientRect();
+          return Math.round(box.left + (word.length > 1 ? 0 : box.width / 2));
+        }
+        throw new Error(`"${word}" is not on the page`);
+      };
+      const title = document.querySelector('[data-testid="answer-confirm-title"]');
+      const what = document.querySelector('[data-testid="answer-confirm-what"]');
+      const step = document.querySelector('[data-testid="answer-step"]');
+      if (!title || !what || !step) throw new Error("no confirm");
+      const name = title.querySelector('[data-testid="answer-confirm-name"]');
+      const connection = title.querySelector('[data-testid="answer-confirm-connection"]');
+      const tool = what.querySelector('[data-testid="answer-confirm-tool"]');
+      if (!name || !connection || !tool) throw new Error("no names");
+      return {
+        title: [
+          left(title, "Allow"),
+          Math.round(name.getBoundingClientRect().left),
+          left(title, "on"),
+          Math.round(connection.getBoundingClientRect().left),
+          left(title, "?"),
+        ],
+        what: [Math.round(tool.getBoundingClientRect().left), left(what, "would run")],
+        step: [
+          Math.round(
+            (step.querySelector('[data-testid="answer-step-title"]') as Element).getBoundingClientRect()
+              .left,
+          ),
+          Math.round(
+            (
+              step.querySelector('[data-testid="answer-step-connection"]') as Element
+            ).getBoundingClientRect().left,
+          ),
+          left(step, "Waiting for you"),
+        ],
+        isolated: [name, connection, tool].map((el) => getComputedStyle(el).unicodeBidi),
+      };
+    });
+    const ascending = (xs: number[]) => xs.every((x, i) => i === 0 || x > xs[i - 1]);
+    expect(ascending(order.title), `title: ${order.title}`).toBe(true);
+    expect(ascending(order.what), `what: ${order.what}`).toBe(true);
+    expect(ascending(order.step), `step: ${order.step}`).toBe(true);
+    expect(order.isolated).toEqual(["isolate", "isolate", "isolate"]);
+    // The buttons are where they always are.
+    const deny = await button(page, "Deny").boundingBox();
+    const allow = await button(page, "Allow").boundingBox();
+    expect(deny && allow && deny.x > allow.x).toBe(true);
+  });
+
   test("an ask without tools shows no steps and no confirm", async ({ page }) => {
     await open(page);
     await emitAskTick(page, { phase: "done", question: "what is a tap", answer: "A short press." });
@@ -1039,7 +1252,6 @@ test.describe("answer window: the confirm", () => {
     expect(await input.evaluate((el) => el.textContent)).toBe(CONFIRM.input);
     expect(await input.evaluate((el) => getComputedStyle(el).whiteSpace)).toBe("pre-wrap");
     expect(await input.evaluate((el) => getComputedStyle(el).fontFamily)).toMatch(/mono/i);
-    await expect(page.getByTestId("answer-confirm-cut")).toHaveCount(0);
     await expect(page.getByTestId("answer-confirm-timeout")).toHaveText(
       "No answer within 120 seconds counts as no.",
     );
@@ -1099,21 +1311,188 @@ test.describe("answer window: the confirm", () => {
     }
     expect(await confirmCard(page).locator("form").count()).toBe(0);
     expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+    // With Allow active, so a key that reached it would count.
+    await armed(page);
     await page.keyboard.press("Enter");
     await page.keyboard.press("Space");
-    await page.waitForTimeout(150);
-    expect(await confirmCalls(page)).toEqual([]);
+    // A key press that answered would have called a command by the
+    // time the press is over (the handler runs with the event). So
+    // the answer that follows is the first one there is.
     await expect(confirmCard(page)).toBeVisible();
+    await button(page, "Deny").click();
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+    ]);
   });
 
-  test("an input that was cut says so plainly", async ({ page }) => {
+  test("Allow is inactive when the card comes up and active a moment later, Deny at once", async ({
+    page,
+  }) => {
     await open(page);
-    await confirming(page, {
-      confirm: { ...CONFIRM, input: '{\n  "text": "' + "a".repeat(300), input_cut: true },
-    });
-    await expect(page.getByTestId("answer-confirm-cut")).toHaveText(
-      "The input is longer than what is shown. You would allow something you cannot see in full.",
+    await stopClock(page);
+    await confirming(page);
+    const allow = button(page, "Allow");
+    await expect(confirmCard(page)).toHaveAttribute("data-armed", "false");
+    await expect(allow).toBeDisabled();
+    await expect(button(page, "Deny")).toBeEnabled();
+    const at = await allow.boundingBox();
+    if (!at) throw new Error("no Allow button");
+    // A click on it does nothing, however often.
+    await clickAt(page, at);
+    await clickAt(page, at);
+    expect(await confirmCalls(page)).toEqual([]);
+    // Just short of the moment: still inactive.
+    await page.clock.runFor(590);
+    await expect(allow).toBeDisabled();
+    // Nothing has to arrive for it to become active: no tick is sent
+    // here, the card counts by itself.
+    await page.clock.runFor(20);
+    await expect(confirmCard(page)).toHaveAttribute("data-armed", "true");
+    await expect(allow).toBeEnabled();
+    await clickAt(page, at);
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_allow", args: { askId: 7, requestId: "r1" } },
+    ]);
+  });
+
+  test("a confirm that has waited already still starts inactive in this window", async ({
+    page,
+  }) => {
+    await open(page);
+    await stopClock(page);
+    // A confirm that has been waiting, as far as the card knows.
+    await confirming(page, { confirm: { ...CONFIRM, armed_in_ms: 0 } });
+    // Still a moment in this window before a yes is taken.
+    await expect(button(page, "Allow")).toBeDisabled();
+    await page.clock.runFor(610);
+    await expect(button(page, "Allow")).toBeEnabled();
+  });
+
+  test("Deny works from the first moment", async ({ page }) => {
+    await open(page);
+    await stopClock(page);
+    await confirming(page);
+    await expect(button(page, "Allow")).toBeDisabled();
+    const at = await button(page, "Deny").boundingBox();
+    if (!at) throw new Error("no Deny button");
+    await clickAt(page, at);
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+    ]);
+  });
+
+  // The next confirm of the same ask, as core raises it.
+  const SECOND = {
+    steps: [
+      READ_DONE,
+      { ...SEND, state: "running" as const },
+      step({
+        id: "s3",
+        state: "waiting",
+        tool: "delete_message",
+        title: "Delete message",
+        kind: "act",
+        input_summary: 'id: "m-17"',
+      }),
+    ],
+    confirm: {
+      ...CONFIRM,
+      request_id: "r2",
+      step_id: "s3",
+      tool: "delete_message",
+      title: "Delete message",
+      input: '{\n  "id": "m-17"\n}',
+    },
+  };
+
+  test("a double click on Allow does not allow the confirm that comes next", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await armed(page);
+    const at = await button(page, "Allow").boundingBox();
+    if (!at) throw new Error("no Allow button");
+    await stopClock(page);
+    // The first click of the two allows what the person read.
+    await clickAt(page, at);
+    await expect(confirmCard(page)).toHaveCount(0);
+    // 150 ms later the model asks for the next tool, and the second
+    // click lands where Allow was.
+    await page.clock.runFor(150);
+    await confirming(page, SECOND);
+    await expect(confirmCard(page)).toHaveAttribute("data-request", "r2");
+    const again = await button(page, "Allow").boundingBox();
+    expect(again && Math.abs(again.x - at.x) < 40 && Math.abs(again.y - at.y) < 40).toBe(true);
+    await clickAt(page, again ?? at);
+    await clickAt(page, at);
+    // Nothing reached Rust for the second confirm.
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_allow", args: { askId: 7, requestId: "r1" } },
+    ]);
+    await expect(confirmCard(page)).toHaveAttribute("data-armed", "false");
+    await expect(page.getByTestId("answer-confirm-title")).toHaveText(
+      "Allow Delete message on teamchat?",
     );
+    // And had it reached Rust, core would have refused it: a yes
+    // counts only after the confirm has been on show for a moment.
+    const early = await page.evaluate(() =>
+      (
+        window.__TAURI_INTERNALS__ as {
+          invoke: (cmd: string, args: unknown) => Promise<unknown>;
+        }
+      ).invoke("ask_confirm_allow", { askId: 7, requestId: "r2" }),
+    );
+    expect(early).toBe(false);
+    await expect(confirmCard(page)).toBeVisible();
+    // Read, then allowed: this one counts.
+    await page.clock.runFor(700);
+    await armed(page);
+    await clickAt(page, again ?? at);
+    expect((await confirmCalls(page)).at(-1)).toEqual({
+      cmd: "ask_confirm_allow",
+      args: { askId: 7, requestId: "r2" },
+    });
+    await expect(confirmCard(page)).toHaveCount(0);
+  });
+
+  test("a confirm that takes the place of another starts inactive, and a click meant for the first is not taken", async ({
+    page,
+  }) => {
+    await open(page);
+    await confirming(page);
+    await armed(page);
+    const at = await button(page, "Allow").boundingBox();
+    if (!at) throw new Error("no Allow button");
+    await stopClock(page);
+    // The first one ran out of time and the next came up within the
+    // same tick: the card is replaced under the pointer.
+    await confirming(page, SECOND);
+    await expect(confirmCard(page)).toHaveAttribute("data-request", "r2");
+    await expect(confirmCard(page)).toHaveAttribute("data-armed", "false");
+    await clickAt(page, at);
+    expect(await confirmCalls(page)).toEqual([]);
+    await expect(confirmCard(page)).toBeVisible();
+    // The new card answers for its own request only.
+    await page.clock.runFor(700);
+    await armed(page);
+    await button(page, "Allow").click();
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_allow", args: { askId: 7, requestId: "r2" } },
+    ]);
+  });
+
+  test("Deny and Allow sit at opposite ends of the card", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    await atRest(page);
+    const deny = await button(page, "Deny").boundingBox();
+    const allow = await button(page, "Allow").boundingBox();
+    const whole = await confirmCard(page).boundingBox();
+    if (!deny || !allow || !whole) throw new Error("no boxes");
+    // More than a third of the card between them, the line about
+    // the time in that room.
+    expect(deny.x - (allow.x + allow.width)).toBeGreaterThan(whole.width / 3);
+    const note = await page.getByTestId("answer-confirm-timeout").boundingBox();
+    expect(note && note.x >= allow.x + allow.width && note.x + note.width <= deny.x).toBe(true);
   });
 
   test("a long input scrolls in itself and the buttons stay inside the window", async ({ page }) => {
@@ -1129,7 +1508,7 @@ test.describe("answer window: the confirm", () => {
         step({ id: "x", state: "done", tool: "search_messages", title: "Search messages" }),
         SEND,
       ],
-      confirm: { ...CONFIRM, input: `{\n${lines.join("\n")}\n}`, input_cut: true },
+      confirm: { ...CONFIRM, input: `{\n${lines.join("\n")}\n}` },
     });
     const b = await card(page).boundingBox();
     expect(b && b.y >= 0 && b.y + b.height <= WINDOW.height).toBe(true);
@@ -1150,7 +1529,7 @@ test.describe("answer window: the confirm", () => {
     expect(inner.overflowY).toBe("auto");
     expect(inner.text).toContain('"line_60": "value 60"');
     // Every line of the card is whole: only the input gives way.
-    for (const id of ["answer-confirm-title", "answer-confirm-what", "answer-confirm-timeout", "answer-confirm-cut"]) {
+    for (const id of ["answer-confirm-title", "answer-confirm-what", "answer-confirm-timeout"]) {
       await expect(page.getByTestId(id)).toBeInViewport({ ratio: 1 });
       const line = await page
         .getByTestId(id)
@@ -1243,6 +1622,201 @@ test.describe("answer window: the confirm", () => {
     );
   });
 
+  test("a very long input and very long names: everything stays inside the card at 420 x 360", async ({
+    page,
+  }) => {
+    await open(page);
+    // 120 characters each, without a place to break.
+    const title = "SendAMessageToEveryone".repeat(6).slice(0, 120);
+    const tool = "send_message_to_everyone_".repeat(5).slice(0, 120);
+    const connection = "teamchat-for-the-whole-company-".repeat(4).slice(0, 120);
+    const input = `{\n  "to": "Bo",\n  "text": "${"See you at ten. ".repeat(940).slice(0, 14970)}"\n}`;
+    expect(input.length).toBeGreaterThanOrEqual(15000);
+    await confirming(page, {
+      question:
+        "tell Bo I will be there at ten and ask whether the room on the second floor is still free then",
+      notice: "Web search is not available with this backend.",
+      context_source: { kind: "connection", name: connection },
+      answer: "Let me look at the thread first.",
+      steps: [READ_DONE, { ...SEND, title, tool, connection }],
+      confirm: { ...CONFIRM, title, tool, connection, input },
+    });
+    await atRest(page);
+    const window = { x: 0, y: 0, width: WINDOW.width, height: WINDOW.height };
+    const cardBox = await card(page).boundingBox();
+    const confirmBox = await confirmCard(page).boundingBox();
+    expect(inside(cardBox, window), "the card in the window").toBe(true);
+    expect(inside(confirmBox, cardBox), "the confirm in the card").toBe(true);
+    // Deny, Allow and the line about the time: whole, inside the
+    // confirm, inside the card, inside the window.
+    for (const name of ["Deny", "Allow"]) {
+      const box = await button(page, name).boundingBox();
+      expect(inside(box, confirmBox), `${name} in the confirm`).toBe(true);
+      expect(inside(box, cardBox), `${name} in the card`).toBe(true);
+      expect(inside(box, window), `${name} in the window`).toBe(true);
+      expect(box && box.height >= 24, `${name} is whole`).toBe(true);
+    }
+    const note = page.getByTestId("answer-confirm-timeout");
+    expect(inside(await note.boundingBox(), confirmBox), "the time line in the confirm").toBe(true);
+    expect(await note.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+    // Cancel is still there.
+    expect(inside(await button(page, "Cancel").boundingBox(), cardBox)).toBe(true);
+    // The three names are whole: every character, wrapped, nothing
+    // cut off at the side or the bottom, nothing ending in an
+    // ellipsis, all of it in view without scrolling.
+    await expect(page.getByTestId("answer-confirm-name")).toHaveText(title);
+    await expect(page.getByTestId("answer-confirm-connection")).toHaveText(connection);
+    await expect(page.getByTestId("answer-confirm-tool")).toHaveText(tool);
+    for (const id of ["answer-confirm-title", "answer-confirm-what"]) {
+      const line = page.getByTestId(id);
+      const fits = await line.evaluate((el) => ({
+        wide: el.scrollWidth <= el.clientWidth,
+        tall: el.scrollHeight <= el.clientHeight,
+        lines: el.getClientRects().length,
+        overflow: getComputedStyle(el).textOverflow,
+      }));
+      expect(fits.wide && fits.tall, id).toBe(true);
+      expect(fits.overflow, id).not.toBe("ellipsis");
+      expect(inside(await line.boundingBox(), confirmBox), `${id} in the confirm`).toBe(true);
+      await expect(line).toBeInViewport({ ratio: 1 });
+    }
+    const names = await page.locator(".answer-confirm-names").evaluate((el) => ({
+      hidden: el.scrollHeight - el.clientHeight,
+      sideways: el.scrollWidth - el.clientWidth,
+    }));
+    expect(names).toEqual({ hidden: 0, sideways: 0 });
+    // The input takes the room that is left, at least four lines of
+    // it, and scrolls where it is, with all of it there.
+    const pre = page.getByTestId("answer-confirm-input");
+    expect(inside(await pre.boundingBox(), confirmBox), "the input in the confirm").toBe(true);
+    const shown = await pre.evaluate((el) => ({
+      height: el.clientHeight,
+      overflow: el.scrollHeight - el.clientHeight,
+      sideways: el.scrollWidth - el.clientWidth,
+      text: el.textContent ?? "",
+    }));
+    expect(shown.height).toBeGreaterThanOrEqual(4 * 16);
+    expect(shown.overflow).toBeGreaterThan(0);
+    expect(shown.sideways).toBe(0);
+    expect(shown.text).toBe(input);
+    // Scrolled to its end, the buttons are where they were.
+    const before = await button(page, "Deny").boundingBox();
+    await pre.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    expect(await button(page, "Deny").boundingBox()).toEqual(before);
+    await button(page, "Deny").click();
+    expect(await confirmCalls(page)).toEqual([
+      { cmd: "ask_confirm_deny", args: { askId: 7, requestId: "r1" } },
+    ]);
+  });
+
+  test("names with wide letters and no room at all: the names scroll before a button leaves the card", async ({
+    page,
+  }) => {
+    await open(page);
+    const title = "W".repeat(120);
+    const tool = "W".repeat(120);
+    const connection = "M".repeat(120);
+    await confirming(page, {
+      steps: [READ_DONE, { ...SEND, title, tool, connection }],
+      confirm: { ...CONFIRM, title, tool, connection, input: `{\n  "text": "${"a".repeat(3000)}"\n}` },
+    });
+    await atRest(page);
+    const cardBox = await card(page).boundingBox();
+    const confirmBox = await confirmCard(page).boundingBox();
+    expect(inside(cardBox, { x: 0, y: 0, width: WINDOW.width, height: WINDOW.height })).toBe(true);
+    for (const name of ["Deny", "Allow"]) {
+      expect(inside(await button(page, name).boundingBox(), confirmBox), name).toBe(true);
+    }
+    expect(inside(await page.getByTestId("answer-confirm-timeout").boundingBox(), confirmBox)).toBe(
+      true,
+    );
+    // Still four lines of the input, and the names whole and
+    // wrapped, in a part of their own that scrolls.
+    const pre = await page.getByTestId("answer-confirm-input").evaluate((el) => el.clientHeight);
+    expect(pre).toBeGreaterThanOrEqual(4 * 16);
+    const names = await page.locator(".answer-confirm-names").evaluate((el) => ({
+      sideways: el.scrollWidth - el.clientWidth,
+      overflowY: getComputedStyle(el).overflowY,
+      text: el.textContent ?? "",
+    }));
+    expect(names.sideways).toBe(0);
+    expect(names.overflowY).toBe("auto");
+    expect(names.text).toContain(title);
+    expect(names.text).toContain(connection);
+  });
+
+  test("the step that waits stays in view while its card shows, also once the answer has started", async ({
+    page,
+  }) => {
+    await open(page);
+    const paragraphs = Array.from(
+      { length: 12 },
+      (_, i) => `Paragraph ${i + 1} of what the model wrote before it asked.`,
+    );
+    await confirming(page, { answer: paragraphs.join("\n\n") });
+    const waiting = page.locator('[data-testid="answer-step"][data-state="waiting"]');
+    await expect(waiting).toHaveCount(1);
+    await expect(waiting.getByTestId("answer-step-title")).toHaveText("Send message");
+    await expect(waiting.getByTestId("answer-step-state")).toHaveText("Waiting for you");
+    await expect(waiting).toBeInViewport({ ratio: 1 });
+    // It is not in the part that scrolls, so no scroll position
+    // takes it away.
+    const scroll = page.getByTestId("answer-scroll");
+    expect(await waiting.evaluate((el) => el.closest('[data-testid="answer-scroll"]') === null)).toBe(
+      true,
+    );
+    for (const to of [0, 100000]) {
+      await scroll.evaluate((el, top) => {
+        el.scrollTop = top;
+      }, to);
+      await expect(waiting).toBeInViewport({ ratio: 1 });
+    }
+    // Right above the card that asks about it.
+    await atRest(page);
+    const stepBox = await waiting.boundingBox();
+    const cardBox = await confirmCard(page).boundingBox();
+    expect(stepBox && cardBox && stepBox.y + stepBox.height <= cardBox.y + 0.5).toBe(true);
+    // Answered: it is one of the steps again.
+    await button(page, "Deny").click();
+    await expect(page.getByTestId("answer-steps-waiting")).toHaveCount(0);
+    await expect(steps(page)).toHaveCount(2);
+    await expect(steps(page).nth(1)).toHaveAttribute("data-state", "denied");
+  });
+
+  test("a confirm closed because Claude Code stopped says so on the step", async ({ page }) => {
+    await open(page);
+    await confirming(page);
+    // Core: the CLI died while the confirm waited (`gone`). The
+    // confirm is closed at once and the step says why, in core's
+    // words.
+    await emitAskTick(page, {
+      id: 7,
+      phase: "error",
+      question: "tell Bo I will be there at ten",
+      error: "Claude Code stopped before it answered.",
+      steps: [
+        READ_DONE,
+        {
+          ...SEND,
+          state: "denied",
+          outcome: "Claude Code stopped before you answered, so it was not run.",
+        },
+      ],
+      confirm: null,
+    });
+    await expect(confirmCard(page)).toHaveCount(0);
+    await expect(steps(page).nth(1).getByTestId("answer-step-state")).toHaveText("Not run");
+    await expect(steps(page).nth(1).getByTestId("answer-step-outcome")).toHaveText(
+      "Claude Code stopped before you answered, so it was not run.",
+    );
+    await expect(page.getByTestId("answer-error")).toContainText(
+      "Claude Code stopped before it answered.",
+    );
+    expect(await confirmCalls(page)).toEqual([]);
+  });
+
   test("a confirm that ran out of time closes by itself", async ({ page }) => {
     await open(page);
     await confirming(page);
@@ -1326,5 +1900,42 @@ test.describe("answer window: where the ask looked", () => {
     await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
     await emitAskTick(page, { phase: "done", answer: "A short press." });
     await expect(page.getByTestId("answer-context-source")).toHaveCount(0);
+  });
+
+  test("what core has to say about the connections shows under the answer, whole", async ({ page }) => {
+    await open(page);
+    // Core's notices of an agent ask: a connection that was left
+    // out, one that was still starting, tools that showed up after
+    // the lookup. Each is a sentence or two; they come as one text.
+    const notice =
+      'The connection "tracker" has not been looked up since the app started, so this answer was made without it. Refresh the connections in the Agent settings to use it. ' +
+      'The connection "teamchat" was still starting when this was answered, so the answer may have been made without it. Ask again in a moment.';
+    await emitAskTick(page, {
+      phase: "done",
+      question: "what did Anna say",
+      answer: "I could not look that up.",
+      notice,
+    });
+    const line = page.getByTestId("answer-notice");
+    await expect(line).toHaveText(notice);
+    await atRest(page);
+    await expect(line).toBeInViewport({ ratio: 1 });
+    const cardBox = await card(page).boundingBox();
+    expect(inside(await line.boundingBox(), cardBox)).toBe(true);
+    expect(await line.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    // The buttons are still there.
+    await expect(button(page, "Insert")).toBeInViewport({ ratio: 1 });
+    // While the ask runs, too.
+    await emitAskTick(page, { phase: "thinking", question: "what did Anna say", notice });
+    await expect(line).toHaveText(notice);
+    // A name without a place to break does not push the card wider.
+    await emitAskTick(page, {
+      phase: "done",
+      question: "what did Anna say",
+      answer: "I could not look that up.",
+      notice: `The connection "${"teamchat-".repeat(14)}" has not been looked up since the app started.`,
+    });
+    expect(inside(await line.boundingBox(), await card(page).boundingBox())).toBe(true);
+    expect(await card(page).evaluate((el) => el.scrollWidth - el.clientWidth)).toBe(0);
   });
 });

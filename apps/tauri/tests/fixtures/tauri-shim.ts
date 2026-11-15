@@ -506,7 +506,7 @@ async function installTauriShim(
             answer: string;
             version: number;
             steps?: Step[];
-            confirm?: { request_id: string; step_id: string } | null;
+            confirm?: { request_id: string; step_id: string; armed_in_ms?: number } | null;
           };
           const w = window as unknown as {
             __owAskSettings?: Partial<Omit<AskSettings, "context">> & {
@@ -518,6 +518,7 @@ async function installTauriShim(
             __owAskBackend?: Record<string, unknown>;
             __owAskCalls?: { cmd: string; args: Record<string, unknown> }[];
             __owAskSnapshot?: AskSnapshot;
+            __owAskConfirmRaised?: { ask_id: number; request_id: string; until: number };
             __owAskCopied?: string[];
             __owAskInserted?: string[];
           };
@@ -716,7 +717,22 @@ async function installTauriShim(
             }
             return lines.join("\n");
           }
-          if (cmd === "ask_snapshot") return structuredClone(snap);
+          // `AskConfirm::armed_in_ms` in core: how long until a yes to
+          // this confirm counts. It counts down from the moment the
+          // confirm was raised (`emitAskTick` notes when), read off
+          // the clock like in `ask::snapshot`. A snapshot that was
+          // put there some other way says it itself.
+          const armedInMs = (confirm: { request_id: string; armed_in_ms?: number }) => {
+            const raised = w.__owAskConfirmRaised;
+            return raised && raised.ask_id === snap.id && raised.request_id === confirm.request_id
+              ? Math.max(0, Math.ceil(raised.until - performance.now()))
+              : (confirm.armed_in_ms ?? 0);
+          };
+          if (cmd === "ask_snapshot") {
+            const now = structuredClone(snap);
+            if (now.confirm) now.confirm.armed_in_ms = armedInMs(now.confirm);
+            return now;
+          }
           if (cmd === "ask_start") {
             if (!stored.enabled) {
               throw "Ask is switched off. Switch it on in the settings to ask questions.";
@@ -754,14 +770,28 @@ async function installTauriShim(
             return true;
           }
           if (cmd === "ask_confirm_allow" || cmd === "ask_confirm_deny") {
+            // `check_caller` in src-tauri/src/agent.rs: a yes or no
+            // is only taken from the answer window.
+            if (windowLabel !== "answer") throw `${cmd} is not accepted from this window.`;
+            // Both arguments are required, as in Rust.
+            const { askId, requestId } = (args ?? {}) as { askId?: unknown; requestId?: unknown };
+            if (typeof askId !== "number") {
+              throw `invalid args \`askId\` for command \`${cmd}\`: command ${cmd} missing required key askId`;
+            }
+            if (typeof requestId !== "string") {
+              throw `invalid args \`requestId\` for command \`${cmd}\`: command ${cmd} missing required key requestId`;
+            }
             // `confirm_allow` and `confirm_deny` in core: only the
             // confirm the ask is waiting on right now is answered. A
             // click that names another ask or another request, or
             // comes late, changes nothing.
-            const { askId, requestId } = (args ?? {}) as { askId?: number; requestId?: string };
             const waiting = snap.phase === "confirming" ? (snap.confirm ?? null) : null;
             if (askId !== snap.id || !waiting || waiting.request_id !== requestId) return false;
             const allowed = cmd === "ask_confirm_allow";
+            // A yes that comes before the confirm has been on show
+            // for a moment is refused, and the confirm stays open. A
+            // no is taken at any time.
+            if (allowed && armedInMs(waiting) > 0) return false;
             change({
               ...snap,
               // Back to where the ask was (`after_confirm` in core).
@@ -946,29 +976,51 @@ async function installTauriShim(
           return null;
         }
         // Agent (TASK-99): the Agent pane. An in-memory Agent block that
-        // behaves like Rust (src-tauri/src/agent.rs): a save takes the
-        // person's choices and lays them over what is stored, so a
-        // window can switch connections and tick tools but cannot add
-        // a connection or change what one is; a tick only counts for
-        // a tool the connection is known to have; the app table is
-        // tidied the way core does it; and how a connection is
-        // reached is never in a payload. Which tool is of which kind
-        // is core's decision, so a seed says it per tool.
+        // behaves like Rust (src-tauri/src/agent.rs) and is no more
+        // lenient than it:
+        // - A save is one change (`AgentPatch`): only what it names is
+        //   changed, laid over what is stored at that moment. A switch
+        //   that is left out is not changed. A window cannot add a
+        //   connection or change what one is; a field Rust does not
+        //   know is refused.
+        // - A tick is refused for a tool the connection is not known
+        //   to have, for one that cannot be used at all, and for one
+        //   that acts while drafts only is on. An untick is always
+        //   taken.
+        // - A change and a lookup are only taken from the main window,
+        //   and a lookup only runs while Agent is on, Ask is on and
+        //   the backend is Claude. Arguments Rust requires are
+        //   required here.
+        // - The connections are looked up in the background each time
+        //   Agent becomes able to use them, whichever command notices
+        //   first. The app is taken to have started long ago: what a
+        //   seed says was looked up is what the start found.
+        // - Whether an ask can use a connection (`usable`) follows
+        //   from what was looked up, never from a seed.
+        // - How a connection is reached is never in a payload.
+        // Which tool is of which kind, and whether it can be used at
+        // all, is core's decision, so a seed says it per tool
+        // (`kind`, `problem`).
         // `__owAgentSettings` seeds the stored block and
         // `__owAgentListing` what a lookup of the connections finds
         // (`connections`, or `error` when it fails; without it a
         // lookup finds what is there). `__owAgentRefreshMs` makes a
         // lookup take that long, `__owAgentStatus` overrides what
         // `agent_status` answers, `__owAgentSetError` makes a save
-        // fail and `__owRunningApps` are the open apps. Every call is
+        // fail and `__owRunningApps` are the open apps. The answer of
+        // a save can be made to arrive late with `__owAgentSetMs` and
+        // that of a lookup with `__owAgentRefreshAnswerMs` (the work
+        // is done at once either way, as in Rust; only the answer is
+        // on its way for that long), and `__owAgentAnswered` counts
+        // the answers of the two that have arrived. Every call is
         // recorded in `__owAgentCalls`, every save in `__owAgentSaves`
-        // and every connection added by hand in `__owAgentAdded`; a
-        // change emits `agent_changed`, as Rust does. The built-in app
+        // and every lookup that ran in `__owAgentLookups`; a change
+        // emits `agent_changed`, as Rust does. The built-in app
         // table here is a short stand-in with made-up apps; the real
         // one is in core/src/settings/agent.rs. Keep in step with
         // scripts/pw-shim.js.
         if (cmd.startsWith("agent_")) {
-          type Tool = { name: string; title: string; kind: string };
+          type Tool = { name: string; title: string; kind: string; problem: string | null };
           type Connection = {
             name: string;
             kind: string;
@@ -976,7 +1028,6 @@ async function installTauriShim(
             allowed_tools: string[];
             tools: Tool[];
             state: string;
-            usable: boolean;
             via: string | null;
           };
           type ConnectionSeed = Partial<Omit<Connection, "tools">> & {
@@ -999,10 +1050,10 @@ async function installTauriShim(
             app_connections: AppRow[] | null;
             listing: Listing;
           };
-          type Choices = {
+          type Patch = {
             enabled?: boolean;
             drafts_only?: boolean;
-            connections?: { name: string; enabled?: boolean; allowed_tools?: string[] }[];
+            connection?: { name: string; enabled?: boolean; tick?: string[]; untick?: string[] };
             app_connections?: Partial<AppRow>[] | null;
           };
           const w = window as unknown as {
@@ -1017,11 +1068,15 @@ async function installTauriShim(
               custom_error?: string;
             };
             __owAgentRefreshMs?: number;
+            __owAgentRefreshAnswerMs?: number;
+            __owAgentSetMs?: number;
+            __owAgentAnswered?: number;
             __owAgentStatus?: Record<string, unknown>;
             __owAgentSetError?: string;
             __owAgentCalls?: { cmd: string; args: Record<string, unknown> }[];
-            __owAgentSaves?: Choices[];
-            __owAgentAdded?: { name: string; command: string; args: string[]; url: string }[];
+            __owAgentSaves?: Patch[];
+            __owAgentLookups?: number;
+            __owAgentAsked?: boolean;
             __owRunningApps?: { id: string; name: string }[];
             __owAskStored?: { enabled?: boolean };
             __owAskSettings?: { enabled?: boolean };
@@ -1049,10 +1104,10 @@ async function installTauriShim(
               title: t.title ?? "",
               // A tool nobody said anything about is one that acts.
               kind: t.kind ?? "act",
+              // Core's sentence when the tool cannot be used at all.
+              problem: t.problem ?? null,
             })),
             state: seed.state ?? "not-looked-up",
-            // The person's own entry needs no lookup.
-            usable: seed.usable ?? seed.kind === "custom",
             via: seed.kind === "custom" ? (seed.via ?? "command") : null,
           });
           const defaultApps: AppRow[] = [
@@ -1078,11 +1133,39 @@ async function installTauriShim(
             };
           }
           const stored = w.__owAgentStored;
+          // The Ask switch and the backend, as the Ask shim has them.
+          const askEnabled = () => w.__owAskStored?.enabled ?? w.__owAskSettings?.enabled ?? false;
+          const backend = () =>
+            w.__owAskBackend?.backend ??
+            w.__owRefineStored?.backend ??
+            w.__owRefineSettings?.backend ??
+            "claude-cli";
+          // `check_caller` in src-tauri/src/agent.rs.
+          const onlyFromMain = () => {
+            if (windowLabel !== "main") throw `${cmd} is not accepted from this window.`;
+          };
+          // An argument Rust requires: Tauri refuses a call without it.
+          const required = <T,>(name: string, ok: (value: unknown) => boolean): T => {
+            const value = (args ?? {})[name];
+            if (!ok(value)) {
+              throw `invalid args \`${name}\` for command \`${cmd}\`: command ${cmd} missing required key ${name}`;
+            }
+            return value as T;
+          };
+          // An ask can start with a connection: the person's own
+          // entry, or one of Claude Code's that a lookup found
+          // (`agent::connections::is_listed` in core).
+          const usable = (c: Connection) =>
+            c.kind === "custom" || (c.state !== "not-looked-up" && c.state !== "missing");
           // The ticked tools of a connection that an ask could call:
-          // with drafts only, a tool that acts is not one of them.
+          // with drafts only, a tool that acts is not one of them,
+          // and a tool that cannot be used never is.
           const runnable = (c: Connection) =>
             c.tools.filter(
-              (t) => c.allowed_tools.includes(t.name) && !(stored.drafts_only && t.kind === "act"),
+              (t) =>
+                c.allowed_tools.includes(t.name) &&
+                t.problem === null &&
+                !(stored.drafts_only && t.kind === "act"),
             );
           const state = () => {
             const table = stored.app_connections ?? defaultApps;
@@ -1091,7 +1174,7 @@ async function installTauriShim(
               drafts_only: stored.drafts_only,
               confirm_timeout_s: stored.confirm_timeout_s,
               max_turns: stored.max_turns,
-              connections: stored.connections,
+              connections: stored.connections.map((c) => ({ ...c, usable: usable(c) })),
               app_connections: table.map((row) => {
                 const named = (c: Connection) =>
                   nameKey(row.connection) !== "" && nameKey(c.name) === nameKey(row.connection);
@@ -1112,19 +1195,37 @@ async function installTauriShim(
             window.__owEmit("agent_changed", structuredClone(now));
             return now;
           };
-          // A lookup of the connections ended (`agent::refresh` and
+          // The answer of a save or a lookup, on its way for `ms`.
+          const answered = <T,>(answer: T, ms: number | undefined): Promise<T> =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                w.__owAgentAnswered = (w.__owAgentAnswered ?? 0) + 1;
+                resolve(answer);
+              }, ms ?? 0),
+            );
+          // A lookup of the connections ended (`agent::list_all` and
           // `merge_listing` in core): what the person chose stays,
-          // the tools and the state come from what was found, a new
-          // connection arrives switched off, and one that is gone
-          // stays only when it was touched.
+          // the tools and the state come from what was found, a tick
+          // for a tool that is gone is dropped, a new connection
+          // arrives switched off, and one that is gone stays only
+          // when it was touched. An entry of the person's own that is
+          // switched off is never started, so it was not looked up.
           const applyListing = () => {
+            w.__owAgentLookups = (w.__owAgentLookups ?? 0) + 1;
             const found = w.__owAgentListing;
             if (found?.error) {
               stored.listing = { ...stored.listing, refreshing: false, error: found.error };
               return;
             }
+            const customError = found?.custom_error ?? "";
+            const notFound = (c: Connection) =>
+              c.kind !== "custom"
+                ? { ...c, state: "missing" }
+                : { ...c, state: c.enabled && customError ? "unknown" : "not-looked-up" };
             if (found?.connections) {
-              const names = new Set(found.connections.map((s) => key(s.name)));
+              const listed = found.connections.map(connection);
+              const inListing = (c: Connection) =>
+                listed.find((l) => key(l.name) === key(c.name) && l.kind === c.kind);
               for (const seed of found.connections) {
                 const fresh = connection(seed);
                 const at = stored.connections.findIndex(
@@ -1132,11 +1233,12 @@ async function installTauriShim(
                 );
                 if (at >= 0) {
                   const kept = stored.connections[at];
+                  // Its own entry, switched off: not started.
+                  if (kept.kind === "custom" && !kept.enabled) continue;
                   stored.connections[at] = {
                     ...kept,
                     tools: fresh.tools.length > 0 ? fresh.tools : kept.tools,
                     state: seed.state ?? "connected",
-                    usable: true,
                   };
                 } else if (fresh.kind === "claude") {
                   stored.connections.push({
@@ -1144,7 +1246,6 @@ async function installTauriShim(
                     enabled: false,
                     allowed_tools: [],
                     state: seed.state ?? "connected",
-                    usable: true,
                   });
                 }
               }
@@ -1152,56 +1253,93 @@ async function installTauriShim(
                 .filter(
                   (c) =>
                     c.kind === "custom" ||
-                    names.has(key(c.name)) ||
+                    inListing(c) !== undefined ||
                     c.enabled ||
                     c.allowed_tools.length > 0,
                 )
                 .map((c) =>
-                  names.has(key(c.name))
-                    ? c
-                    : c.kind === "custom"
-                      ? { ...c, state: "unknown" }
-                      : { ...c, state: "missing", usable: false },
+                  inListing(c) !== undefined && !(c.kind === "custom" && !c.enabled) ? c : notFound(c),
                 );
             } else {
               // Nothing seeded: the lookup finds what is there.
-              stored.connections = stored.connections.map((c) => ({
-                ...c,
-                state: c.state === "not-looked-up" ? "connected" : c.state,
-                usable: true,
-              }));
+              stored.connections = stored.connections.map((c) =>
+                c.kind === "custom" && !c.enabled
+                  ? notFound(c)
+                  : { ...c, state: c.state === "not-looked-up" ? "connected" : c.state },
+              );
+            }
+            for (const c of stored.connections) {
+              c.allowed_tools = c.allowed_tools.filter((t) => c.tools.some((x) => x.name === t));
             }
             stored.listing = {
               refreshing: false,
               refreshed_at_ms: Date.now(),
               error: "",
-              custom_error: found?.custom_error ?? "",
+              custom_error: customError,
             };
           };
-          if (cmd === "agent_get") return state();
-          if (cmd === "agent_set") {
-            if (w.__owAgentSetError) throw w.__owAgentSetError;
-            const { choices } = (args ?? {}) as { choices: Choices };
-            w.__owAgentSaves = [...(w.__owAgentSaves ?? []), structuredClone(choices)];
-            const wasOn = stored.enabled;
-            // `with_choices` in src-tauri/src/agent.rs. A switch that
-            // is left out is the careful one.
-            stored.enabled = choices.enabled ?? false;
-            stored.drafts_only = choices.drafts_only ?? true;
-            for (const c of stored.connections) {
-              const choice = (choices.connections ?? []).find((x) => key(x.name) === key(c.name));
-              if (!choice) continue;
-              c.enabled = choice.enabled ?? false;
-              c.allowed_tools = (choice.allowed_tools ?? []).filter(
-                (t) => c.tools.some((x) => x.name === t) || c.allowed_tools.includes(t),
-              );
+          // `lookup_refusal` in src-tauri/src/agent.rs.
+          const lookupRefusal = () =>
+            !stored.enabled
+              ? "Agent is switched off, so the connections were not looked up."
+              : !askEnabled()
+                ? "Ask is switched off, so the connections were not looked up. Agent only works in an ask."
+                : backend() === "openai-compatible"
+                  ? "Agent needs the Claude backend, so the connections were not looked up."
+                  : null;
+          // `lookup_due` in src-tauri/src/agent.rs: once each time
+          // Agent becomes able to use connections, whichever command
+          // notices. At the first command the app has long started:
+          // the lookup of the start, if there was one, is over.
+          const lookUpIfDue = () => {
+            const able = lookupRefusal() === null;
+            if (w.__owAgentAsked === undefined) {
+              w.__owAgentAsked = able;
+              return;
             }
+            if (!able) {
+              w.__owAgentAsked = false;
+              return;
+            }
+            if (w.__owAgentAsked) return;
+            w.__owAgentAsked = true;
+            stored.listing = { ...stored.listing, refreshing: true };
+            setTimeout(() => {
+              applyListing();
+              announce();
+            }, w.__owAgentRefreshMs ?? 0);
+          };
+          if (cmd === "agent_get") {
+            lookUpIfDue();
+            return state();
+          }
+          if (cmd === "agent_set") {
+            onlyFromMain();
+            const patch = required<Patch>("patch", (v) => typeof v === "object" && v !== null);
+            if (w.__owAgentSetError) throw w.__owAgentSetError;
+            // `deny_unknown_fields` on `AgentPatch` and
+            // `ConnectionPatch`.
+            const unknown = (given: object, known: string[]) =>
+              Object.keys(given).find((field) => !known.includes(field));
+            const odd =
+              unknown(patch, ["enabled", "drafts_only", "connection", "app_connections"]) ??
+              (patch.connection
+                ? unknown(patch.connection, ["name", "enabled", "tick", "untick"])
+                : undefined);
+            if (odd !== undefined) {
+              throw `invalid args \`patch\` for command \`agent_set\`: unknown field \`${odd}\``;
+            }
+            // `with_patch` in src-tauri/src/agent.rs, on a copy: a
+            // patch that is refused changes nothing.
+            const next = structuredClone(stored);
+            if (typeof patch.enabled === "boolean") next.enabled = patch.enabled;
+            if (typeof patch.drafts_only === "boolean") next.drafts_only = patch.drafts_only;
             // `AgentSettings::cleaned` in core: ids in lower case,
             // each app once, a row without an id or a connection
             // dropped.
-            if (Array.isArray(choices.app_connections)) {
+            if (Array.isArray(patch.app_connections)) {
               const rows: AppRow[] = [];
-              for (const raw of choices.app_connections) {
+              for (const raw of patch.app_connections) {
                 const row = {
                   app_id: tidy(raw.app_id).toLowerCase(),
                   app_name: tidy(raw.app_name),
@@ -1212,37 +1350,51 @@ async function installTauriShim(
                 }
                 rows.push(row);
               }
-              stored.app_connections = rows;
-            } else {
-              stored.app_connections = null;
+              next.app_connections = rows;
+            } else if (patch.app_connections === null) {
+              next.app_connections = null;
             }
-            // Agent went on: the connections are looked up in the
-            // background, and the windows hear when that is over.
-            if (!wasOn && stored.enabled) {
-              stored.listing = { ...stored.listing, refreshing: true };
-              setTimeout(() => {
-                applyListing();
-                announce();
-              }, w.__owAgentRefreshMs ?? 0);
+            const change = patch.connection;
+            if (change) {
+              const c = next.connections.find((x) => key(x.name) === key(change.name));
+              if (!c) throw `There is no connection called "${String(change.name ?? "").trim()}".`;
+              if (typeof change.enabled === "boolean") c.enabled = change.enabled;
+              const untick = change.untick ?? [];
+              c.allowed_tools = c.allowed_tools.filter((t) => !untick.includes(t));
+              for (const name of change.tick ?? []) {
+                if (c.allowed_tools.includes(name)) continue;
+                // `tick_refusal` in src-tauri/src/agent.rs.
+                const tool = c.tools.find((t) => t.name === name);
+                if (!tool) {
+                  throw `"${name}" is not a tool this connection is known to have. Refresh and try again.`;
+                }
+                if (tool.problem !== null) throw `"${name}" cannot be ticked. ${tool.problem}`;
+                if (next.drafts_only && tool.kind === "act") {
+                  throw `"${name}" sends, posts, deletes or changes something, so it cannot be ticked while Drafts only is on.`;
+                }
+                c.allowed_tools.push(name);
+              }
             }
-            return announce();
+            Object.assign(stored, next);
+            w.__owAgentSaves = [...(w.__owAgentSaves ?? []), structuredClone(patch)];
+            lookUpIfDue();
+            return answered(announce(), w.__owAgentSetMs);
           }
           if (cmd === "agent_refresh") {
+            onlyFromMain();
+            const refused = lookupRefusal();
+            if (refused !== null) throw refused;
+            w.__owAgentAsked = true;
             stored.listing = { ...stored.listing, refreshing: true };
             return new Promise((resolve) =>
               setTimeout(() => {
                 applyListing();
-                resolve(announce());
+                resolve(answered(announce(), w.__owAgentRefreshAnswerMs));
               }, w.__owAgentRefreshMs ?? 0),
             );
           }
           if (cmd === "agent_status") {
-            const askEnabled = w.__owAskStored?.enabled ?? w.__owAskSettings?.enabled ?? false;
-            const backend =
-              w.__owAskBackend?.backend ??
-              w.__owRefineStored?.backend ??
-              w.__owRefineSettings?.backend ??
-              "claude-cli";
+            lookUpIfDue();
             // `agent::readiness` in core.
             const on = stored.connections.filter((c) => c.enabled);
             const used = on.filter((c) => runnable(c).length > 0);
@@ -1253,9 +1405,9 @@ async function installTauriShim(
             let message: string;
             if (!stored.enabled) {
               message = "Agent is switched off.";
-            } else if (!askEnabled) {
+            } else if (!askEnabled()) {
               message = "Agent only works in an ask, and Ask is switched off.";
-            } else if (backend === "openai-compatible") {
+            } else if (backend() === "openai-compatible") {
               message =
                 "Agent needs the Claude backend. An OpenAI-compatible endpoint cannot use connections.";
             } else if (on.length === 0) {
@@ -1274,38 +1426,19 @@ async function installTauriShim(
                 message += ` ${asking} of them ask you first, every time.`;
               }
             }
-            return { ready, message, ask_enabled: askEnabled, backend, ...(w.__owAgentStatus ?? {}) };
-          }
-          if (cmd === "agent_add_connection") {
-            // `with_custom` in src-tauri/src/agent.rs.
-            const given = (args ?? {}) as {
-              name?: string;
-              command?: string;
-              args?: string[];
-              url?: string;
+            return {
+              ready,
+              message,
+              ask_enabled: askEnabled(),
+              backend: backend(),
+              ...(w.__owAgentStatus ?? {}),
             };
-            const name = tidy(given.name);
-            const command = String(given.command ?? "").trim();
-            const url = String(given.url ?? "").trim();
-            if (!name) throw "Give the connection a name.";
-            if (stored.connections.some((c) => key(c.name) === key(name))) {
-              throw `There is already a connection called "${name}".`;
-            }
-            if (!command && !url) throw "Give the connection a command or a URL.";
-            w.__owAgentAdded = [
-              ...(w.__owAgentAdded ?? []),
-              { name, command, args: (given.args ?? []).filter((a) => a.trim() !== ""), url },
-            ];
-            // Off, nothing ticked, no tools known until a lookup.
-            stored.connections.push(
-              connection({ name, kind: "custom", via: command ? "command" : "url" }),
-            );
-            return announce();
           }
           if (cmd === "agent_remove_connection") {
-            const { name } = (args ?? {}) as { name?: string };
+            onlyFromMain();
+            const name = required<string>("name", (v) => typeof v === "string");
             const at = stored.connections.findIndex((c) => key(c.name) === key(name));
-            if (at < 0) throw `There is no connection called "${String(name ?? "").trim()}".`;
+            if (at < 0) throw `There is no connection called "${name.trim()}".`;
             stored.connections.splice(at, 1);
             return announce();
           }
@@ -1315,7 +1448,10 @@ async function installTauriShim(
               app_name: a.name,
             }));
           }
-          return null;
+          // There is no other command: a window cannot add a
+          // connection (`openwhisper agent connections add-custom`
+          // does, in a terminal).
+          throw `Command ${cmd} not found`;
         }
         if (cmd === "settings_capture_hotkey_start") {
           const { target } = (args ?? {}) as {
@@ -2437,9 +2573,13 @@ export interface MockAskConfirm {
   connection: string;
   tool: string;
   title: string;
+  // The whole input, never cut.
   input: string;
-  input_cut: boolean;
   timeout_s: number;
+  // How long until a yes counts, in milliseconds: 600 when the
+  // confirm is raised. `emitAskTick` counts it down by itself for a
+  // confirm it has sent before.
+  armed_in_ms: number;
 }
 
 export const ASK_SNAPSHOT_DEFAULTS: MockAskSnapshot = {
@@ -2489,20 +2629,42 @@ export interface MockAskSettings {
 // Push `ask_tick` as the Rust emitter does, and make the snapshot the
 // one the shim's `ask_snapshot`, `ask_cancel`, `ask_dismiss`,
 // `ask_insert` and `ask_copy` answer from. `version` goes up by
-// itself unless the test sets it. Returns how many listeners got it.
+// itself unless the test sets it. A confirm is raised the first time
+// a tick carries it: from then its `armed_in_ms` counts down like in
+// core (a later tick with the same request says what is left), and
+// the shim refuses a yes until it is 0. Returns how many listeners
+// got it.
 export async function emitAskTick(
   page: Page,
   snapshot: Partial<MockAskSnapshot> & Pick<MockAskSnapshot, "phase">,
 ): Promise<number> {
   return page.evaluate(
     ({ defaults, given }) => {
-      const w = window as unknown as { __owAskSnapshot?: { version: number } };
+      const w = window as unknown as {
+        __owAskSnapshot?: { version: number };
+        __owAskConfirmRaised?: { ask_id: number; request_id: string; until: number };
+      };
       const next = {
         ...defaults,
         id: 1,
         version: (w.__owAskSnapshot?.version ?? 0) + 1,
         ...given,
       };
+      if (next.confirm) {
+        const raised = w.__owAskConfirmRaised;
+        if (!raised || raised.ask_id !== next.id || raised.request_id !== next.confirm.request_id) {
+          w.__owAskConfirmRaised = {
+            ask_id: next.id,
+            request_id: next.confirm.request_id,
+            until: performance.now() + (next.confirm.armed_in_ms ?? 600),
+          };
+        }
+        const until = w.__owAskConfirmRaised?.until ?? 0;
+        next.confirm = {
+          ...next.confirm,
+          armed_in_ms: Math.max(0, Math.ceil(until - performance.now())),
+        };
+      }
       w.__owAskSnapshot = next;
       return window.__owEmit("ask_tick", next);
     },

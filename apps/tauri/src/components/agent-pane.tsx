@@ -1,7 +1,17 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { ChevronRight, CircleAlert, Plus, RefreshCw, X } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -10,15 +20,6 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import {
   Field,
@@ -41,17 +42,14 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   AGENT_STATE_LABELS,
   AGENT_TOOL_KINDS,
   agentAppLabel,
   toolLabel,
   type AgentAppConnection,
-  type AgentChoices,
   type AgentConnection,
-  type AgentCustomConnection,
+  type AgentPatch,
   type AgentState,
   type AgentTool,
   type AgentToolKind,
@@ -60,11 +58,6 @@ import { formatClock } from "@/lib/history";
 import type { SettingsPaneId } from "@/lib/settings-panes";
 import { useAgent, useAgentRunningApps, useAgentStatus } from "@/lib/use-agent";
 import { cn } from "@/lib/utils";
-
-// Longest name core keeps (`AGENT_NAME_MAX_CHARS`), and the longest
-// command, argument or URL (`AGENT_CUSTOM_FIELD_MAX_CHARS`).
-const NAME_MAX_CHARS = 120;
-const CUSTOM_FIELD_MAX_CHARS = 2000;
 
 interface AgentPaneProps {
   // Opens another settings pane: Ask, which Agent works inside, and
@@ -77,14 +70,16 @@ interface AgentPaneProps {
 // connection.
 //
 // A thin view over Rust (`agent_get`, `agent_set`, `agent_refresh`,
-// `agent_status`). Which tool is of which kind, what an ask may use
-// and whether an ask uses tools at all are core's decisions; this
-// pane shows them and sends back the person's choices. How a
-// connection is reached never comes here.
+// `agent_status`). Which tool is of which kind, which tool can be
+// used at all, what an ask may use and whether an ask uses tools at
+// all are core's decisions; this pane shows them and sends back one
+// change at a time. How a connection is reached never comes here,
+// and a connection of the person's own is not added here either: it
+// is a command that is started on this computer, so it is added in
+// a terminal.
 export function AgentPane({ onOpenPane }: AgentPaneProps) {
-  const { state, error, update, refresh, addConnection, removeConnection } = useAgent();
+  const { state, error, update, refresh, removeConnection } = useAgent();
   const status = useAgentStatus();
-  const [adding, setAdding] = useState(false);
 
   const enabled = state?.enabled ?? false;
   // The two things Agent needs besides its own switch. Said whether
@@ -107,10 +102,12 @@ export function AgentPane({ onOpenPane }: AgentPaneProps) {
             in front of you.
           </FieldDescription>
           <FieldDescription data-testid="agent-cannot">
-            It cannot use a connection or a tool you have not ticked.
-            It cannot send, post, delete or change anything while
-            Drafts only is on. It cannot open your files or run
-            commands on this computer.
+            It cannot use a connection you have not switched on or a
+            tool you have not ticked. A connection can do whatever
+            its ticked tools do. Tools that read or draft run without
+            asking. Tools that act ask you every time, and cannot run
+            at all while Drafts only is on. Claude Code's own tools
+            for files and the shell are switched off in an ask.
           </FieldDescription>
           <FieldDescription data-testid="agent-privacy">
             What a tool returns is sent to Claude together with your
@@ -121,7 +118,7 @@ export function AgentPane({ onOpenPane }: AgentPaneProps) {
           id="agent-enabled"
           checked={enabled}
           disabled={!state}
-          onCheckedChange={(on) => update((c) => ({ ...c, enabled: on }))}
+          onCheckedChange={(on) => update({ enabled: on })}
         />
       </Field>
 
@@ -199,7 +196,7 @@ export function AgentPane({ onOpenPane }: AgentPaneProps) {
           id="agent-drafts-only"
           checked={state?.drafts_only ?? true}
           disabled={!state}
-          onCheckedChange={(on) => update((c) => ({ ...c, drafts_only: on }))}
+          onCheckedChange={(on) => update({ drafts_only: on })}
         />
       </Field>
 
@@ -209,9 +206,11 @@ export function AgentPane({ onOpenPane }: AgentPaneProps) {
         <ConnectionsSection
           state={state}
           disabled={!enabled}
+          // A lookup starts every connection Claude Code has, so
+          // Rust only runs one while an ask could use what it finds.
+          cannotLookUp={askOff || otherBackend}
           update={update}
           onRefresh={refresh}
-          onAdd={() => setAdding(true)}
           onRemove={removeConnection}
         />
       )}
@@ -219,33 +218,48 @@ export function AgentPane({ onOpenPane }: AgentPaneProps) {
       <Separator />
 
       {state && <AppsSection state={state} disabled={!enabled} update={update} />}
-
-      <ConnectionDialog open={adding} onOpenChange={setAdding} onAdd={addConnection} />
     </FieldGroup>
   );
 }
 
-type Update = (change: (choices: AgentChoices) => AgentChoices) => void;
+type Update = (patch: AgentPatch) => void;
 
 // The connections: what Claude Code has and the person's own, each
 // with its switch and, opened, its tools by kind.
 function ConnectionsSection({
   state,
   disabled,
+  cannotLookUp,
   update,
   onRefresh,
-  onAdd,
   onRemove,
 }: {
   state: AgentState;
   // Agent is switched off.
   disabled: boolean;
+  // Ask is off or the backend is not Claude: nothing is looked up.
+  cannotLookUp: boolean;
   update: Update;
   onRefresh: () => void;
-  onAdd: () => void;
   onRemove: (name: string) => void;
 }) {
   const [filter, setFilter] = useState("");
+  // The connection that is about to be removed. Kept while the
+  // dialog closes, so its text does not change on the way out.
+  const [removal, setRemoval] = useState<{ open: boolean; connection: AgentConnection | null }>({
+    open: false,
+    connection: null,
+  });
+  // Where keyboard focus goes when the dialog closes: the row it was
+  // opened from (its Remove button is hidden again by then and
+  // cannot take focus), or Refresh when that row is gone.
+  const openedFrom = useRef<HTMLElement | null>(null);
+  const refreshButton = useRef<HTMLButtonElement | null>(null);
+  const focusAfterClose = () => {
+    const row = openedFrom.current;
+    if (row === null) return true;
+    return row.isConnected ? row : refreshButton.current;
+  };
   // The connections whose tools are showing, by name. All closed to
   // begin with: one setup can have hundreds of tools.
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
@@ -273,19 +287,16 @@ function ConnectionsSection({
       return next;
     });
 
-  const change = (name: string, patch: { enabled?: boolean; allowed_tools?: string[] }) =>
-    update((c) => ({
-      ...c,
-      connections: c.connections.map((x) => (x.name === name ? { ...x, ...patch } : x)),
-    }));
+  // One connection's switch, or tools of it to tick or untick.
+  const change = (name: string, patch: { enabled?: boolean; tick?: string[]; untick?: string[] }) =>
+    update({ connection: { name, ...patch } });
 
   return (
     <>
       <SectionHeader>Connections</SectionHeader>
       <FieldDescription data-testid="agent-connections-intro">
-        Nothing is switched on until you switch it on. Looking the
-        connections up starts Claude Code for a few seconds. No tool
-        is called and the model is not asked anything.
+        The connections Claude Code on this computer has, and your
+        own. Nothing is switched on until you switch it on.
       </FieldDescription>
       {disabled && (
         <FieldDescription data-testid="agent-off-note">
@@ -296,9 +307,10 @@ function ConnectionsSection({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button
+          ref={refreshButton}
           variant="outline"
           size="sm"
-          disabled={disabled || listing.refreshing}
+          disabled={disabled || cannotLookUp || listing.refreshing}
           data-testid="agent-refresh"
           onClick={onRefresh}
         >
@@ -308,10 +320,6 @@ function ConnectionsSection({
             <RefreshCw data-icon="inline-start" />
           )}
           {listing.refreshing ? "Looking up" : "Refresh"}
-        </Button>
-        <Button variant="outline" size="sm" disabled={disabled} onClick={onAdd}>
-          <Plus data-icon="inline-start" />
-          Add connection
         </Button>
         <span
           className="text-xs text-muted-foreground tabular-nums"
@@ -325,6 +333,16 @@ function ConnectionsSection({
               : "Not looked up since the app started."}
         </span>
       </div>
+
+      <FieldDescription data-testid="agent-refresh-note">
+        Refresh starts Claude Code and every connection it has for a
+        few seconds, to ask each one for its tools. No tool is called
+        and the model is not asked anything.
+      </FieldDescription>
+      <FieldDescription data-testid="agent-add-note">
+        A connection of your own is added in a terminal, with{" "}
+        <code className="font-mono text-xs">openwhisper agent connections add-custom</code>.
+      </FieldDescription>
 
       {listing.error && (
         <Alert variant="destructive" data-testid="agent-listing-error">
@@ -345,7 +363,7 @@ function ConnectionsSection({
             <EmptyTitle>No connections yet</EmptyTitle>
             <EmptyDescription>
               Press Refresh to look up the connections Claude Code has
-              on this computer, or add one of your own.
+              on this computer.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -389,14 +407,48 @@ function ConnectionsSection({
                     // Switched on: the next thing to do is tick tools.
                     if (enabled && connection.tools.length > 0) setOpenFor(connection.name, true);
                   }}
-                  onToolsChange={(allowed_tools) => change(connection.name, { allowed_tools })}
-                  onRemove={() => onRemove(connection.name)}
+                  onTick={(names, tick) =>
+                    change(connection.name, tick ? { tick: names } : { untick: names })
+                  }
+                  onRemove={(row) => {
+                    openedFrom.current = row;
+                    setRemoval({ open: true, connection });
+                  }}
                 />
               ))}
             </ul>
           )}
         </>
       )}
+
+      <AlertDialog
+        open={removal.open}
+        onOpenChange={(open) => setRemoval((d) => ({ ...d, open }))}
+      >
+        <AlertDialogContent finalFocus={focusAfterClose} data-testid="agent-remove-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove the connection “{removal.connection?.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {removal.connection?.kind === "custom"
+                ? "It is taken off the list with its ticks, and the app forgets how to reach it. To use it again, add it again in a terminal."
+                : "It is taken off the list with its ticks. Claude Code no longer has it."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              data-testid="agent-remove-confirm"
+              onClick={() => {
+                if (removal.connection) onRemove(removal.connection.name);
+                setRemoval((d) => ({ ...d, open: false }));
+              }}
+            >
+              Remove connection
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
@@ -417,7 +469,7 @@ function ConnectionRow({
   open,
   onOpenChange,
   onEnabledChange,
-  onToolsChange,
+  onTick,
   onRemove,
 }: {
   connection: AgentConnection;
@@ -429,10 +481,13 @@ function ConnectionRow({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onEnabledChange: (enabled: boolean) => void;
-  onToolsChange: (tools: string[]) => void;
-  onRemove: () => void;
+  // Tick or untick the named tools; the other ticks stay.
+  onTick: (names: string[], tick: boolean) => void;
+  // Asks first. Gets the row, for the focus to come back to.
+  onRemove: (row: HTMLElement | null) => void;
 }) {
   const { name, tools, allowed_tools: allowed } = connection;
+  const rowRef = useRef<HTMLDivElement>(null);
   const ticked = tools.filter((t) => allowed.includes(t.name)).length;
   const hasTools = tools.length > 0;
   // The person's own entry, and a connection Claude Code no longer
@@ -459,6 +514,7 @@ function ConnectionRow({
             hovered or has keyboard focus (`.ow-hover-host` in
             App.css), and a hidden button cannot be tabbed to. */}
         <div
+          ref={rowRef}
           className="ow-hover-host flex min-h-12 items-center gap-2 rounded-lg py-1.5 pr-3 pl-1.5 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           tabIndex={removable ? 0 : undefined}
         >
@@ -499,7 +555,7 @@ function ConnectionRow({
               tabIndex={0}
               disabled={disabled}
               aria-label={`Remove ${name}`}
-              onClick={onRemove}
+              onClick={() => onRemove(rowRef.current)}
             >
               <X />
             </Button>
@@ -527,7 +583,7 @@ function ConnectionRow({
             draftsOnly={draftsOnly}
             disabled={disabled}
             needle={needle}
-            onToolsChange={onToolsChange}
+            onTick={onTick}
           />
         </CollapsibleContent>
       </Collapsible>
@@ -541,24 +597,19 @@ function ToolList({
   draftsOnly,
   disabled,
   needle,
-  onToolsChange,
+  onTick,
 }: {
   connection: AgentConnection;
   draftsOnly: boolean;
   disabled: boolean;
   needle: string;
-  onToolsChange: (tools: string[]) => void;
+  onTick: (names: string[], tick: boolean) => void;
 }) {
   const id = useId();
   const { tools, allowed_tools: allowed } = connection;
   // Ticks only count on a connection that is switched on.
   const off = disabled || !connection.enabled;
   const visible = needle === "" ? tools : tools.filter((t) => toolMatches(t, needle));
-
-  const setTicked = (names: string[], tick: boolean) => {
-    const rest = allowed.filter((t) => !names.includes(t));
-    onToolsChange(tick ? [...rest, ...names] : rest);
-  };
 
   return (
     <div className="flex flex-col gap-4 border-t p-3" data-testid="agent-tools">
@@ -582,7 +633,7 @@ function ToolList({
             allowed={allowed}
             off={off}
             draftsOnly={draftsOnly}
-            onTick={setTicked}
+            onTick={onTick}
           />
         );
       })}
@@ -616,7 +667,9 @@ function ToolGroup({
   // With drafts only, a tool that acts cannot run, ticked or not.
   const unavailable = act && draftsOnly;
   const ticked = tools.filter((t) => allowed.includes(t.name)).length;
-  const all = ticked === tools.length;
+  // A tool core cannot use at all is never ticked.
+  const tickable = tools.filter((t) => t.problem === null || t.problem === undefined);
+  const all = tickable.length > 0 && tickable.every((t) => allowed.includes(t.name));
 
   return (
     <FieldSet
@@ -640,7 +693,7 @@ function ToolGroup({
           {description}{" "}
           {act &&
             (unavailable
-              ? "Unavailable while Drafts only is on: none of these can run."
+              ? "Unavailable while Drafts only is on: none of these can run, and none can be ticked. One that is ticked can be unticked."
               : "Each of these asks you in the answer panel before it runs, every time.")}
         </FieldDescription>
         {/* Not for the tools that act: each of those is ticked on
@@ -650,10 +703,10 @@ function ToolGroup({
             variant="ghost"
             size="xs"
             className="shrink-0"
-            disabled={off}
+            disabled={off || tickable.length === 0}
             onClick={() =>
               onTick(
-                tools.map((t) => t.name),
+                tickable.map((t) => t.name),
                 !all,
               )
             }
@@ -665,7 +718,13 @@ function ToolGroup({
       <FieldGroup data-slot="checkbox-group" className="max-h-64 gap-2 overflow-y-auto py-0.5">
         {tools.map((tool) => {
           const boxId = `${idPrefix}-${tool.name}`;
-          const blocked = off || unavailable;
+          const problem = tool.problem ?? null;
+          const checked = problem === null && allowed.includes(tool.name);
+          // A tool that cannot be used is never ticked. With drafts
+          // only, a tool that acts cannot be ticked either, but one
+          // that was ticked before can be unticked: it would come
+          // alive again the day Drafts only is switched off.
+          const blocked = off || problem !== null || (unavailable && !checked);
           return (
             <Field
               key={tool.name}
@@ -673,19 +732,31 @@ function ToolGroup({
               data-disabled={blocked ? "true" : undefined}
               data-testid="agent-tool"
               data-tool={tool.name}
+              data-unusable={problem !== null ? "true" : undefined}
             >
               <Checkbox
                 id={boxId}
-                checked={allowed.includes(tool.name)}
+                checked={checked}
                 disabled={blocked}
-                onCheckedChange={(checked) => onTick([tool.name], checked === true)}
+                aria-describedby={problem !== null ? `${boxId}-problem` : undefined}
+                onCheckedChange={(next) => onTick([tool.name], next === true)}
               />
-              <FieldLabel htmlFor={boxId} className="min-w-0 flex-wrap items-baseline font-normal">
-                <span>{toolLabel(tool)}</span>
-                {tool.title.trim() !== "" && tool.title !== tool.name && (
-                  <span className="font-mono text-xs text-muted-foreground">{tool.name}</span>
+              <FieldContent className="min-w-0 gap-0.5">
+                <FieldLabel
+                  htmlFor={boxId}
+                  className="min-w-0 flex-wrap items-baseline font-normal [overflow-wrap:anywhere]"
+                >
+                  <span>{toolLabel(tool)}</span>
+                  {tool.title.trim() !== "" && tool.title !== tool.name && (
+                    <span className="font-mono text-xs text-muted-foreground">{tool.name}</span>
+                  )}
+                </FieldLabel>
+                {problem !== null && (
+                  <FieldDescription id={`${boxId}-problem`} data-testid="agent-tool-problem">
+                    {problem}
+                  </FieldDescription>
                 )}
-              </FieldLabel>
+              </FieldContent>
             </Field>
           );
         })}
@@ -721,8 +792,7 @@ function AppsSection({
   // The table as it is stored: what `agent_set` gets back.
   const plain = (): AgentAppConnection[] =>
     rows.map(({ app_id, app_name, connection: to }) => ({ app_id, app_name, connection: to }));
-  const save = (table: AgentAppConnection[] | null) =>
-    update((c) => ({ ...c, app_connections: table }));
+  const save = (table: AgentAppConnection[] | null) => update({ app_connections: table });
 
   const picked = openApps.find((a) => a.app_id === appId) ?? null;
   const onAdd = () => {
@@ -904,185 +974,6 @@ function AppsSection({
         </div>
       )}
     </>
-  );
-}
-
-// Add a connection of the person's own: a command with its
-// arguments, or a URL. The form lives in a child that mounts with
-// the dialog, so every opening starts empty.
-function ConnectionDialog({
-  open,
-  onOpenChange,
-  onAdd,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  // Resolves to what went wrong, or null when it was added.
-  onAdd: (connection: AgentCustomConnection) => Promise<string | null>;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md" data-testid="agent-connection-dialog">
-        <ConnectionForm onAdd={onAdd} onDone={() => onOpenChange(false)} />
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ConnectionForm({
-  onAdd,
-  onDone,
-}: {
-  onAdd: (connection: AgentCustomConnection) => Promise<string | null>;
-  onDone: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [way, setWay] = useState<"command" | "url">("command");
-  const [command, setCommand] = useState("");
-  const [args, setArgs] = useState("");
-  const [url, setUrl] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const ready = name.trim() !== "" && (way === "command" ? command.trim() : url.trim()) !== "";
-
-  const submit = async () => {
-    if (!ready || saving) return;
-    setSaving(true);
-    setError(null);
-    const problem = await onAdd(
-      way === "command"
-        ? {
-            name,
-            command,
-            // One argument per line, as written.
-            args: args.split("\n").filter((line) => line.trim() !== ""),
-            url: "",
-          }
-        : { name, command: "", args: [], url },
-    );
-    setSaving(false);
-    if (problem) setError(problem);
-    else onDone();
-  };
-
-  return (
-    <form
-      className="grid gap-4"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle>Add a connection</DialogTitle>
-        <DialogDescription>
-          A tool server of your own. It is added switched off with no
-          tool ticked. Press Refresh afterwards to look up its tools.
-        </DialogDescription>
-      </DialogHeader>
-
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor="agent-connection-name">Name</FieldLabel>
-          <Input
-            id="agent-connection-name"
-            placeholder="notes"
-            value={name}
-            maxLength={NAME_MAX_CHARS}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </Field>
-        <Field>
-          <FieldLabel>How it is reached</FieldLabel>
-          {/* Control choice: two ways, both visible at once. */}
-          <ToggleGroup
-            value={[way]}
-            onValueChange={(v) => {
-              const next = v[0];
-              if (next === "command" || next === "url") setWay(next);
-            }}
-            variant="outline"
-          >
-            <ToggleGroupItem value="command">Command</ToggleGroupItem>
-            <ToggleGroupItem value="url">URL</ToggleGroupItem>
-          </ToggleGroup>
-        </Field>
-        {way === "command" ? (
-          <>
-            <Field>
-              <FieldLabel htmlFor="agent-connection-command">Command</FieldLabel>
-              <Input
-                id="agent-connection-command"
-                className="font-mono"
-                placeholder="/usr/local/bin/notes-server"
-                value={command}
-                maxLength={CUSTOM_FIELD_MAX_CHARS}
-                autoComplete="off"
-                spellCheck={false}
-                autoCapitalize="off"
-                autoCorrect="off"
-                onChange={(e) => setCommand(e.target.value)}
-              />
-              <FieldDescription>
-                The program is started on this computer when the
-                connections are looked up and when an ask uses it.
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="agent-connection-args">Arguments</FieldLabel>
-              <Textarea
-                id="agent-connection-args"
-                className="font-mono text-xs"
-                rows={3}
-                placeholder={"--stdio"}
-                value={args}
-                spellCheck={false}
-                onChange={(e) => setArgs(e.target.value)}
-              />
-              <FieldDescription>
-                Optional. One argument per line. Variables for its
-                environment are set with{" "}
-                <code className="font-mono text-xs">
-                  openwhisper agent connections add-custom --env
-                </code>
-                .
-              </FieldDescription>
-            </Field>
-          </>
-        ) : (
-          <Field>
-            <FieldLabel htmlFor="agent-connection-url">URL</FieldLabel>
-            <Input
-              id="agent-connection-url"
-              className="font-mono"
-              placeholder="https://notes.example/mcp"
-              value={url}
-              maxLength={CUSTOM_FIELD_MAX_CHARS}
-              autoComplete="off"
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              onChange={(e) => setUrl(e.target.value)}
-            />
-          </Field>
-        )}
-        {error && (
-          <FieldDescription className="text-destructive" role="alert">
-            {error}
-          </FieldDescription>
-        )}
-      </FieldGroup>
-
-      <DialogFooter>
-        <DialogClose render={<Button type="button" variant="outline" />}>Cancel</DialogClose>
-        <Button type="submit" disabled={!ready || saving}>
-          Add connection
-        </Button>
-      </DialogFooter>
-    </form>
   );
 }
 

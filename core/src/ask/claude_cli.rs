@@ -13,10 +13,15 @@
 //! - **No tools, pinned.** `--tools ""` as in Refine, and always
 //!   `--permission-mode default`: the CLI's own default mode is a
 //!   per-machine setting and can be a looser one. With web search on,
-//!   the tool list is exactly `WebSearch`. If the model is seen
+//!   the tool list is exactly `WebSearch,WebFetch`, and the fetch
+//!   tool is allowed for the two weather hosts and nothing else
+//!   ([`super::weather`], [`web_allow_rules`]). If the model is seen
 //!   starting any other tool, the turn fails and the process is
 //!   killed; with these flags that cannot happen, so if it does, the
-//!   flags no longer mean what this file assumes.
+//!   flags no longer mean what this file assumes. A fetch of another
+//!   address is not such a tool call: the CLI refuses it and the
+//!   model answers without it ([`WebTools`]). Should one come back
+//!   with content all the same, the turn fails there.
 //! - **A conversation.** stdin stays open after the first question,
 //!   so a later [`AskBackend::send`] continues in the same process
 //!   with the context kept (TASK-98 sends the screen that way). One
@@ -46,6 +51,7 @@
 //! (2026-11-10): cold, the first text is back after 1.3 to 2.3 s;
 //! with the process spawned at record start, after 0.5 to 0.7 s.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -58,8 +64,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use super::steps::{AskConfirm, ConfirmDecision, ConfirmOutcome, Waiting};
-use super::{AskBackend, AskError, AskEvent, AskInput, AskReply, AskSetup, CancelFlag, POLL, Turn};
+use super::steps::{self, AskConfirm, ConfirmDecision, ConfirmOutcome, Waiting};
+use super::{AskBackend, AskError, AskEvent, AskInput, AskReply, AskSetup, CancelFlag, POLL, Turn, weather};
 use crate::refine::claude_cli as refine_cli;
 use crate::refine::{CallUsage, PlanWindows};
 use crate::settings::{ClaudeCliSettings, RefineEffort};
@@ -67,8 +73,26 @@ use crate::settings::{ClaudeCliSettings, RefineEffort};
 /// Backend id: the same backend as Refine's.
 pub const ID: &str = refine_cli::ID;
 
-/// The one tool an ask may have, and only with web search on.
+/// The tool an ask has with web search on. The other one is the
+/// fetch tool, for the weather hosts only ([`super::weather`]).
 pub(crate) const WEB_SEARCH_TOOL: &str = "WebSearch";
+
+/// The value of `--tools` with web search on: the two built-in web
+/// tools and no other.
+pub(crate) fn web_tools() -> String {
+    format!("{WEB_SEARCH_TOOL},{}", weather::FETCH_TOOL)
+}
+
+/// What the allow list holds for the web with web search on: the
+/// search, and the fetch tool once per weather host
+/// ([`weather::allow_rules`]). Every entry is fixed at compile time.
+/// The bare name of the fetch tool is never one of them: that would
+/// allow every address.
+pub(crate) fn web_allow_rules() -> Vec<String> {
+    let mut rules = vec![WEB_SEARCH_TOOL.to_string()];
+    rules.extend(weather::allow_rules());
+    rules
+}
 
 /// The Claude Code CLI as an [`AskBackend`].
 pub struct ClaudeCliAsk {
@@ -85,7 +109,7 @@ impl ClaudeCliAsk {
 
     fn spawn(&self, setup: &AskSetup) -> Result<Process, AskError> {
         let bin = find_binary(&self.settings)?;
-        let reader = Box::new(PlainReader { web_search: setup.web_search });
+        let reader = Box::new(PlainReader { web: WebTools::new(setup.web_search) });
         Process::spawn(&bin, setup, |prompt_file| Ok(spawn_args(setup, prompt_file)), reader, None, false)
     }
 }
@@ -158,11 +182,14 @@ impl AskBackend for ClaudeCliAsk {
 
 /// Arguments for one headless conversation: Refine's lean flags
 /// ([`refine_cli::spawn_args`]) with streaming, the permission mode
-/// pinned and, with web search on, that one tool.
+/// pinned and, with web search on, the two web tools: the search, and
+/// the fetch tool for the weather hosts only ([`web_allow_rules`]).
+/// With web search off there is no tool and no allow list, as before.
 ///
-/// `--tools` and `--allowedTools` take a list, so each is followed by
-/// another `--flag`, never by a bare value that could be read as one
-/// more tool.
+/// `--tools` and `--allowedTools` take a list, handed over as one
+/// comma-separated argument each, and each is followed by another
+/// `--flag`, never by a bare value that could be read as one more
+/// tool.
 pub fn spawn_args(setup: &AskSetup, system_prompt_file: &Path) -> Vec<String> {
     // The Claude CLI has no "minimal" level.
     let effort = match setup.effort {
@@ -174,11 +201,8 @@ pub fn spawn_args(setup: &AskSetup, system_prompt_file: &Path) -> Vec<String> {
         && let Some(tools) = args.iter().position(|a| a == "--tools")
         && tools + 1 < args.len()
     {
-        args[tools + 1] = WEB_SEARCH_TOOL.to_string();
-        args.splice(
-            tools + 2..tools + 2,
-            ["--allowedTools".to_string(), WEB_SEARCH_TOOL.to_string()],
-        );
+        args[tools + 1] = web_tools();
+        args.splice(tools + 2..tools + 2, ["--allowedTools".to_string(), web_allow_rules().join(",")]);
     }
     args.extend(
         ["--include-partial-messages", "--permission-mode", "default"]
@@ -242,12 +266,214 @@ pub(crate) trait Reader: Send {
 
 /// The reader of an ask without tools: [`read_line`].
 struct PlainReader {
-    web_search: bool,
+    web: WebTools,
 }
 
 impl Reader for PlainReader {
     fn read(&mut self, line: &str) -> Result<Line, AskError> {
-        read_line(line, self.web_search)
+        // The one question the CLI can have for an ask without
+        // tools: may this fetch run?
+        if let Some(permission) = self.web.asked(line) {
+            return Ok(Line::Permission(permission));
+        }
+        read_line(line, &mut self.web)
+    }
+}
+
+/// The built-in web tools of one conversation, and what its lines
+/// say about them.
+///
+/// With web search off there are none: any tool call is an error.
+/// With it on there are two, and they are read differently:
+///
+/// - the **search** is shown while it runs
+///   ([`AskEvent::Searching`], [`AskEvent::SearchDone`]);
+/// - a **fetch of a weather host** ([`weather::is_allowed`]) is shown
+///   the same way, with [`weather::SHOWN`] in place of a query;
+/// - a **fetch of any other address** is not shown, and it does not
+///   run. It is stopped twice over: the CLI checks with this process
+///   before every fetch ([`WebTools::hello`],
+///   [`WebTools::before_fetch`]) and is told no, and the address is
+///   on no allow list either. The model is told so and answers
+///   without it; the sink hears that it was refused
+///   ([`AskEvent::FetchRefused`]). Should the result of such a fetch
+///   come back as anything but a refusal, the CLI has read from an
+///   address this ask may not reach: the turn fails there, which
+///   ends the process, and the person gets the error instead of an
+///   answer made from it.
+pub(crate) struct WebTools {
+    on: bool,
+    /// Fetches of an address that is not a weather host, by the id
+    /// of the tool call, with the host as it may be shown.
+    elsewhere: HashMap<String, String>,
+}
+
+/// One of the two built-in web tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WebTool {
+    Search,
+    Fetch,
+}
+
+/// What stands for the host of an address that has none this app
+/// can read.
+const UNREADABLE_ADDRESS: &str = "an address that could not be read";
+
+/// The name this app gives its check before a fetch
+/// ([`WebTools::hello`]); the CLI names it when it asks.
+pub(crate) const FETCH_CHECK: &str = "openwhisper-fetch";
+
+/// What the model is told when it tries to fetch an address that is
+/// not a weather host.
+pub const FETCH_ELSEWHERE_DENIED: &str = "Nothing was fetched: from here only weather data can be read, from api.open-meteo.com and geocoding-api.open-meteo.com. Do not try this or any other address again. Answer from what you know, and say in one sentence that you could not read the page.";
+
+impl WebTools {
+    pub(crate) fn new(web_search: bool) -> Self {
+        Self { on: web_search, elsewhere: HashMap::new() }
+    }
+
+    /// What a process is told before its first question when the
+    /// fetch tool is in play: check with this process before every
+    /// fetch ([`FETCH_CHECK`]). `None` with web search off: then
+    /// there is no fetch tool and nothing is said, so the CLI is
+    /// started and spoken to exactly as before.
+    ///
+    /// Why the allow list is not enough. Claude Code lets its fetch
+    /// tool read a list of its own without any rule (about a hundred
+    /// documentation sites, found in Claude Code 2.1.325; nothing
+    /// documented switches that off). The allow list of this app
+    /// cannot take those away. A check before the tool runs can: it
+    /// comes first, and a no from it is final. `onFailure: block`
+    /// makes a check that is not answered, or answered wrongly,
+    /// count as a no.
+    pub(crate) fn hello(web_search: bool) -> Option<String> {
+        web_search.then(|| {
+            json!({
+                "type": "control_request",
+                "request_id": "openwhisper-hello",
+                "request": {
+                    "subtype": "initialize",
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": weather::FETCH_TOOL,
+                            "hookCallbackIds": [FETCH_CHECK],
+                            "onFailure": "block",
+                        }],
+                    },
+                },
+            })
+            .to_string()
+        })
+    }
+
+    /// `line` is a question from the CLI to an ask without tools: the
+    /// answer to give. The one question such an ask knows is the
+    /// check before a fetch ([`WebTools::hello`]); any other gets
+    /// "not supported", and nothing runs because of it. `None` for a
+    /// line that is not a question.
+    pub(crate) fn asked(&mut self, line: &str) -> Option<Permission> {
+        // Cheap for the lines of an answer, which are never this.
+        if !line.contains("\"control_request\"") {
+            return None;
+        }
+        let v = serde_json::from_str::<Value>(line.trim()).ok()?;
+        if v["type"].as_str() != Some("control_request") {
+            return None;
+        }
+        let request_id = v["request_id"].as_str().filter(|id| !id.is_empty())?;
+        let verdict = match self.before_fetch(&v["request"]) {
+            None => Verdict::Unsupported,
+            Some(Ok(())) => Verdict::Fetch { deny: None, events: Vec::new() },
+            Some(Err(_)) => Verdict::Fetch { deny: Some(FETCH_ELSEWHERE_DENIED.to_string()), events: Vec::new() },
+        };
+        Some(Permission { request_id: request_id.to_string(), verdict })
+    }
+
+    /// What to say to one check before a fetch: `Ok` leaves the
+    /// fetch to the CLI's allow list (the address is a weather
+    /// host); `Err` is a no, with the host that was asked for, safe
+    /// to show. `None` when `request` is not the check this app
+    /// asked for.
+    ///
+    /// A no is the answer to everything that is not exactly a fetch
+    /// of an https address on a weather host: another address, an
+    /// address that cannot be read, another tool.
+    pub(crate) fn before_fetch(&mut self, request: &Value) -> Option<Result<(), String>> {
+        if !self.on
+            || request["subtype"].as_str() != Some("hook_callback")
+            || request["callback_id"].as_str() != Some(FETCH_CHECK)
+        {
+            return None;
+        }
+        let input = &request["input"];
+        let url = input["tool_input"]["url"].as_str().unwrap_or("");
+        if input["tool_name"].as_str() == Some(weather::FETCH_TOOL) && weather::is_allowed(url) {
+            return Some(Ok(()));
+        }
+        let host = weather::host_of(url).unwrap_or_else(|| UNREADABLE_ADDRESS.to_string());
+        // Remembered, so the result of this call is read as a
+        // refusal also when the call itself was not seen first.
+        let id = request["tool_use_id"].as_str().or_else(|| input["tool_use_id"].as_str()).unwrap_or("");
+        self.elsewhere.insert(id.to_string(), host.clone());
+        Some(Err(host))
+    }
+
+    /// Which web tool `block` calls: `Ok(None)` when it is not a tool
+    /// call at all. Any other tool is an error, and so is a web tool
+    /// while web search is off: an ask may not use tools.
+    pub(crate) fn tool(&self, block: &Value) -> Result<Option<WebTool>, AskError> {
+        let kind = block["type"].as_str().unwrap_or("");
+        if !kind.ends_with("tool_use") {
+            return Ok(None);
+        }
+        let name = block["name"].as_str().unwrap_or("unknown");
+        match name {
+            WEB_SEARCH_TOOL if self.on => Ok(Some(WebTool::Search)),
+            weather::FETCH_TOOL if self.on => Ok(Some(WebTool::Fetch)),
+            _ => Err(AskError::Backend(format!(
+                "The model tried to use a tool ({}). An ask may not use tools, so it was stopped.",
+                steps::one_line(name, 80)
+            ))),
+        }
+    }
+
+    /// A complete tool call (its input is there). Returns what to
+    /// show for it, if anything; see the type's docs.
+    pub(crate) fn called(&mut self, block: &Value) -> Result<Option<AskEvent>, AskError> {
+        Ok(match self.tool(block)? {
+            None => None,
+            Some(WebTool::Search) => {
+                Some(AskEvent::Searching { query: block["input"]["query"].as_str().unwrap_or("").to_string() })
+            }
+            Some(WebTool::Fetch) => {
+                let url = block["input"]["url"].as_str().unwrap_or("");
+                if weather::is_allowed(url) {
+                    Some(AskEvent::Searching { query: weather::SHOWN.to_string() })
+                } else {
+                    let host = weather::host_of(url).unwrap_or_else(|| UNREADABLE_ADDRESS.to_string());
+                    self.elsewhere.insert(block["id"].as_str().unwrap_or("").to_string(), host);
+                    None
+                }
+            }
+        })
+    }
+
+    /// The result of a web tool call, fed back to the model: the
+    /// search or the weather came back, or a fetch of another address
+    /// was refused. An error when such a fetch was not refused.
+    pub(crate) fn came_back(&mut self, block: &Value) -> Result<AskEvent, AskError> {
+        let Some(host) = self.elsewhere.remove(block["tool_use_id"].as_str().unwrap_or("")) else {
+            return Ok(AskEvent::SearchDone);
+        };
+        if block["is_error"].as_bool().unwrap_or(false) {
+            Ok(AskEvent::FetchRefused { host })
+        } else {
+            Err(AskError::Backend(format!(
+                "Claude Code read from a web address an ask may not reach ({host}), so the ask was stopped and its \
+answer thrown away. An ask can only read weather data from {}.",
+                weather::SOURCE
+            )))
+        }
     }
 }
 
@@ -274,6 +500,12 @@ pub(crate) enum Verdict {
     /// Not a question this app knows how to answer: the CLI is told
     /// so, and nothing runs because of it.
     Unsupported,
+    /// The CLI asks before a fetch, because this app told it to
+    /// ([`WebTools::hello`]). `deny` is what the model is told when
+    /// the address is not a weather host, and the fetch does not
+    /// run; `None` leaves the fetch to the CLI's allow list. `events`
+    /// go to the sink.
+    Fetch { deny: Option<String>, events: Vec<AskEvent> },
 }
 
 /// What the model is told when the person said no.
@@ -362,9 +594,16 @@ impl Process {
                 )));
             }
         };
-        let stdin = child.stdin.take();
+        let mut stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        // With the fetch tool in play: ask the CLI to check with
+        // this process before every fetch. A few hundred bytes into
+        // an empty pipe, so the write does not wait. A CLI that is
+        // already gone is found out by the first turn.
+        if let (Some(hello), Some(stdin)) = (WebTools::hello(setup.web_search), stdin.as_mut()) {
+            let _ = stdin.write_all(hello.as_bytes()).and_then(|()| stdin.write_all(b"\n")).and_then(|()| stdin.flush());
+        }
 
         let errors = Arc::new(Mutex::new(String::new()));
         if let Some(mut stderr) = stderr {
@@ -508,8 +747,6 @@ impl Process {
                 }
                 Line::Text(delta) => turn.text(&delta),
                 Line::NewMessage => turn.new_message(),
-                Line::Searching(query) => turn.event(AskEvent::Searching { query }),
-                Line::SearchDone => turn.event(AskEvent::SearchDone),
                 Line::Plan(windows) => plan = Some(windows),
                 Line::Result(text) => {
                     // A CLI that did not stream still answers.
@@ -567,6 +804,11 @@ impl Process {
             }
             Verdict::Deny { message, events } => {
                 self.respond(&deny(&request_id, &message))?;
+                events.into_iter().for_each(|event| turn.event(event));
+                Ok(Duration::ZERO)
+            }
+            Verdict::Fetch { deny, events } => {
+                self.respond(&fetch_answer(&request_id, deny.as_deref()))?;
                 events.into_iter().for_each(|event| turn.event(event));
                 Ok(Duration::ZERO)
             }
@@ -667,6 +909,27 @@ fn deny(request_id: &str, message: &str) -> Value {
     })
 }
 
+/// The answer to the CLI's question before a fetch
+/// ([`WebTools::hello`]): with `deny`, the fetch does not run and the
+/// model is told why; without, nothing is decided here and the CLI
+/// goes on to its allow list.
+fn fetch_answer(request_id: &str, deny: Option<&str>) -> Value {
+    let said = match deny {
+        Some(reason) => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            },
+        }),
+        None => json!({}),
+    };
+    json!({
+        "type": "control_response",
+        "response": { "subtype": "success", "request_id": request_id, "response": said },
+    })
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         // Close stdin first: an idle CLI exits on its own once its
@@ -687,7 +950,7 @@ impl Drop for Process {
 }
 
 /// What one line of the CLI's output means for an ask. The last
-/// three only come from the reader of an ask with tools.
+/// two only come from the reader of an ask with tools.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(not(feature = "agent"), allow(dead_code))]
 pub(crate) enum Line {
@@ -695,17 +958,14 @@ pub(crate) enum Line {
     Text(String),
     /// The model started a new message (after a search).
     NewMessage,
-    /// The model searches the web for this.
-    Searching(String),
-    /// The search came back.
-    SearchDone,
     /// The plan's usage windows, for the usage of this turn.
     Plan(PlanWindows),
     /// The turn is over; the whole answer as the CLI reports it.
     Result(String),
     /// Nothing an ask acts on (init, thinking, block boundaries).
     Other,
-    /// Events for the sink, as they are: the steps of an ask with
+    /// Events for the sink, as they are: a web search or a read of
+    /// the weather that starts or ends, and the steps of an ask with
     /// tools.
     Events(Vec<AskEvent>),
     /// Something the person should know about how the answer was
@@ -716,8 +976,9 @@ pub(crate) enum Line {
 }
 
 /// Read one stdout line. An error ends the turn: the CLI reported a
-/// failure, or the model reached for a tool an ask may not use.
-pub(crate) fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> {
+/// failure, the model reached for a tool an ask may not use, or a
+/// fetch of an address an ask may not reach came back with content.
+pub(crate) fn read_line(line: &str, web: &mut WebTools) -> Result<Line, AskError> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
         return Ok(Line::Other);
     };
@@ -732,7 +993,7 @@ pub(crate) fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> 
                 // Caught here, as the block starts, and not only on
                 // the `assistant` line that follows it.
                 Some("content_block_start") => {
-                    check_tool(&event["content_block"], web_search)?;
+                    web.tool(&event["content_block"])?;
                     Ok(Line::Other)
                 }
                 _ => Ok(Line::Other),
@@ -741,20 +1002,21 @@ pub(crate) fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> 
         // The finished message. Its text already arrived as deltas;
         // a tool call is complete here, with its input.
         Some("assistant") => {
-            let mut searching = None;
+            let mut events = Vec::new();
             for block in v["message"]["content"].as_array().into_iter().flatten() {
-                if check_tool(block, web_search)? {
-                    searching = Some(block["input"]["query"].as_str().unwrap_or("").to_string());
-                }
+                events.extend(web.called(block)?);
             }
-            Ok(searching.map_or(Line::Other, Line::Searching))
+            Ok(if events.is_empty() { Line::Other } else { Line::Events(events) })
         }
         // The tool's answer, fed back to the model.
         Some("user") => {
-            let has_result = v["message"]["content"]
-                .as_array()
-                .is_some_and(|blocks| blocks.iter().any(|b| b["type"].as_str() == Some("tool_result")));
-            Ok(if has_result { Line::SearchDone } else { Line::Other })
+            let mut events = Vec::new();
+            for block in v["message"]["content"].as_array().into_iter().flatten() {
+                if block["type"].as_str() == Some("tool_result") {
+                    events.push(web.came_back(block)?);
+                }
+            }
+            Ok(if events.is_empty() { Line::Other } else { Line::Events(events) })
         }
         Some("rate_limit_event") => Ok(refine_cli::parse_rate_limit_line(line).map_or(Line::Other, Line::Plan)),
         Some("result") => match refine_cli::parse_result_line(line) {
@@ -763,24 +1025,6 @@ pub(crate) fn read_line(line: &str, web_search: bool) -> Result<Line, AskError> 
             None => Ok(Line::Other),
         },
         _ => Ok(Line::Other),
-    }
-}
-
-/// `Ok(true)` when `block` is the web search and web search is on,
-/// `Ok(false)` when it is not a tool call at all. Any other tool is an
-/// error: an ask may not use tools.
-pub(crate) fn check_tool(block: &Value, web_search: bool) -> Result<bool, AskError> {
-    let kind = block["type"].as_str().unwrap_or("");
-    if !kind.ends_with("tool_use") {
-        return Ok(false);
-    }
-    let name = block["name"].as_str().unwrap_or("unknown");
-    if web_search && name == WEB_SEARCH_TOOL {
-        Ok(true)
-    } else {
-        Err(AskError::Backend(format!(
-            "The model tried to use a tool ({name}). An ask may not use tools, so it was stopped."
-        )))
     }
 }
 
@@ -891,7 +1135,7 @@ done
         let tools = args.iter().position(|a| a == "--tools").unwrap();
         assert_eq!(args[tools + 1], "");
         assert!(!args.iter().any(|a| a == "--allowedTools"));
-        assert!(!joined.contains("WebSearch"));
+        assert!(!joined.contains("WebSearch") && !joined.contains("WebFetch"));
         assert!(!args.iter().any(|a| a == "--bare" || a == "--dangerously-skip-permissions"));
         // Exactly Refine's flags and the three added ones.
         let refine = refine_cli::spawn_args("sonnet", RefineEffort::Low, Path::new("/tmp/prompt.txt"));
@@ -941,11 +1185,19 @@ done
     }
 
     #[test]
-    fn web_search_adds_exactly_the_two_websearch_flags() {
+    fn web_search_adds_exactly_the_two_web_tools_and_their_allow_list() {
         let plain = spawn_args(&setup(false), Path::new("/tmp/p.txt"));
         let web = spawn_args(&setup(true), Path::new("/tmp/p.txt"));
         let tools = web.iter().position(|a| a == "--tools").unwrap();
-        assert_eq!(web[tools..tools + 4], ["--tools", "WebSearch", "--allowedTools", "WebSearch"]);
+        assert_eq!(
+            web[tools..tools + 4],
+            [
+                "--tools",
+                "WebSearch,WebFetch",
+                "--allowedTools",
+                "WebSearch,WebFetch(domain:api.open-meteo.com),WebFetch(domain:geocoding-api.open-meteo.com)",
+            ]
+        );
         // Each list is followed by a flag, so nothing after it can be
         // read as one more tool.
         assert!(web[tools + 4].starts_with("--"), "{web:?}");
@@ -953,7 +1205,69 @@ done
         let mut without = web.clone();
         without.splice(tools + 1..tools + 4, [String::new()]);
         assert_eq!(without, plain);
-        assert_eq!(web.iter().filter(|a| *a == "WebSearch").count(), 2);
+        // The fetch tool is named in those two arguments and nowhere
+        // else, and the permission mode is still pinned.
+        assert_eq!(web.iter().filter(|a| a.contains("WebFetch")).count(), 2);
+        assert_eq!(web.iter().filter(|a| a.contains("WebSearch")).count(), 2);
+        assert!(web.join(" ").contains("--permission-mode default"));
+        assert!(!web.iter().any(|a| a == "--disallowedTools" || a == "--dangerously-skip-permissions"));
+    }
+
+    /// The entries of an allow list, as the CLI takes them apart: at
+    /// every comma that is not inside brackets.
+    fn allow_entries(list: &str) -> Vec<String> {
+        let (mut entries, mut entry, mut depth) = (Vec::new(), String::new(), 0i32);
+        for c in list.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    entries.push(std::mem::take(&mut entry));
+                    continue;
+                }
+                _ => {}
+            }
+            entry.push(c);
+        }
+        entries.push(entry);
+        entries
+    }
+
+    #[test]
+    fn the_fetch_tool_is_only_ever_allowed_for_the_weather_hosts() {
+        // The whole of what the web puts on an allow list.
+        assert_eq!(
+            web_allow_rules(),
+            ["WebSearch", "WebFetch(domain:api.open-meteo.com)", "WebFetch(domain:geocoding-api.open-meteo.com)"]
+        );
+        assert_eq!(web_tools(), "WebSearch,WebFetch");
+        for effort in [None, Some(RefineEffort::Minimal), Some(RefineEffort::High)] {
+            let args = spawn_args(&AskSetup { effort, ..setup(true) }, Path::new("/tmp/p.txt"));
+            let allowed = &args[args.iter().position(|a| a == "--allowedTools").unwrap() + 1];
+            let entries = allow_entries(allowed);
+            let fetch: Vec<&String> = entries.iter().filter(|entry| entry.contains("Fetch")).collect();
+            // One entry per host, each exactly `WebFetch(domain:HOST)`.
+            assert_eq!(fetch.len(), weather::HOSTS.len(), "{allowed}");
+            for host in weather::HOSTS {
+                assert!(fetch.contains(&&format!("WebFetch(domain:{host})")), "{host} is missing in {allowed}");
+            }
+            // Never the bare tool, which allows every address, never
+            // a pattern, and no rule for another host.
+            for entry in &entries {
+                assert_ne!(entry, "WebFetch", "{allowed}");
+                assert!(!entry.contains('*') && !entry.contains(' '), "{entry}");
+                assert!(entry == "WebSearch" || fetch.contains(&entry), "{entry} in {allowed}");
+            }
+            assert_eq!(entries.len(), 1 + weather::HOSTS.len(), "{allowed}");
+        }
+        // With web search off: no fetch tool, no search, no allow
+        // list at all.
+        for effort in [None, Some(RefineEffort::Low), Some(RefineEffort::High)] {
+            let args = spawn_args(&AskSetup { effort, ..setup(false) }, Path::new("/tmp/p.txt"));
+            assert!(!args.iter().any(|a| a.contains("WebFetch") || a.contains("WebSearch") || a.contains("open-meteo")), "{args:?}");
+            assert!(!args.iter().any(|a| a == "--allowedTools"));
+            assert_eq!(args[args.iter().position(|a| a == "--tools").unwrap() + 1], "");
+        }
     }
 
     #[test]
@@ -1004,16 +1318,22 @@ done
         assert!(args.contains("--permission-mode default"), "{args}");
         assert!(args.contains("--include-partial-messages"), "{args}");
         assert!(!args.contains("Brennholt"), "the prompt must not ride on the command line: {args}");
-        assert!(!args.contains("WebSearch"), "{args}");
+        assert!(!args.contains("WebSearch") && !args.contains("WebFetch"), "{args}");
     }
 
     #[test]
-    fn web_search_reaches_the_command_line_as_the_two_flags() {
+    fn web_search_reaches_the_command_line_as_the_two_lists() {
         let dir = tempfile::tempdir().unwrap();
         let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), STREAM_OK));
         send(&mut cli, &setup(true), &question(), LONG).0.unwrap();
         let args = fs::read_to_string(dir.path().join("args.txt")).unwrap();
-        assert!(args.contains("--tools WebSearch --allowedTools WebSearch --strict-mcp-config"), "{args}");
+        assert!(
+            args.contains(
+                "--tools WebSearch,WebFetch --allowedTools \
+WebSearch,WebFetch(domain:api.open-meteo.com),WebFetch(domain:geocoding-api.open-meteo.com) --strict-mcp-config"
+            ),
+            "{args}"
+        );
         assert!(args.contains("--permission-mode default"), "{args}");
     }
 
@@ -1154,18 +1474,332 @@ echo '{"type":"stream_event","event":{"type":"content_block_start","index":1,"co
 
     #[test]
     fn a_tool_call_is_caught_on_either_line_that_shows_it() {
+        let on = || WebTools::new(true);
         let start = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Write","input":{}}}}"#;
-        assert!(matches!(read_line(start, true), Err(AskError::Backend(_))));
+        assert!(matches!(read_line(start, &mut on()), Err(AskError::Backend(_))));
         let done = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
-        assert!(matches!(read_line(done, true), Err(AskError::Backend(_))));
+        assert!(matches!(read_line(done, &mut on()), Err(AskError::Backend(_))));
         let server = r#"{"type":"assistant","message":{"content":[{"type":"server_tool_use","name":"web_fetch","input":{}}]}}"#;
-        assert!(matches!(read_line(server, true), Err(AskError::Backend(_))));
+        assert!(matches!(read_line(server, &mut on()), Err(AskError::Backend(_))));
         // Text and thinking blocks are not tools.
+        let off = || WebTools::new(false);
         let text = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text","text":""}}}"#;
-        assert_eq!(read_line(text, false), Ok(Line::Other));
+        assert_eq!(read_line(text, &mut off()), Ok(Line::Other));
         let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hm"}}}"#;
-        assert_eq!(read_line(thinking, false), Ok(Line::Other));
-        assert_eq!(read_line("not json", false), Ok(Line::Other));
+        assert_eq!(read_line(thinking, &mut off()), Ok(Line::Other));
+        assert_eq!(read_line("not json", &mut off()), Ok(Line::Other));
+        // The fetch tool starts as a block like any other tool: with
+        // web search on that is no error, with it off it is.
+        let fetch = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_f","name":"WebFetch","input":{}}}}"#;
+        assert_eq!(read_line(fetch, &mut on()), Ok(Line::Other));
+        match read_line(fetch, &mut off()) {
+            Err(AskError::Backend(m)) => assert!(m.contains("WebFetch") && m.contains("may not use tools"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // A name is shown on one line, whatever it holds.
+        let odd = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Evil\nTool","input":{}}]}}"#;
+        match read_line(odd, &mut on()) {
+            Err(AskError::Backend(m)) => assert!(!m.contains('\n'), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The check before a fetch, as Claude Code 2.1.325 sends it.
+    fn check(request_id: &str, callback: &str, tool: &str, url: &str, tool_use_id: &str) -> String {
+        json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": callback,
+                "input": {
+                    "hook_event_name": "PreToolUse",
+                    "permission_mode": "default",
+                    "tool_name": tool,
+                    "tool_input": { "url": url, "prompt": "the title" },
+                    "tool_use_id": tool_use_id,
+                },
+                "tool_use_id": tool_use_id,
+            },
+        })
+        .to_string()
+    }
+
+    /// A weather ask as the real CLI streams it: it takes the hello,
+    /// then the question; the place is turned into coordinates, the
+    /// forecast is read (each after a check), then the answer.
+    fn reads_the_weather() -> String {
+        let geo = "https://geocoding-api.open-meteo.com/v1/search?name=Oslo&count=1";
+        let now = "https://api.open-meteo.com/v1/forecast?latitude=59.91&longitude=10.75&current=temperature_2m";
+        format!(
+            r#"
+here="$(dirname "$0")"
+read -r hello; printf '%s\n' "$hello" > "$here/hello.txt"
+read -r line; printf '%s\n' "$line" > "$here/question.txt"
+echo '{{"type":"control_response","response":{{"subtype":"success","request_id":"openwhisper-hello","response":{{"commands":[]}}}}}}'
+echo '{{"type":"stream_event","event":{{"type":"message_start"}}}}'
+echo '{{"type":"stream_event","event":{{"type":"content_block_start","index":0,"content_block":{{"type":"tool_use","id":"toolu_geo","name":"WebFetch","input":{{}}}}}}}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_geo","name":"WebFetch","input":{{"url":"{geo}","prompt":"coordinates"}}}}]}}}}'
+echo '{check_geo}'
+read -r answer; printf '%s\n' "$answer" > "$here/answer-1.txt"
+echo '{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_geo","type":"tool_result","content":"latitude 59.91, longitude 10.75"}}]}}}}'
+echo '{{"type":"stream_event","event":{{"type":"message_start"}}}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"toolu_now","name":"WebFetch","input":{{"url":"{now}","prompt":"the weather now"}}}}]}}}}'
+echo '{check_now}'
+read -r answer; printf '%s\n' "$answer" > "$here/answer-2.txt"
+echo '{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"toolu_now","type":"tool_result","content":"3.2 C, overcast"}}]}}}}'
+echo '{{"type":"stream_event","event":{{"type":"message_start"}}}}'
+echo '{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"In Oslo it is 3 degrees and overcast (Open-Meteo)."}}}}}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"In Oslo it is 3 degrees and overcast (Open-Meteo)."}}'
+"#,
+            check_geo = check("req-geo", FETCH_CHECK, "WebFetch", geo, "toolu_geo"),
+            check_now = check("req-now", FETCH_CHECK, "WebFetch", now, "toolu_now"),
+        )
+    }
+
+    fn json_file(path: &Path) -> Value {
+        serde_json::from_str(&wait_for(path)).unwrap()
+    }
+
+    #[test]
+    fn a_read_of_the_weather_is_shown_like_a_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &reads_the_weather()));
+        let (reply, events) = send(&mut cli, &setup(true), &question(), LONG);
+        let reading = || AskEvent::Searching { query: "weather data from open-meteo.com".into() };
+        assert_eq!(
+            events,
+            vec![
+                reading(),
+                AskEvent::SearchDone,
+                reading(),
+                AskEvent::SearchDone,
+                AskEvent::Text("In Oslo it is 3 degrees and overcast (Open-Meteo).".into()),
+            ]
+        );
+        assert_eq!(reply.unwrap().text, "In Oslo it is 3 degrees and overcast (Open-Meteo).");
+        // The address itself is never shown: only where it leads.
+        assert!(!format!("{events:?}").contains("latitude"));
+        // Both checks were answered, and neither decided anything:
+        // a weather host is left to the allow list.
+        for (file, id) in [("answer-1.txt", "req-geo"), ("answer-2.txt", "req-now")] {
+            let answer = json_file(&dir.path().join(file));
+            assert_eq!(answer["type"], "control_response", "{file}");
+            assert_eq!(answer["response"], json!({ "subtype": "success", "request_id": id, "response": {} }), "{file}");
+        }
+    }
+
+    #[test]
+    fn the_cli_is_told_to_check_before_every_fetch_only_while_web_search_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &reads_the_weather()));
+        send(&mut cli, &setup(true), &question(), LONG).0.unwrap();
+        // The first line the CLI gets: the check, for the fetch tool
+        // and nothing else, and a check that fails counts as a no.
+        assert_eq!(
+            json_file(&dir.path().join("hello.txt")),
+            json!({
+                "type": "control_request",
+                "request_id": "openwhisper-hello",
+                "request": {
+                    "subtype": "initialize",
+                    "hooks": {
+                        "PreToolUse": [{ "matcher": "WebFetch", "hookCallbackIds": ["openwhisper-fetch"], "onFailure": "block" }],
+                    },
+                },
+            })
+        );
+        // Then the question, as always.
+        let sent = json_file(&dir.path().join("question.txt"));
+        assert_eq!(sent["message"]["content"][0]["text"], "<question>\nwhat is the capital of norway\n</question>");
+        assert_eq!(WebTools::hello(true).as_deref(), Some(fs::read_to_string(dir.path().join("hello.txt")).unwrap().trim()));
+
+        // With web search off there is no fetch tool, and the CLI is
+        // told nothing: the first line it gets is the question
+        // (`streams_the_text_in_order_and_reports_first_text_and_usage`
+        // reads it back).
+        assert_eq!(WebTools::hello(false), None);
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), STREAM_OK));
+        send(&mut cli, &setup(false), &question(), LONG).0.unwrap();
+        let first = json_file(&dir.path().join("stdin-1.txt"));
+        assert_eq!(first["type"], "user");
+        assert!(!dir.path().join("stdin-2.txt").exists());
+    }
+
+    #[test]
+    fn with_web_search_off_the_fetch_tool_is_a_tool_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = SEARCHES.replace("WebSearch", "WebFetch");
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &body));
+        let (reply, events) = send(&mut cli, &setup(false), &question(), LONG);
+        match reply.unwrap_err() {
+            AskError::Backend(m) => assert!(m.contains("WebFetch") && m.contains("may not use tools"), "{m}"),
+            other => panic!("expected Backend, got {other:?}"),
+        }
+        assert!(events.is_empty() && cli.process.is_none(), "{events:?}");
+        // And a check that arrives all the same is not answered with
+        // a yes: this ask asked for none.
+        let mut off = WebTools::new(false);
+        let asked = off.asked(&check("req-1", FETCH_CHECK, "WebFetch", "https://api.open-meteo.com/v1/forecast", "toolu_1"));
+        assert_eq!(asked, Some(Permission { request_id: "req-1".into(), verdict: Verdict::Unsupported }));
+    }
+
+    /// The model reaches for another address. `CHECK` is the check
+    /// the CLI makes first (empty for a CLI that makes none), `RESULT`
+    /// what comes back for the call.
+    const FETCHES_ELSEWHERE: &str = r#"
+here="$(dirname "$0")"
+echo $$ > "$here/pid.txt"
+read -r hello
+read -r line
+echo '{"type":"stream_event","event":{"type":"message_start"}}'
+echo '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_x","name":"WebFetch","input":{}}}}'
+echo '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_x","name":"WebFetch","input":{"url":"URL","prompt":"the title"}}]}}'
+CHECK
+echo 'RESULT'
+echo '{"type":"stream_event","event":{"type":"message_start"}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I cannot read that page from here."}}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"I cannot read that page from here."}'
+sleep 30
+"#;
+
+    /// What the CLI feeds back after a no from the check, and after
+    /// its own allow list said no (the shapes Claude Code 2.1.325
+    /// prints; the second one without its apostrophe).
+    const STOPPED_BY_THE_CHECK: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"PreToolUse:WebFetch hook error: Nothing was fetched.","is_error":true,"tool_use_id":"toolu_x"}]}}"#;
+    const REFUSED: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Claude requested permissions to use WebFetch, but you have not granted it yet.","is_error":true,"tool_use_id":"toolu_x"}]},"tool_result_meta":[{"id":"toolu_x","non_execution_kind":"user-rejected"}]}"#;
+    const CAME_BACK: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_x","type":"tool_result","content":"Example Domain"}]}}"#;
+
+    fn fetches(url: &str, with_check: bool, result: &str) -> String {
+        let check = if with_check {
+            format!(
+                "echo '{}'\nread -r answer; printf '%s\\n' \"$answer\" > \"$here/answer.txt\"",
+                check("req-x", FETCH_CHECK, "WebFetch", url, "toolu_x")
+            )
+        } else {
+            String::new()
+        };
+        FETCHES_ELSEWHERE.replace("URL", url).replace("CHECK", &check).replace("RESULT", result)
+    }
+
+    const OTHER_ADDRESSES: [(&str, &str); 6] = [
+        ("https://example.com/?q=hello", "example.com"),
+        ("https://docs.example.com/guide", "docs.example.com"),
+        ("https://api.open-meteo.com.example.com/v1/forecast", "api.open-meteo.com.example.com"),
+        ("https://api.open-meteo.com@example.com/", "example.com"),
+        ("http://api.open-meteo.com/v1/forecast", "api.open-meteo.com"),
+        ("not an address", "an address that could not be read"),
+    ];
+
+    #[test]
+    fn a_fetch_of_another_address_is_stopped_by_the_check_before_it_runs() {
+        for (url, host) in OTHER_ADDRESSES {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &fetches(url, true, STOPPED_BY_THE_CHECK)));
+            let (reply, events) = send(&mut cli, &setup(true), &question(), LONG);
+            // Never shown as a search: nothing was read.
+            assert_eq!(
+                events,
+                vec![
+                    AskEvent::FetchRefused { host: host.to_string() },
+                    AskEvent::Text("I cannot read that page from here.".into()),
+                ],
+                "{url}"
+            );
+            assert_eq!(reply.unwrap().text, "I cannot read that page from here.", "{url}");
+            // The no, as the CLI takes it: the tool does not run, and
+            // the model is told why.
+            let answer = json_file(&dir.path().join("answer.txt"));
+            assert_eq!(answer["response"]["subtype"], "success", "{url}");
+            assert_eq!(answer["response"]["request_id"], "req-x", "{url}");
+            assert_eq!(
+                answer["response"]["response"],
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": FETCH_ELSEWHERE_DENIED,
+                    },
+                }),
+                "{url}"
+            );
+        }
+        assert!(FETCH_ELSEWHERE_DENIED.contains("api.open-meteo.com and geocoding-api.open-meteo.com"));
+    }
+
+    #[test]
+    fn a_check_is_a_no_for_everything_but_a_fetch_of_a_weather_host() {
+        let mut web = WebTools::new(true);
+        let verdict = |web: &mut WebTools, line: &str| web.asked(line).map(|permission| permission.verdict);
+        let no = Some(Verdict::Fetch { deny: Some(FETCH_ELSEWHERE_DENIED.to_string()), events: Vec::new() });
+        let yes = Some(Verdict::Fetch { deny: None, events: Vec::new() });
+        for host in weather::HOSTS {
+            let url = format!("https://{host}/v1/x?name=Oslo");
+            assert_eq!(verdict(&mut web, &check("r", FETCH_CHECK, "WebFetch", &url, "t")), yes, "{url}");
+        }
+        for (url, _) in OTHER_ADDRESSES {
+            assert_eq!(verdict(&mut web, &check("r", FETCH_CHECK, "WebFetch", url, "t")), no, "{url}");
+        }
+        // Another tool under this check, with an address that would
+        // be fine for a fetch.
+        let fine = "https://api.open-meteo.com/v1/forecast";
+        assert_eq!(verdict(&mut web, &check("r", FETCH_CHECK, "Bash", fine, "t")), no);
+        // A check this app never asked for, and any other question:
+        // not answered with a yes or a no.
+        assert_eq!(verdict(&mut web, &check("r", "someone-elses", "WebFetch", fine, "t")), Some(Verdict::Unsupported));
+        let other = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"https://api.open-meteo.com/"}}}"#;
+        assert_eq!(verdict(&mut web, other), Some(Verdict::Unsupported));
+        // Nothing to answer to, and lines that are no question.
+        assert_eq!(verdict(&mut web, &check("", FETCH_CHECK, "WebFetch", fine, "t")), None);
+        assert_eq!(verdict(&mut web, r#"{"type":"assistant","message":{"content":[{"type":"text","text":"a \"control_request\" is a line"}]}}"#), None);
+        assert_eq!(verdict(&mut web, "not json \"control_request\""), None);
+    }
+
+    #[test]
+    fn a_fetch_of_another_address_is_refused_by_the_allow_list_when_no_check_is_made() {
+        // A CLI that does not check first still has the allow list:
+        // the address is not on it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &fetches("https://example.com/?q=hello", false, REFUSED)));
+        let (reply, events) = send(&mut cli, &setup(true), &question(), LONG);
+        assert_eq!(
+            events,
+            vec![
+                AskEvent::FetchRefused { host: "example.com".into() },
+                AskEvent::Text("I cannot read that page from here.".into()),
+            ]
+        );
+        assert_eq!(reply.unwrap().text, "I cannot read that page from here.");
+    }
+
+    #[test]
+    fn a_fetch_of_another_address_that_comes_back_ends_the_ask() {
+        // Neither the check nor the allow list stopped it. With
+        // these flags that cannot happen, so if it does, they no
+        // longer mean what this file assumes, and nothing made from
+        // that page is shown.
+        for with_check in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let body = fetches("https://docs.example.com/guide?note=hello", with_check, CAME_BACK);
+            let mut cli = ClaudeCliAsk::new(fake_cli(dir.path(), &body));
+            cli.warm(&setup(true));
+            let pid = wait_for(&dir.path().join("pid.txt"));
+            let (reply, events) = send(&mut cli, &setup(true), &question(), LONG);
+            match reply.unwrap_err() {
+                AskError::Backend(m) => {
+                    assert!(m.contains("a web address an ask may not reach (docs.example.com)"), "{m}");
+                    assert!(m.contains("An ask can only read weather data from open-meteo.com."), "{m}");
+                    assert!(!m.contains("note=hello") && !m.contains('\n'), "{m}");
+                }
+                other => panic!("expected Backend, got {other:?}"),
+            }
+            // Nothing reached the sink, and the process is gone
+            // before it could say more.
+            assert!(events.is_empty(), "{events:?}");
+            assert!(cli.process.is_none());
+            assert!(!alive(&pid), "process {pid} survived");
+        }
     }
 
     #[test]

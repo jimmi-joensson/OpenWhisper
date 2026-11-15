@@ -61,6 +61,13 @@
 //!   with tools, shows every tool call and asks before anything that
 //!   sends, posts, deletes or changes something; `agent eval` runs
 //!   the eval set against a test fixture.
+//! - `scenarios`: end-to-end checks of normal use (TASK-103). A
+//!   scenario is a person's situation (their settings, a question as
+//!   they would say it) and a check on what they would see. `scenarios
+//!   list` shows them; `scenarios run` runs them against the real
+//!   backend in a scratch config folder, with a test fixture as the
+//!   only connection and a stand-in for the screen; `scenarios run
+//!   --offline` proves the checks without asking a model.
 //!
 //! Convention: stdout = data (the answer), stderr = log (verbose
 //! traces, errors). Pipelines like `openwhisper transcribe --json
@@ -115,6 +122,8 @@ enum Command {
     Vision(commands::vision::VisionArgs),
     /// Agent: an ask that can use your own tool connections.
     Agent(commands::agent::AgentArgs),
+    /// Scenarios: end-to-end checks of normal use, in a scratch folder.
+    Scenarios(commands::scenarios::ScenariosArgs),
 }
 
 fn main() -> Result<()> {
@@ -133,5 +142,6 @@ fn main() -> Result<()> {
         Command::Ask(args) => commands::ask::run(args, cli.json),
         Command::Vision(args) => commands::vision::run(args, cli.json),
         Command::Agent(args) => commands::agent::run(args, cli.json),
+        Command::Scenarios(args) => commands::scenarios::run(args, cli.json),
     }
 }

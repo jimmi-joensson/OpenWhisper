@@ -41,9 +41,12 @@ pub const ASK_PLACE_MAX_CHARS: usize = 120;
 #[serde(default)]
 pub struct ContextSettings {
     /// The date, the local time, the time zone and its UTC offset.
+    /// With the Claude backend, Claude Code tells the model the date
+    /// itself, whatever this says ([`crate::refine::added_by_backend`]).
     pub date_time: bool,
     /// Operating system, machine model, chip, memory, power, displays,
-    /// free disk space, online or offline.
+    /// free disk space, online or offline. With the Claude backend,
+    /// Claude Code tells the model the operating system itself.
     pub computer: bool,
     /// The name of the app the person is working in when they ask.
     /// Never the title of its window.
@@ -95,7 +98,10 @@ pub struct AskSettings {
     pub enabled: bool,
     /// Let the model search the web when the answer needs current
     /// facts. Off by default: a search sends the query to a search
-    /// provider and takes many seconds. Claude backend only.
+    /// provider and takes many seconds. For weather the model then
+    /// also reads live data from open-meteo.com, which is sent the
+    /// place asked about ([`crate::ask::weather`]). Claude backend
+    /// only.
     pub web_search: bool,
     /// The user's standing instructions for answers ("answer in
     /// Danish", "I am a nurse, skip the basics"). Empty = none.

@@ -102,6 +102,17 @@ export function RefinePane() {
             within {seconds} seconds, or anything goes wrong, your words
             are typed as transcribed.
           </FieldDescription>
+          {/* What Claude Code tells the model by itself, with every
+              request (core: `refine::added_by_backend`). Another
+              backend gets exactly what this app sends. */}
+          {backend === "claude-cli" && (
+            <FieldDescription data-testid="refine-added-by-backend">
+              Claude Code also tells the model a few things by itself:
+              today's date, the operating system, the shell, the name
+              of the model, the working folder (a neutral one) and the
+              email address of your Claude account.
+            </FieldDescription>
+          )}
         </FieldContent>
         <Switch
           id="refine-enabled"

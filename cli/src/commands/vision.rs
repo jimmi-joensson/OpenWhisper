@@ -778,6 +778,12 @@ mod tests {
     /// of the CLI; and no file names core's capture entry point or
     /// the pixel test's hook.
     ///
+    /// One more file makes such a plan, and can never see the screen
+    /// with it: the scenario runner (`commands/scenarios/asking.rs`,
+    /// TASK-103) asks the way the app does, and in the same
+    /// expression gives the plan a stand-in for the screen, so what
+    /// the plan captures is a synthetic image or a made-up platform.
+    ///
     /// (The words are put together here so this test does not find
     /// itself.)
     #[test]
@@ -798,8 +804,8 @@ mod tests {
         plan_makers.sort();
         assert_eq!(
             plan_makers,
-            ["commands/agent.rs", "commands/ask.rs"],
-            "only `ask run` and `agent run` may make a plan that can capture"
+            ["commands/agent.rs", "commands/ask.rs", "commands/scenarios/asking.rs"],
+            "only `ask run`, `agent run` and the scenario runner may make a plan that can capture"
         );
 
         // In each of those files: one call, and it is in the function
@@ -822,6 +828,23 @@ mod tests {
         // The eval set of Agent is started from the CLI and never
         // captures: core gives each of its plans a synthetic image
         // to take in place of the screen.
+
+        // The scenario runner: one place makes its plans, and that
+        // place puts a stand-in for the screen on the plan before
+        // the expression ends. No plan of a scenario exists without
+        // one, so none can reach the real screen.
+        let asking = sources().into_iter().find(|(name, _)| name == "commands/scenarios/asking.rs").unwrap().1;
+        let shipped = &asking[..asking.find("#[cfg(test)]\nmod tests").expect("the tests of asking.rs")];
+        assert_eq!(shipped.matches(call.as_str()).count(), 1, "the scenario runner makes its plans in one place");
+        let at = shipped.find(call.as_str()).unwrap();
+        let expression = &shipped[at..at + shipped[at..].find(';').expect("the end of the expression")];
+        assert!(
+            expression.contains(&join(".with_screen_", "stand_in(")),
+            "the scenario runner makes a plan without a stand-in for the screen: {expression}"
+        );
+        for forced in [join("VisionChoice::", "Force")] {
+            assert!(!shipped.contains(forced.as_str()), "the scenario runner forces a capture");
+        }
 
         // And this file, the Vision commands, sends no question at
         // all through a plan: its eval hands its cases to a backend

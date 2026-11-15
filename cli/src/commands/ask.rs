@@ -22,14 +22,18 @@
 //!   flags.
 //! - `context`: print the facts about this computer an ask would
 //!   send along right now, exactly as the model gets them. Nothing is
-//!   sent anywhere.
+//!   sent anywhere. With the Claude backend it then says, on stderr
+//!   (`added_by_backend` in the record), what Claude Code tells the
+//!   model by itself whatever is switched on: the date and the
+//!   operating system among it.
 //! - `eval`: run the built-in eval set against the real backend.
 //!
 //! `run` and `eval` work whether or not Ask is switched on in the
 //! settings: invoking them is the opt-in. They send the question to
 //! the configured backend, exactly like the ask key would, and say
 //! so. An ask has no tools: it can answer and nothing else, plus a
-//! web search with `--web-search`.
+//! web search with `--web-search`, which also lets it read live
+//! weather from open-meteo.com and from no other address.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -40,7 +44,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use openwhisper_core::ask::{
-    self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, ScreenState, VisionChoice, context, eval,
+    self, AskEvent, AskInput, AskPlan, AskSuggestion, CancelFlag, ScreenState, VisionChoice, context, eval, weather,
 };
 use openwhisper_core::refine;
 use openwhisper_core::settings::{
@@ -71,7 +75,7 @@ pub enum AskCommand {
 
 /// Per-invocation overrides of the saved settings. Nothing here is
 /// written back.
-#[derive(Args, Debug, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct Overrides {
     /// Backend to use: claude-cli or openai-compatible. Saved in the
     /// Refine settings; Ask uses the same one.
@@ -79,12 +83,12 @@ pub struct Overrides {
     backend: Option<String>,
     /// Model for the selected backend.
     #[arg(long)]
-    model: Option<String>,
+    pub(super) model: Option<String>,
     /// Effort for the selected backend: low, medium, high, xhigh or
     /// max (OpenAI-compatible also: minimal, and "none" to send no
     /// effort at all).
     #[arg(long)]
-    effort: Option<String>,
+    pub(super) effort: Option<String>,
     /// Timeout in milliseconds (doubled with web search).
     #[arg(long)]
     timeout_ms: Option<u64>,
@@ -105,7 +109,8 @@ pub struct RunArgs {
     /// The question. Read from stdin when omitted.
     text: Option<String>,
     /// Let the model search the web for this question (Claude backend
-    /// only).
+    /// only). For weather it then reads live data from
+    /// open-meteo.com, and the place asked about is sent there.
     #[arg(long)]
     web_search: bool,
     /// Print the answer once it is complete instead of as it arrives.
@@ -178,7 +183,9 @@ pub struct ConfigArgs {
     /// Switch Ask on or off.
     #[arg(long, value_parser = parse_bool)]
     enabled: Option<bool>,
-    /// Let the model search the web (Claude backend only).
+    /// Let the model search the web (Claude backend only). For
+    /// weather it then reads live data from open-meteo.com, and the
+    /// place asked about is sent there.
     #[arg(long, value_parser = parse_bool)]
     web_search: Option<bool>,
     /// Standing instructions for every answer. An empty string clears
@@ -208,11 +215,14 @@ pub struct ConfigArgs {
     /// Remove the place.
     #[arg(long)]
     clear_place: bool,
-    /// Tell the model the date, the time and the time zone.
+    /// Tell the model the date, the time and the time zone. With the
+    /// Claude backend, Claude Code tells the model the date itself.
     #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
     context_date_time: Option<bool>,
     /// Tell the model about the computer: system, model, chip,
     /// memory, power, displays, free disk space, online or offline.
+    /// With the Claude backend, Claude Code tells the model the
+    /// operating system itself.
     #[arg(long, value_parser = parse_bool, value_name = "BOOL")]
     context_computer: Option<bool>,
     /// Tell the model the name of the app in front (never the title
@@ -264,8 +274,13 @@ fn settings_path() -> Result<PathBuf> {
 /// The saved Ask and Refine blocks with `overrides` applied (not
 /// persisted).
 pub(super) fn load(overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
-    let path = settings_path()?;
-    apply(settings::load_ask_settings(&path), settings::load_refine_settings(&path), overrides)
+    load_from(&settings_path()?, overrides)
+}
+
+/// [`load`] from the settings file at `path`: for a caller that has
+/// a config folder of its own (`openwhisper scenarios`).
+pub(super) fn load_from(path: &std::path::Path, overrides: &Overrides) -> Result<(AskSettings, RefineSettings)> {
+    apply(settings::load_ask_settings(path), settings::load_refine_settings(path), overrides)
 }
 
 /// A model or effort override goes where the selected backend reads
@@ -484,6 +499,8 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
     let mut last_char = '\n';
     // What became of the screen, also when there is no answer.
     let mut screen = (ScreenState::None, String::new());
+    // Web addresses the model tried to read and was refused.
+    let mut refused: Vec<String> = Vec::new();
     let mut sink = |event: AskEvent| match event {
         AskEvent::Screen { state, notice } => {
             if !json {
@@ -506,6 +523,12 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             let _ = out.flush();
         }
         AskEvent::Searching { query } if !json => eprintln!("searching the web: {query}"),
+        AskEvent::FetchRefused { host } => {
+            if !json {
+                eprintln!("not fetched: {host} (an ask can only read weather data from {})", weather::SOURCE);
+            }
+            refused.push(host);
+        }
         _ => {}
     };
     let mut backend = plan.backend();
@@ -545,6 +568,7 @@ fn run_question(args: RunArgs, json: bool) -> Result<()> {
             "model": plan.setup.model,
             "effort": effort,
             "web_search": plan.setup.web_search,
+            "refused_fetches": refused,
             "screen": reply.map_or(screen.0, |r| r.screen).as_str(),
             "screen_notice": reply.map_or(screen.1.as_str(), |r| r.screen_notice.as_str()),
             "vision": match vision_choice {
@@ -624,7 +648,10 @@ fn status(overrides: &Overrides, json: bool) -> Result<()> {
     println!("model             {}", or_dash(&status.model));
     println!("effort            {}", or_dash(&status.effort));
     println!("web search        {}", if status.web_search { "on" } else { "off" });
-    println!("tools             none{}", if status.web_search { " but the web search" } else { "" });
+    println!(
+        "tools             none{}",
+        if status.web_search { format!(" but the web search, and live weather from {}", weather::SOURCE) } else { String::new() }
+    );
     println!("timeout_ms        {}", status.timeout_ms);
     println!(
         "instructions      {}",
@@ -773,27 +800,43 @@ fn context_settings(saved: settings::ContextSettings, args: &ContextArgs) -> set
 }
 
 /// `ask context`: the text an ask would send about this computer
-/// right now, and nothing else on stdout, so it can be piped.
+/// right now, and nothing else on stdout, so it can be piped. What
+/// the backend adds by itself is not this app's text: it goes to
+/// stderr, and into the record of `--json`.
 fn show_context(args: ContextArgs, json: bool) -> Result<()> {
-    let saved = settings::load_ask_settings(&settings_path()?).context;
+    let path = settings_path()?;
+    let saved = settings::load_ask_settings(&path).context;
+    let backend = settings::load_refine_settings(&path).backend;
     let wanted = context_settings(saved, &args);
     let facts = context::gather(&wanted, args.front_app.as_deref());
     let text = facts.render();
+    let added = refine::added_by_backend(backend);
     if json {
-        let value = serde_json::json!({ "text": text, "facts": facts, "settings": wanted });
+        let value = serde_json::json!({
+            "text": text,
+            "facts": facts,
+            "settings": wanted,
+            "backend": backend.as_str(),
+            "added_by_backend": added,
+            "preview": ask::with_backend_note(&text, backend),
+        });
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
     if text.is_empty() {
-        eprintln!("nothing: every part of the context is switched off and no place is set");
-        return Ok(());
+        eprintln!("nothing from OpenWhisper: every part of the context is switched off and no place is set");
+    } else {
+        println!("{text}");
     }
-    println!("{text}");
-    if wanted.front_app && args.front_app.is_none() {
+    if !text.is_empty() && wanted.front_app && args.front_app.is_none() {
         eprintln!(
             "note: no app in front is named here (from a terminal that is the terminal). In the app it is the \
 app you are working in; try one with --front-app NAME"
         );
+    }
+    if !added.is_empty() {
+        eprintln!();
+        eprintln!("{}", refine::added_by_backend_note(backend));
     }
     Ok(())
 }

@@ -51,17 +51,24 @@ const FALLBACK_PLACE_MAX_CHARS = 120;
 // order core sends them, each with what is in it. Which facts a
 // group holds is core's (`core/src/ask/context.rs`); this is the
 // sentence that says so.
+//
+// `withClaude` is added with the Claude backend: Claude Code tells
+// the model a few things by itself, whatever is switched on here
+// (core: `refine::added_by_backend`, which the preview below
+// lists in full), so the switch does not keep those from the model.
 const CONTEXT_GROUPS: {
   key: Exclude<keyof AskContextSettings, "place">;
   id: string;
   label: string;
   description: string;
+  withClaude?: string;
 }[] = [
   {
     key: "date_time",
     id: "date-time",
     label: "Date and time",
     description: "Today's date, the time and your time zone.",
+    withClaude: "With the Claude backend, Claude Code tells the model the date itself.",
   },
   {
     key: "computer",
@@ -69,6 +76,8 @@ const CONTEXT_GROUPS: {
     label: "Computer",
     description:
       "Operating system, model, chip, memory, battery or plugged in, displays, free disk space and whether you are online. Never the network name, the IP address, the serial number, the name of the computer or your user name.",
+    withClaude:
+      "With the Claude backend, Claude Code tells the model the operating system itself.",
   },
   {
     key: "front_app",
@@ -209,7 +218,7 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
           <FieldLabel htmlFor="ask-web-search">Web search</FieldLabel>
           <FieldDescription data-testid="ask-web-search-note">
             {claude
-              ? "The model can look things up on the web when a question needs it. Answers take longer. Works with the Claude backend only."
+              ? "The model can look things up on the web when a question needs it. Answers take longer. Works with the Claude backend only. For weather, live data is read from open-meteo.com, and the place you ask about is sent there."
               : "Web search only works with the Claude backend. Refine is set up with an OpenAI-compatible server, so it is not available."}
           </FieldDescription>
         </FieldContent>
@@ -254,6 +263,7 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
           <ContextSection
             context={askContext(settings)}
             enabled={settings.enabled}
+            claude={claude}
             destination={destination}
             placeMaxChars={state.limits.place_max_chars ?? FALLBACK_PLACE_MAX_CHARS}
             onChange={(patch) => update({ context: { ...askContext(settings), ...patch } })}
@@ -277,6 +287,7 @@ export function AskPane({ onOpenPane }: AskPaneProps) {
 function ContextSection({
   context,
   enabled,
+  claude,
   destination,
   placeMaxChars,
   onChange,
@@ -284,6 +295,8 @@ function ContextSection({
   context: AskContextSettings;
   // Ask is switched on.
   enabled: boolean;
+  // The backend is Claude Code, which adds a few facts by itself.
+  claude: boolean;
   destination: string;
   placeMaxChars: number;
   onChange: (patch: Partial<AskContextSettings>) => void;
@@ -313,7 +326,10 @@ function ContextSection({
         >
           <FieldContent>
             <FieldLabel htmlFor={`ask-context-${group.id}`}>{group.label}</FieldLabel>
-            <FieldDescription>{group.description}</FieldDescription>
+            <FieldDescription>
+              {group.description}
+              {claude && group.withClaude ? ` ${group.withClaude}` : ""}
+            </FieldDescription>
           </FieldContent>
           <Switch
             id={`ask-context-${group.id}`}
@@ -360,6 +376,7 @@ function ContextSection({
         />
         <FieldDescription>
           This is the exact text that goes with a question asked now.
+          {claude ? " Under it is what Claude Code adds by itself." : ""}
           {context.front_app
             ? " The app in front is read when you ask, so it is not in this preview while this window is in front."
             : ""}

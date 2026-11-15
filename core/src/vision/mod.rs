@@ -135,6 +135,9 @@ mod windows;
 
 pub use crate::ask::AskCaptureToken;
 pub use capture::{NoScreenshot, Screenshot, capture_for_ask};
+// The same steps against a platform an ask brings itself
+// (`crate::ask::StandIn::platform`). Still needs an ask's token.
+pub(crate) use capture::capture_with;
 // The hook of the live pixel test. Not in a build without the
 // feature: see the module docs.
 #[cfg(all(feature = "vision-live-test", any(target_os = "macos", target_os = "windows")))]

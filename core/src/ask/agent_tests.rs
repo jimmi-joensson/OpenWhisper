@@ -752,4 +752,42 @@ mod with_a_screen {
         let (reply, _, _, _) = one_shot(&plan, "two plus two");
         assert_eq!((stand_in.taken(), reply.screen), (1, ScreenState::None));
     }
+
+    #[test]
+    fn a_platform_that_stands_in_goes_through_the_steps_of_a_real_capture() {
+        use crate::vision::PermissionState;
+        let _lock = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // What the operating system would be: left alone throughout.
+        let screen = install(Fake::default());
+        // The person keeps one app out of every screenshot.
+        let settings = VisionSettings {
+            never_capture: Some(vec![crate::settings::NeverCaptureApp::new("com.example.vault", "Vault")]),
+            ..vision(VisionTrigger::Phrases)
+        };
+        let through = |fake: Fake| {
+            let fake = std::sync::Arc::new(fake);
+            let stand_in = screen::StandIn::platform(fake.clone());
+            let plan = routed_plan(&agent(&["read_thread"], true), EDITOR)
+                .with_vision(&settings, VisionChoice::Settings)
+                .with_screen_stand_in(stand_in.clone());
+            let (reply, _, _, images) = one_shot(&plan, "what is on my screen");
+            assert_eq!(stand_in.taken(), 1);
+            (reply, images, fake.captures())
+        };
+        // No permission: no image, the ask goes on, and it says why.
+        let (reply, images, captures) = through(Fake { permission: PermissionState::Denied, ..Fake::default() });
+        assert_eq!((reply.screen, images, captures), (ScreenState::Unavailable, 0, 0));
+        assert!(reply.screen_notice.starts_with("No screenshot was taken:"), "{}", reply.screen_notice);
+        // That app in front: decided by the plan's own Vision
+        // settings, and nothing is captured.
+        let vault = Fake { front: vec![Fake::front_app("com.example.vault", "Vault")], ..Fake::default() };
+        let (reply, images, captures) = through(vault);
+        assert_eq!((reply.screen, images, captures), (ScreenState::Blocked, 0, 0));
+        assert!(reply.screen_notice.contains("Vault is in front"), "{}", reply.screen_notice);
+        // A platform that can capture: its image goes with the ask.
+        let (reply, images, captures) = through(Fake::default());
+        assert_eq!((reply.screen, images, captures), (ScreenState::Included, 1, 1));
+        assert_eq!(screen.0.captures(), 0);
+        assert!(screen.0.calls().is_empty());
+    }
 }

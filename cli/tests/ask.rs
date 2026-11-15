@@ -237,6 +237,9 @@ if [ "$1" = "--version" ]; then echo '9.9.9 (Fake Claude)'; exit 0; fi
 echo "$@" > "$here/args.txt"
 prev=""; for a in "$@"; do if [ "$prev" = "--system-prompt-file" ]; then cp "$a" "$here/system.txt"; fi; prev="$a"; done
 while read -r line; do
+  # What the app says before the question when web search is on: not
+  # a question.
+  case "$line" in *'"type":"control_request"'*) printf '%s\n' "$line" > "$here/hello.txt"; continue ;; esac
   printf '%s\n' "$line" > "$here/stdin.txt"
   echo '{"type":"stream_event","event":{"type":"message_start"}}'
   echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"easy"}}}'
@@ -311,7 +314,8 @@ done
         assert!(args.contains("--permission-mode default"), "{args}");
         assert!(args.contains("--no-session-persistence"), "{args}");
         assert!(args.contains("--model sonnet --effort low"), "{args}");
-        assert!(!args.contains("WebSearch") && !args.contains("--allowedTools"), "{args}");
+        assert!(!args.contains("WebSearch") && !args.contains("WebFetch") && !args.contains("--allowedTools"), "{args}");
+        assert!(!cfg.dir.join("hello.txt").exists(), "with web search off the CLI is told nothing before the question");
         // Nothing was saved by running.
         assert!(!cfg.dir.join("settings.json").exists());
     }
@@ -351,9 +355,23 @@ done
         assert_eq!(String::from_utf8_lossy(&out.stdout), "The capital of Norway is Oslo.\n");
         assert!(stderr.contains("(claude-cli, opus, medium effort)"), "{stderr}");
 
-        // Web search is exactly the two WebSearch flags.
+        // Web search is exactly the two web tools, the fetch tool
+        // allowed for the two weather hosts and for nothing else.
         let args = recorded(&cfg, "args.txt");
-        assert!(args.contains("--tools WebSearch --allowedTools WebSearch --strict-mcp-config"), "{args}");
+        assert!(
+            args.contains(
+                "--tools WebSearch,WebFetch --allowedTools \
+WebSearch,WebFetch(domain:api.open-meteo.com),WebFetch(domain:geocoding-api.open-meteo.com) --strict-mcp-config"
+            ),
+            "{args}"
+        );
+        // And the CLI was told to check with the app before every
+        // fetch, before it got the question.
+        let hello: Value = serde_json::from_str(&recorded(&cfg, "hello.txt")).unwrap();
+        assert_eq!(hello["request"]["subtype"], "initialize");
+        assert_eq!(hello["request"]["hooks"]["PreToolUse"][0]["matcher"], "WebFetch");
+        let system = recorded(&cfg, "system.txt");
+        assert!(system.contains("do not rely on search results. Fetch live data instead"), "{system}");
         assert!(args.contains("--model opus --effort medium"), "{args}");
         assert!(args.contains("--permission-mode default"), "{args}");
         let system = recorded(&cfg, "system.txt");

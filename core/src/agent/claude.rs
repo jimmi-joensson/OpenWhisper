@@ -13,8 +13,8 @@
 //! | `--permission-mode default` | The CLI's own default is a per-machine setting; on a machine where it is `auto`, a tool that is on no list would run without asking. |
 //! | `--setting-sources ""` | None of the person's Claude Code settings, hooks, plugins or permission rules. Not `--safe-mode`: that drops every connection too. |
 //! | `--strict-mcp-config`, `--mcp-config FILE` | Only the connections in the run's private file ([`super::connections::write_run_config`]) exist. |
-//! | `--tools ""` | No built-in tool: no shell, no file access, no web fetch. With web search on for asks, exactly `WebSearch`, as in a plain ask. |
-//! | `--allowedTools` | The ticked read and draft tools: they run without a question. |
+//! | `--tools ""` | No built-in tool: no shell, no file access, no web fetch. With web search on for asks, exactly `WebSearch,WebFetch`, as in a plain ask. |
+//! | `--allowedTools` | The ticked read and draft tools: they run without a question. With web search on, also the search and the fetch tool for the two weather hosts ([`crate::ask::weather`]), as in a plain ask. |
 //! | `--disallowedTools` | Every other tool the connections are known to have: taken out of what the model sees. |
 //! | `--permission-prompt-tool stdio` | A tool on neither list makes the CLI ask this process and wait. That is the confirm. |
 //! | `--no-session-persistence` | Nothing of the conversation is written to disk, a screenshot included. |
@@ -32,7 +32,24 @@
 //! ([`super::policy::unusable_reason`]); and should a name that is
 //! not made of plain characters reach [`spawn_args`] all the same,
 //! there are no arguments: the ask ends with an error before a
-//! process exists.
+//! process exists. The entries for the web are not names from a
+//! connection: they are fixed at compile time
+//! ([`claude_cli::web_allow_rules`]), the fetch tool's with a host in
+//! brackets, and are put on the list after that check, so the check
+//! stays as strict as it is for every name that comes from outside.
+//!
+//! **A fetch of another address is never asked about.** With web
+//! search on the model has the fetch tool, allowed for the weather
+//! hosts only. The CLI checks with this process before every fetch
+//! ([`claude_cli::WebTools::hello`]), and for any other address the
+//! answer is no ([`AgentReader::before_fetch`]). Such an address is
+//! on no list either, so a CLI that did not check would ask whether
+//! the tool may run, and that answer is no too, at once, without a
+//! confirm: the person is never asked to let an ask read an address
+//! ([`AgentReader::can_use_tool`]). Either way it shows as a denied
+//! step. Should the result of such a fetch come back as anything but
+//! a refusal, the ask ends there, as a plain ask does
+//! ([`claude_cli::WebTools`]).
 //!
 //! **The plan is checked against what the CLI really started with**
 //! ([`AgentReader::init`]). The first thing the CLI prints for a
@@ -81,9 +98,9 @@ use serde_json::Value;
 
 use super::policy::{self, ToolKind};
 use super::{AgentRun, connections};
-use crate::ask::claude_cli::{self, Line, Permission, Process, Reader, Verdict};
+use crate::ask::claude_cli::{self, Line, Permission, Process, Reader, Verdict, WebTools};
 use crate::ask::steps::{self, AskConfirm, AskStep, ConfirmOutcome, StepState};
-use crate::ask::{AskBackend, AskError, AskEvent, AskInput, AskReply, AskSetup, CancelFlag};
+use crate::ask::{AskBackend, AskError, AskEvent, AskInput, AskReply, AskSetup, CancelFlag, weather};
 use crate::settings::{ClaudeCliSettings, RefineEffort};
 
 /// What the model is told when it reaches for a tool this ask does
@@ -208,12 +225,17 @@ pub fn spawn_args(
         None | Some(RefineEffort::Minimal) => RefineEffort::Low,
         Some(effort) => effort,
     };
-    let mut allowed = run.tools.allowed.clone();
-    if setup.web_search {
-        allowed.insert(0, claude_cli::WEB_SEARCH_TOOL.to_string());
-    }
-    check_list("--allowedTools", &allowed)?;
+    // Every name that comes from a connection is looked at first.
+    check_list("--allowedTools", &run.tools.allowed)?;
     check_list("--disallowedTools", &run.tools.disallowed)?;
+    // Then the web, when it is on: entries of this app's own, fixed
+    // at compile time. The fetch tool's carry a host in brackets,
+    // which the check above would refuse, and rightly so for a name
+    // from outside; they never pass through it and nothing else is
+    // ever added here.
+    let mut allowed = if setup.web_search { claude_cli::web_allow_rules() } else { Vec::new() };
+    allowed.extend(run.tools.allowed.iter().cloned());
+    let web_tools = if setup.web_search { claude_cli::web_tools() } else { String::new() };
     let mut args: Vec<String> = [
         "-p",
         "--model",
@@ -223,7 +245,7 @@ pub fn spawn_args(
         "--setting-sources",
         "",
         "--tools",
-        if setup.web_search { claude_cli::WEB_SEARCH_TOOL } else { "" },
+        web_tools.as_str(),
         "--strict-mcp-config",
         "--mcp-config",
     ]
@@ -268,7 +290,8 @@ pub fn spawn_args(
 
 /// What the lines of an agent ask mean, and the steps so far.
 struct AgentReader {
-    web_search: bool,
+    /// The built-in web tools, read as in a plain ask.
+    web: WebTools,
     confirm_timeout_s: u64,
     max_turns: u32,
     /// The tools the model can call, by full name.
@@ -313,7 +336,7 @@ impl AgentReader {
             }
         }
         Self {
-            web_search,
+            web: WebTools::new(web_search),
             confirm_timeout_s: run.confirm_timeout_s,
             max_turns: run.max_turns,
             tools: run.planned.iter().map(|t| (t.full_name.clone(), t.clone())).collect(),
@@ -338,6 +361,11 @@ impl AgentReader {
                 // connection gave none; the CLI's is nicer then.
                 let title = if planned.title == planned.tool { shown.unwrap_or(&planned.title) } else { &planned.title };
                 (planned.connection.clone(), planned.tool.clone(), title.to_string(), planned.kind)
+            }
+            // The fetch tool is the CLI's own and belongs to no
+            // connection: it reads the web.
+            None if full_name == weather::FETCH_TOOL => {
+                ("web".to_string(), full_name.to_string(), shown.unwrap_or(full_name).to_string(), ToolKind::Act)
             }
             None => {
                 let (server, tool) = full_name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")).unwrap_or(("", full_name));
@@ -403,15 +431,20 @@ impl AgentReader {
                     self.pending.retain(|pending| *pending != planned.connection);
                 }
                 events.push(self.record(step));
-            } else if claude_cli::check_tool(block, self.web_search)? {
-                events.push(AskEvent::Searching { query: block["input"]["query"].as_str().unwrap_or("").to_string() });
+            } else {
+                // The web search, or a read of the weather: shown as
+                // in a plain ask. Any other built-in tool ends the
+                // ask here.
+                events.extend(self.web.called(block)?);
             }
         }
         Ok(if events.is_empty() { Line::Other } else { Line::Events(events) })
     }
 
-    /// A tool's answer, fed back to the model.
-    fn tool_results(&mut self, v: &Value) -> Line {
+    /// A tool's answer, fed back to the model. An error when a fetch
+    /// of an address this ask may not reach came back with content
+    /// ([`WebTools::came_back`]).
+    fn tool_results(&mut self, v: &Value) -> Result<Line, AskError> {
         let mut events = Vec::new();
         for block in v["message"]["content"].as_array().into_iter().flatten() {
             if block["type"].as_str() != Some("tool_result") {
@@ -419,8 +452,9 @@ impl AgentReader {
             }
             let id = block["tool_use_id"].as_str().unwrap_or("");
             if !self.steps.contains_key(id) {
-                // Not one of ours: the web search coming back.
-                events.push(AskEvent::SearchDone);
+                // Not a step: the web search or the weather coming
+                // back.
+                events.push(self.web.came_back(block)?);
                 continue;
             }
             let failed = block["is_error"].as_bool().unwrap_or(false);
@@ -438,7 +472,7 @@ impl AgentReader {
             };
             events.extend(self.end(id, state, &result_text(&block["content"])));
         }
-        if events.is_empty() { Line::Other } else { Line::Events(events) }
+        Ok(if events.is_empty() { Line::Other } else { Line::Events(events) })
     }
 
     /// The CLI refused a call by itself.
@@ -576,12 +610,42 @@ impl AgentReader {
             return Line::Other;
         };
         let request = &v["request"];
-        let verdict = if request["subtype"].as_str() != Some("can_use_tool") {
-            Verdict::Unsupported
-        } else {
-            self.can_use_tool(request_id, request)
+        let verdict = match request["subtype"].as_str() {
+            Some("can_use_tool") => self.can_use_tool(request_id, request),
+            Some("hook_callback") => self.before_fetch(request_id, request),
+            _ => Verdict::Unsupported,
         };
         Line::Permission(Permission { request_id: request_id.to_string(), verdict })
+    }
+
+    /// The CLI checks before a fetch, as this app asked it to
+    /// ([`WebTools::hello`]). A weather host is left to the allow
+    /// list; any other address is a no, and shows as a denied step.
+    /// A check this app never asked for is not answered with a yes
+    /// or a no at all.
+    fn before_fetch(&mut self, request_id: &str, request: &Value) -> Verdict {
+        match self.web.before_fetch(request) {
+            None => Verdict::Unsupported,
+            Some(Ok(())) => Verdict::Fetch { deny: None, events: Vec::new() },
+            Some(Err(_)) => {
+                let input = &request["input"];
+                let id = request["tool_use_id"]
+                    .as_str()
+                    .or_else(|| input["tool_use_id"].as_str())
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or(request_id);
+                let name = input["tool_name"].as_str().unwrap_or(weather::FETCH_TOOL);
+                let events = vec![self.refused_fetch(id, name, None, &input["tool_input"])];
+                Verdict::Fetch { deny: Some(claude_cli::FETCH_ELSEWHERE_DENIED.to_string()), events }
+            }
+        }
+    }
+
+    /// The step of a fetch that was refused.
+    fn refused_fetch(&mut self, id: &str, name: &str, display: Option<&str>, input: &Value) -> AskEvent {
+        let mut step = self.step(id, name, display, input, StepState::Denied);
+        step.outcome = format!("An ask can only read weather data from {}.", weather::SOURCE);
+        self.record(step)
     }
 
     fn can_use_tool(&mut self, request_id: &str, request: &Value) -> Verdict {
@@ -594,6 +658,13 @@ impl AgentReader {
         }
         let id = request["tool_use_id"].as_str().filter(|id| !id.is_empty()).unwrap_or(request_id);
         let display = request["display_name"].as_str();
+        if name == weather::FETCH_TOOL {
+            // A fetch of an address that is on no allow list, so not
+            // one of the weather hosts. The person is never asked to
+            // let an ask read an address: the answer is no.
+            let events = vec![self.refused_fetch(id, name, display, input)];
+            return Verdict::Deny { message: claude_cli::FETCH_ELSEWHERE_DENIED.to_string(), events };
+        }
         let asks_person = self.tools.get(name).is_some_and(|tool| tool.confirm);
         if !asks_person {
             // On neither list, or on the list of tools that run by
@@ -637,7 +708,7 @@ impl Reader for AgentReader {
         match v["type"].as_str() {
             Some("control_request") => Ok(self.permission(&v)),
             Some("assistant") => self.assistant(&v),
-            Some("user") => Ok(self.tool_results(&v)),
+            Some("user") => self.tool_results(&v),
             Some("system") => Ok(match v["subtype"].as_str() {
                 Some("permission_denied") => self.denied_by_cli(&v),
                 Some("init") => self.init(&v)?,
@@ -657,7 +728,7 @@ impl Reader for AgentReader {
                 self.max_turns
             ))),
             // Text, the plan's windows, the result: as in a plain ask.
-            _ => claude_cli::read_line(line, self.web_search),
+            _ => claude_cli::read_line(line, &mut self.web),
         }
     }
 

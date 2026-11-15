@@ -5,10 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 
 import {
   AGENT_CHANGED_EVENT,
-  choicesOf,
-  withChoices,
-  type AgentChoices,
-  type AgentCustomConnection,
+  withPatch,
+  type AgentPatch,
   type AgentRunningApp,
   type AgentState,
   type AgentStatus,
@@ -18,8 +16,9 @@ import { ASK_CHANGED_EVENT } from "./ask";
 // Data for the Agent settings (TASK-99), on TanStack Query like Ask
 // and Vision: Rust owns the Agent block and every rule about it, and
 // the query cache is the one copy the webview keeps. A change is
-// `agent_set` with the person's choices; Rust answers with the state
-// as it stored it, and that answer is what ends up on screen.
+// `agent_set` with that one change and nothing else; Rust lays it
+// over the block as it is on disk and answers with the state as it
+// stored it, and that answer is what ends up on screen.
 
 const AGENT_KEY = ["agent"] as const;
 // Whether an ask would use tools right now. Its own key: it follows
@@ -39,12 +38,15 @@ export function useAgent() {
     queryFn: () => invoke<AgentState>("agent_get"),
   });
 
-  // The answer of a command is the new state. While another save is
-  // still on its way, an earlier answer would take a later click back
-  // off the screen for a moment, so only the last one is shown.
+  // A state Rust answered with goes on screen, unless a save is
+  // still on its way: a click that is shown already (a tick, a
+  // switch) would be taken back off the screen for a moment by a
+  // state from before it. The answer of the last save puts things
+  // right. `own`: the state is the answer of a save itself, which is
+  // still counted as on its way while its answer is handled.
   const show = useCallback(
-    (state: AgentState) => {
-      if (client.isMutating({ mutationKey: AGENT_SAVE_KEY }) <= 1) {
+    (state: AgentState, own: boolean) => {
+      if (client.isMutating({ mutationKey: AGENT_SAVE_KEY }) <= (own ? 1 : 0)) {
         client.setQueryData<AgentState>(AGENT_KEY, state);
       }
       void client.invalidateQueries({ queryKey: AGENT_STATUS_KEY });
@@ -52,26 +54,55 @@ export function useAgent() {
     [client],
   );
 
+  // Read the block again, as it is on disk now: it can have been
+  // changed elsewhere (the headless CLI) without this window being
+  // told. Not while a save is on its way: its answer is that read.
+  const reread = useCallback(() => {
+    if (client.isMutating({ mutationKey: AGENT_SAVE_KEY }) > 0) return;
+    void client.invalidateQueries({ queryKey: AGENT_KEY });
+    void client.invalidateQueries({ queryKey: AGENT_STATUS_KEY });
+  }, [client]);
+
+  // Whenever the window gets the focus back. TanStack Query reads
+  // again when a page becomes visible, which a window that was only
+  // behind another one never stopped being.
+  useEffect(() => {
+    window.addEventListener("focus", reread);
+    return () => window.removeEventListener("focus", reread);
+  }, [reread]);
+
   const save = useMutation({
     mutationKey: AGENT_SAVE_KEY,
-    mutationFn: (choices: AgentChoices) => invoke<AgentState>("agent_set", { choices }),
+    mutationFn: (patch: AgentPatch) => invoke<AgentState>("agent_set", { patch }),
     // Shown at once, so a switch or a tick does not lag behind the
     // click; undone if the save fails.
-    onMutate: async (choices) => {
+    onMutate: async (patch) => {
       await client.cancelQueries({ queryKey: AGENT_KEY });
       const previous = client.getQueryData<AgentState>(AGENT_KEY);
-      if (previous) client.setQueryData<AgentState>(AGENT_KEY, withChoices(previous, choices));
+      if (previous) client.setQueryData<AgentState>(AGENT_KEY, withPatch(previous, patch));
       return { previous };
     },
-    onError: (_error, _choices, context) => {
+    onError: (_error, _patch, context) => {
       if (context?.previous) client.setQueryData(AGENT_KEY, context.previous);
     },
-    onSuccess: show,
+    // The answer is the block as Rust read it from disk and stored
+    // it with this change.
+    onSuccess: (state) => show(state, true),
+    // After every save, taken or refused, the block is read again:
+    // what is on disk is what the pane shows, also when that is not
+    // what this window thought it was. Not while a later save is on
+    // its way (this one is still counted while it is settled here).
+    onSettled: () => {
+      if (client.isMutating({ mutationKey: AGENT_SAVE_KEY }) <= 1) {
+        void client.invalidateQueries({ queryKey: AGENT_KEY });
+      }
+    },
   });
 
   // Ask Claude Code which connections it has. Takes a few seconds.
-  // The answer is always a state: a lookup that failed says why in
-  // `listing.error`.
+  // The answer is a state: a lookup that ran and failed says why in
+  // `listing.error`. One that Rust did not start (Agent, Ask or the
+  // Claude backend is missing) is an error that says which.
   const lookUp = useMutation({
     mutationFn: () => invoke<AgentState>("agent_refresh"),
     onMutate: () => {
@@ -83,53 +114,32 @@ export function useAgent() {
         });
       }
     },
-    onSuccess: show,
+    onSuccess: (state) => show(state, false),
     onError: () => {
       void client.invalidateQueries({ queryKey: AGENT_KEY });
     },
   });
 
-  const add = useMutation({
-    mutationFn: (connection: AgentCustomConnection) =>
-      invoke<AgentState>("agent_add_connection", { ...connection }),
-    onSuccess: show,
-  });
-
   const remove = useMutation({
     mutationFn: (name: string) => invoke<AgentState>("agent_remove_connection", { name }),
-    onSuccess: show,
+    onSuccess: (state) => show(state, false),
+    onError: () => {
+      void client.invalidateQueries({ queryKey: AGENT_KEY });
+    },
   });
 
   const { mutate } = save;
-  // Change the choices as they are on screen now.
-  const update = useCallback(
-    (change: (choices: AgentChoices) => AgentChoices) => {
-      const current = client.getQueryData<AgentState>(AGENT_KEY);
-      if (current) mutate(change(choicesOf(current)));
-    },
-    [client, mutate],
-  );
-
   const { mutate: startLookUp } = lookUp;
-  const { mutateAsync: addAsync } = add;
   const { mutate: removeNow } = remove;
 
   const failure = query.error ?? save.error ?? lookUp.error ?? remove.error;
   return {
     state: query.data ?? null,
     error: failure ? String(failure) : null,
-    update,
+    // One change: a switch, one connection's switch or ticks, or
+    // the app table.
+    update: useCallback((patch: AgentPatch) => mutate(patch), [mutate]),
     refresh: useCallback(() => startLookUp(), [startLookUp]),
-    // Resolves to what went wrong, or null when the connection was
-    // added.
-    addConnection: useCallback(
-      (connection: AgentCustomConnection): Promise<string | null> =>
-        addAsync(connection).then(
-          () => null,
-          (error) => String(error),
-        ),
-      [addAsync],
-    ),
     removeConnection: useCallback((name: string) => removeNow(name), [removeNow]),
   };
 }
@@ -150,11 +160,17 @@ export function useAgentStatus(): AgentStatus | null {
 // to the app table. Asked only while `enabled`, and again whenever
 // the window gets focus back.
 export function useAgentRunningApps(enabled: boolean): AgentRunningApp[] {
+  const client = useQueryClient();
   const query = useQuery({
     queryKey: AGENT_APPS_KEY,
     queryFn: () => invoke<AgentRunningApp[]>("agent_running_apps"),
     enabled,
   });
+  useEffect(() => {
+    const again = () => void client.invalidateQueries({ queryKey: AGENT_APPS_KEY });
+    window.addEventListener("focus", again);
+    return () => window.removeEventListener("focus", again);
+  }, [client]);
   return query.data ?? [];
 }
 

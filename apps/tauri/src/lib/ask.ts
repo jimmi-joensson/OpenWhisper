@@ -69,8 +69,8 @@ export type AskStepState =
   | "done"
   // It ran and reported an error.
   | "failed"
-  // It did not run: not allowed, or the person said no or did not
-  // answer in time.
+  // It did not run: not allowed, the person said no or did not
+  // answer in time, or Claude Code stopped while it waited.
   | "denied"
   // It waits for the person's yes or no.
   | "waiting";
@@ -103,12 +103,18 @@ export interface AskConfirm {
   connection: string;
   tool: string;
   title: string;
-  // The whole input as indented JSON text.
+  // The whole input as indented JSON text: never cut (core refuses a
+  // call whose input is too long to show, without asking). Short
+  // fields come first, and characters that would not show as what
+  // they are arrive as visible escapes.
   input: string;
-  // The input was too long and is shown cut.
-  input_cut: boolean;
   // How long the confirm waits before it counts as a no.
   timeout_s: number;
+  // How long until a yes to this confirm counts, in milliseconds:
+  // 600 when it is raised, counting down to 0. Until then core
+  // refuses a yes and the confirm stays open, so Allow shows as not
+  // yet active. A no is taken at any time.
+  armed_in_ms: number;
 }
 
 // Mirrors `ContextSource` in core: where an ask looked for what the

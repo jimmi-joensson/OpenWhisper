@@ -1,10 +1,10 @@
 ---
 id: TASK-99
 title: Agent - let an ask use the user's own MCP connections
-status: In Progress
+status: In Review
 assignee: []
 created_date: '2026-11-10T14:36:00Z'
-updated_date: '2026-11-11T06:39:00Z'
+updated_date: '2026-11-15T06:53:00Z'
 labels:
   - agent
   - ask
@@ -35,11 +35,11 @@ Before designing: verify that the headless Claude Code CLI sees the connections 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Spike result written into the task notes: which connections the headless CLI can use, how permissions work, typical run time
-- [ ] #2 Agent is its own opt-in switch, off by default, separate from Refine and Ask
-- [ ] #3 Only tools on the allow list run; anything that sends, posts or deletes waits for a confirm in the panel
-- [ ] #4 Every tool call and its outcome is visible in the panel and summarised on the history entry
-- [ ] #5 On-screen text that tries to instruct the agent is covered by an eval set
-- [ ] #6 Headless parity: the CLI can run an agent ask
+- [x] #2 Agent is its own opt-in switch, off by default, separate from Refine and Ask
+- [x] #3 Only tools on the allow list run; anything that sends, posts or deletes waits for a confirm in the panel
+- [x] #4 Every tool call and its outcome is visible in the panel and summarised on the history entry
+- [x] #5 On-screen text that tries to instruct the agent is covered by an eval set
+- [x] #6 Headless parity: the CLI can run an agent ask
 - [ ] #7 Terms check redone and reported before release to other users
 <!-- AC:END -->
 
@@ -57,4 +57,16 @@ Spike (2026-11-10, Claude Code 2.1.322, Sonnet low, fake MCP server only; no rea
 - Terms: docs say --bare will become the default for -p, which would cut subscription sign-in; Anthropic says products for others should not offer claude.ai login. To be re-checked before release (AC 7).
 
 2026-11-11: the headless feasibility check passed (spike notes above; the orchestrator re-ran the confirm flow: a denied send never reached the fake server), so the feature is built. Plan doc-52 - Agent-implementation-plan.md, subtasks 99.1 to 99.4. Branch task-99-agent, stacked on task-98-vision.
+
+In review 2026-11-15, branch task-99-agent (d394b56, 0ac48d3, 8b9cf57, 25f66f9).
+
+What it does: Settings > Agent (off by default). With it on, an ask through the Claude backend can use the connections the person switched on and the tools they ticked. Tools are read, draft or act, decided from the name on the cautious side. Drafts only (default) keeps every act tool from running. With it off, a ticked act tool shows a confirm card with the whole input; no answer in 120 s is a no. Every call is a step in the panel and is listed on the history entry. An app in front that is mapped to a switched-on connection is answered through the connection instead of a screenshot; a screen phrase still takes the screenshot.
+
+Review found and fixed: a comma in a tool name widened the allow list to another connection (a send ran without a confirm on the fixture); names like share_draft counted as drafts; a read-only note from the connection outweighed the name; the confirm showed 4000 characters of an input that was sent whole; a double click could allow the next confirm; the window could add a connection with any command; control and direction characters reached the card and the terminal; token values were printed by agent status --json; the private run file survived a kill.
+
+Not verified, needs a person: any tool call on a real connection (only listing was run: 34 connections, no tool called); a real confirm card clicked in the panel; the look of the pane and panel; the lookup at app start; everything on Windows (compiles only).
+
+Known limits: the tool kind is a heuristic on the name, shown before a tool is ticked; there is no per-tool override yet. A read tool that fetches a URL could be used by planted text to send data out. Looking up connections starts every connection Claude Code has. Connections from a project or plugin scope start without their environment.
+
+AC 7 (terms) stays open: running the person's own signed-in Claude Code from their own app on their own machine is the documented headless use. Shipping this to other people is a separate question that has not been checked again; it has to be before a release.
 <!-- SECTION:NOTES:END -->

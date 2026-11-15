@@ -50,7 +50,11 @@ pub fn refine_get(app: AppHandle) -> Result<RefineState, String> {
 #[tauri::command]
 pub fn refine_set(app: AppHandle, settings: RefineSettings) -> Result<RefineSettings, String> {
     let path = settings_path(&app)?;
-    core_settings::save_refine_settings(&path, settings)
+    let saved = core_settings::save_refine_settings(&path, settings)?;
+    // Agent needs the Claude backend: with a change of backend it
+    // may have become able to use its connections.
+    crate::agent::conditions_changed(&app);
+    Ok(saved)
 }
 
 /// Can the selected backend run? Probes the Claude CLI (about 0.2 s),

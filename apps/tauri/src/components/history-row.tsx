@@ -16,6 +16,9 @@ const TOOL_OUTCOMES: Record<string, string> = {
   done: "done",
   failed: "failed",
   denied: "not run",
+  // The ask ended (failed, timed out, was cancelled) while the call
+  // was running: it may have gone through or not.
+  result_not_known: "result not known, the ask ended while it was running",
 };
 
 // The dictation that just finished, when it is in the list: its row

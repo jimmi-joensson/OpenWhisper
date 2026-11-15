@@ -24,23 +24,34 @@
 //!   URL ([`ConnectionView::via`]) and nothing of it.
 //!
 //! For the same reason a window cannot send a whole Agent block back.
-//! What it sends is the person's choices ([`AgentChoices`]: the two
-//! switches, which connections are on, which tools are ticked, the
-//! app table), and they are laid over the block as it is on disk
-//! ([`with_choices`]). A connection is added only through
-//! [`agent_add_connection`] and what a connection is never changes
-//! from a window.
+//! What it sends is one change ([`AgentPatch`]: a switch, one
+//! connection's switch or ticks, the app table), and it is laid over
+//! the block as it is on disk at that moment ([`with_patch`]), so a
+//! change made elsewhere in the meantime (the headless CLI) is kept.
+//!
+//! A window can never add a connection: a connection of the person's
+//! own is a command that is started on this computer, so it is added
+//! in a terminal only (`openwhisper agent connections add-custom`).
+//! What a connection is never changes from a window either.
+//!
+//! # Which window may call what
+//!
+//! A yes or no to a confirm is accepted from the answer window only,
+//! and a change of the settings from the main window only
+//! ([`check_caller`]). Reading is open to every window.
 //!
 //! # Looking the connections up
 //!
 //! An ask can only use a connection of the person's Claude Code after
 //! this process has listed it (core keeps how it is reached in
-//! memory, see above). So the connections are listed in the
-//! background when the app starts with Agent on and when Agent is
-//! switched on, and when the person presses Refresh. A listing starts
-//! the Claude CLI without a prompt: no tool is called and the model
-//! is not asked anything. It takes a few seconds, so it never runs on
-//! the main thread, and only one runs at a time.
+//! memory, see above). A listing starts the Claude CLI without a
+//! prompt: no tool is called and the model is not asked anything, but
+//! every connection Claude Code has is started. So it runs only while
+//! Agent could use the result ([`lookup_refusal`]: Agent on, Ask on,
+//! the Claude backend): once in the background when that becomes
+//! true ([`lookup_due`]), and when the person presses Refresh. It
+//! takes a few seconds, so it never runs on the main thread, and only
+//! one runs at a time ([`Turns`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -48,13 +59,13 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 
-use openwhisper_core::agent::{self, policy, AgentRun, ConnectionState, FrontApp, ListedConnection, ToolKind};
+use openwhisper_core::agent::{self, policy, AgentError, AgentRun, ConnectionState, FrontApp, ToolKind};
 use openwhisper_core::ask;
 use openwhisper_core::focus;
 use openwhisper_core::settings::{
-    self as core_settings, AgentConnection, AgentConnectionKind, AgentSettings, AppConnection, CustomServer,
+    self as core_settings, AgentConnection, AgentConnectionKind, AgentSettings, AppConnection, RefineBackendKind,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, WebviewWindow};
 
 use crate::settings::settings_path;
 
@@ -62,19 +73,45 @@ use crate::settings::settings_path;
 /// listing ended. Payload: [`AgentState`].
 pub(crate) const AGENT_CHANGED_EVENT: &str = "agent_changed";
 
+/// Label of the main window, where the Agent pane is.
+const MAIN_LABEL: &str = "main";
+
 /// Every command of this module.
 #[cfg(test)]
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 8] = [
     "agent_get",
     "agent_set",
     "agent_refresh",
     "agent_status",
-    "agent_add_connection",
     "agent_remove_connection",
     "agent_running_apps",
     "ask_confirm_allow",
     "ask_confirm_deny",
 ];
+
+// --- which window may call what ------------------------------------
+
+/// The one window `command` is accepted from. `None` for a command
+/// that only reads: every window may call it.
+fn window_of(command: &str) -> Option<&'static str> {
+    match command {
+        // A yes or no is given where the confirm is shown, with its
+        // whole input in front of the person.
+        "ask_confirm_allow" | "ask_confirm_deny" => Some(crate::ask::ANSWER_LABEL),
+        // The settings are changed where the Agent pane is.
+        "agent_set" | "agent_refresh" | "agent_remove_connection" => Some(MAIN_LABEL),
+        _ => None,
+    }
+}
+
+/// Refuse `command` when it comes from the window `label` and that is
+/// not the window it is accepted from ([`window_of`]).
+fn check_caller(command: &str, label: &str) -> Result<(), String> {
+    match window_of(command) {
+        Some(wanted) if wanted != label => Err(format!("{command} is not accepted from this window.")),
+        _ => Ok(()),
+    }
+}
 
 // --- what a window is shown ----------------------------------------
 
@@ -110,7 +147,8 @@ pub struct ConnectionView {
     /// Where the connection stood in the last listing of this run of
     /// the app: one of core's `ConnectionState` words, `missing` (the
     /// listing did not find it), or `not-looked-up` (there has been
-    /// no listing yet).
+    /// no listing yet, or it is an entry of the person's own that was
+    /// switched off, which a listing never starts).
     pub state: String,
     /// An ask can start with it right now: the person's own entry, or
     /// a connection of their Claude Code that was listed since the
@@ -129,6 +167,10 @@ pub struct ToolView {
     pub title: String,
     /// Core's decision (`agent::policy`): `read`, `draft` or `act`.
     pub kind: ToolKind,
+    /// Why the tool cannot be used at all, as core's sentence for the
+    /// person (`policy::unusable_reason`); `None` when it can. Such a
+    /// tool is shown and can never be ticked.
+    pub problem: Option<&'static str>,
 }
 
 /// One row of the app table.
@@ -157,7 +199,7 @@ pub struct ListingView {
     /// Why the last listing failed; empty when it worked.
     pub error: String,
     /// Why the person's own entries could not be listed; empty when
-    /// they were, or when there are none.
+    /// they were, or when none is switched on.
     pub custom_error: String,
 }
 
@@ -181,104 +223,117 @@ pub struct RunningApp {
 
 // --- what a window may change --------------------------------------
 
-/// The person's choices, as the Agent pane sends them. Not a whole
-/// block: see the module docs. A field a payload leaves out is the
-/// careful choice ([`AgentChoices::default`]), never the open one.
-#[derive(serde::Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct AgentChoices {
-    pub enabled: bool,
-    pub drafts_only: bool,
-    pub connections: Vec<ConnectionChoice>,
-    /// `None` = the built-in table.
-    pub app_connections: Option<Vec<AppConnection>>,
+/// One change from the Agent pane. Only what is named is changed:
+/// a field that is left out stays as it is on disk. So a window never
+/// writes back what it happened to have on screen, and leaving
+/// `drafts_only` out can never switch it off: only an explicit
+/// `false` does.
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentPatch {
+    pub enabled: Option<bool>,
+    pub drafts_only: Option<bool>,
+    /// A change to one connection.
+    pub connection: Option<ConnectionPatch>,
+    /// The whole app table. Named and `null`: back to the built-in
+    /// table. Left out: not changed.
+    #[serde(deserialize_with = "named")]
+    pub app_connections: Option<Option<Vec<AppConnection>>>,
 }
 
-/// The careful choices, like `AgentSettings::default()` in core:
-/// Agent off, drafts only on, the built-in table.
-impl Default for AgentChoices {
-    fn default() -> Self {
-        Self { enabled: false, drafts_only: true, connections: Vec::new(), app_connections: None }
-    }
+/// A field that is in the payload, `null` included, as `Some`.
+fn named<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
-/// The switch and the ticked tools of one connection.
-#[derive(serde::Deserialize, Clone, Debug, Default)]
-#[serde(default)]
-pub struct ConnectionChoice {
+/// A change to one connection: its switch, and tools to tick or to
+/// untick. The other ticks of the connection stay as they are.
+#[derive(serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConnectionPatch {
     pub name: String,
-    pub enabled: bool,
-    pub allowed_tools: Vec<String>,
+    pub enabled: Option<bool>,
+    pub tick: Vec<String>,
+    pub untick: Vec<String>,
 }
 
 fn key(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-/// `stored` with the person's `choices` laid over it.
+/// Why the tool `name` of `connection` may not be ticked, as a
+/// sentence for the person; `None` when it may.
 ///
-/// - The two switches and the app table are taken as sent.
-/// - A connection that is in both gets the switch and the ticks of
-///   the choice. A tick counts only for a tool the connection is
-///   known to have, or one that was ticked already: nobody can tick
-///   a tool that has not been seen.
-/// - A connection that is only in `choices` is ignored, and one that
-///   is only in `stored` stays as it is: a window adds and removes
-///   connections through their own commands.
-/// - What a connection is (its kind, its tools, how it is reached)
-///   is never taken from `choices`.
-fn with_choices(mut stored: AgentSettings, choices: &AgentChoices) -> AgentSettings {
-    stored.enabled = choices.enabled;
-    stored.drafts_only = choices.drafts_only;
-    stored.app_connections = choices.app_connections.clone();
-    for connection in &mut stored.connections {
-        let Some(choice) = choices.connections.iter().find(|c| key(&c.name) == key(&connection.name)) else {
-            continue;
-        };
-        connection.enabled = choice.enabled;
-        let ticked: Vec<String> = choice
-            .allowed_tools
-            .iter()
-            .filter(|tool| connection.tool(tool).is_some() || connection.allows(tool))
-            .cloned()
-            .collect();
-        connection.allowed_tools = ticked;
+/// - A tool nobody has seen cannot be ticked.
+/// - A tool core cannot use at all (`policy::unusable_reason`) can
+///   never be ticked.
+/// - While drafts only is on, a tool that acts cannot be ticked: it
+///   could not run, and a tick made now would come alive unseen the
+///   day drafts only is switched off.
+fn tick_refusal(connection: &AgentConnection, drafts_only: bool, name: &str) -> Option<String> {
+    let shown = ask::safe_to_show(name, false);
+    let Some(tool) = connection.tool(name) else {
+        return Some(format!("\"{shown}\" is not a tool this connection is known to have. Refresh and try again."));
+    };
+    if let Some(problem) = policy::unusable_reason(connection, tool) {
+        return Some(format!("\"{shown}\" cannot be ticked. {}", problem.sentence()));
     }
-    stored
+    if drafts_only && policy::kind_of(tool) == ToolKind::Act {
+        return Some(format!(
+            "\"{shown}\" sends, posts, deletes or changes something, so it cannot be ticked while Drafts only is on."
+        ));
+    }
+    None
 }
 
-/// `stored` with a connection of the person's own added: switched
-/// off, nothing ticked, no tools known until the next listing. The
-/// rules are those of `openwhisper agent connections add-custom`.
-fn with_custom(
-    mut stored: AgentSettings,
-    name: &str,
-    command: &str,
-    args: Vec<String>,
-    url: &str,
-) -> Result<AgentSettings, String> {
-    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-    if name.is_empty() {
-        return Err("Give the connection a name.".into());
+/// `stored` with one change from a window laid over it, or why the
+/// change is refused (nothing is changed then).
+///
+/// - Only what the patch names is changed.
+/// - A connection that is not in `stored` cannot be changed: a window
+///   adds none, and removes one through its own command.
+/// - A tick is taken only when [`tick_refusal`] has nothing against
+///   it, judged with drafts only as it is after this patch. A tool
+///   that is ticked already stays ticked without being asked about
+///   again. An untick is always taken.
+/// - What a connection is (its kind, its tools, how it is reached)
+///   is never taken from a window.
+fn with_patch(mut stored: AgentSettings, patch: &AgentPatch) -> Result<AgentSettings, String> {
+    if let Some(on) = patch.enabled {
+        stored.enabled = on;
     }
-    if stored.connection(&name).is_some() {
-        return Err(format!("There is already a connection called \"{name}\"."));
+    if let Some(on) = patch.drafts_only {
+        stored.drafts_only = on;
     }
-    let custom = CustomServer {
-        command: command.trim().to_string(),
-        args: args.into_iter().filter(|a| !a.trim().is_empty()).collect(),
-        url: url.trim().to_string(),
-        ..CustomServer::default()
-    };
-    if !custom.is_usable() {
-        return Err("Give the connection a command or a URL.".into());
+    if let Some(table) = &patch.app_connections {
+        stored.app_connections = table.clone();
     }
-    stored.connections.push(AgentConnection {
-        name,
-        kind: AgentConnectionKind::Custom,
-        custom: Some(custom),
-        ..AgentConnection::default()
-    });
+    if let Some(change) = &patch.connection {
+        let drafts_only = stored.drafts_only;
+        let Some(connection) = stored.connection_mut(&change.name) else {
+            return Err(format!(
+                "There is no connection called \"{}\".",
+                ask::safe_to_show(change.name.trim(), false)
+            ));
+        };
+        if let Some(on) = change.enabled {
+            connection.enabled = on;
+        }
+        connection.allowed_tools.retain(|ticked| !change.untick.contains(ticked));
+        for name in &change.tick {
+            if connection.allows(name) {
+                continue;
+            }
+            if let Some(why) = tick_refusal(connection, drafts_only, name) {
+                return Err(why);
+            }
+            connection.allowed_tools.push(name.clone());
+        }
+    }
     Ok(stored)
 }
 
@@ -287,24 +342,60 @@ fn with_custom(
 /// What the last listing of this run of the app found: the state of
 /// each connection, by name. Nothing about how one is reached.
 #[derive(Default)]
-struct Listing {
+struct LastListing {
     /// By name in lower case, and whether it is the person's own
     /// entry.
     found: HashMap<(String, bool), ConnectionState>,
     view: ListingView,
 }
 
-static LISTING: Mutex<Option<Listing>> = Mutex::new(None);
+static LISTING: Mutex<Option<LastListing>> = Mutex::new(None);
 
-fn listing<R>(f: impl FnOnce(&mut Listing) -> R) -> R {
+fn listing<R>(f: impl FnOnce(&mut LastListing) -> R) -> R {
     let mut guard = LISTING.lock().unwrap_or_else(|e| e.into_inner());
-    f(guard.get_or_insert_with(Listing::default))
+    f(guard.get_or_insert_with(LastListing::default))
+}
+
+/// Longest reason a failed listing is shown and logged with.
+const ERROR_MAX_CHARS: usize = 300;
+
+/// Why a listing failed, as it may be shown and logged. The text can
+/// carry a line the Claude CLI wrote, which is not ours: it is put on
+/// one line, made safe to show (`ask::safe_to_show`) and capped.
+fn shown_error(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let safe = ask::safe_to_show(&flat, false);
+    if safe.chars().count() <= ERROR_MAX_CHARS {
+        return safe;
+    }
+    let mut cut: String = safe.chars().take(ERROR_MAX_CHARS - 1).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+impl LastListing {
+    /// Keep what a listing that ended at `now_ms` came to. One that
+    /// worked replaces what was found before; one that failed says
+    /// why and leaves the rest as it was.
+    fn took(&mut self, outcome: &Result<agent::Listing, AgentError>, now_ms: i64) {
+        match outcome {
+            Ok(found) => {
+                self.found = found
+                    .connections
+                    .iter()
+                    .map(|c| ((key(&c.name), c.source == agent::ConnectionSource::Custom), c.state))
+                    .collect();
+                self.view.refreshed_at_ms = Some(now_ms);
+                self.view.error = String::new();
+                self.view.custom_error = shown_error(&found.custom_error);
+            }
+            Err(e) => self.view.error = shown_error(&e.to_string()),
+        }
+    }
 }
 
 /// Listings asked for and not over yet.
 static PENDING: AtomicUsize = AtomicUsize::new(0);
-/// Listings that ran to their end.
-static RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// A listing that was asked for. Counted from the moment it is asked
 /// for, so the state a command returns right after says "refreshing".
@@ -324,14 +415,20 @@ impl Drop for Pending {
 }
 
 /// The word for where `connection` stood in the last listing.
-fn state_word(connection: &AgentConnection, last: &Listing) -> String {
+fn state_word(connection: &AgentConnection, last: &LastListing) -> String {
     let custom = connection.kind == AgentConnectionKind::Custom;
     match last.found.get(&(key(&connection.name), custom)) {
         Some(state) => state.as_str().to_string(),
         None if last.view.refreshed_at_ms.is_none() => "not-looked-up".to_string(),
-        // The person's own entries are listed apart, and that part
-        // can fail while the rest worked.
-        None if custom => ConnectionState::Unknown.as_str().to_string(),
+        // The person's own entries are listed apart, only those that
+        // are switched on, and that part can fail while the rest
+        // worked. One that was tried and is not there: not known.
+        None if custom && connection.enabled && !last.view.custom_error.is_empty() => {
+            ConnectionState::Unknown.as_str().to_string()
+        }
+        // Switched off (a listing never starts it), or switched on
+        // after the last listing.
+        None if custom => "not-looked-up".to_string(),
         None => "missing".to_string(),
     }
 }
@@ -339,7 +436,7 @@ fn state_word(connection: &AgentConnection, last: &Listing) -> String {
 /// The state a window is shown, from the stored block and the last
 /// listing. `is_listed` says whether core knows how to reach a
 /// connection of the person's Claude Code.
-fn state(settings: &AgentSettings, last: &Listing, refreshing: bool, is_listed: impl Fn(&str) -> bool) -> AgentState {
+fn state(settings: &AgentSettings, last: &LastListing, refreshing: bool, is_listed: impl Fn(&str) -> bool) -> AgentState {
     let connections = settings
         .connections
         .iter()
@@ -353,7 +450,12 @@ fn state(settings: &AgentSettings, last: &Listing, refreshing: bool, is_listed: 
                 tools: connection
                     .tools
                     .iter()
-                    .map(|tool| ToolView { name: tool.name.clone(), title: tool.title.clone(), kind: policy::kind_of(tool) })
+                    .map(|tool| ToolView {
+                        name: tool.name.clone(),
+                        title: tool.title.clone(),
+                        kind: policy::kind_of(tool),
+                        problem: policy::unusable_reason(connection, tool).map(|p| p.sentence()),
+                    })
                     .collect(),
                 state: state_word(connection, last),
                 usable: custom || is_listed(&connection.name),
@@ -420,64 +522,144 @@ fn announce(app: &AppHandle, settings: &AgentSettings) -> AgentState {
     now
 }
 
-/// Agent went from off to on: the connections have to be looked up
-/// before an ask can use one.
-fn refresh_due(before: &AgentSettings, now: &AgentSettings) -> bool {
-    !before.enabled && now.enabled
+// --- when the connections are looked up ----------------------------
+
+/// Why the connections are not looked up right now, as a sentence
+/// for the person; `None` when they can be. A lookup starts every
+/// connection Claude Code has, so it only runs while an ask could
+/// use what it finds: Agent on, Ask on, the Claude backend.
+fn lookup_refusal(agent: &AgentSettings, ask_enabled: bool, backend: RefineBackendKind) -> Option<&'static str> {
+    if !agent.enabled {
+        Some("Agent is switched off, so the connections were not looked up.")
+    } else if !ask_enabled {
+        Some("Ask is switched off, so the connections were not looked up. Agent only works in an ask.")
+    } else if backend == RefineBackendKind::OpenaiCompatible {
+        Some("Agent needs the Claude backend, so the connections were not looked up.")
+    } else {
+        None
+    }
+}
+
+/// [`lookup_refusal`] with the Ask switch and the backend as core
+/// has them now.
+fn lookup_refusal_now(agent: &AgentSettings) -> Option<&'static str> {
+    lookup_refusal(
+        agent,
+        core_settings::current_ask_settings().enabled,
+        core_settings::current_refine_settings().backend,
+    )
+}
+
+/// Whether a lookup is due now. `asked` remembers that one was asked
+/// for since Agent last became able to use connections (`able`: no
+/// [`lookup_refusal`]).
+///
+/// Due once each time `able` goes from false to true, whoever notices
+/// first: the start of the app, a save from the pane, or any read
+/// that finds the block (or the Ask switch, or the backend) changed
+/// by someone else. Nothing here compares a block with the one
+/// before, so it does not matter which command read the file first.
+fn lookup_due(asked: &mut bool, able: bool) -> bool {
+    if !able {
+        *asked = false;
+        return false;
+    }
+    !std::mem::replace(asked, true)
+}
+
+/// See [`lookup_due`].
+static ASKED: Mutex<bool> = Mutex::new(false);
+
+/// Look the connections up in the background when that is due
+/// ([`lookup_due`]). Called with the Agent block wherever it was just
+/// read or saved.
+fn look_up_if_due(app: &AppHandle, settings: &AgentSettings) {
+    let able = lookup_refusal_now(settings).is_none();
+    let due = lookup_due(&mut ASKED.lock().unwrap_or_else(|e| e.into_inner()), able);
+    if due {
+        refresh_in_background(app);
+    }
+}
+
+/// The Ask switch or the Refine backend changed: Agent may have
+/// become able to use connections by it. Called by `ask.rs` and
+/// `refine.rs` after a save.
+pub(crate) fn conditions_changed(app: &AppHandle) {
+    look_up_if_due(app, &core_settings::current_agent_settings());
 }
 
 // --- listing -------------------------------------------------------
 
-/// What a listing found, kept for the pane.
-fn remember(found: &[ListedConnection], custom_error: &str) {
-    listing(|last| {
-        last.found = found
-            .iter()
-            .map(|c| ((key(&c.name), c.source == agent::ConnectionSource::Custom), c.state))
-            .collect();
-        last.view.refreshed_at_ms = Some(openwhisper_core::history::now_ms());
-        last.view.error = String::new();
-        last.view.custom_error = custom_error.to_string();
-    });
+/// Work that runs one at a time, where a caller that had to wait for
+/// another's run takes that run's result instead of starting its own.
+struct Turns {
+    /// Runs that came to their end.
+    done: AtomicU64,
+    running: Mutex<()>,
 }
 
-/// List the connections and bring the Agent block at `path` up to
-/// date (`agent::refresh`). One at a time: a caller that waited for
-/// another listing takes that one's result instead of starting its
-/// own. Blocks for a few seconds. A failure is kept for the pane
-/// ([`ListingView::error`]) and changes nothing on disk.
-fn run_refresh(path: &Path) {
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-    let seen = RUNS.load(Ordering::SeqCst);
-    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    if RUNS.load(Ordering::SeqCst) != seen {
-        return;
+/// How many runs had ended when a caller asked for one.
+struct Ticket(u64);
+
+impl Turns {
+    const fn new() -> Self {
+        Self { done: AtomicU64::new(0), running: Mutex::new(()) }
     }
-    let cli = core_settings::current_refine_settings().claude_cli;
-    match agent::refresh(path, &cli, agent::LIST_WAIT) {
-        Ok(refreshed) => {
-            remember(&refreshed.listing, &refreshed.custom_error);
-            // Core read the block, merged and saved without this
-            // module's lock. A change of ours that was between its
-            // own read and save at that moment wrote the tool lists
-            // from before the listing back; merging once more, under
-            // the lock, puts them right. Usually there is nothing to
-            // do.
+
+    /// Taken before waiting for a turn.
+    fn ticket(&self) -> Ticket {
+        Ticket(self.done.load(Ordering::SeqCst))
+    }
+
+    /// Wait for a turn, then run `work`, unless a run ended since
+    /// `ticket` was taken: that one's result is as fresh as the
+    /// caller asked for. Returns whether `work` ran.
+    fn run(&self, ticket: Ticket, work: impl FnOnce()) -> bool {
+        let _turn = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if self.done.load(Ordering::SeqCst) != ticket.0 {
+            return false;
+        }
+        work();
+        self.done.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+static LISTINGS: Turns = Turns::new();
+
+/// List the connections and bring the Agent block at `path` up to
+/// date. One at a time ([`Turns`]). Blocks for a few seconds. A
+/// failure is kept for the pane ([`ListingView::error`]) and changes
+/// nothing on disk.
+///
+/// The listing itself (`agent::list_all`) saves nothing and runs
+/// without this module's lock. What it found is merged into the block
+/// as it is on disk when the listing is over, read and saved under
+/// the lock, so a change made while the listing ran is kept.
+fn run_refresh(path: &Path) {
+    let ticket = LISTINGS.ticket();
+    LISTINGS.run(ticket, || {
+        let cli = core_settings::current_refine_settings().claude_cli;
+        let asked_with = {
             let _held = agent_lock();
-            let current = core_settings::load_agent_settings(path);
-            let merged = agent::merge_listing(&current, &refreshed.listing, true);
-            if merged != current {
-                if let Err(e) = core_settings::save_agent_settings(path, merged) {
-                    eprintln!("[agent] the listing could not be saved: {e}");
+            core_settings::load_agent_settings(path)
+        };
+        let outcome = agent::list_all(&asked_with, &cli, agent::LIST_WAIT);
+        listing(|last| last.took(&outcome, openwhisper_core::history::now_ms()));
+        match outcome {
+            Ok(found) => {
+                let _held = agent_lock();
+                let current = core_settings::load_agent_settings(path);
+                let merged = agent::merge_listing(&current, &found.connections, true);
+                if merged != current {
+                    if let Err(e) = core_settings::save_agent_settings(path, merged) {
+                        eprintln!("[agent] the listing could not be saved: {e}");
+                    }
                 }
             }
+            Err(e) => eprintln!("[agent] the connections could not be listed: {}", shown_error(&e.to_string())),
         }
-        Err(e) => {
-            eprintln!("[agent] the connections could not be listed: {e}");
-            listing(|last| last.view.error = e.to_string());
-        }
-    }
-    RUNS.fetch_add(1, Ordering::SeqCst);
+    });
 }
 
 /// [`run_refresh`], then tell the windows. `pending` is given up
@@ -508,13 +690,14 @@ fn refresh_in_background(app: &AppHandle) {
     }
 }
 
-/// Boot-time: load the Agent block into core's cache, and when Agent
-/// is on, look the connections up in the background. Without that
-/// the first ask that wants a connection of the person's Claude Code
-/// would fail and ask for a refresh.
+/// Boot-time: load the Agent block into core's cache, and when an ask
+/// could use connections ([`lookup_refusal`]), look them up in the
+/// background. Without that the first ask that wants a connection of
+/// the person's Claude Code would be made without it.
 ///
-/// Call it after `vision::init`, which tells core where the settings
-/// file is.
+/// Call it after `ask::init`, `refine::init` and `vision::init`: the
+/// Ask switch and the backend decide whether anything is looked up,
+/// and `vision::init` tells core where the settings file is.
 pub fn init(app: &AppHandle) {
     let Ok(path) = settings_path(app) else {
         return;
@@ -524,47 +707,55 @@ pub fn init(app: &AppHandle) {
         core_settings::load_agent_settings(&path)
     };
     if settings.enabled {
-        refresh_in_background(app);
+        if let Some(why) = lookup_refusal_now(&settings) {
+            eprintln!("[agent] {why}");
+        }
     }
+    look_up_if_due(app, &settings);
+}
+
+/// The Agent block as it is on disk now (it is also edited by the
+/// headless CLI), put into core's cache. When that is not what this
+/// process had, the windows are told; and when Agent became able to
+/// use connections, they are looked up in the background. Blocking:
+/// a file read.
+fn fresh(app: &AppHandle, path: &Path) -> AgentSettings {
+    let (before, settings) = {
+        let _held = agent_lock();
+        (core_settings::current_agent_settings(), core_settings::load_agent_settings(path))
+    };
+    look_up_if_due(app, &settings);
+    // The file was changed behind this process's back.
+    if before != settings {
+        announce(app, &settings);
+    }
+    settings
 }
 
 // --- commands ------------------------------------------------------
 
-/// Fresh read from disk (the block is also edited by the headless
-/// CLI). Starts nothing and calls no tool. Off the UI thread for the
-/// file read.
+/// Fresh read from disk ([`fresh`]). Calls no tool. Off the UI thread
+/// for the file read.
 #[tauri::command]
 pub async fn agent_get(app: AppHandle) -> Result<AgentState, String> {
     let path = settings_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let (before, settings) = {
-            let _held = agent_lock();
-            (core_settings::current_agent_settings(), core_settings::load_agent_settings(&path))
-        };
-        // The file was changed behind this process's back.
-        if before != settings {
-            if refresh_due(&before, &settings) {
-                refresh_in_background(&app);
-            }
-            return announce(&app, &settings);
-        }
-        current_state(&settings)
-    })
-    .await
-    .map_err(|e| format!("agent settings: {e}"))
+    tauri::async_runtime::spawn_blocking(move || current_state(&fresh(&app, &path)))
+        .await
+        .map_err(|e| format!("agent settings: {e}"))
 }
 
-/// Save the person's choices over the block on disk ([`with_choices`])
-/// and answer with the new state. Emits `agent_changed`. When Agent
-/// was switched on by this, the connections are looked up in the
-/// background.
+/// Lay one change over the block on disk ([`with_patch`]) and answer
+/// with the new state. Emits `agent_changed`. When Agent became able
+/// to use connections by this, they are looked up in the background.
+/// Only from the main window.
 ///
 /// Not an async command, like `ask_set` and `vision_set`: the pane
-/// sends one of these per click, each with every choice in it, and
-/// they have to be applied in the order they were made.
+/// sends one of these per click, and they have to be applied in the
+/// order they were made.
 #[tauri::command]
-pub fn agent_set(app: AppHandle, choices: AgentChoices) -> Result<AgentState, String> {
-    change(&app, |stored| Ok(with_choices(stored, &choices)))
+pub fn agent_set(window: WebviewWindow, app: AppHandle, patch: AgentPatch) -> Result<AgentState, String> {
+    check_caller("agent_set", window.label())?;
+    change(&app, |stored| with_patch(stored, &patch))
 }
 
 /// Read the block, change it and save it, as one step.
@@ -573,29 +764,41 @@ fn change(
     edit: impl FnOnce(AgentSettings) -> Result<AgentSettings, String>,
 ) -> Result<AgentState, String> {
     let path = settings_path(app)?;
-    let (before, saved) = {
+    let saved = {
         let _held = agent_lock();
         let before = core_settings::load_agent_settings(&path);
-        let saved = core_settings::save_agent_settings(&path, edit(before.clone())?)?;
-        (before, saved)
+        core_settings::save_agent_settings(&path, edit(before)?)?
     };
-    if refresh_due(&before, &saved) {
-        refresh_in_background(app);
-    }
+    look_up_if_due(app, &saved);
     Ok(announce(app, &saved))
 }
 
 /// Ask Claude Code which connections it has, with their tools, and
 /// bring the block up to date. No tool is called and the model is
-/// not asked anything. Takes a few seconds, on a blocking thread.
-/// Always answers with the state: a listing that failed says why in
-/// `listing.error`.
+/// not asked anything, but every connection Claude Code has is
+/// started. Takes a few seconds, on a blocking thread. Only from the
+/// main window, and only while an ask could use what is found:
+/// otherwise nothing is started and the error says why
+/// ([`lookup_refusal`]). A listing that ran and failed answers with
+/// the state, and says why in `listing.error`.
 #[tauri::command]
-pub async fn agent_refresh(app: AppHandle) -> Result<AgentState, String> {
-    let pending = Pending::new();
-    tauri::async_runtime::spawn_blocking(move || refresh_and_announce(&app, pending))
-        .await
-        .map_err(|e| format!("agent refresh: {e}"))?
+pub async fn agent_refresh(window: WebviewWindow, app: AppHandle) -> Result<AgentState, String> {
+    check_caller("agent_refresh", window.label())?;
+    let path = settings_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = {
+            let _held = agent_lock();
+            core_settings::load_agent_settings(&path)
+        };
+        if let Some(why) = lookup_refusal_now(&settings) {
+            return Err(why.to_string());
+        }
+        // This is the lookup a change of the switches would ask for.
+        *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        refresh_and_announce(&app, Pending::new())
+    })
+    .await
+    .map_err(|e| format!("agent refresh: {e}"))?
 }
 
 /// Whether an ask would use tools right now, and why not, in core's
@@ -605,10 +808,7 @@ pub async fn agent_refresh(app: AppHandle) -> Result<AgentState, String> {
 pub async fn agent_status(app: AppHandle) -> Result<AgentStatus, String> {
     let path = settings_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let settings = {
-            let _held = agent_lock();
-            core_settings::load_agent_settings(&path)
-        };
+        let settings = fresh(&app, &path);
         let ask_enabled = core_settings::current_ask_settings().enabled;
         let backend = core_settings::current_refine_settings().backend;
         let (ready, message) = agent::readiness(&settings, ask_enabled, backend);
@@ -618,36 +818,16 @@ pub async fn agent_status(app: AppHandle) -> Result<AgentStatus, String> {
     .map_err(|e| format!("agent status: {e}"))
 }
 
-/// Add a connection of the person's own: a command with its
-/// arguments, or a URL. It arrives switched off with nothing ticked,
-/// and its tools are not known until the next refresh. Variables for
-/// its environment are not taken here: `openwhisper agent
-/// connections add-custom --env` sets them.
-#[tauri::command]
-pub fn agent_add_connection(
-    app: AppHandle,
-    name: String,
-    command: String,
-    args: Vec<String>,
-    url: String,
-) -> Result<AgentState, String> {
-    let wanted = key(&name.split_whitespace().collect::<Vec<_>>().join(" "));
-    let added = change(&app, |stored| with_custom(stored, &name, &command, args, &url))?;
-    // Core drops an entry it cannot keep (too many connections).
-    if !added.connections.iter().any(|c| key(&c.name) == wanted) {
-        return Err("The connection could not be saved.".into());
-    }
-    Ok(added)
-}
-
 /// Remove a connection from the block, with its ticks. A connection
 /// of the person's Claude Code comes back, switched off, with the
-/// next refresh for as long as Claude Code has it.
+/// next refresh for as long as Claude Code has it. Only from the main
+/// window.
 #[tauri::command]
-pub fn agent_remove_connection(app: AppHandle, name: String) -> Result<AgentState, String> {
+pub fn agent_remove_connection(window: WebviewWindow, app: AppHandle, name: String) -> Result<AgentState, String> {
+    check_caller("agent_remove_connection", window.label())?;
     change(&app, |mut stored| {
         let Some(found) = stored.connection(&name).map(|c| c.name.clone()) else {
-            return Err(format!("There is no connection called \"{}\".", name.trim()));
+            return Err(format!("There is no connection called \"{}\".", ask::safe_to_show(name.trim(), false)));
         };
         stored.connections.retain(|c| c.name != found);
         Ok(stored)
@@ -669,25 +849,30 @@ fn running(apps: Vec<(String, String)>) -> Vec<RunningApp> {
 }
 
 /// Yes to the confirm `request_id` of the ask `ask_id`: the tool runs
-/// with exactly the input the panel showed. Only while that confirm
-/// is the one the ask waits on (`ask::confirm_allow`); returns
-/// whether it was.
+/// with exactly the input the panel showed. Only from the answer
+/// window, only while that confirm is the one the ask waits on, and
+/// only once it has been on show for a moment (`ask::confirm_allow`);
+/// returns whether the yes was taken.
 #[tauri::command]
-pub fn ask_confirm_allow(ask_id: u64, request_id: String) -> bool {
-    ask::confirm_allow(ask_id, &request_id)
+pub fn ask_confirm_allow(window: WebviewWindow, ask_id: u64, request_id: String) -> Result<bool, String> {
+    check_caller("ask_confirm_allow", window.label())?;
+    Ok(ask::confirm_allow(ask_id, &request_id))
 }
 
 /// No to the confirm `request_id` of the ask `ask_id`: the tool does
 /// not run and the ask goes on to its answer (`ask::confirm_deny`).
+/// Only from the answer window.
 #[tauri::command]
-pub fn ask_confirm_deny(ask_id: u64, request_id: String) -> bool {
-    ask::confirm_deny(ask_id, &request_id)
+pub fn ask_confirm_deny(window: WebviewWindow, ask_id: u64, request_id: String) -> Result<bool, String> {
+    check_caller("ask_confirm_deny", window.label())?;
+    Ok(ask::confirm_deny(ask_id, &request_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openwhisper_core::settings::ToolInfo;
+    use openwhisper_core::agent::{ConnectionSource, ListedConnection};
+    use openwhisper_core::settings::{CustomServer, ToolInfo};
     use std::collections::BTreeMap;
 
     /// This file up to its tests: the part that ships.
@@ -742,11 +927,15 @@ mod tests {
     }
 
     fn shown(settings: &AgentSettings) -> AgentState {
-        state(settings, &Listing::default(), false, |_| false)
+        state(settings, &LastListing::default(), false, |_| false)
+    }
+
+    fn patch(json: &str) -> AgentPatch {
+        serde_json::from_str(json).expect("a patch")
     }
 
     #[test]
-    fn the_commands_of_this_module_are_the_nine_listed_and_all_are_registered() {
+    fn the_commands_of_this_module_are_the_eight_listed_and_all_are_registered() {
         assert_eq!(command_names(shipped()), COMMANDS);
         let lib = include_str!("lib.rs");
         let start = lib.find("generate_handler![").expect("handler list");
@@ -754,6 +943,49 @@ mod tests {
         for name in COMMANDS {
             assert!(list.contains(&format!("agent::{name},")), "{name} is not registered");
         }
+    }
+
+    #[test]
+    fn no_command_adds_a_connection() {
+        // A connection of the person's own is a command that is
+        // started on this computer: it is added in a terminal only.
+        let lib = include_str!("lib.rs");
+        assert!(!lib.contains("agent_add_connection"));
+        assert!(!command_names(shipped()).iter().any(|name| name.contains("add")));
+        // Nothing that ships here can make one, either.
+        let builds = shipped().lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains("CustomServer"));
+        assert!(!builds, "the shell builds a custom connection");
+    }
+
+    #[test]
+    fn a_yes_or_no_is_taken_from_the_answer_window_and_a_change_from_the_main_window() {
+        for command in ["ask_confirm_allow", "ask_confirm_deny"] {
+            assert_eq!(check_caller(command, "answer"), Ok(()), "{command}");
+            for other in ["main", "pill", "", "Answer", "answer2"] {
+                let refused = check_caller(command, other).unwrap_err();
+                assert!(refused.contains("not accepted from this window"), "{command} from {other:?}: {refused}");
+            }
+        }
+        for command in ["agent_set", "agent_refresh", "agent_remove_connection"] {
+            assert_eq!(check_caller(command, "main"), Ok(()), "{command}");
+            for other in ["answer", "pill", "", "Main"] {
+                assert!(check_caller(command, other).is_err(), "{command} from {other:?}");
+            }
+        }
+        // Reading is open to every window.
+        for command in ["agent_get", "agent_status", "agent_running_apps"] {
+            for label in ["main", "pill", "answer"] {
+                assert_eq!(check_caller(command, label), Ok(()), "{command} from {label}");
+            }
+        }
+        // Every command has its rule here, and each one that is bound
+        // to a window asks for it by its own name.
+        for command in COMMANDS {
+            let bound = window_of(command).is_some();
+            let asks = shipped().contains(&format!("check_caller(\"{command}\", window.label())?;"));
+            assert_eq!(bound, asks, "{command}");
+        }
+        assert_eq!(window_of("ask_confirm_allow"), Some(crate::ask::ANSWER_LABEL));
     }
 
     #[test]
@@ -782,7 +1014,7 @@ mod tests {
             keys(&value["connections"][0]),
             ["allowed_tools", "enabled", "kind", "name", "state", "tools", "usable", "via"]
         );
-        assert_eq!(keys(&value["connections"][0]["tools"][0]), ["kind", "name", "title"]);
+        assert_eq!(keys(&value["connections"][0]["tools"][0]), ["kind", "name", "problem", "title"]);
         assert_eq!(keys(&value["app_connections"][0]), ["active", "app_id", "app_name", "connection", "known"]);
         assert_eq!(keys(&value["listing"]), ["custom_error", "error", "refreshed_at_ms", "refreshing"]);
         // The careful defaults, and the words a window reads.
@@ -798,8 +1030,32 @@ mod tests {
             value["connections"][0]["tools"].as_array().unwrap().iter().map(|t| t["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["read", "draft", "act"]);
         assert_eq!(value["connections"][0]["tools"][0]["title"], "Read thread");
+        assert_eq!(value["connections"][0]["tools"][0]["problem"], serde_json::Value::Null);
         assert_eq!(value["listing"]["refreshing"], false);
         assert_eq!(value["listing"]["refreshed_at_ms"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_tool_that_cannot_be_used_says_why_in_cores_words() {
+        let mut teamchat = chat("teamchat");
+        teamchat.tools.push(ToolInfo::new("list,all"));
+        teamchat.tools.push(ToolInfo::new("read.thread"));
+        teamchat.tools.push(ToolInfo::new("read_thread_"));
+        teamchat.tools.push(ToolInfo::new("read-thread"));
+        let now = shown(&settings(vec![teamchat.clone()]));
+        let problem = |name: &str| now.connections[0].tools.iter().find(|t| t.name == name).unwrap().problem;
+        assert_eq!(problem("send_message"), None);
+        assert_eq!(problem("list,all"), Some(policy::ToolProblem::Name.sentence()));
+        // `read.thread` and `read-thread` are spelled like `read_thread`
+        // by the time Claude Code has them: none of the three can be
+        // told from the others.
+        assert_eq!(problem("read.thread"), Some(policy::ToolProblem::Twin.sentence()));
+        assert_eq!(problem("read_thread"), Some(policy::ToolProblem::Twin.sentence()));
+        assert_eq!(problem("read_thread_"), None);
+        // Exactly what core says, tool by tool.
+        for (shown, tool) in now.connections[0].tools.iter().zip(&teamchat.tools) {
+            assert_eq!(shown.problem, policy::unusable_reason(&teamchat, tool).map(|p| p.sentence()), "{}", tool.name);
+        }
     }
 
     #[test]
@@ -828,112 +1084,197 @@ mod tests {
     }
 
     #[test]
-    fn choices_change_the_switches_the_ticks_and_the_table_and_nothing_else() {
-        let stored = AgentSettings { confirm_timeout_s: 60, ..settings(vec![chat("teamchat"), own("notes")]) };
-        let choices = AgentChoices {
+    fn a_patch_changes_what_it_names_and_nothing_else() {
+        let mut teamchat = chat("teamchat");
+        teamchat.enabled = true;
+        teamchat.allowed_tools = vec!["read_thread".into()];
+        let stored = AgentSettings {
             enabled: true,
             drafts_only: false,
-            connections: vec![
-                ConnectionChoice {
-                    name: " TeamChat ".into(),
-                    enabled: true,
-                    // The last one is not a tool anybody has seen.
-                    allowed_tools: vec!["read_thread".into(), "send_message".into(), "wipe_everything".into()],
-                },
-                // Not a connection on disk: a window cannot add one
-                // this way.
-                ConnectionChoice { name: "sneaked".into(), enabled: true, allowed_tools: vec!["run".into()] },
-            ],
+            confirm_timeout_s: 60,
             app_connections: Some(vec![AppConnection::new("com.example.chat", "Chat", "teamchat")]),
+            ..settings(vec![teamchat, own("notes")])
         };
-        let merged = with_choices(stored.clone(), &choices);
-        assert!(merged.enabled && !merged.drafts_only);
-        assert_eq!(merged.confirm_timeout_s, 60);
-        assert_eq!(merged.connections.len(), 2);
-        let teamchat = &merged.connections[0];
-        assert!(teamchat.enabled);
-        assert_eq!(teamchat.allowed_tools, ["read_thread", "send_message"]);
-        assert_eq!(teamchat.tools, stored.connections[0].tools);
-        // Not named in the choices: untouched, details and all.
-        assert_eq!(merged.connections[1], stored.connections[1]);
-        assert_eq!(merged.app_connections, choices.app_connections);
-        // A tick that was there stays there, seen or not, until it
-        // is taken away.
-        let mut old = stored.clone();
-        old.connections[0].allowed_tools = vec!["gone_tool".into()];
-        let kept = with_choices(
-            old,
-            &AgentChoices {
-                connections: vec![ConnectionChoice {
-                    name: "teamchat".into(),
-                    enabled: false,
-                    allowed_tools: vec!["gone_tool".into(), "read_thread".into()],
-                }],
-                ..AgentChoices::default()
-            },
-        );
-        assert_eq!(kept.connections[0].allowed_tools, ["gone_tool", "read_thread"]);
-        // No table = the built-in one.
-        assert_eq!(with_choices(merged, &AgentChoices::default()).app_connections, None);
+        // Nothing named: nothing changed. Above all, drafts only is
+        // not switched back on or off by being left out.
+        assert_eq!(with_patch(stored.clone(), &patch("{}")).unwrap(), stored);
+
+        // One switch.
+        let off = with_patch(stored.clone(), &patch(r#"{"enabled":false}"#)).unwrap();
+        assert_eq!(off, AgentSettings { enabled: false, ..stored.clone() });
+        let careful = with_patch(stored.clone(), &patch(r#"{"drafts_only":true}"#)).unwrap();
+        assert_eq!(careful, AgentSettings { drafts_only: true, ..stored.clone() });
+
+        // One connection's switch: its ticks and the other connection
+        // stay, details and all.
+        let switched =
+            with_patch(stored.clone(), &patch(r#"{"connection":{"name":" TeamChat ","enabled":false}}"#)).unwrap();
+        assert!(!switched.connections[0].enabled);
+        assert_eq!(switched.connections[0].allowed_tools, ["read_thread"]);
+        assert_eq!(switched.connections[0].tools, stored.connections[0].tools);
+        assert_eq!(switched.connections[1], stored.connections[1]);
+        assert_eq!((switched.enabled, switched.drafts_only, switched.confirm_timeout_s), (true, false, 60));
+        assert_eq!(switched.app_connections, stored.app_connections);
+
+        // Ticks of one connection: the ones named, the rest as they
+        // are.
+        let ticked = with_patch(
+            stored.clone(),
+            &patch(r#"{"connection":{"name":"teamchat","tick":["create_draft","read_thread"]}}"#),
+        )
+        .unwrap();
+        assert_eq!(ticked.connections[0].allowed_tools, ["read_thread", "create_draft"]);
+        assert!(ticked.connections[0].enabled);
+        let unticked =
+            with_patch(ticked, &patch(r#"{"connection":{"name":"teamchat","untick":["read_thread","never_ticked"]}}"#))
+                .unwrap();
+        assert_eq!(unticked.connections[0].allowed_tools, ["create_draft"]);
+
+        // The app table: a new one, or back to the built-in one.
+        let table = with_patch(
+            stored.clone(),
+            &patch(r#"{"app_connections":[{"app_id":"com.example.mail","app_name":"Mail","connection":"notes"}]}"#),
+        )
+        .unwrap();
+        assert_eq!(table.app_connections, Some(vec![AppConnection::new("com.example.mail", "Mail", "notes")]));
+        assert_eq!(table.connections, stored.connections);
+        let builtin = with_patch(stored.clone(), &patch(r#"{"app_connections":null}"#)).unwrap();
+        assert_eq!(builtin.app_connections, None);
+        assert_eq!(AgentSettings { app_connections: stored.app_connections.clone(), ..builtin }, stored);
     }
 
     #[test]
-    fn a_payload_that_names_nothing_switches_nothing_on() {
-        let choices: AgentChoices = serde_json::from_str("{}").unwrap();
-        assert!(!choices.enabled);
-        // Left out is drafts only on, not off.
-        assert!(choices.drafts_only);
-        let open = AgentSettings { enabled: true, drafts_only: false, ..settings(vec![chat("teamchat")]) };
-        let merged = with_choices(open, &choices);
-        assert!(!merged.enabled);
-        assert!(merged.drafts_only);
-        assert!(!merged.connections[0].enabled);
-        // A switch that is named is taken as named.
-        let named: AgentChoices = serde_json::from_str(r#"{"enabled":true,"drafts_only":false}"#).unwrap();
-        assert!(named.enabled && !named.drafts_only);
+    fn a_patch_can_only_switch_drafts_only_off_by_saying_so() {
+        // Left out is "not changed", whatever it is now.
+        assert_eq!(patch("{}").drafts_only, None);
+        assert_eq!(patch(r#"{"enabled":true}"#).drafts_only, None);
+        for stored in [AgentSettings::default(), AgentSettings { drafts_only: false, ..AgentSettings::default() }] {
+            let after = with_patch(stored.clone(), &patch(r#"{"enabled":true}"#)).unwrap();
+            assert_eq!(after.drafts_only, stored.drafts_only);
+        }
+        assert!(!with_patch(AgentSettings::default(), &patch(r#"{"drafts_only":false}"#)).unwrap().drafts_only);
+        // Something that is not a yes or no is not taken for one.
+        for bad in [r#"{"drafts_only":null}"#, r#"{"drafts_only":"no"}"#, r#"{"drafts_only":0}"#] {
+            match serde_json::from_str::<AgentPatch>(bad) {
+                Ok(read) => assert_eq!(read.drafts_only, None, "{bad}"),
+                Err(_) => {}
+            }
+        }
     }
 
     #[test]
-    fn a_connection_of_the_persons_own_needs_a_name_of_its_own_and_a_way_to_reach_it() {
+    fn a_patch_cannot_add_a_connection_or_say_what_one_is() {
         let stored = settings(vec![chat("teamchat")]);
-        let add = |name: &str, command: &str, url: &str| {
-            with_custom(stored.clone(), name, command, vec!["--stdio".into(), "  ".into()], url)
+        // A connection that is not on disk.
+        let refused = with_patch(stored.clone(), &patch(r#"{"connection":{"name":"sneaked","enabled":true}}"#));
+        assert_eq!(refused.unwrap_err(), "There is no connection called \"sneaked\".");
+        // The whole list, the old way: not read as anything.
+        assert!(serde_json::from_str::<AgentPatch>(r#"{"connections":[{"name":"teamchat","enabled":true}]}"#).is_err());
+        // What a connection is, how it is reached, its tools.
+        for field in [r#""kind":"custom""#, r#""custom":{"command":"sh"}"#, r#""tools":[{"name":"run"}]"#, r#""allowed_tools":["send_message"]"#] {
+            let sent = format!(r#"{{"connection":{{"name":"teamchat",{field}}}}}"#);
+            assert!(serde_json::from_str::<AgentPatch>(&sent).is_err(), "{sent}");
+        }
+        assert!(serde_json::from_str::<AgentPatch>(r#"{"confirm_timeout_s":600}"#).is_err());
+    }
+
+    #[test]
+    fn a_tool_that_acts_cannot_be_ticked_under_drafts_only_and_an_unusable_one_never() {
+        let mut teamchat = chat("teamchat");
+        teamchat.enabled = true;
+        teamchat.tools.push(ToolInfo::new("list,all"));
+        teamchat.tools.push(ToolInfo::new("post.note"));
+        teamchat.tools.push(ToolInfo::new("post_note"));
+
+        // Drafts only on: read and draft tools, not one that acts.
+        assert_eq!(tick_refusal(&teamchat, true, "read_thread"), None);
+        assert_eq!(tick_refusal(&teamchat, true, "create_draft"), None);
+        let acts = tick_refusal(&teamchat, true, "send_message").expect("refused");
+        assert!(acts.contains("cannot be ticked while Drafts only is on"), "{acts}");
+        // Drafts only off: it can.
+        assert_eq!(tick_refusal(&teamchat, false, "send_message"), None);
+        // Unusable: never, with core's reason.
+        for drafts_only in [true, false] {
+            let name = tick_refusal(&teamchat, drafts_only, "list,all").expect("refused");
+            assert!(name.ends_with(policy::ToolProblem::Name.sentence()), "{name}");
+            let twin = tick_refusal(&teamchat, drafts_only, "post.note").expect("refused");
+            assert!(twin.ends_with(policy::ToolProblem::Twin.sentence()), "{twin}");
+            // A tool nobody has seen.
+            let unseen = tick_refusal(&teamchat, drafts_only, "wipe_everything").expect("refused");
+            assert!(unseen.contains("is not a tool this connection is known to have"), "{unseen}");
+        }
+        // A name is shown safely in the refusal.
+        let hidden = tick_refusal(&teamchat, false, "wipe\u{202E}everything").expect("refused");
+        assert!(hidden.contains("wipe\\u{202E}everything") && !hidden.contains('\u{202E}'), "{hidden}");
+
+        // The same through a patch, and a refusal changes nothing.
+        let tick = |stored: &AgentSettings, tool: &str| {
+            with_patch(stored.clone(), &patch(&format!(r#"{{"connection":{{"name":"teamchat","tick":["read_thread","{tool}"]}}}}"#)))
         };
-        assert_eq!(add("  ", "notes-server", "").unwrap_err(), "Give the connection a name.");
-        assert!(add("TeamChat", "notes-server", "").unwrap_err().contains("already a connection"));
-        assert_eq!(add("notes", " ", "").unwrap_err(), "Give the connection a command or a URL.");
-        let added = add(" my   notes ", " notes-server ", "").unwrap();
-        let notes = added.connection("my notes").expect("added");
-        assert_eq!(notes.kind, AgentConnectionKind::Custom);
-        // Off, nothing ticked, no tools known.
-        assert!(!notes.enabled && notes.allowed_tools.is_empty() && notes.tools.is_empty());
-        let custom = notes.custom.as_ref().unwrap();
-        assert_eq!((custom.command.as_str(), custom.args.as_slice()), ("notes-server", &["--stdio".to_string()][..]));
-        // Core keeps it as it was added.
-        assert_eq!(added.clone().cleaned(), added);
-        assert!(add("web notes", "", "https://notes.example/mcp").is_ok());
+        let careful = settings(vec![teamchat.clone()]);
+        assert!(tick(&careful, "send_message").unwrap_err().contains("Drafts only"));
+        assert!(tick(&careful, "list,all").is_err());
+        assert_eq!(tick(&careful, "create_draft").unwrap().connections[0].allowed_tools, ["read_thread", "create_draft"]);
+        let open = AgentSettings { drafts_only: false, ..careful.clone() };
+        assert_eq!(tick(&open, "send_message").unwrap().connections[0].allowed_tools, ["read_thread", "send_message"]);
+        assert!(tick(&open, "list,all").is_err());
+        // Drafts only as it is after the patch decides: switched off
+        // in the same patch, the tick is taken; switched on, it is
+        // not.
+        let both = with_patch(
+            careful.clone(),
+            &patch(r#"{"drafts_only":false,"connection":{"name":"teamchat","tick":["send_message"]}}"#),
+        )
+        .unwrap();
+        assert_eq!(both.connections[0].allowed_tools, ["send_message"]);
+        assert!(with_patch(
+            open.clone(),
+            &patch(r#"{"drafts_only":true,"connection":{"name":"teamchat","tick":["send_message"]}}"#)
+        )
+        .is_err());
+
+        // A tool that acts and was ticked before drafts only went on
+        // stays ticked without being asked about again, and can be
+        // unticked. Once unticked it cannot be ticked back.
+        let mut before = teamchat.clone();
+        before.allowed_tools = vec!["send_message".into()];
+        let kept = settings(vec![before]);
+        assert_eq!(tick(&kept, "send_message").unwrap().connections[0].allowed_tools, ["send_message", "read_thread"]);
+        let unticked =
+            with_patch(kept, &patch(r#"{"connection":{"name":"teamchat","untick":["send_message"]}}"#)).unwrap();
+        assert!(unticked.connections[0].allowed_tools.is_empty());
+        assert!(tick(&unticked, "send_message").is_err());
     }
 
     #[test]
     fn a_connection_says_where_it_stood_in_the_last_listing() {
-        let s = settings(vec![chat("teamchat"), chat("tracker"), own("notes")]);
-        let words = |last: &Listing| -> Vec<String> {
+        let mut on = own("mine");
+        on.enabled = true;
+        let s = settings(vec![chat("teamchat"), chat("tracker"), own("notes"), on]);
+        let words = |last: &LastListing| -> Vec<String> {
             state(&s, last, false, |name| name == "teamchat").connections.iter().map(|c| c.state.clone()).collect()
         };
         // Before the first listing of this run.
-        assert_eq!(words(&Listing::default()), ["not-looked-up", "not-looked-up", "not-looked-up"]);
-        let mut last = Listing::default();
+        assert_eq!(words(&LastListing::default()), ["not-looked-up"; 4]);
+        let mut last = LastListing::default();
         last.view.refreshed_at_ms = Some(1);
         last.found.insert(("teamchat".into(), false), ConnectionState::NeedsAuth);
         // A connection of Claude Code the listing did not find is
-        // gone; the person's own entries are listed apart.
-        assert_eq!(words(&last), ["needs-auth", "missing", "unknown"]);
-        last.found.insert(("notes".into(), true), ConnectionState::Connected);
+        // gone. An entry of the person's own that is switched off is
+        // never in a listing: it was not looked up. One that is on
+        // and not there was switched on after the listing.
+        assert_eq!(words(&last), ["needs-auth", "missing", "not-looked-up", "not-looked-up"]);
+        // The person's own entries could not be listed: the one that
+        // was tried is not known, the one that is off was not tried.
+        last.view.custom_error = "Claude Code did not answer in time".into();
+        assert_eq!(words(&last), ["needs-auth", "missing", "not-looked-up", "unknown"]);
+        last.view.custom_error = String::new();
+        last.found.insert(("mine".into(), true), ConnectionState::Connected);
         // The same name as an entry of the other kind is not it.
         last.found.insert(("tracker".into(), true), ConnectionState::Connected);
-        assert_eq!(words(&last), ["needs-auth", "missing", "connected"]);
+        assert_eq!(words(&last), ["needs-auth", "missing", "not-looked-up", "connected"]);
         let now = state(&s, &last, true, |name| name == "teamchat");
-        assert_eq!(now.connections.iter().map(|c| c.usable).collect::<Vec<_>>(), [true, false, true]);
+        assert_eq!(now.connections.iter().map(|c| c.usable).collect::<Vec<_>>(), [true, false, true, true]);
         assert!(now.listing.refreshing);
         assert_eq!(now.listing.refreshed_at_ms, Some(1));
     }
@@ -974,17 +1315,207 @@ mod tests {
     }
 
     #[test]
-    fn the_connections_are_looked_up_when_agent_goes_on() {
+    fn the_connections_are_only_looked_up_while_an_ask_could_use_them() {
+        use RefineBackendKind::{ClaudeCli, OpenaiCompatible};
         let off = AgentSettings::default();
         let on = AgentSettings { enabled: true, ..AgentSettings::default() };
-        assert!(refresh_due(&off, &on));
-        assert!(!refresh_due(&on, &on));
-        assert!(!refresh_due(&on, &off));
-        assert!(!refresh_due(&off, &off));
+        assert_eq!(lookup_refusal(&on, true, ClaudeCli), None);
+        // Each thing that is missing is named, Agent's own switch
+        // first.
+        let agent_off = lookup_refusal(&off, true, ClaudeCli).expect("refused");
+        assert!(agent_off.starts_with("Agent is switched off"), "{agent_off}");
+        assert!(lookup_refusal(&off, false, OpenaiCompatible).unwrap().starts_with("Agent is switched off"));
+        let ask_off = lookup_refusal(&on, false, ClaudeCli).expect("refused");
+        assert!(ask_off.starts_with("Ask is switched off"), "{ask_off}");
+        let other = lookup_refusal(&on, true, OpenaiCompatible).expect("refused");
+        assert!(other.starts_with("Agent needs the Claude backend"), "{other}");
+        for why in [agent_off, ask_off, other] {
+            assert!(why.contains("the connections were not looked up"), "{why}");
+        }
+        // No enabled connection and no tick is needed: the lookup is
+        // what brings the connections to choose from.
+        assert!(on.connections.is_empty());
+    }
+
+    #[test]
+    fn a_lookup_is_due_once_each_time_agent_becomes_able_whoever_notices() {
+        let mut asked = false;
+        // Not able: nothing, however often it is looked at.
+        assert!(!lookup_due(&mut asked, false));
+        assert!(!lookup_due(&mut asked, false));
+        // Able: the first one to notice starts the lookup, whichever
+        // command that is. Everyone after it finds it asked for.
+        assert!(lookup_due(&mut asked, true));
+        assert!(!lookup_due(&mut asked, true));
+        assert!(!lookup_due(&mut asked, true));
+        // Off and on again: due again, once.
+        assert!(!lookup_due(&mut asked, false));
+        assert!(lookup_due(&mut asked, true));
+        assert!(!lookup_due(&mut asked, true));
+        // A lookup the person asked for themselves counts: nothing
+        // more is due after it.
+        let mut asked = true;
+        assert!(!lookup_due(&mut asked, true));
+
+        // The order two readers come in does not matter: Agent was
+        // switched on in a terminal, and the status is read before
+        // the settings (as the pane does) or after.
+        for status_first in [true, false] {
+            let mut asked = false;
+            let mut started = 0;
+            let mut read = |_who: &str| {
+                if lookup_due(&mut asked, true) {
+                    started += 1;
+                }
+            };
+            if status_first {
+                read("agent_status");
+                read("agent_get");
+            } else {
+                read("agent_get");
+                read("agent_status");
+            }
+            assert_eq!(started, 1, "status first: {status_first}");
+        }
+        // And both readers go through the one place that asks.
+        let fresh_reads = shipped().matches("fresh(&app, &path)").count();
+        assert_eq!(fresh_reads, 2, "agent_get and agent_status");
+        assert!(!shipped().contains("fn refresh_due"));
+    }
+
+    #[test]
+    fn listings_run_one_at_a_time_and_a_caller_that_waited_takes_the_result() {
+        let turns = Turns::new();
+        let mut ran = Vec::new();
+        // Two callers ask while nothing has ended yet. The first runs.
+        let first = turns.ticket();
+        let second = turns.ticket();
+        assert!(turns.run(first, || ran.push("first")));
+        // The second waited for the first: a run ended since it
+        // asked, so it takes that result and starts nothing.
+        assert!(!turns.run(second, || ran.push("second")));
+        // A caller that asks after that gets a run of its own.
+        let third = turns.ticket();
+        assert!(turns.run(third, || ran.push("third")));
+        assert_eq!(ran, ["first", "third"]);
+
+        // Really one at a time: the second caller cannot start while
+        // the first is inside.
+        let turns = std::sync::Arc::new(Turns::new());
+        let (inside, entered) = std::sync::mpsc::channel::<()>();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, second_done) = std::sync::mpsc::channel::<bool>();
+        let a = {
+            let turns = turns.clone();
+            thread::spawn(move || {
+                let ticket = turns.ticket();
+                turns.run(ticket, || {
+                    inside.send(()).unwrap();
+                    held.recv().unwrap();
+                })
+            })
+        };
+        entered.recv().unwrap();
+        // Asked while the first is running.
+        let ticket = turns.ticket();
+        let b = {
+            let turns = turns.clone();
+            thread::spawn(move || finished.send(turns.run(ticket, || unreachable!("a second listing"))).unwrap())
+        };
+        assert!(second_done.try_recv().is_err(), "the second caller did not wait");
+        release.send(()).unwrap();
+        assert!(a.join().unwrap());
+        assert!(!second_done.recv().unwrap());
+        b.join().unwrap();
+    }
+
+    fn listed(name: &str, source: ConnectionSource, state: ConnectionState) -> ListedConnection {
+        ListedConnection { name: name.into(), source, state, transport: String::new(), tools: Vec::new() }
+    }
+
+    #[test]
+    fn what_a_listing_came_to_is_kept_for_the_pane() {
+        let mut last = LastListing::default();
+        // One that failed before any worked: why, and nothing else.
+        last.took(&Err(AgentError::Unavailable("Claude Code is not installed.".into())), 5);
+        assert_eq!(last.view.error, "Claude Code is not installed.");
+        assert_eq!(last.view.refreshed_at_ms, None);
+        assert!(last.found.is_empty());
+        // One that worked: what was found, when, and no error left.
+        let found = agent::Listing {
+            connections: vec![
+                listed("TeamChat", ConnectionSource::User, ConnectionState::Connected),
+                listed("notes", ConnectionSource::Custom, ConnectionState::Failed),
+            ],
+            custom_error: String::new(),
+            elapsed_ms: 1200,
+        };
+        last.took(&Ok(found), 10);
+        assert_eq!(last.view, ListingView { refreshing: false, refreshed_at_ms: Some(10), error: String::new(), custom_error: String::new() });
+        assert_eq!(last.found.get(&("teamchat".into(), false)), Some(&ConnectionState::Connected));
+        assert_eq!(last.found.get(&("notes".into(), true)), Some(&ConnectionState::Failed));
+        // A later one that fails says why and keeps what was found.
+        last.took(&Err(AgentError::Timeout), 20);
+        assert_eq!(last.view.error, "Claude Code did not answer in time");
+        assert_eq!(last.view.refreshed_at_ms, Some(10));
+        assert_eq!(last.found.len(), 2);
+        // The person's own entries could not be listed: the listing
+        // still counts.
+        let partly = agent::Listing {
+            connections: vec![listed("teamchat", ConnectionSource::Account, ConnectionState::NeedsAuth)],
+            custom_error: "notes: no such file".into(),
+            elapsed_ms: 900,
+        };
+        last.took(&Ok(partly), 30);
+        assert_eq!((last.view.error.as_str(), last.view.custom_error.as_str()), ("", "notes: no such file"));
+        assert_eq!(last.view.refreshed_at_ms, Some(30));
+        assert_eq!(last.found.len(), 1);
+    }
+
+    #[test]
+    fn what_the_windows_are_told_after_a_listing_says_that_it_is_over() {
+        // `refresh_and_announce` gives its `Pending` up before it
+        // tells the windows; the state they are told is built from
+        // the count at that moment.
+        let source = shipped();
+        let body = &source[source.find("fn refresh_and_announce").expect("the function")..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        let (dropped, told) = (body.find("drop(pending);").expect("gives it up"), body.find("Ok(announce(app").expect("tells"));
+        assert!(body.find("run_refresh(&path);").expect("lists") < dropped && dropped < told);
+        // And the state follows the count.
+        let s = settings(vec![chat("teamchat")]);
+        assert!(state(&s, &LastListing::default(), true, |_| false).listing.refreshing);
+        assert!(!state(&s, &LastListing::default(), false, |_| false).listing.refreshing);
+    }
+
+    #[test]
+    fn why_a_listing_failed_is_made_safe_to_show_and_capped() {
+        // A line the Claude CLI wrote: an escape sequence, a
+        // right-to-left override, more than one line.
+        let raw = "error: \u{1B}[2Jcould not start \u{202E}txt.exe\nat line 2";
+        let safe = shown_error(raw);
+        assert_eq!(safe, "error: \\u{1B}[2Jcould not start \\u{202E}txt.exe at line 2");
+        // Exactly core's escaping, nothing of this module's own.
+        assert_eq!(safe, ask::safe_to_show(&raw.replace('\n', " "), false));
+        assert_eq!(shown_error("  plain words  "), "plain words");
+        // Long: cut, with an ellipsis.
+        let long = shown_error(&"x".repeat(5000));
+        assert_eq!(long.chars().count(), ERROR_MAX_CHARS);
+        assert!(long.ends_with('\u{2026}'));
+        assert_eq!(shown_error(&"x".repeat(ERROR_MAX_CHARS)).chars().count(), ERROR_MAX_CHARS);
+        // Through a failed listing: this is what reaches a window.
+        let mut last = LastListing::default();
+        last.took(&Err(AgentError::Failed(raw.into())), 1);
+        assert_eq!(last.view.error, safe);
+        let found = agent::Listing { connections: Vec::new(), custom_error: raw.into(), elapsed_ms: 1 };
+        last.took(&Ok(found), 2);
+        assert_eq!(last.view.custom_error, safe);
     }
 
     #[test]
     fn a_listing_counts_as_running_from_the_moment_it_is_asked_for() {
+        // Other tests of this module start no listing, so the count
+        // only moves here.
         let before = PENDING.load(Ordering::SeqCst);
         let pending = Pending::new();
         assert_eq!(PENDING.load(Ordering::SeqCst), before + 1);
@@ -1002,8 +1533,7 @@ mod tests {
 
     #[test]
     fn the_status_payload_is_cores_readiness() {
-        let (ready, message) =
-            agent::readiness(&AgentSettings::default(), true, openwhisper_core::settings::RefineBackendKind::ClaudeCli);
+        let (ready, message) = agent::readiness(&AgentSettings::default(), true, RefineBackendKind::ClaudeCli);
         let value = serde_json::to_value(AgentStatus { ready, message, ask_enabled: true, backend: "claude-cli" }).unwrap();
         assert_eq!(
             value,

@@ -13,7 +13,8 @@
 //! when it starts, and the steps, the confirm it may wait on and
 //! where it looked are fields of the same snapshot. The two answers
 //! to a confirm (`ask_confirm_allow`, `ask_confirm_deny`) are in
-//! `agent.rs`, with the Agent settings.
+//! `agent.rs`, with the Agent settings; they are taken from this
+//! module's answer window only.
 //!
 //! # The answer window
 //!
@@ -148,6 +149,9 @@ pub fn init(app: &AppHandle) {
 fn announce(app: &AppHandle, before: &AskSettings, now: &AskSettings) {
     if before.enabled != now.enabled {
         crate::hotkey::install(app);
+        // Agent only works in an ask: with Ask on, it may have
+        // become able to use its connections.
+        crate::agent::conditions_changed(app);
     }
     if let Err(e) = app.emit(ASK_CHANGED_EVENT, now) {
         eprintln!("[ask] {ASK_CHANGED_EVENT} emit failed: {e}");
@@ -785,8 +789,8 @@ mod tests {
                 "tool": "send_message",
                 "title": "Send message",
                 "input": "{\n  \"to\": \"Bo\"\n}",
-                "input_cut": false,
                 "timeout_s": 120,
+                "armed_in_ms": 600,
             })
         );
         assert_eq!(value["context_source"], serde_json::json!({ "kind": "connection", "name": "teamchat" }));

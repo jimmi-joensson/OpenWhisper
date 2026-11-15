@@ -56,7 +56,9 @@ export interface HistoryTool {
   connection: string;
   // The tool's own name.
   tool: string;
-  // How it ended: "done", "failed" or "denied".
+  // How it ended: "done", "failed" or "denied", or
+  // "result_not_known" for a call that was still running when its
+  // ask ended.
   outcome: string;
 }
 

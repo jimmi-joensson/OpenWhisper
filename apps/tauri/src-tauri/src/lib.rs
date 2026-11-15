@@ -1438,7 +1438,6 @@ pub fn run() {
             agent::agent_set,
             agent::agent_refresh,
             agent::agent_status,
-            agent::agent_add_connection,
             agent::agent_remove_connection,
             agent::agent_running_apps,
             agent::ask_confirm_allow,

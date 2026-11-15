@@ -54,6 +54,10 @@ const COPIED_SHOWN_MS = 1200;
 // The view counts as "at the newest text" within this many pixels of
 // the end, so a line that is still growing does not unpin it.
 const FOLLOW_SLACK_PX = 24;
+// How long a confirm has to be on show in this window before its
+// Allow button is active (`CONFIRM_ARM_MS` in core, which refuses a
+// yes that comes sooner).
+const CONFIRM_ARM_MS = 600;
 
 // The answer window of Ask (TASK-97): what the person asked, where
 // the ask stands, and the answer with Copy, Insert and Dismiss. With
@@ -126,6 +130,17 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   const [answered, setAnswered] = useState<string | null>(null);
   const waiting = phase === "confirming" ? (ask.confirm ?? null) : null;
   const confirm = waiting && waiting.request_id !== answered ? waiting : null;
+  // The step the confirm is about. While its card shows it is taken
+  // out of the part that scrolls and shown right above the card, so
+  // it cannot be scrolled out of view.
+  const waitingStep = confirm ? (steps.find((step) => step.id === confirm.step_id) ?? null) : null;
+  const listedSteps = waitingStep ? steps.filter((step) => step !== waitingStep) : steps;
+  // The confirm whose names (the tool's title, its own name and its
+  // connection) did not fit whole in the room the card had: the card
+  // says so once it has measured (`ConfirmCard`), and everything
+  // that only repeats the names then steps aside for it.
+  const [crampedRequest, setCrampedRequest] = useState<string | null>(null);
+  const tight = confirm !== null && confirm.request_id === crampedRequest;
   // Changes when a step is added or ends.
   const stepsKey = steps.map((step) => `${step.id}:${step.state}`).join(" ");
 
@@ -139,6 +154,7 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
     pinned.current = true;
     setCopied(false);
     setAnswered(null);
+    setCrampedRequest(null);
   }, [id]);
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -183,14 +199,14 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
     void invoke(command, { id }).catch(() => {});
   };
 
-  // Yes or no to the tool call that waits. Both name the ask and the
-  // request, so a click can only ever answer the confirm it was made
-  // on: Rust ignores one that has run out of time or been replaced.
-  const answerConfirm = (command: "ask_confirm_allow" | "ask_confirm_deny") => {
-    if (!confirm) return;
-    const requestId = confirm.request_id;
+  // Yes or no to a tool call that waits. The ask and the request are
+  // the ones of the card the click was made on (it hands them over),
+  // never "whatever waits now": a click can only ever answer the
+  // confirm the person was looking at. Rust ignores one that has run
+  // out of time or been replaced, and a yes that comes too early.
+  const answerConfirm = (command: ConfirmCommand, askId: number, requestId: string) => {
     setAnswered(requestId);
-    void invoke<boolean>(command, { askId: id, requestId })
+    void invoke<boolean>(command, { askId, requestId })
       .then((ok) => {
         // Not taken: show the confirm again if it is still there.
         if (!ok) setAnswered((now) => (now === requestId ? null : now));
@@ -221,6 +237,10 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
   // that instead of the screen.
   const usedConnection =
     ask.context_source?.kind === "connection" ? ask.context_source.name : null;
+  // While a confirm shows, the part that scrolls is only there when
+  // it has something in it: it would take room from the card.
+  const hasBody =
+    !confirm || listedSteps.length > 0 || showAnswer || status !== null || phase === "error";
 
   return (
     <Card
@@ -228,60 +248,77 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
       className="answer-card"
       data-testid="answer-card"
       data-confirming={confirm ? "true" : undefined}
+      data-tight={tight ? "true" : undefined}
       role="region"
       aria-label="Answer"
     >
       {ask.question && (
-        <CardHeader className="shrink-0">
-          <CardDescription className="line-clamp-2 text-xs" data-testid="answer-question">
+        <CardHeader className="answer-header shrink-0">
+          <CardDescription
+            className="answer-question line-clamp-2 text-xs"
+            data-testid="answer-question"
+          >
             {ask.question}
           </CardDescription>
         </CardHeader>
       )}
 
-      <CardContent
-        ref={scroller}
-        onScroll={onScroll}
-        className="answer-body flex flex-col gap-2"
-        data-testid="answer-scroll"
-      >
-        {steps.length > 0 && <Steps steps={steps} />}
-        {showAnswer && <AnswerText text={answer} />}
-        {status && (
-          <p
-            className="flex items-center gap-1.5 text-[13px] text-muted-foreground"
-            role="status"
-            data-testid="answer-status"
-          >
-            {status.working && <Spinner className="size-3.5 motion-reduce:animate-none" />}
-            <span>{status.text}</span>
-          </p>
-        )}
-        {phase === "error" && (
-          <Alert variant="destructive" data-testid="answer-error">
-            <CircleAlert />
-            <AlertTitle>No answer</AlertTitle>
-            <AlertDescription>{ask.error || "Something went wrong."}</AlertDescription>
-          </Alert>
-        )}
-      </CardContent>
+      {hasBody && (
+        <CardContent
+          ref={scroller}
+          onScroll={onScroll}
+          className="answer-body flex flex-col gap-2"
+          data-testid="answer-scroll"
+        >
+          {listedSteps.length > 0 && <Steps steps={listedSteps} />}
+          {showAnswer && <AnswerText text={answer} />}
+          {status && (
+            <p
+              className="flex items-center gap-1.5 text-[13px] text-muted-foreground"
+              role="status"
+              data-testid="answer-status"
+            >
+              {status.working && <Spinner className="size-3.5 motion-reduce:animate-none" />}
+              <span>{status.text}</span>
+            </p>
+          )}
+          {phase === "error" && (
+            <Alert variant="destructive" data-testid="answer-error">
+              <CircleAlert />
+              <AlertTitle>No answer</AlertTitle>
+              <AlertDescription>{ask.error || "Something went wrong."}</AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      )}
 
-      {/* Outside the part that scrolls, so it is always in view. */}
+      {/* Outside the part that scrolls, so it is always in view: the
+          step that waits, and the card that asks about it. The card
+          is keyed by the ask and the request, so a new confirm is a
+          new card: nothing of the one before (a click on its way,
+          how long it has been on show) carries over. */}
       {confirm && (
         <CardContent className="answer-confirm">
+          {waitingStep && <Steps steps={[waitingStep]} waiting />}
           <ConfirmCard
+            key={`${id}:${confirm.request_id}`}
+            askId={id}
             confirm={confirm}
-            onAllow={() => answerConfirm("ask_confirm_allow")}
-            onDeny={() => answerConfirm("ask_confirm_deny")}
+            onAnswer={answerConfirm}
+            onCramped={setCrampedRequest}
           />
         </CardContent>
       )}
 
-      <CardFooter className="shrink-0 flex-col items-stretch gap-2 text-xs text-muted-foreground">
+      <CardFooter className="answer-footer shrink-0 flex-col items-stretch gap-2 text-xs text-muted-foreground">
         {/* While a confirm shows, the notes of the footer step aside:
             the window is fixed in size, and the input to judge needs
             the room. They are back when the confirm is answered. */}
-        {!confirm && ask.notice && <p data-testid="answer-notice">{ask.notice}</p>}
+        {!confirm && ask.notice && (
+          <p className="answer-wrap" data-testid="answer-notice">
+            {ask.notice}
+          </p>
+        )}
         {!confirm && suggestWebSearch && (
           <p data-testid="answer-suggestion">
             Web search is off, so this answer could not look anything up.{" "}
@@ -316,13 +353,12 @@ function AnswerCard({ ask }: { ask: AskSnapshot }) {
           </p>
         )}
         <div className="flex items-end justify-between gap-2">
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="answer-source flex min-w-0 flex-1 flex-col gap-0.5">
             <p data-testid="answer-source">{source}</p>
             {/* The question went out with a picture of the screen. */}
             {ask.screen === "included" && (
               <p data-testid="answer-screen-included">Screen included</p>
             )}
-
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
             {(phase === "done" || phase === "error") && (
@@ -438,14 +474,21 @@ function StepIcon({ state }: { state: AskStepState }) {
   }
 }
 
-function Steps({ steps }: { steps: AskStep[] }) {
+// `waiting`: the one step a confirm is about, shown above its card.
+// Its input is left out there: the card under it shows all of it.
+function Steps({ steps, waiting = false }: { steps: AskStep[]; waiting?: boolean }) {
   return (
-    <Trace role="list" aria-label="Tool calls" className="gap-1.5" data-testid="answer-steps">
+    <Trace
+      role="list"
+      aria-label={waiting ? "The tool call that waits for you" : "Tool calls"}
+      className={waiting ? "answer-step-waiting shrink-0 gap-1.5" : "gap-1.5"}
+      data-testid={waiting ? "answer-steps-waiting" : "answer-steps"}
+    >
       {steps.map((step) => (
         <div
           key={step.id}
           role="listitem"
-          className="flex-col"
+          className="min-w-0 flex-col"
           data-testid="answer-step"
           data-state={step.state}
           data-kind={step.kind}
@@ -457,26 +500,37 @@ function Steps({ steps }: { steps: AskStep[] }) {
             <TraceIcon>
               <StepIcon state={step.state} />
             </TraceIcon>
-            <TraceTitle data-testid="answer-step-title">{step.title || step.tool}</TraceTitle>
-            <TraceDescription className="min-w-0 shrink truncate" data-testid="answer-step-connection">
+            <TraceTitle className="answer-untrusted" data-testid="answer-step-title">
+              {step.title || step.tool}
+            </TraceTitle>
+            <TraceDescription
+              className="answer-untrusted min-w-0 shrink truncate"
+              data-testid="answer-step-connection"
+            >
               {step.connection}
             </TraceDescription>
             <span className="shrink-0" data-testid="answer-step-state">
               {STEP_STATES[step.state] ?? step.state}
             </span>
           </TraceLine>
-          {step.input_summary && (
+          {step.input_summary && !waiting && (
             <span
-              className="truncate pl-6 font-mono text-[11px] text-muted-foreground"
+              className="answer-untrusted truncate pl-6 font-mono text-[11px] text-muted-foreground"
               data-testid="answer-step-input"
             >
               {step.input_summary}
             </span>
           )}
-          {/* Why it failed or did not run. What a call that worked
-              returned is the model's to use, not shown here. */}
+          {/* Why it failed or did not run, in core's words (you said
+              no, nobody answered in time, Claude Code stopped while
+              it waited). Long text wraps, wherever it has to. What a
+              call that worked returned is the model's to use, not
+              shown here. */}
           {step.outcome && (step.state === "failed" || step.state === "denied") && (
-            <span className="pl-6 text-xs text-muted-foreground" data-testid="answer-step-outcome">
+            <span
+              className="answer-untrusted answer-wrap pl-6 text-xs text-muted-foreground"
+              data-testid="answer-step-outcome"
+            >
               {step.outcome}
             </span>
           )}
@@ -486,60 +540,142 @@ function Steps({ steps }: { steps: AskStep[] }) {
   );
 }
 
+type ConfirmCommand = "ask_confirm_allow" | "ask_confirm_deny";
+
+// Whether a yes to the confirm this card shows counts yet. Core
+// counts down from the moment it raised the confirm and says how
+// long is left (`armed_in_ms`) on every snapshot; a timer here takes
+// it from there, so the button becomes active without waiting for
+// another tick. The card also has to have been on show in this
+// window for as long: a click that was on its way to something else
+// when the card came up must not land on an active Allow.
+function useArmed(armedInMs: number | undefined): boolean {
+  const [armed, setArmed] = useState(false);
+  // When this card came up here. A card is mounted once per confirm.
+  const shownAt = useRef<number | null>(null);
+  useEffect(() => {
+    if (armed) return;
+    const now = performance.now();
+    if (shownAt.current === null) shownAt.current = now;
+    const floor = shownAt.current + CONFIRM_ARM_MS - now;
+    const timer = setTimeout(() => setArmed(true), Math.max(floor, armedInMs ?? 0, 0));
+    return () => clearTimeout(timer);
+  }, [armed, armedInMs]);
+  return armed;
+}
+
+// How tall the input is at least, in lines: four, or all of it when
+// it is shorter than that. A long line counts for the lines it wraps
+// to (about fifty characters each).
+function inputLines(input: string): number {
+  const lines = input.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 50)), 0);
+  return Math.min(4, Math.max(1, lines));
+}
+
 // A tool call that waits for a yes or no: which tool, on which
-// connection, and everything it would be given. Deny is the button
-// that stands out and comes first; Allow is never a default. The
-// window does not take the keyboard, so no key press answers this.
+// connection, and everything it would be given. The names are shown
+// whole, however long, and the input scrolls in the room that is
+// left. Deny is the button that stands out, comes first for the
+// keyboard and is active from the start. Allow is never a default,
+// sits at the other end of the card and is inactive for a moment
+// after the card came up (`useArmed`). The window does not take the
+// keyboard, so no key press answers this.
 function ConfirmCard({
+  askId,
   confirm,
-  onAllow,
-  onDeny,
+  onAnswer,
+  onCramped,
 }: {
+  askId: number;
   confirm: AskConfirm;
-  onAllow: () => void;
-  onDeny: () => void;
+  onAnswer: (command: ConfirmCommand, askId: number, requestId: string) => void;
+  // The names of this request do not fit whole in the room there is.
+  onCramped: (requestId: string) => void;
 }) {
+  // The ask and the request this card was made for. A click answers
+  // these and nothing else.
+  const [made] = useState(() => ({ askId, requestId: confirm.request_id }));
+  const armed = useArmed(confirm.armed_in_ms);
   const title = confirm.title || confirm.tool;
+
+  // The names are never cut. When they do not fit in the room the
+  // card has (the part they are in would have to scroll), the panel
+  // is told, before anything is painted, and makes room. Measured
+  // again whenever that part changes size. Layout only: the DOM is
+  // read, nothing here animates.
+  const names = useRef<HTMLDivElement>(null);
+  const { requestId } = made;
+  useLayoutEffect(() => {
+    const el = names.current;
+    if (!el) return;
+    const measure = () => {
+      if (el.scrollHeight > el.clientHeight) onCramped(requestId);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [requestId, onCramped]);
   return (
     <Alert
       role="group"
       aria-label="Allow this tool call?"
-      className="flex min-h-0 flex-col gap-1"
+      className="answer-confirm-card"
       data-testid="answer-confirm"
+      data-request={made.requestId}
+      data-armed={armed ? "true" : "false"}
     >
-      <AlertTitle className="shrink-0" data-testid="answer-confirm-title">
-        Allow {title} on {confirm.connection}?
-      </AlertTitle>
-      <AlertDescription className="flex min-h-0 flex-col gap-1 text-xs [&_p:not(:last-child)]:mb-0">
-        {/* One line, so the input below gets the room. */}
-        <p className="shrink-0 truncate" data-testid="answer-confirm-what">
-          <span className="font-mono">{confirm.tool}</span> would run with exactly this input:
+      <div ref={names} className="answer-confirm-names">
+        <AlertTitle className="text-[13px] leading-[18px]" data-testid="answer-confirm-title">
+          Allow{" "}
+          <span className="answer-untrusted" data-testid="answer-confirm-name">
+            {title}
+          </span>{" "}
+          on{" "}
+          <span className="answer-untrusted" data-testid="answer-confirm-connection">
+            {confirm.connection}
+          </span>
+          ?
+        </AlertTitle>
+        <p className="text-xs text-muted-foreground" data-testid="answer-confirm-what">
+          <span className="answer-untrusted font-mono text-[11px]" data-testid="answer-confirm-tool">
+            {confirm.tool}
+          </span>{" "}
+          would run with exactly this input:
         </p>
-        <pre className="answer-confirm-input ow-selectable" data-testid="answer-confirm-input">
-          {confirm.input}
-        </pre>
-        {confirm.input_cut && (
-          <p className="shrink-0 text-destructive" data-testid="answer-confirm-cut">
-            The input is longer than what is shown. You would allow something you cannot see in
-            full.
-          </p>
-        )}
-        <div className="flex shrink-0 items-center justify-between gap-2">
-          <p data-testid="answer-confirm-timeout">
-            No answer within {confirm.timeout_s} seconds counts as no.
-          </p>
-          {/* Deny first in the document, last on screen where the
-              main button of the panel sits. */}
-          <div className="flex shrink-0 flex-row-reverse items-center gap-1.5">
-            <Button type="button" size="sm" onClick={onDeny}>
-              Deny
-            </Button>
-            <Button type="button" variant="outline" size="sm" onClick={onAllow}>
-              Allow
-            </Button>
-          </div>
-        </div>
-      </AlertDescription>
+      </div>
+      <pre
+        className="answer-confirm-input answer-untrusted ow-selectable"
+        style={{ minHeight: inputLines(confirm.input) * 16 + 12 }}
+        data-testid="answer-confirm-input"
+      >
+        {confirm.input}
+      </pre>
+      {/* Deny first in the document and last on screen, where the
+          main button of the panel sits; Allow at the far end. */}
+      <div className="answer-confirm-actions">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => onAnswer("ask_confirm_deny", made.askId, made.requestId)}
+        >
+          Deny
+        </Button>
+        <p className="text-xs text-muted-foreground" data-testid="answer-confirm-timeout">
+          No answer within {confirm.timeout_s} seconds counts as no.
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!armed}
+          onClick={() => {
+            if (armed) onAnswer("ask_confirm_allow", made.askId, made.requestId);
+          }}
+        >
+          Allow
+        </Button>
+      </div>
     </Alert>
   );
 }

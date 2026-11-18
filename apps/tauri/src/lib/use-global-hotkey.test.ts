@@ -30,6 +30,29 @@ describe("hotkeyFor", () => {
   });
 });
 
+describe("the ask slot", () => {
+  const ask: HotkeyConfig = { kind: "modifier-tap", code: "RightOption", mods: [] };
+
+  it("reads the ask target from the ask key", () => {
+    expect(hotkeyFor({ ...unbound, ask }, "ask")).toBe(ask);
+  });
+
+  it("is null when cleared (null, as the backend sends it) or absent", () => {
+    expect(hotkeyFor({ ...unbound, ask: null }, "ask")).toBeNull();
+    expect(hotkeyFor(unbound, "ask")).toBeNull();
+  });
+
+  it("is set and cleared without touching the other slots", () => {
+    const withCycle = { ...unbound, cycle_mode: cycle };
+    const bound = withHotkey(withCycle, "ask", ask);
+    expect(bound).toEqual({ toggle, cancel, cycle_mode: cycle, ask });
+    const cleared = withHotkey(bound, "ask", null);
+    expect(hotkeyFor(cleared, "ask")).toBeNull();
+    expect(hotkeyFor(cleared, "cycle-mode")).toBe(cycle);
+    expect(cleared.toggle).toBe(toggle);
+  });
+});
+
 describe("withHotkey", () => {
   it("replaces one slot and leaves the others", () => {
     const next = withHotkey(unbound, "cancel", cycle);

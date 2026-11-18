@@ -9,9 +9,9 @@
 //! chain. WH_KEYBOARD_LL is system-wide, runs before the focused app, and
 //! can swallow the chord by returning a non-zero LRESULT.
 //!
-//! A slot marked `gate_on_recording` (cancel) only matches while
-//! `dictation::is_recording()`. Outside an active recording its binding
-//! passes through to the focused app.
+//! A slot with a gate (cancel) only matches while the gate is open:
+//! `dictation::cancel_would_act()`, a recording or a running ask.
+//! Otherwise its binding passes through to the focused app.
 //!
 //! Capture mode: when `crate::hotkey::is_capture_active()` is true the hook
 //! diverts to capture-only — every keyboard event is swallowed; the first
@@ -46,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::{SkippedSlot, SlotSpec, SLOTS};
 use crate::settings::{HotkeyConfig, HotkeyKind, HotkeySettings};
-use openwhisper_core::{dictation, verbose_log};
+use openwhisper_core::verbose_log;
 
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
@@ -297,7 +297,7 @@ fn try_match_slot(
         );
     }
     if is_down && held == required {
-        if spec.gate_on_recording && !dictation::is_recording() {
+        if !spec.gate_passes() {
             return false;
         }
         if !slot.fired.swap(true, Ordering::Relaxed) {

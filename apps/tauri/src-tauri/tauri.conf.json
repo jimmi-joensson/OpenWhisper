@@ -38,6 +38,24 @@
         "acceptFirstMouse": true,
         "visibleOnAllWorkspaces": false,
         "titleBarStyle": "Transparent"
+      },
+      {
+        "label": "answer",
+        "url": "index.html",
+        "width": 420,
+        "height": 360,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "focusable": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": false,
+        "titleBarStyle": "Transparent"
       }
     ],
     "security": {

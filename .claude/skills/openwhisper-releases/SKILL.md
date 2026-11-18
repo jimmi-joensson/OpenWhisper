@@ -69,7 +69,7 @@ PATH="$HOME/.cargo/bin:$PATH" pnpm release:mac
 # → target/release/bundle/macos/OpenWhisper.app (signed)
 ```
 
-`release:mac` runs `pnpm tauri build` (which signs with the Developer ID identity from `tauri.conf.json` + `Entitlements.plist`) then `pnpm notarize:mac` (which submits the DMG, waits for Apple, staples the ticket, and runs a final Gatekeeper assessment). Notarization typically takes 2–15 min server-side; first submission from a fresh Developer ID can run 30+ min.
+`release:mac` runs `pnpm tauri build` (which signs with the Developer ID identity from `tauri.conf.json` + `Entitlements.plist`) then `pnpm notarize:mac` (which submits the DMG, waits for Apple, staples the ticket, and runs a final Gatekeeper assessment). Notarization typically takes 2–15 min server-side; first submission from a fresh Developer ID can run 30+ min. Last, `pnpm prune:target` deletes older versions' bundles and trims `target/` to its size budget (see `openwhisper-dev-workflow`); the new DMG and .app stay.
 
 Verify after build:
 
@@ -138,7 +138,7 @@ Required sections:
 - **Repo path on the Win box** (paste-ready, not "your repo")
 - **Starting state** — what tag to pull, what versions to expect
 - **Scope summary** — same buckets as the Mac smoke, so the Win agent knows what to manually exercise
-- **Build command** — `cd apps\tauri && pnpm install && pnpm setup:ort && pnpm tauri build`
+- **Build command** — `cd apps\tauri && pnpm install && pnpm setup:ort && pnpm tauri build && pnpm prune:target`
 - **Artifact paths** — `target\release\bundle\msi\OpenWhisper_N.M.0_x64_en-US.msi` and the `nsis\…-setup.exe`
 - **Upload + publish** — `gh release upload vN.M.0 …` then `gh release edit vN.M.0 --draft=false`
 - **Win-specific gotchas** — vendor-natives prereq (covered in `openwhisper-dev-workflow`), which exact features to smoke

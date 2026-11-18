@@ -97,16 +97,35 @@ impl TauriInjector {
 
 impl Injector for TauriInjector {
     fn inject(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let app = self.app.clone();
-        let text = text.to_string();
-        thread::Builder::new()
-            .name("openwhisper-inject".into())
-            .spawn(move || do_inject(app, &text))
-            .expect("spawn injection thread");
+        inject_text(&self.app, text);
     }
+}
+
+/// Paste `text` into the focused app on a thread of its own. The one
+/// paste path: core calls it through [`TauriInjector`] for a
+/// dictation, and "insert" in the answer panel calls it for a
+/// finished answer (`ask::ask_insert`).
+pub(crate) fn inject_text(app: &AppHandle, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let text = text.to_string();
+    thread::Builder::new()
+        .name("openwhisper-inject".into())
+        .spawn(move || do_inject(app, &text))
+        .expect("spawn injection thread");
+}
+
+/// Put `text` on the clipboard and leave it there: "copy" in the
+/// answer panel. A copy the person asked for, so unlike a paste it is
+/// not kept out of the clipboard history on Windows and nothing is
+/// restored afterwards.
+pub(crate) fn copy_text(text: &str) -> Result<(), String> {
+    let mut clipboard = Clipboard::new().map_err(|e| format!("clipboard: {e}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|e| format!("clipboard: {e}"))
 }
 
 fn do_inject(app: AppHandle, text: &str) {
@@ -176,16 +195,17 @@ fn set_clipboard_text(clipboard: &mut Clipboard, text: String) -> Result<(), arb
     }
 }
 
-/// True when one of our own windows is the focus target. The pill is
-/// non-activating so it should never report focused, but check it anyway —
-/// costs nothing and protects against future window-config drift.
+/// True when one of our own windows is the focus target. The pill and
+/// the answer window are non-activating so they should never report
+/// focused, but check them anyway: it costs nothing and protects
+/// against future window-config drift.
 fn is_self_frontmost(app: &AppHandle) -> bool {
     let focused = |label: &str| {
         app.get_webview_window(label)
             .and_then(|w| w.is_focused().ok())
             .unwrap_or(false)
     };
-    focused("main") || focused("pill")
+    focused("main") || focused("pill") || focused(crate::ask::ANSWER_LABEL)
 }
 
 #[cfg(target_os = "macos")]

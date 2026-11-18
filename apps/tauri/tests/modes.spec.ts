@@ -512,6 +512,10 @@ test.describe("modes pane: the list", () => {
     const dialog = page.getByRole("dialog", { name: "Edit mode" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue("Formal");
+    // A dialog takes the focus a moment after it opens. Every key
+    // from here on waits for the focus to be where that key needs
+    // it: a key pressed in between goes to whatever had focus before.
+    await expect(dialog.getByRole("textbox", { name: "Name" })).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
@@ -520,21 +524,35 @@ test.describe("modes pane: the list", () => {
     await expect(formal).toBeFocused();
     await expect(remove).toBeVisible();
     await page.keyboard.press("Tab");
+    await expect(edit).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(remove).toBeFocused();
     await page.keyboard.press("Enter");
     const confirm = page.getByRole("alertdialog");
+    const cancel = confirm.getByRole("button", { name: "Cancel" });
+    const confirmDelete = page.getByTestId("mode-delete-confirm");
     await expect(confirm).toContainText("Delete the mode “Formal”?");
+    // The question opens on Cancel, so Enter alone deletes nothing.
+    await expect(cancel).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(confirm).toHaveCount(0);
     await expect(formal).toBeFocused();
+    await expect(row(page, "formal")).toHaveCount(1);
 
-    // Deleting for real: the row is gone, focus moves to New mode.
+    // Deleting for real, still with the keyboard alone: Delete mode
+    // is one Tab from Cancel. The row is gone, focus moves to New
+    // mode.
+    await expect(remove).toBeVisible();
     await page.keyboard.press("Tab");
+    await expect(edit).toBeFocused();
     await page.keyboard.press("Tab");
+    await expect(remove).toBeFocused();
     await page.keyboard.press("Enter");
-    await page.getByTestId("mode-delete-confirm").focus();
+    await expect(cancel).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(confirmDelete).toBeFocused();
     await page.keyboard.press("Enter");
+    await expect(confirm).toHaveCount(0);
     await expect(row(page, "formal")).toHaveCount(0);
     await expect(page.getByTestId("mode-new")).toBeFocused();
   });

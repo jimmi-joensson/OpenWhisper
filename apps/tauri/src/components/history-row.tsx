@@ -2,8 +2,9 @@ import { useMemo, useState } from "react";
 import { Check, Copy, Trash2 } from "lucide-react";
 
 import { ModeMarker, TranscriptNotes } from "@/components/transcript-row";
+import { Badge } from "@/components/ui/badge";
 import type { DictionaryReplacement } from "@/lib/dictation";
-import { formatClock, groupByDay, type HistoryEntry } from "@/lib/history";
+import { formatClock, groupByDay, isAskEntry, type HistoryEntry } from "@/lib/history";
 import type { RefineInfo } from "@/lib/refine";
 
 // Text longer than this is folded to a few lines until expanded.
@@ -25,8 +26,8 @@ interface HistoryDaysProps {
   onDelete: (id: string) => void;
 }
 
-// Stored dictations grouped by the day they were made. Shared by the
-// short list on Home and the History screen.
+// Stored dictations and asks grouped by the day they were made.
+// Shared by the short list on Home and the History screen.
 export function HistoryDays({ entries, latest = null, onDelete }: HistoryDaysProps) {
   const days = useMemo(() => groupByDay(entries), [entries]);
   return (
@@ -62,14 +63,23 @@ function HistoryRow({
 }) {
   const [copied, setCopied] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false);
+  const [showAnswer, setShowAnswer] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const long = entry.text.length > FOLD_AT_CHARS;
   const app = entry.app_name ?? entry.app_id;
   const original = entry.original;
+  // An ask (TASK-97): the row text is the question, and the answer
+  // is one click away, like the original of a refined dictation.
+  const ask = isAskEntry(entry);
+  const answer = ask ? entry.answer : null;
+  // Copy takes what is being read: the answer while it is shown,
+  // otherwise the row text.
+  const copiesAnswer = answer !== null && showAnswer;
+  const copyLabel = !ask ? "Copy transcript" : copiesAnswer ? "Copy answer" : "Copy question";
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(entry.text);
+      await navigator.clipboard.writeText(copiesAnswer ? answer : entry.text);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
@@ -82,11 +92,17 @@ function HistoryRow({
       className="ow-history-row ow-hover-host"
       data-testid="history-row"
       data-latest={notes ? "true" : undefined}
+      data-kind={ask ? "ask" : undefined}
     >
       <div className="ow-history-row__body">
         <div className="ow-history-row__meta">
           <time dateTime={new Date(entry.at_ms).toISOString()}>{formatClock(entry.at_ms)}</time>
           {app && <span data-testid="history-row-app">{app}</span>}
+          {ask && (
+            <Badge variant="outline" data-testid="history-row-ask">
+              Ask
+            </Badge>
+          )}
         </div>
         <p
           className="ow-history-row__text ow-selectable"
@@ -106,7 +122,7 @@ function HistoryRow({
         {entry.mode && !notes?.refine.mode && (
           <ModeMarker name={entry.mode} testId="history-row-mode" />
         )}
-        {(long || (original && !notes)) && (
+        {(long || (original && !notes) || answer !== null) && (
           <div className="ow-history-row__links">
             {long && (
               <button
@@ -128,6 +144,16 @@ function HistoryRow({
                 {showOriginal ? "Hide original" : "Show original"}
               </button>
             )}
+            {answer !== null && (
+              <button
+                type="button"
+                className="ow-transcript-row__refine-toggle"
+                aria-expanded={showAnswer}
+                onClick={() => setShowAnswer((v) => !v)}
+              >
+                {showAnswer ? "Hide answer" : "Show answer"}
+              </button>
+            )}
           </div>
         )}
         {original && !notes && showOriginal && (
@@ -138,6 +164,14 @@ function HistoryRow({
             {original}
           </p>
         )}
+        {answer !== null && showAnswer && (
+          <p
+            className="ow-transcript-row__original ow-history-row__answer ow-selectable"
+            data-testid="history-row-answer"
+          >
+            {answer}
+          </p>
+        )}
       </div>
       <div className="ow-history-row__actions ow-hover-reveal">
         <button
@@ -145,7 +179,7 @@ function HistoryRow({
           className="ow-history-row__action"
           data-testid="history-row-copy"
           onClick={() => void onCopy()}
-          aria-label={copied ? "Copied" : "Copy transcript"}
+          aria-label={copied ? "Copied" : copyLabel}
         >
           {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
         </button>

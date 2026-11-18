@@ -17,10 +17,10 @@
 //! the matching KeyUp are swallowed so the focused app does not also
 //! receive the chord.
 //!
-//! A slot marked `gate_on_recording` (cancel) only matches while
-//! `dictation::is_recording()`. Outside an active recording its binding
-//! passes through normally so the focused app still sees Escape (or
-//! whatever the user picked).
+//! A slot with a gate (cancel) only matches while the gate is open:
+//! `dictation::cancel_would_act()`, a recording or a running ask.
+//! Otherwise its binding passes through normally so the focused app
+//! still sees Escape (or whatever the user picked).
 //!
 //! Capture mode: when `crate::hotkey::is_capture_active()` is true the
 //! handler diverts to capture-only — every keyboard event is swallowed,
@@ -78,7 +78,6 @@ fn ax_trust_check(app: &AppHandle) -> bool {
     }
 }
 
-use openwhisper_core::dictation;
 
 // Device-side modifier bits (NX_DEVICE*KEYMASK from
 // `IOKit/hidsystem/ev_keymap.h`). Used for modifier-tap detection — they
@@ -172,7 +171,7 @@ impl SlotState {
     }
 
     fn gate_passes(&self) -> bool {
-        !self.spec.gate_on_recording || dictation::is_recording()
+        self.spec.gate_passes()
     }
 
     fn is_modifier_tap(&self) -> bool {
@@ -709,11 +708,12 @@ mod tests {
         ($fired:ident, $config:expr) => {
             counting_slot!($fired, $config, false)
         };
-        ($fired:ident, $config:expr, $gate_on_recording:expr) => {{
+        ($fired:ident, $config:expr, $gated:expr) => {{
             static $fired: AtomicUsize = AtomicUsize::new(0);
             static SPEC: SlotSpec = SlotSpec {
                 target: HotkeyTarget::Toggle,
-                gate_on_recording: $gate_on_recording,
+                // The cancel slot's gate, when the slot is gated.
+                gate: if $gated { Some(openwhisper_core::dictation::cancel_would_act) } else { None },
                 action: || {
                     $fired.fetch_add(1, Ordering::Relaxed);
                 },
@@ -922,7 +922,8 @@ mod tests {
 
     #[test]
     fn a_slot_gated_on_recording_passes_its_key_through_when_idle() {
-        // Nothing records in a unit test, so the gate is closed.
+        // Nothing records and no ask runs in a unit test, so the gate
+        // is closed.
         let (slot, fired) = counting_slot!(FIRED, HotkeyConfig::chord("Escape", &[]), true);
         let slots = [slot];
 

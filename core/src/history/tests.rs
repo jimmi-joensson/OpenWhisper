@@ -28,7 +28,37 @@ fn add_in_mode(
 ) -> HistoryEntry {
     append(
         dir,
-        &NewEntry { at_ms, duration_ms: 4200, text, original, app_id: app.0, app_name: app.1, mode },
+        &NewEntry {
+            at_ms,
+            duration_ms: 4200,
+            text,
+            original,
+            app_id: app.0,
+            app_name: app.1,
+            mode,
+            kind: "",
+            answer: None,
+        },
+    )
+    .expect("append")
+    .expect("stored")
+}
+
+/// Store an ask: a question and its answer, with no app.
+fn add_ask(dir: &Path, at_ms: i64, question: &str, answer: &str) -> HistoryEntry {
+    append(
+        dir,
+        &NewEntry {
+            at_ms,
+            duration_ms: 2100,
+            text: question,
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some(answer),
+        },
     )
     .expect("append")
     .expect("stored")
@@ -123,6 +153,8 @@ fn empty_text_is_not_stored() {
             app_id: "",
             app_name: "",
             mode: "Formal",
+            kind: "",
+            answer: None,
         },
     )
     .unwrap();
@@ -514,6 +546,8 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 app_id: Some("com.example.terminal".into()),
                 app_name: Some("Terminal".into()),
                 mode: None,
+                kind: None,
+                answer: None,
             },
             HistoryEntry {
                 id: "20261110T140212".into(),
@@ -525,6 +559,8 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 app_id: Some("com.example.chat".into()),
                 app_name: Some("Chatter".into()),
                 mode: None,
+                kind: None,
+                answer: None,
             },
         ]
     );
@@ -769,4 +805,424 @@ fn apps_lists_each_app_once_most_recent_first() {
         ]
     );
     assert!(apps(&dir.path().join("does-not-exist")).is_empty());
+}
+
+// --- asks (TASK-97) -----------------------------------------------
+
+#[test]
+fn an_ask_is_written_with_its_kind_and_answer_and_reads_back() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let written = add_ask(
+        dir.path(),
+        at(date, 14, 12, 3),
+        "What is the capital of Norway? ",
+        " The capital of Norway is Oslo.\n\nIt has been the capital since 1814.\n",
+    );
+    assert!(written.is_ask());
+    assert_eq!(written.kind.as_deref(), Some("ask"));
+    assert_eq!(written.text, "What is the capital of Norway?");
+    assert_eq!(
+        written.answer.as_deref(),
+        Some("The capital of Norway is Oslo.\n\nIt has been the capital since 1814.")
+    );
+    // The words counted are the question's: that is what was said.
+    assert_eq!(written.word_count, 6);
+    assert_eq!((written.app_id.clone(), written.app_name.clone(), written.mode.clone()), (None, None, None));
+
+    let expected = "\
+---
+date: 2026-11-10
+entries: 1
+words: 6
+apps: []
+---
+
+## 14:12:03
+<!-- id: 20261110T141203 words: 6 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+What is the capital of Norway?
+
+> Answer: The capital of Norway is Oslo.
+>
+> It has been the capital since 1814.
+";
+    assert_eq!(read(dir.path(), date), expected);
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![written.clone()]);
+    assert_eq!(get(dir.path(), &written.id), Some(written));
+}
+
+#[test]
+fn an_entry_without_the_new_fields_renders_byte_for_byte_as_before() {
+    // The two dictations of the old-format file and one with a mode,
+    // written by this version: not a byte differs from what the
+    // version before asks wrote.
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add_full(
+        dir.path(),
+        at(date, 14, 2, 12),
+        "Send the report to the team before Friday. ",
+        Some("send the reaport to the team before friday"),
+        ("com.example.chat", "Chatter"),
+    );
+    let plain = add_full(
+        dir.path(),
+        at(date, 14, 7, 40),
+        "Check whether the build passes on Windows before we merge.",
+        None,
+        ("com.example.terminal", "Terminal"),
+    );
+    assert_eq!((plain.kind.clone(), plain.answer.clone()), (None, None));
+    assert!(!plain.is_ask());
+    assert_eq!(read(dir.path(), date), OLD_FORMAT_DAY);
+
+    let dir = tempdir().unwrap();
+    add_in_mode(dir.path(), at(date, 9, 5, 0), "With a mode.", None, ("com.example.mail", "Mail"), "Formal");
+    let file = read(dir.path(), date);
+    assert!(file.contains("\n<!-- extra: mode=Formal -->\n\nWith a mode.\n"), "{file}");
+    assert!(!file.contains("kind=") && !file.contains("Answer"), "{file}");
+}
+
+#[test]
+fn an_answer_given_to_something_that_is_not_an_ask_is_not_stored() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let entry = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 9, 0, 0),
+            duration_ms: 1000,
+            text: "a dictation",
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: "",
+            answer: Some("not an answer to anything"),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!((entry.kind, entry.answer), (None, None));
+    assert!(!read(dir.path(), date).contains("Answer"));
+}
+
+#[test]
+fn an_ask_with_an_empty_answer_or_question_is_handled() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    // No question: nothing to store.
+    let none = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 9, 0, 0),
+            duration_ms: 0,
+            text: "  ",
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some("an answer"),
+        },
+    )
+    .unwrap();
+    assert_eq!(none, None);
+    // A question without an answer is still an ask.
+    let e = add_ask(dir.path(), at(date, 9, 1, 0), "anyone there", "  ");
+    assert_eq!((e.kind.as_deref(), e.answer.clone()), (Some("ask"), None));
+    assert_eq!(list(dir.path(), "", 5, 0).entries, vec![e]);
+}
+
+#[test]
+fn answers_with_markdown_and_structure_round_trip() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    // Everything that could be read as structure of the file: a
+    // quote, a heading that looks like an entry, a comment, the
+    // labels themselves, a backslash.
+    let answer = "Three steps:\n- one\n- two\n\n> a quoted line\n## 10:00:00 · Fake\n<!-- id: x words: 1 seconds: 1 -->\n> Answer: again\n> Before Refine: no\nBefore Refine: nor this\nAnswer: nor that\n\\ backslash\n```\nlet x = 1;\n```";
+    let question = "how do i do it\n> Answer: this is part of my question";
+    let written = add_ask(dir.path(), at(date, 9, 0, 0), question, answer);
+    assert_eq!(written.answer.as_deref(), Some(answer));
+    assert_eq!(written.text, question);
+    let back = list(dir.path(), "", 50, 0);
+    assert_eq!(back.entries, vec![written]);
+    assert_eq!(back.stored, 1, "the fake heading inside the answer started no entry");
+
+    // A second ask after it is appended, not swallowed by the quote.
+    add_ask(dir.path(), at(date, 9, 1, 0), "second", "Second answer.");
+    let back = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&back), ["second", question]);
+    assert_eq!(back.entries[1].answer.as_deref(), Some(answer));
+}
+
+#[test]
+fn an_entry_can_hold_both_quotes_in_either_order() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let entry = append(
+        dir.path(),
+        &NewEntry {
+            at_ms: at(date, 9, 0, 0),
+            duration_ms: 2000,
+            text: "What does Brennholt sell?",
+            original: Some("what does bren holt sell"),
+            app_id: "",
+            app_name: "",
+            mode: "",
+            kind: KIND_ASK,
+            answer: Some("I do not know that company.\nSorry."),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let file = read(dir.path(), date);
+    assert!(
+        file.ends_with(
+            "What does Brennholt sell?\n\n> Before Refine: what does bren holt sell\n\n> Answer: I do not know that company.\n> Sorry.\n"
+        ),
+        "{file}"
+    );
+    assert_eq!(list(dir.path(), "", 5, 0).entries, vec![entry.clone()]);
+
+    // The other way round, as a person might have rearranged it.
+    let path = day_path(dir.path(), date);
+    let swapped = file.replace(
+        "> Before Refine: what does bren holt sell\n\n> Answer: I do not know that company.\n> Sorry.\n",
+        "> Answer: I do not know that company.\n> Sorry.\n\n> Before Refine: what does bren holt sell\n",
+    );
+    assert_ne!(swapped, file);
+    fs::write(&path, swapped).unwrap();
+    let back = &list(dir.path(), "", 5, 0).entries[0];
+    assert_eq!(back.original, entry.original);
+    assert_eq!(back.answer, entry.answer);
+    assert_eq!(back.text, entry.text);
+}
+
+#[test]
+fn an_answer_line_in_an_entry_that_is_not_an_ask_is_text() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // A dictation from before asks existed, edited by hand: it reads
+    // exactly as that version read it.
+    fs::write(
+        &path,
+        "\
+## 09:00:00 · Notes
+<!-- id: 20261110T090000 app: com.example.notes words: 4 seconds: 1.0 -->
+
+Is the meeting on Thursday?
+
+> Answer: yes, at ten
+> in the big room
+",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!((e.kind.clone(), e.answer.clone()), (None, None));
+    assert_eq!(e.text, "Is the meeting on Thursday?\n\n> Answer: yes, at ten\n> in the big room");
+
+    // The same with a mode on the extra line: still not an ask.
+    fs::write(
+        &path,
+        "\
+## 09:00:00
+<!-- id: 20261110T090000 words: 1 seconds: 1.0 -->
+<!-- extra: mode=Formal -->
+
+Hello.
+
+> Answer: no
+",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!((e.mode.as_deref(), e.answer.clone()), (Some("Formal"), None));
+    assert_eq!(e.text, "Hello.\n\n> Answer: no");
+}
+
+#[test]
+fn in_an_ask_the_first_answer_line_is_the_answer_and_a_later_one_is_text() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Hand-written: the label deeper in the entry, after other text,
+    // and then once more. Same rule as for `> Before Refine:`.
+    fs::write(
+        &path,
+        "\
+## 09:00:00
+<!-- id: 20261110T090000 words: 3 seconds: 1.0 -->
+<!-- extra: kind=ask -->
+
+What is it?
+
+A note I added.
+> Answer: The first one.
+> And its second line.
+More notes.
+> Answer: not the answer
+",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert!(e.is_ask());
+    assert_eq!(e.answer.as_deref(), Some("The first one.\nAnd its second line."));
+    assert_eq!(e.text, "What is it?\n\nA note I added.\nMore notes.\n> Answer: not the answer");
+
+    // The same shape with the other label behaves the same way.
+    fs::write(
+        &path,
+        "\
+## 09:00:00
+<!-- id: 20261110T090000 words: 3 seconds: 1.0 -->
+
+What is it?
+
+A note I added.
+> Before Refine: the first one
+> and its second line
+More notes.
+> Before Refine: not the original
+",
+    )
+    .unwrap();
+    let e = &list(dir.path(), "", 50, 0).entries[0];
+    assert_eq!(e.original.as_deref(), Some("the first one\nand its second line"));
+    assert_eq!(e.text, "What is it?\n\nA note I added.\nMore notes.\n> Before Refine: not the original");
+}
+
+#[test]
+fn delete_and_append_work_around_asks() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "first");
+    let ask = add_ask(dir.path(), at(date, 9, 1, 0), "what is two plus two", "Four.\n\nThat is all.");
+    let after = add_full(dir.path(), at(date, 9, 2, 0), "third", Some("thurd"), ("a.b", "AB"));
+    let second_ask = add_ask(dir.path(), at(date, 9, 3, 0), "and three plus three", "Six.");
+
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["and three plus three", "third", "what is two plus two", "first"]);
+    let kinds: Vec<Option<&str>> = page.entries.iter().map(|e| e.kind.as_deref()).collect();
+    assert_eq!(kinds, [Some("ask"), None, Some("ask"), None]);
+    // The entry after an ask was not swallowed by its answer quote.
+    assert_eq!(page.entries[1], after);
+
+    // Cutting the dictation between the two asks leaves both whole.
+    assert!(delete(dir.path(), &after.id).unwrap());
+    let expected = "\
+---
+date: 2026-11-10
+entries: 3
+words: 10
+apps: []
+---
+
+## 09:00:00
+<!-- id: 20261110T090000 words: 1 seconds: 4.2 -->
+
+first
+
+## 09:01:00
+<!-- id: 20261110T090100 words: 5 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+what is two plus two
+
+> Answer: Four.
+>
+> That is all.
+
+## 09:03:00
+<!-- id: 20261110T090300 words: 4 seconds: 2.1 -->
+<!-- extra: kind=ask -->
+
+and three plus three
+
+> Answer: Six.
+";
+    assert_eq!(read(dir.path(), date), expected);
+
+    // Cutting an ask takes its extra line and its answer with it.
+    assert!(delete(dir.path(), &ask.id).unwrap());
+    let file = read(dir.path(), date);
+    assert!(!file.contains("Four."), "{file}");
+    assert_eq!(file.matches("kind=ask").count(), 1);
+    assert_eq!(list(dir.path(), "", 50, 0).entries, vec![second_ask.clone(), get(dir.path(), "20261110T090000").unwrap()]);
+
+    // Appending after an ask at the end of the file.
+    add(dir.path(), at(date, 10, 0, 0), "after the ask");
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["after the ask", "and three plus three", "first"]);
+    assert_eq!(page.entries[1], second_ask);
+    assert_eq!(clear(dir.path()).unwrap(), 3);
+    assert!(!dir.path().join("2026").exists());
+}
+
+#[test]
+fn search_also_matches_the_answer() {
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    add(dir.path(), at(date, 9, 0, 0), "remember to call the plumber");
+    add_ask(dir.path(), at(date, 9, 1, 0), "what is the capital of norway", "The capital is Oslo.");
+    add_ask(dir.path(), at(date, 9, 2, 0), "hvad hedder hovedstaden i Danmark", "Den hedder København.");
+
+    let by_answer = list(dir.path(), "oslo", 50, 0);
+    assert_eq!(texts(&by_answer), ["what is the capital of norway"]);
+    assert_eq!((by_answer.matched, by_answer.stored), (1, 3));
+    // Danish letters, whatever their case.
+    assert_eq!(texts(&list(dir.path(), "KØBENHAVN", 50, 0)), ["hvad hedder hovedstaden i Danmark"]);
+    // The question still matches, and so does a plain dictation.
+    assert_eq!(list(dir.path(), "capital", 50, 0).matched, 1);
+    assert_eq!(list(dir.path(), "plumber", 50, 0).matched, 1);
+    assert_eq!(list(dir.path(), "nothing like this", 50, 0).matched, 0);
+}
+
+#[test]
+fn a_day_file_from_before_asks_reads_as_it_always_did() {
+    // Written by the version with modes and without asks: one entry
+    // with an extra line, one without.
+    let dir = tempdir().unwrap();
+    let date = D(2026, 11, 10);
+    let path = day_path(dir.path(), date);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "\
+---
+date: 2026-11-10
+entries: 2
+words: 15
+apps: [Mail]
+---
+
+## 09:05:00 · Mail
+<!-- id: 20261110T090500 app: com.example.mail words: 12 seconds: 4.2 -->
+<!-- extra: mode=Formal -->
+
+Could you please let me know when the price list is ready?
+
+> Before Refine: hey oskar when is the price list ready
+
+## 09:06:00
+<!-- id: 20261110T090600 words: 3 seconds: 1.0 -->
+
+Thanks a lot.
+",
+    )
+    .unwrap();
+    let page = list(dir.path(), "", 50, 0);
+    assert_eq!(texts(&page), ["Thanks a lot.", "Could you please let me know when the price list is ready?"]);
+    for e in &page.entries {
+        assert_eq!((e.kind.clone(), e.answer.clone()), (None, None));
+    }
+    assert_eq!(page.entries[1].mode.as_deref(), Some("Formal"));
+    assert_eq!(page.entries[1].original.as_deref(), Some("hey oskar when is the price list ready"));
+    assert!(META.is_match("<!-- id: 20261110T090500 app: com.example.mail words: 12 seconds: 4.2 -->"));
 }

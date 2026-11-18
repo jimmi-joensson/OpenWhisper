@@ -70,6 +70,12 @@ ALTER TABLE refine_runs ADD COLUMN window_7d_resets_at INTEGER;";
 const MIGRATION_5_REFINE_MODE: &str = "\
 ALTER TABLE refine_runs ADD COLUMN mode TEXT;";
 
+/// Asks (TASK-97) are rows of `refine_runs` with source `ask`. They
+/// stream, so they have a time to first text. NULL for Refine runs
+/// and on rows written before this migration.
+const MIGRATION_6_ASK_FIRST_TEXT: &str = "\
+ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;";
+
 fn specs() -> Vec<M<'static>> {
     vec![
         M::up(MIGRATION_1_DICTATIONS),
@@ -77,6 +83,7 @@ fn specs() -> Vec<M<'static>> {
         M::up(MIGRATION_3_REFINE_RUNS),
         M::up(MIGRATION_4_REFINE_USAGE),
         M::up(MIGRATION_5_REFINE_MODE),
+        M::up(MIGRATION_6_ASK_FIRST_TEXT),
     ]
 }
 

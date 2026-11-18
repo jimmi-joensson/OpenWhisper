@@ -5,9 +5,9 @@
 //! [`openwhisper_core::settings`]. This module only owns:
 //!   - the `#[tauri::command]` wrappers React invokes,
 //!   - [`apply_collection_behavior`], which mirrors the
-//!     `show_in_fullscreen` setting onto the pill panel's
-//!     NSCollectionBehavior on macOS / `set_visible_on_all_workspaces`
-//!     on Windows.
+//!     `show_in_fullscreen` setting onto the pill panel's and the
+//!     answer panel's NSCollectionBehavior on macOS /
+//!     `set_visible_on_all_workspaces` on Windows.
 
 use openwhisper_core::settings::{
     self, BehaviorSettings, BT_RESUME_DELAY_MS_MAX,
@@ -20,19 +20,23 @@ fn current_or_default() -> BehaviorSettings {
     settings::current_behavior_settings().unwrap_or_default()
 }
 
-/// Mirror `show_in_fullscreen` onto the pill panel's
-/// collection-behavior so it can render over other apps' fullscreen
+/// The windows that follow the "show in fullscreen" rule: the pill
+/// and the answer window that sits above it.
+const OVERLAY_WINDOWS: [&str; 2] = ["pill", crate::ask::ANSWER_LABEL];
+
+/// Mirror `show_in_fullscreen` onto the overlay panels'
+/// collection-behavior so they can render over other apps' fullscreen
 /// Spaces on macOS.
 ///
-/// On macOS the pill is converted to an NSPanel at boot (see
-/// `lib.rs::setup`) and we drive its collection-behavior through the
-/// `tauri-nspanel` API rather than the underlying NSWindow's
-/// `set_visible_on_all_workspaces`: plain NSWindow with the same bits
-/// is unreliable on Sonoma+ when the fullscreen Space owner is
-/// another app (Apple Developer Forums #26677). The panel's
-/// `nonactivating_panel` style + `full_screen_auxiliary` +
-/// `can_join_all_spaces` is the canonical recipe shipped by Cap,
-/// Screenpipe, Hyprnote, Wispr Flow.
+/// On macOS the pill and the answer window are converted to NSPanels
+/// at boot (see `lib.rs::setup`) and we drive their
+/// collection-behavior through the `tauri-nspanel` API rather than
+/// the underlying NSWindow's `set_visible_on_all_workspaces`: plain
+/// NSWindow with the same bits is unreliable on Sonoma+ when the
+/// fullscreen Space owner is another app (Apple Developer Forums
+/// #26677). The panel's `nonactivating_panel` style +
+/// `full_screen_auxiliary` + `can_join_all_spaces` is the canonical
+/// recipe shipped by Cap, Screenpipe, Hyprnote, Wispr Flow.
 ///
 /// On non-macOS targets we fall back to the Tauri call, which is a
 /// no-op on platforms that don't support the workspace concept (the
@@ -41,22 +45,26 @@ pub fn apply_collection_behavior(app: &AppHandle, show: bool) {
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::{CollectionBehavior, ManagerExt};
-        let Ok(panel) = app.get_webview_panel("pill") else {
-            return;
-        };
-        let cb = if show {
-            CollectionBehavior::new()
-                .can_join_all_spaces()
-                .full_screen_auxiliary()
-        } else {
-            CollectionBehavior::new()
-        };
-        panel.set_collection_behavior(cb.into());
+        for label in OVERLAY_WINDOWS {
+            let Ok(panel) = app.get_webview_panel(label) else {
+                continue;
+            };
+            let cb = if show {
+                CollectionBehavior::new()
+                    .can_join_all_spaces()
+                    .full_screen_auxiliary()
+            } else {
+                CollectionBehavior::new()
+            };
+            panel.set_collection_behavior(cb.into());
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        if let Some(pill) = app.get_webview_window("pill") {
-            let _ = pill.set_visible_on_all_workspaces(show);
+        for label in OVERLAY_WINDOWS {
+            if let Some(window) = app.get_webview_window(label) {
+                let _ = window.set_visible_on_all_workspaces(show);
+            }
         }
     }
 }

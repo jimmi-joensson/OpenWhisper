@@ -41,6 +41,40 @@ function applyTheme(theme: Theme) {
   root.classList.add(effective);
 }
 
+// For a window that has no ThemeProvider of its own (the answer
+// window of Ask): follow the theme chosen in the main window. The
+// choice lives in localStorage, which the windows share; index.html
+// applies it when the page loads, and this keeps it right while the
+// window stays open: when the main window stores another choice (the
+// `storage` event) and when the OS switches between light and dark.
+// Returns a function that applies the stored choice again, for a
+// window that wants to be sure before it shows something new.
+export function useStoredTheme(): () => void {
+  useEffect(() => {
+    applyStoredTheme();
+    const onStorage = (event: StorageEvent) => {
+      // `key` is null when the whole storage was cleared.
+      if (event.key === null || event.key === STORAGE_KEY) applyStoredTheme();
+    };
+    window.addEventListener("storage", onStorage);
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    mql.addEventListener("change", applyStoredTheme);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      mql.removeEventListener("change", applyStoredTheme);
+    };
+  }, []);
+  return applyStoredTheme;
+}
+
+function applyStoredTheme() {
+  try {
+    applyTheme(readStoredTheme());
+  } catch {
+    // localStorage unavailable: keep the theme the page loaded with.
+  }
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(readStoredTheme);
 

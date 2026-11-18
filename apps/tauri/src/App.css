@@ -869,6 +869,12 @@ body[data-platform="macos"] .ow-titlebar {
   color: var(--muted-foreground);
 }
 
+/* The answer of an ask: the model's text, with its line breaks. */
+.ow-history-row__answer {
+  color: var(--foreground);
+  white-space: pre-wrap;
+}
+
 .ow-history-row__actions {
   flex-shrink: 0;
   display: flex;

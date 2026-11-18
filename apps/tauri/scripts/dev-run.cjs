@@ -35,6 +35,14 @@ const path = require("node:path");
 
 const isMac = process.platform === "darwin";
 
+// Trim target/ to its size budget at most once a day, before the build
+// adds to it. A failure here never blocks the dev build.
+try {
+    require("./prune-target.cjs").prune({ maxAgeHours: 24 });
+} catch (err) {
+    console.warn(`[prune-target] skipped: ${err.message}`);
+}
+
 const args = process.argv.slice(2);
 const verbose = args.includes("--verbose");
 

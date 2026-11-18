@@ -101,7 +101,17 @@ pub fn process_tracked(text: &str) -> (String, Vec<crate::dictionary::Replacemen
 /// rules and trailing space as [`process`]. No filler stripping or
 /// dedupe: the model already made those calls.
 pub fn finalize_refined(text: &str) -> String {
-    let out = crate::dictionary::current_matcher().apply(text);
+    finalize_refined_with(text, false)
+}
+
+/// [`finalize_refined`], and with `no_long_dashes` the text first
+/// loses its em dashes and en dashes ([`crate::dashes::normalize`]):
+/// the model was asked not to write any, and this is the net under
+/// that. Only ever called on what a model returned, so the transcript
+/// as it was recognized keeps whatever it holds.
+pub fn finalize_refined_with(text: &str, no_long_dashes: bool) -> String {
+    let text = if no_long_dashes { crate::dashes::normalize(text) } else { text.to_string() };
+    let out = crate::dictionary::current_matcher().apply(&text);
     let out = normalize_whitespace(&out);
     if out.is_empty() { out } else { format!("{out} ") }
 }
@@ -232,6 +242,23 @@ mod tests {
     fn dedupe_after_substitution() {
         // "open whisper open whisper" -> subs run first, then dedupe collapses.
         assert_eq!(process("open whisper open whisper"), "OpenWhisper ");
+    }
+
+    #[test]
+    fn refined_text_loses_its_long_dashes_only_when_asked() {
+        let text = "The report \u{2014} which is late \u{2014} needs a review, 10\u{2013}12 pages.";
+        assert_eq!(
+            finalize_refined_with(text, true),
+            "The report - which is late - needs a review, 10-12 pages. "
+        );
+        // Without the switch the text is the model's, as before.
+        assert_eq!(finalize_refined_with(text, false), format!("{text} "));
+        assert_eq!(finalize_refined(text), format!("{text} "));
+        // The rule pass on the transcript itself never replaces one.
+        assert_eq!(process("ten \u{2013} twelve"), "ten \u{2013} twelve ");
+        // A dash the text ends with does not leave two blanks behind.
+        assert_eq!(finalize_refined_with("Wait\u{2014}", true), "Wait - ");
+        assert_eq!(finalize_refined_with("", true), "");
     }
 
     #[test]

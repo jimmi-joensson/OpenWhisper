@@ -6,6 +6,7 @@ import {
   DICTATION_TICK_EVENT,
   PHASE_TRANSCRIBING,
   type DictationTick,
+  type SessionKind,
 } from "./dictation";
 
 const MAIN_BAR_COUNT = 32;
@@ -23,6 +24,10 @@ export interface DictationView {
   errorMessage: string;
   canToggle: boolean;
   isRecording: boolean;
+  // What the recording in flight (or the last one) is for.
+  sessionKind: SessionKind;
+  // The cancel key would do something: a recording or a running ask.
+  cancelWouldAct: boolean;
   downloadBytesDone: number;
   downloadBytesTotal: number;
   toggle: () => Promise<void>;
@@ -42,6 +47,8 @@ const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
   errorMessage: "",
   canToggle: true,
   isRecording: false,
+  sessionKind: "dictation",
+  cancelWouldAct: false,
   downloadBytesDone: 0,
   downloadBytesTotal: 0,
 };
@@ -76,6 +83,8 @@ export function useDictation(): DictationView {
           errorMessage: t.error_message,
           canToggle: t.can_toggle,
           isRecording: t.is_recording,
+          sessionKind: t.session_kind ?? "dictation",
+          cancelWouldAct: t.cancel_would_act ?? t.is_recording,
           downloadBytesDone: t.download_bytes_done,
           downloadBytesTotal: t.download_bytes_total,
         };

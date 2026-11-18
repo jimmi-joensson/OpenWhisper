@@ -15,6 +15,9 @@ export interface RefineSettings {
   timeout_ms: number;
   min_words: number;
   drift_guard: boolean;
+  // Refine and Ask never write an em dash or an en dash. On unless
+  // the person switched it off.
+  no_long_dashes: boolean;
   claude_cli: { model: string; effort: RefineEffort; path: string | null };
   // `effort: null` = no effort is sent (most servers do not take one).
   openai: { base_url: string; model: string; effort: RefineEffort | null };
@@ -139,8 +142,11 @@ export const NO_REFINE: RefineInfo = {
 // timings and reasons only, never any dictated text.
 export interface RefineRun {
   at_ms: number;
-  source: "dictation" | "test";
-  status: RefineInfo["status"];
+  // "ask" rows (TASK-97) are asks answered by the same backend, not
+  // Refine runs: their status is "answered", "timeout", "unavailable",
+  // "failed" or "cancelled".
+  source: "dictation" | "test" | "ask";
+  status: RefineInfo["status"] | "answered" | "cancelled";
   backend: string;
   model: string;
   effort: string;
@@ -166,6 +172,9 @@ export interface RefineRun {
   // Name of the mode the run was made in, when it was one the user
   // made. null for the built-in Dictation mode and for older runs.
   mode: string | null;
+  // An ask: ms from sending the question to the first text of the
+  // answer. null for Refine runs and for asks that got no text.
+  first_text_ms: number | null;
 }
 
 // Mirrors `PlanEstimate` in core/src/refine/history.rs. The windows
@@ -186,7 +195,14 @@ export interface RefinePlanEstimate {
 
 // Mirrors `RefineSummary` in core/src/refine/history.rs.
 export interface RefineSummary {
+  // Rows looked at, asks included.
   total: number;
+  // Asks among them, how many got an answer, and over the answered
+  // ones the median time to the first text and to the end.
+  asks: number;
+  asks_answered: number;
+  ask_median_first_text_ms: number | null;
+  ask_median_ms: number | null;
   refined: number;
   skipped: number;
   fallbacks: number;

@@ -43,7 +43,10 @@
 //! system prompt is handed over in a temp file instead of an argument
 //! (see [`spawn_args`]), because a `.cmd` shim goes through `cmd.exe`,
 //! which cannot carry quotes and newlines safely and caps the command
-//! line at 8191 characters.
+//! line at 8191 characters; and a process that is stopped in the
+//! middle of a request is ended with everything under it, because
+//! behind a shim the CLI is not the process that was spawned
+//! ([`end_process`]).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -70,9 +73,9 @@ pub const ID: &str = "claude-cli";
 pub const DESTINATION: &str =
     "Anthropic (Claude), through the Claude Code app signed in on this computer";
 
-const NOT_INSTALLED: &str = "Claude Code is not installed on this computer. Install it from \
+pub(crate) const NOT_INSTALLED: &str = "Claude Code is not installed on this computer. Install it from \
 claude.com/claude-code, run `claude` once in a terminal and sign in.";
-const NOT_SIGNED_IN: &str =
+pub(crate) const NOT_SIGNED_IN: &str =
     "Claude Code is installed but not signed in. Run `claude` in a terminal and sign in.";
 
 /// How long the `claude auth status` / `--version` probes may take.
@@ -366,13 +369,16 @@ pub fn spawn_args(model: &str, effort: RefineEffort, system_prompt_file: &Path) 
 }
 
 /// Write the system prompt to a private temp file for
-/// `--system-prompt-file`. It holds the cleanup instructions and the
-/// dictionary terms, never a transcript. Removed when the process is
-/// dropped.
-fn write_prompt_file(system: &str) -> Result<PathBuf, RefineError> {
+/// `--system-prompt-file`. It holds the instructions and the
+/// dictionary terms, never a transcript. The caller removes it when
+/// its process is dropped. `feature` ("Refine", "Ask") names the file
+/// and the error; Ask starts its CLI processes through the same
+/// helpers (see `crate::ask::claude_cli`).
+pub(crate) fn write_prompt_file(feature: &str, system: &str) -> Result<PathBuf, RefineError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let name = format!(
-        "openwhisper-refine-{}-{}.txt",
+        "openwhisper-{}-{}-{}.txt",
+        feature.to_lowercase(),
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     );
@@ -387,11 +393,14 @@ fn write_prompt_file(system: &str) -> Result<PathBuf, RefineError> {
     options
         .open(&path)
         .and_then(|mut f| f.write_all(system.as_bytes()))
-        .map_err(|e| RefineError::Backend(format!("Could not write the Refine prompt file: {e}")))?;
+        .map_err(|e| RefineError::Backend(format!("Could not write the {feature} prompt file: {e}")))?;
     Ok(path)
 }
 
-fn command(bin: &Path) -> Command {
+/// A `Command` for the CLI at `bin`: a neutral working directory, a
+/// `PATH` that finds `node`, no console window on Windows. Shared
+/// with Ask.
+pub(crate) fn command(bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
     // A neutral directory: nothing project-specific to pick up.
     cmd.current_dir(std::env::temp_dir());
@@ -430,10 +439,58 @@ fn child_path(bin: &Path, inherited: Option<&OsStr>, windows: bool) -> Option<st
     std::env::join_paths(dirs).ok()
 }
 
+/// End the CLI process `child` and reap it. Shared with Ask.
+///
+/// `mid_turn` says the model may still be working on a turn (a
+/// cancel, a timeout, an error halfway). The CLI only exits by itself
+/// when its input closes while it is idle: with a turn in flight it
+/// finishes the turn first (seen live with Claude Code 2.1.322), so
+/// closing stdin is not enough then.
+///
+/// On Unix the child is the CLI itself (a `#!` script runs in the
+/// process that was spawned), so killing it ends the turn. On Windows
+/// an npm install is a `claude.cmd` shim: the child is `cmd.exe` and
+/// the CLI is its child, which killing `cmd.exe` leaves running. So
+/// there the whole tree is ended with `taskkill /T /F` first.
+/// `taskkill` rather than a Job Object because it needs nothing new:
+/// no FFI, no dependency, and nothing to set up at spawn that could
+/// change how the CLI starts.
+pub(crate) fn end_process(child: &mut Child, mid_turn: bool) {
+    #[cfg(windows)]
+    if mid_turn {
+        kill_tree(child.id());
+    }
+    #[cfg(not(windows))]
+    let _ = mid_turn;
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Force-end the process `pid` and every process under it, without a
+/// console window. Waits for `taskkill` to finish (some tens of
+/// milliseconds), so the tree is gone when this returns.
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    // By full path: a `taskkill` found through PATH could be anything.
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let _ = Command::new(system.join("System32").join("taskkill.exe"))
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // CREATE_NO_WINDOW
+        .creation_flags(0x0800_0000)
+        .status();
+}
+
 /// One spawned CLI process, good for one request.
 struct Process {
     child: Child,
     stdin: Option<ChildStdin>,
+    /// The transcript was sent and no result has come back: the model
+    /// may be working on it.
+    mid_turn: bool,
     /// The single result the reader thread sends.
     rx: Receiver<Result<String, RefineError>>,
     /// Filled by the reader thread before it sends the result.
@@ -452,7 +509,7 @@ impl Process {
         effort: RefineEffort,
         system: &str,
     ) -> Result<Self, RefineError> {
-        let prompt_file = write_prompt_file(system)?;
+        let prompt_file = write_prompt_file("Refine", system)?;
         let mut cmd = command(bin);
         cmd.args(spawn_args(model, effort, &prompt_file))
             .stdin(Stdio::piped())
@@ -521,6 +578,7 @@ impl Process {
         Ok(Self {
             child,
             stdin,
+            mid_turn: false,
             rx,
             usage,
             system: system.to_string(),
@@ -568,8 +626,14 @@ impl Process {
                 Err(_) => Err(RefineError::Backend("Claude Code exited before it was asked".into())),
             };
         }
+        self.mid_turn = true;
         match self.rx.recv_timeout(timeout) {
-            Ok(result) => result,
+            Ok(result) => {
+                // The result line, or the process ended: either way
+                // nothing is being worked on any more.
+                self.mid_turn = false;
+                result
+            }
             Err(RecvTimeoutError::Timeout) => Err(RefineError::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
                 Err(RefineError::Backend("Claude Code stopped without an answer".into()))
@@ -580,18 +644,18 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        // Close stdin first: a CLI behind a `claude.cmd` shim is a
-        // grandchild that `kill` does not reach, but it exits on its
-        // own once its input is closed.
+        // Close stdin first: an idle CLI exits on its own once its
+        // input is closed, also the one behind a `claude.cmd` shim
+        // that `kill` does not reach. One that is working on a turn
+        // does not, see [`end_process`].
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        end_process(&mut self.child, self.mid_turn);
         let _ = fs::remove_file(&self.prompt_file);
     }
 }
 
 /// `Some` when `line` is the CLI's final `result` event.
-fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
+pub(crate) fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v["type"].as_str() != Some("result") {
         return None;
@@ -611,7 +675,7 @@ fn parse_result_line(line: &str) -> Option<Result<String, RefineError>> {
 }
 
 /// Tokens and list-price cost from the CLI's `result` event.
-fn parse_usage(result_line: &str) -> Option<CallUsage> {
+pub(crate) fn parse_usage(result_line: &str) -> Option<CallUsage> {
     let v: Value = serde_json::from_str(result_line.trim()).ok()?;
     let usage = v.get("usage")?;
     let n = |key: &str| usage[key].as_u64().unwrap_or(0);
@@ -627,7 +691,7 @@ fn parse_usage(result_line: &str) -> Option<CallUsage> {
 
 /// The plan's usage windows from the CLI's `rate_limit_event`. Only
 /// present when the CLI is signed in with a subscription.
-fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
+pub(crate) fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v["type"].as_str() != Some("rate_limit_event") {
         return None;
@@ -642,7 +706,7 @@ fn parse_rate_limit_line(line: &str) -> Option<PlanWindows> {
 }
 
 /// Turn an error text from the CLI into the right [`RefineError`].
-fn classify_failure(message: &str) -> RefineError {
+pub(crate) fn classify_failure(message: &str) -> RefineError {
     let lower = message.to_lowercase();
     let auth = ["/login", "not logged in", "log in", "sign in", "authentication", "invalid api key", "oauth"]
         .iter()
@@ -654,7 +718,7 @@ fn classify_failure(message: &str) -> RefineError {
     }
 }
 
-fn exit_error(stderr: &str) -> RefineError {
+pub(crate) fn exit_error(stderr: &str) -> RefineError {
     let said = one_line(stderr);
     if said.is_empty() {
         RefineError::Backend("Claude Code exited without an answer".into())
@@ -1053,7 +1117,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello ther
 /// Written on macOS and compile-checked for `x86_64-pc-windows-gnu`,
 /// but not yet run: the first `cargo test` on Windows is what verifies
 /// spawning through a `.cmd` shim, the stdin hand-over, the timeout
-/// and the kill.
+/// and the kill, including that the process behind the shim is gone
+/// after a timeout ([`end_process`]).
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
@@ -1115,6 +1180,55 @@ exit /b 0";
             .unwrap_err();
         assert_eq!(err, RefineError::Timeout);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// A shim that takes the transcript and then starts a process of
+    /// its own that runs for half a minute: the place the real CLI
+    /// has behind `claude.cmd`. That process writes its id to
+    /// `pid.txt` next to the shim.
+    const SLOW_GRANDCHILD: &str = "set /p line=\r\n\
+powershell -NoProfile -Command \"$PID | Out-File -Encoding ascii '%~dp0pid.txt'; Start-Sleep -Seconds 30\"";
+
+    /// The id the grandchild wrote, once it is up.
+    fn grandchild_pid(dir: &Path) -> String {
+        let file = dir.join("pid.txt");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let pid = fs::read_to_string(&file).unwrap_or_default().trim().to_string();
+            if !pid.is_empty() {
+                return pid;
+            }
+            assert!(Instant::now() < deadline, "the grandchild never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `tasklist` still knows the process `pid`.
+    fn alive(pid: &str) -> bool {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn a_timeout_ends_the_process_behind_the_cmd_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = {
+            let dir = dir.path().to_path_buf();
+            thread::spawn(move || grandchild_pid(&dir))
+        };
+        // Long enough for the grandchild to come up and say who it
+        // is; it would run for 30 seconds if nobody stopped it.
+        let err = ClaudeCli::new(fake_cli(dir.path(), SLOW_GRANDCHILD))
+            .refine(&prompt(), "hello there", Duration::from_secs(8))
+            .unwrap_err();
+        assert_eq!(err, RefineError::Timeout);
+        let pid = pid.join().unwrap();
+        // The process is dropped when `refine` returns, and the tree
+        // with it: `taskkill` has finished by then.
+        assert!(!alive(&pid), "the process behind the shim ({pid}) outlived the timeout");
     }
 
     #[test]

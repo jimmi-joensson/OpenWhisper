@@ -1287,6 +1287,8 @@ fn both_turns(first: AskReply, second: AskReply, before: Duration, total: Durati
                 (x, y) => y.or(x),
             },
             plan: b.plan.or(a.plan),
+            // Both turns go to the same model; the second answered.
+            model: b.model.or(a.model),
         }),
         (a, b) => b.or(a),
     };
@@ -2227,6 +2229,7 @@ fn run_record(
         window_7d_used: windows.and_then(|p| p.seven_day_used),
         window_7d_resets_at: windows.and_then(|p| p.seven_day_resets_at),
         mode: None,
+        model_exact: usage.and_then(|u| u.model.clone()),
         first_text_ms: reply.and_then(|r| r.first_text_ms).map(|ms| ms as i64),
         screen: Some(trace.screen == ScreenState::Included),
         context_source: Some(trace.context_source.label()),
@@ -2271,6 +2274,8 @@ fn keep_in_history(question: &str, answer: &str, at_ms: i64, spoken_ms: i64, scr
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: crate::history::KIND_ASK,
             answer: Some(answer),
             screen,
@@ -2607,7 +2612,7 @@ pub(crate) mod test_support {
                 text: text.trim().to_string(),
                 first_text_ms: Some(120),
                 elapsed_ms: 480,
-                usage: Some(CallUsage { tokens_in: 900, tokens_cached: 800, tokens_out: 40, cost_usd: Some(0.002), plan: None }),
+                usage: Some(CallUsage { tokens_in: 900, tokens_cached: 800, tokens_out: 40, cost_usd: Some(0.002), plan: None, model: None }),
                 warm_lead_ms: Some(2500),
                 notice: String::new(),
                 ..AskReply::default()

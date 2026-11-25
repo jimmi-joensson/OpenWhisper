@@ -154,6 +154,13 @@ struct DictationTick {
     /// it still here, so the windows must not take that for a new
     /// dictation.
     session_kind: SessionKind,
+    /// The dictation in flight goes through Refine (the switch is on,
+    /// or the refine key started or stopped it): from the start of
+    /// the recording until the text is delivered. The pill says so
+    /// the whole time.
+    will_refine: bool,
+    /// The transcript is with the Refine backend right now.
+    refining: bool,
     status: &'static str,
     status_message: String,
     transcript: String,
@@ -184,6 +191,8 @@ impl DictationTick {
         Self {
             phase: snap.phase(),
             session_kind: snap.session_kind(),
+            will_refine: snap.will_refine(),
+            refining: snap.refining(),
             status: dictation::phase_status_label(snap.phase()),
             status_message: snap.status_message(),
             transcript: snap.transcript(),
@@ -338,6 +347,15 @@ pub(crate) fn do_ask_toggle() -> Result<(), String> {
     dictation::run_toggle_kind(&TauriDictationEnv, SessionKind::Ask)
 }
 
+/// Shared "dictate with Refine" path: the refine hotkey, a long press
+/// of the dictation key when that is switched on, and the
+/// `dictation_toggle_refined` command. The dictation it starts or
+/// stops goes through Refine whatever the Refine switch says;
+/// orchestration lives in [`dictation::run_toggle_refined`].
+pub(crate) fn do_refine_toggle() -> Result<(), String> {
+    dictation::run_toggle_refined(&TauriDictationEnv)
+}
+
 /// Shared cancel path. See [`do_toggle`]. Also stops an ask that is
 /// being transcribed or answered ([`dictation::run_cancel`]).
 pub(crate) fn do_cancel() -> bool {
@@ -355,6 +373,14 @@ pub(crate) fn do_cycle_mode() -> Result<(), String> {
 #[tauri::command]
 fn dictation_toggle() -> Result<(), String> {
     do_toggle()
+}
+
+/// Same step as the refine hotkey. The Windows in-window keyboard
+/// fallback (`use-global-hotkey.ts`) calls it, because the keyboard
+/// hook does not see keys pressed while our own window has focus.
+#[tauri::command]
+fn dictation_toggle_refined() -> Result<(), String> {
+    do_refine_toggle()
 }
 
 /// Last `pause_now` outcome — `None` when the most recent pause did
@@ -1366,6 +1392,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             core_version,
             dictation_toggle,
+            dictation_toggle_refined,
             dictation_cancel,
             ask::ask_get,
             ask::ask_status,
@@ -1387,8 +1414,10 @@ pub fn run() {
             permissions::permissions_status_current,
             settings::settings_get_hotkeys,
             settings::settings_set_hotkey,
+            settings::settings_get_hotkey_defaults,
             settings::settings_reset_hotkey,
             settings::settings_clear_hotkey,
+            settings::settings_set_long_press,
             settings::settings_capture_hotkey_start,
             settings::settings_capture_hotkey_cancel,
             settings::audio_set_device,
@@ -1406,6 +1435,7 @@ pub fn run() {
             refine::refine_status,
             refine::refine_test,
             refine::refine_set_api_key,
+            refine::refine_model_in_use,
             refine::refine_history,
             refine::refine_history_clear,
             history::history_get,

@@ -51,6 +51,12 @@ The error text is misleading — the actual cause is the **2 GB hard size limit 
 - Don't try to fix this at WiX level (Media element split, multi-cab) — the right fix is keeping the source dir clean. Track follow-up under TASK-59 (Bench-sherpa target isolation so MSI bundler stops sweeping CUDA DLLs).
 - Don't be fooled by the LGHT0306 "65535 files" wording. With our `bundle.resources` map, a healthy `main.wxs` has fewer than 50 components.
 
+## `target/` has a size budget
+
+Cargo never deletes old build output, and `target/` reached 48 GB on the Mac dev box before anyone noticed. `apps/tauri/scripts/prune-target.cjs` keeps it in check: it always deletes bundles from older versions, and when `target/` is over budget (30 GB, override with `OPENWHISPER_TARGET_BUDGET_GB`) it deletes `incremental/` folders first, then everything except the `bundle/` folders.
+
+It runs at most once a day at the start of `pnpm dev:tauri`, after `pnpm release:mac`, and on demand as `pnpm prune:target` (`--dry-run` to preview). When you add a new build or release entry point, chain `pnpm prune:target` after it.
+
 ## GitHub comments — edit or replace, don't stack
 
 When updating a GitHub issue or PR comment thread on the **same topic** in close succession (same session, or within ~24 h), prefer editing the prior comment, or deleting it and posting a single replacement, over leaving a chain of consecutive comments by the same author.

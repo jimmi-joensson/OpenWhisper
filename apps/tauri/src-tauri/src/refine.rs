@@ -86,6 +86,15 @@ pub struct RefineHistory {
     pub runs: Vec<RefineRun>,
 }
 
+/// What a dictation would be refined with now: the backend, the
+/// model (the exact one once a run has named it) and the effort of
+/// the selected mode. Home shows it on the Refine card. Reads the
+/// cached settings and one row of the Refine runs.
+#[tauri::command]
+pub fn refine_model_in_use() -> refine::ModelInUse {
+    refine::model_in_use()
+}
+
 /// Newest `limit` Refine runs with their summary. Same data as
 /// `openwhisper refine history`.
 #[tauri::command]

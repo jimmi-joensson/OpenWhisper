@@ -17,6 +17,12 @@ export interface DictationTick {
   // `transcript` still holds the dictation before it: an "ask" tick
   // never carries a new dictation.
   session_kind: SessionKind;
+  /** The dictation in flight goes through Refine (the switch is on,
+   *  or the refine key started or stopped it): from the start of the
+   *  recording until the text is delivered. */
+  will_refine?: boolean;
+  /** The transcript is with the Refine backend right now. */
+  refining?: boolean;
   status: "idle" | "recording" | "transcribing";
   status_message: string;
   transcript: string;

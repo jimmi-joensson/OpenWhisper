@@ -1,7 +1,8 @@
 //! macOS hotkey via CGEventTap. The slots come from the table in
 //! `hotkey/mod.rs` (`SLOTS`); this file compiles each bound one and
-//! matches key events against the list. Each slot supports both
-//! modifier-tap (single key, tap-not-hold semantics) and chord (mods + key).
+//! matches key events against the list. Each slot supports
+//! modifier-tap (single key, tap-not-hold semantics), modifier-combo
+//! (two or more modifier keys together) and chord (mods + key).
 //!
 //! Tap-not-hold semantics for modifier-tap: the slot fires on release iff
 //! no other key was pressed while the modifier was held — so holding the
@@ -11,6 +12,21 @@
 //! modifier-tap slot. Holding Right Command and pressing Right Option
 //! fires neither a Right Command tap nor a Right Option tap when both
 //! are bound, so one gesture never fires two slots.
+//!
+//! Modifier-combo semantics (TASK-108): the slot fires when all of its
+//! keys have been down together and the last of them is let go, iff no
+//! other key was pressed meanwhile. Its keys count as rival keys for
+//! the modifier-tap slots, so Right Command and Right Option together
+//! fire the combo bound to them and neither tap. A combo swallows
+//! nothing: what its keys do for the focused app is up to the tap
+//! slots, as before.
+//!
+//! Long press: a modifier-tap slot can have a second action for a
+//! press held `LONG_PRESS_MS` or longer (`hotkey::long_press_action`;
+//! the toggle slot, when the user switched it on). A tap fires on
+//! release, so the hold time is known by then and a normal tap is not
+//! delayed. Nothing happens while the key is still down: holding it
+//! and then pressing another key is a shortcut, not a long press.
 //!
 //! Chord semantics: fire on the configured non-modifier KeyDown when the
 //! configured high-level modifier mask matches exactly. Both KeyDown and
@@ -30,10 +46,10 @@
 //! Threading: tap installs on a dedicated thread w/ `CFRunLoopRun`. A 5 s
 //! watchdog re-enables the tap if it goes silently stale.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -51,6 +67,7 @@ use tauri::AppHandle;
 
 use super::{SkippedSlot, SlotSpec, SLOTS};
 use crate::settings::{HotkeyConfig, HotkeyKind, HotkeySettings};
+use openwhisper_core::settings::LONG_PRESS_MS;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -91,6 +108,14 @@ const NX_DEVICE_RCMD: u64 = 0x0010;
 const NX_DEVICE_LOPT: u64 = 0x0020;
 const NX_DEVICE_ROPT: u64 = 0x0040;
 const NX_DEVICE_RCTRL: u64 = 0x2000;
+const NX_DEVICE_MOD_MASK: u64 = NX_DEVICE_LCTRL
+    | NX_DEVICE_LSHIFT
+    | NX_DEVICE_RSHIFT
+    | NX_DEVICE_LCMD
+    | NX_DEVICE_RCMD
+    | NX_DEVICE_LOPT
+    | NX_DEVICE_ROPT
+    | NX_DEVICE_RCTRL;
 
 // High-level CGEventFlags — collapse left/right. Used for chord matching.
 const CG_FLAG_SHIFT: u64 = 0x0002_0000;
@@ -110,9 +135,10 @@ extern "C" {
 struct CompiledKey {
     kind: HotkeyKind,
     /// kVK of the configured key. Modifier-tap = the modifier kVK; chord
-    /// = the non-modifier kVK.
+    /// = the non-modifier kVK; modifier-combo = unused (`-1`).
     code_kv: i64,
-    /// Modifier-tap = device-side bit. Chord = high-level mask (collapsed).
+    /// Modifier-tap = device-side bit. Chord = high-level mask
+    /// (collapsed). Modifier-combo = the device-side bits of its keys.
     mod_mask: u64,
 }
 
@@ -133,6 +159,17 @@ fn compile_config(cfg: &HotkeyConfig) -> Result<CompiledKey, String> {
             }
             Ok(CompiledKey { kind: HotkeyKind::Chord, code_kv, mod_mask })
         }
+        HotkeyKind::ModifierCombo => {
+            let mut mod_mask: u64 = 0;
+            for key in cfg.combo_keys() {
+                mod_mask |= mac_modifier_lookup(key).ok_or_else(unsupported)?.1;
+            }
+            // One key is a modifier-tap, not a combo.
+            if mod_mask.count_ones() < 2 {
+                return Err(unsupported());
+            }
+            Ok(CompiledKey { kind: HotkeyKind::ModifierCombo, code_kv: -1, mod_mask })
+        }
     }
 }
 
@@ -144,9 +181,18 @@ struct SlotState {
     kind: HotkeyKind,
     code_kv: i64,
     mod_mask: u64,
-    /// Modifier-tap state.
+    /// Modifier-tap and modifier-combo state. For a combo `mod_down`
+    /// is "any of its keys is down".
     mod_down: AtomicBool,
     other_pressed_while_held: AtomicBool,
+    /// Modifier-combo: all of its keys have been down together since
+    /// the first of them went down.
+    combo_armed: AtomicBool,
+    /// Modifier-tap: when the key went down ([`now_ms`]).
+    down_at_ms: AtomicU64,
+    /// Modifier-tap: what a press held [`LONG_PRESS_MS`] or longer
+    /// does in place of `spec.action`. `None` = a long press is a tap.
+    long_action: Option<fn()>,
     /// Chord-mode KeyUp pairing.
     chord_keydown_swallowed: AtomicBool,
     chord_fired: AtomicBool,
@@ -161,9 +207,19 @@ impl SlotState {
             mod_mask: key.mod_mask,
             mod_down: AtomicBool::new(false),
             other_pressed_while_held: AtomicBool::new(false),
+            combo_armed: AtomicBool::new(false),
+            down_at_ms: AtomicU64::new(0),
+            long_action: None,
             chord_keydown_swallowed: AtomicBool::new(false),
             chord_fired: AtomicBool::new(false),
         }
+    }
+
+    /// Give the slot a long-press action. Only a modifier-tap can
+    /// tell a long press from a tap; the other kinds ignore it.
+    fn with_long_press(mut self, action: Option<fn()>) -> Self {
+        self.long_action = action;
+        self
     }
 
     fn fire(&self) {
@@ -181,13 +237,31 @@ impl SlotState {
     fn is_chord(&self) -> bool {
         matches!(self.kind, HotkeyKind::Chord)
     }
+
+    fn is_combo(&self) -> bool {
+        matches!(self.kind, HotkeyKind::ModifierCombo)
+    }
+
+    /// The slot is made of modifier keys only, so it follows
+    /// `FlagsChanged` and is spoiled by any other key.
+    fn is_modifier_only(&self) -> bool {
+        self.is_modifier_tap() || self.is_combo()
+    }
 }
 
 #[derive(Default)]
 struct CaptureState {
-    /// kVK of the modifier currently pressed alone, or `-1`.
-    pending_mod: AtomicI64,
+    /// Device-side bits of every modifier pressed since the keyboard
+    /// was last untouched: one bit is a modifier-tap, more a combo.
+    seen_mods: AtomicU64,
     chord_seen: AtomicBool,
+}
+
+/// Milliseconds on a clock that only goes forward, for timing how
+/// long a key is held.
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 struct TapMutState {
@@ -227,12 +301,13 @@ pub fn install(app: &AppHandle, settings: &HotkeySettings) -> Result<Vec<Skipped
     let (compiled, skipped) = super::compile_slots(settings, compile_config)?;
     let slots = compiled
         .into_iter()
-        .map(|(index, key)| SlotState::new(&SLOTS[index], key))
+        .map(|(index, key)| {
+            let spec = &SLOTS[index];
+            SlotState::new(spec, key).with_long_press(super::long_press_action(settings, spec.target))
+        })
         .collect();
 
-    let capture = CaptureState::default();
-    capture.pending_mod.store(-1, Ordering::Relaxed);
-    let state = Arc::new(TapMutState { slots, capture });
+    let state = Arc::new(TapMutState { slots, capture: CaptureState::default() });
 
     spawn_tap(app_name, state)?;
     Ok(skipped)
@@ -395,21 +470,32 @@ fn handle_event(state: &TapMutState, etype: CGEventType, event: &CGEvent) -> boo
 /// Match one keyboard event against the installed slots, firing the
 /// ones it completes. Returns `true` if the event should be swallowed.
 fn dispatch(slots: &[SlotState], etype: CGEventType, flags: u64, key_code: i64) -> bool {
+    dispatch_at(slots, etype, flags, key_code, now_ms())
+}
+
+/// [`dispatch`] at a given time ([`now_ms`]), which is what tells a
+/// long press from a tap.
+fn dispatch_at(slots: &[SlotState], etype: CGEventType, flags: u64, key_code: i64, now_ms: u64) -> bool {
     match etype {
-        // Every modifier-tap slot tracks its own press/release state,
-        // so the same event goes to all of them.
+        // Every modifier-tap and modifier-combo slot tracks its own
+        // press/release state, so the same event goes to all of them.
         CGEventType::FlagsChanged => {
             let mut swallow = false;
-            for (index, slot_ref) in slots.iter().enumerate().filter(|(_, s)| s.is_modifier_tap()) {
-                let rivals = rival_tap_keys(slots, index);
-                swallow |= modifier_tap_step(slot_ref, rivals, flags, key_code);
+            for (index, slot_ref) in slots.iter().enumerate() {
+                if slot_ref.is_modifier_tap() {
+                    let rivals = rival_tap_keys(slots, index);
+                    swallow |= modifier_tap_step(slot_ref, rivals, flags, key_code, now_ms);
+                } else if slot_ref.is_combo() {
+                    combo_step(slot_ref, rival_tap_keys(slots, index), flags);
+                }
             }
             swallow
         }
         CGEventType::KeyDown => {
-            // Mark "other key pressed" for any held modifier-tap slot
-            // the moment a non-modifier KeyDown arrives.
-            for slot_ref in slots.iter().filter(|s| s.is_modifier_tap()) {
+            // Mark "other key pressed" for any held modifier-tap or
+            // modifier-combo slot the moment a non-modifier KeyDown
+            // arrives.
+            for slot_ref in slots.iter().filter(|s| s.is_modifier_only()) {
                 if slot_ref.mod_down.load(Ordering::Relaxed) {
                     slot_ref.other_pressed_while_held.store(true, Ordering::Relaxed);
                 }
@@ -445,16 +531,48 @@ fn dispatch(slots: &[SlotState], etype: CGEventType, flags: u64, key_code: i64) 
     }
 }
 
-/// The device-side bits of the keys the *other* installed modifier-tap
-/// slots are bound to: the only modifiers that spoil the tap of the
-/// slot at `index`. Zero when it is the only modifier-tap slot.
+/// The device-side bits of the keys the *other* installed
+/// modifier-tap and modifier-combo slots are bound to, without the
+/// slot's own keys: the only modifiers that spoil the slot at
+/// `index`. Zero when it is the only such slot.
 fn rival_tap_keys(slots: &[SlotState], index: usize) -> u64 {
     let others = slots
         .iter()
         .enumerate()
-        .filter(|(i, s)| *i != index && s.is_modifier_tap())
+        .filter(|(i, s)| *i != index && s.is_modifier_only())
         .fold(0u64, |mask, (_, s)| mask | s.mod_mask);
     others & !slots[index].mod_mask
+}
+
+/// Run one modifier-combo state step for a single slot. The slot
+/// fires when the last of its keys is let go, iff all of them were
+/// down together at some point since the first went down, and no
+/// other key (a non-modifier, or a rival key) was pressed meanwhile.
+/// Never swallows: see the module docs.
+fn combo_step(slot_ref: &SlotState, rival_keys: u64, flags: u64) {
+    let held = flags & slot_ref.mod_mask;
+    let was_down = slot_ref.mod_down.load(Ordering::Relaxed);
+    let rival_held = (flags & rival_keys) != 0;
+    if held != 0 {
+        if !was_down {
+            slot_ref.mod_down.store(true, Ordering::Relaxed);
+            slot_ref.combo_armed.store(false, Ordering::Relaxed);
+            slot_ref.other_pressed_while_held.store(false, Ordering::Relaxed);
+        }
+        if rival_held {
+            slot_ref.other_pressed_while_held.store(true, Ordering::Relaxed);
+        }
+        if held == slot_ref.mod_mask {
+            slot_ref.combo_armed.store(true, Ordering::Relaxed);
+        }
+    } else if was_down {
+        slot_ref.mod_down.store(false, Ordering::Relaxed);
+        let armed = slot_ref.combo_armed.swap(false, Ordering::Relaxed);
+        let spoiled = slot_ref.other_pressed_while_held.swap(false, Ordering::Relaxed);
+        if armed && !spoiled && slot_ref.gate_passes() {
+            slot_ref.fire();
+        }
+    }
 }
 
 /// Run one modifier-tap state step for a single slot. Returns true iff
@@ -469,12 +587,23 @@ fn rival_tap_keys(slots: &[SlotState], index: usize) -> u64 {
 /// gesture. Any other modifier (Shift, Caps Lock, a Command key no
 /// slot is bound to) leaves the tap alone: with a single modifier-tap
 /// slot this is the tap it has always been.
-fn modifier_tap_step(slot_ref: &SlotState, rival_tap_keys: u64, flags: u64, key_code: i64) -> bool {
+///
+/// A slot with a long-press action runs that one when the key was
+/// held [`LONG_PRESS_MS`] or longer; `now_ms` is the time of this
+/// event ([`now_ms`]).
+fn modifier_tap_step(
+    slot_ref: &SlotState,
+    rival_tap_keys: u64,
+    flags: u64,
+    key_code: i64,
+    now_ms: u64,
+) -> bool {
     let mod_active = (flags & slot_ref.mod_mask) != 0;
     let was_down = slot_ref.mod_down.load(Ordering::Relaxed);
     let rival_held = (flags & rival_tap_keys) != 0;
     if mod_active && !was_down {
         slot_ref.mod_down.store(true, Ordering::Relaxed);
+        slot_ref.down_at_ms.store(now_ms, Ordering::Relaxed);
         slot_ref
             .other_pressed_while_held
             .store(rival_held, Ordering::Relaxed);
@@ -483,7 +612,11 @@ fn modifier_tap_step(slot_ref: &SlotState, rival_tap_keys: u64, flags: u64, key_
         slot_ref.mod_down.store(false, Ordering::Relaxed);
         let chord = slot_ref.other_pressed_while_held.swap(false, Ordering::Relaxed);
         if !chord && slot_ref.gate_passes() {
-            slot_ref.fire();
+            let held_ms = now_ms.saturating_sub(slot_ref.down_at_ms.load(Ordering::Relaxed));
+            match slot_ref.long_action {
+                Some(long_press) if held_ms >= LONG_PRESS_MS => long_press(),
+                _ => slot_ref.fire(),
+            }
         }
         key_code == slot_ref.code_kv
     } else {
@@ -500,42 +633,68 @@ fn modifier_tap_step(slot_ref: &SlotState, rival_tap_keys: u64, flags: u64, key_
 fn capture_handle_event(capture: &CaptureState, etype: CGEventType, event: &CGEvent) -> bool {
     let flags = event.get_flags().bits();
     let key_code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+    let (swallow, captured) = capture_step(capture, etype, flags, key_code);
+    if let Some(config) = captured {
+        crate::hotkey::deliver_capture(config);
+    }
+    swallow
+}
 
+/// One capture-mode step: whether to swallow the event, and the
+/// binding it completes, if any.
+///
+/// - A non-modifier key, with whatever modifiers are held: a chord,
+///   at once.
+/// - Modifier keys on their own: nothing until the last of them is
+///   let go. One key is a modifier-tap, two or more held at some
+///   point during the press are a modifier-combo.
+fn capture_step(
+    capture: &CaptureState,
+    etype: CGEventType,
+    flags: u64,
+    key_code: i64,
+) -> (bool, Option<HotkeyConfig>) {
     match etype {
         CGEventType::FlagsChanged => {
-            let pending = capture.pending_mod.load(Ordering::Relaxed);
-            let Some(name) = mac_modifier_kv_to_name(key_code) else {
-                return true;
+            let Some(bit) = mac_modifier_kv_to_device_mask(key_code) else {
+                return (true, None);
             };
-            let device_mask = mac_modifier_kv_to_device_mask(key_code).unwrap_or(0);
-            let pressed = (flags & device_mask) != 0;
-
-            if pressed {
-                capture.pending_mod.store(key_code, Ordering::Relaxed);
-                capture.chord_seen.store(false, Ordering::Relaxed);
-            } else if pending == key_code {
-                capture.pending_mod.store(-1, Ordering::Relaxed);
-                let chord = capture.chord_seen.swap(false, Ordering::Relaxed);
-                if !chord {
-                    crate::hotkey::deliver_capture(HotkeyConfig::modifier_tap(name));
+            let held_now = flags & NX_DEVICE_MOD_MASK;
+            if flags & bit != 0 {
+                // The first key of a press starts a new one.
+                if held_now == bit {
+                    capture.seen_mods.store(0, Ordering::Relaxed);
+                    capture.chord_seen.store(false, Ordering::Relaxed);
                 }
-            } else {
-                capture.pending_mod.store(-1, Ordering::Relaxed);
-                capture.chord_seen.store(false, Ordering::Relaxed);
+                capture.seen_mods.fetch_or(bit, Ordering::Relaxed);
+                return (true, None);
             }
-            true
+            if held_now != 0 {
+                // Other keys of the press are still down.
+                return (true, None);
+            }
+            let seen = capture.seen_mods.swap(0, Ordering::Relaxed);
+            if capture.chord_seen.swap(false, Ordering::Relaxed) {
+                return (true, None);
+            }
+            let names = mac_device_mask_to_names(seen);
+            let config = match names.as_slice() {
+                [] => None,
+                [one] => Some(HotkeyConfig::modifier_tap(one)),
+                many => HotkeyConfig::modifier_combo(many),
+            };
+            (true, config)
         }
         CGEventType::KeyDown => {
             capture.chord_seen.store(true, Ordering::Relaxed);
-            if let Some(code) = mac_chord_kv_to_name(key_code) {
-                let mods = mac_flags_to_chord_mods(flags);
-                crate::hotkey::deliver_capture(HotkeyConfig::chord(code, &mods));
-                capture.pending_mod.store(-1, Ordering::Relaxed);
-            }
-            true
+            let config = mac_chord_kv_to_name(key_code).map(|code| {
+                capture.seen_mods.store(0, Ordering::Relaxed);
+                HotkeyConfig::chord(code, &mac_flags_to_chord_mods(flags))
+            });
+            (true, config)
         }
-        CGEventType::KeyUp => true,
-        _ => false,
+        CGEventType::KeyUp => (true, None),
+        _ => (false, None),
     }
 }
 
@@ -605,6 +764,15 @@ fn mac_modifier_kv_to_device_mask(kv: i64) -> Option<u64> {
         0x3B => NX_DEVICE_LCTRL,
         _ => return None,
     })
+}
+
+/// The sided names of the modifier keys in a device-side mask.
+fn mac_device_mask_to_names(mask: u64) -> Vec<&'static str> {
+    [0x36, 0x37, 0x3C, 0x38, 0x3D, 0x3A, 0x3E, 0x3B]
+        .into_iter()
+        .filter(|kv| mac_modifier_kv_to_device_mask(*kv).is_some_and(|bit| mask & bit != 0))
+        .filter_map(mac_modifier_kv_to_name)
+        .collect()
 }
 
 fn mac_chord_kv_lookup(name: &str) -> Option<i64> {
@@ -891,6 +1059,201 @@ mod tests {
         flags_changed(&slots, RCMD_HELD, KV_RCMD);
         flags_changed(&slots, NOTHING_HELD, KV_RCMD);
         assert_eq!((count(command_fired), count(option_fired)), (1, 1));
+    }
+
+    // --- modifier-combo and long press (TASK-108) ---------------------
+
+    const RSHIFT_HELD: u64 = CG_FLAG_SHIFT | NX_DEVICE_RSHIFT;
+    const KV_RSHIFT: i64 = 0x3C;
+
+    fn combo(keys: &[&str]) -> HotkeyConfig {
+        HotkeyConfig::modifier_combo(keys).unwrap()
+    }
+
+    #[test]
+    fn a_combo_fires_once_when_its_keys_were_down_together_and_neither_tap_does() {
+        let (dictate, dictated) = counting_slot!(DICTATED, HotkeyConfig::modifier_tap("RightCommand"));
+        let (ask, asked) = counting_slot!(ASKED, HotkeyConfig::modifier_tap("RightOption"));
+        let (refine, refined) = counting_slot!(REFINED, combo(&["RightCommand", "RightOption"]));
+        let slots = [dictate, ask, refine];
+
+        // Command first, Option let go first.
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, RCMD_HELD, KV_ROPT);
+        assert_eq!(count(refined), 0, "not before the last key is let go");
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        assert_eq!((count(dictated), count(asked), count(refined)), (0, 0, 1));
+
+        // Option first, Option let go last.
+        flags_changed(&slots, ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_RCMD);
+        flags_changed(&slots, ROPT_HELD, KV_RCMD);
+        flags_changed(&slots, NOTHING_HELD, KV_ROPT);
+        assert_eq!((count(dictated), count(asked), count(refined)), (0, 0, 2));
+
+        // Each key on its own is still its tap.
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        flags_changed(&slots, ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, NOTHING_HELD, KV_ROPT);
+        assert_eq!((count(dictated), count(asked), count(refined)), (1, 1, 2));
+    }
+
+    #[test]
+    fn a_combo_takes_its_keys_from_a_lone_tap_slot_and_swallows_nothing() {
+        // Ask is off: no slot on Right Option, only the combo names it.
+        let (dictate, dictated) = counting_slot!(DICTATED, HotkeyConfig::modifier_tap("RightCommand"));
+        let (refine, refined) = counting_slot!(REFINED, combo(&["RightCommand", "RightOption"]));
+        let slots = [dictate, refine];
+
+        // Right Option reaches the focused app as before.
+        assert!(!flags_changed(&slots, ROPT_HELD, KV_ROPT));
+        // Right Command is the tap slot's key, swallowed as before.
+        assert!(flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_RCMD));
+        assert!(flags_changed(&slots, ROPT_HELD, KV_RCMD));
+        assert!(!flags_changed(&slots, NOTHING_HELD, KV_ROPT));
+        assert_eq!((count(dictated), count(refined)), (0, 1));
+
+        // Right Option alone does nothing.
+        flags_changed(&slots, ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, NOTHING_HELD, KV_ROPT);
+        assert_eq!((count(dictated), count(refined)), (0, 1));
+    }
+
+    #[test]
+    fn a_key_pressed_while_a_combo_is_held_cancels_it() {
+        let (refine, refined) = counting_slot!(REFINED, combo(&["RightCommand", "RightOption"]));
+        let slots = [refine];
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_ROPT);
+        // Command+Option+A is a shortcut of the focused app.
+        assert!(!key_down(&slots, RCMD_HELD | ROPT_HELD, KV_A));
+        key_up(&slots, RCMD_HELD | ROPT_HELD, KV_A);
+        flags_changed(&slots, RCMD_HELD, KV_ROPT);
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        assert_eq!(count(refined), 0);
+
+        // The next press starts clean.
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, NOTHING_HELD, KV_ROPT);
+        assert_eq!(count(refined), 1);
+    }
+
+    #[test]
+    fn two_combos_sharing_a_key_fire_only_the_one_that_was_pressed() {
+        let (refine, refined) = counting_slot!(REFINED, combo(&["RightCommand", "RightOption"]));
+        let (command, commanded) = counting_slot!(COMMANDED, combo(&["RightCommand", "RightShift"]));
+        let slots = [refine, command];
+
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | RSHIFT_HELD, KV_RSHIFT);
+        flags_changed(&slots, RCMD_HELD, KV_RSHIFT);
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        assert_eq!((count(refined), count(commanded)), (0, 1));
+
+        // All three keys: the key of the other combo spoils both.
+        flags_changed(&slots, RCMD_HELD, KV_RCMD);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD, KV_ROPT);
+        flags_changed(&slots, RCMD_HELD | ROPT_HELD | RSHIFT_HELD, KV_RSHIFT);
+        flags_changed(&slots, NOTHING_HELD, KV_RCMD);
+        assert_eq!((count(refined), count(commanded)), (0, 1));
+    }
+
+    #[test]
+    fn a_combo_needs_two_keys_it_knows() {
+        assert!(compile_config(&combo(&["RightCommand", "RightOption"])).is_ok());
+        let one_key = HotkeyConfig {
+            kind: HotkeyKind::ModifierCombo,
+            code: "RightCommand".into(),
+            mods: vec!["RightCommand".into()],
+        };
+        assert!(compile_config(&one_key).is_err());
+        assert!(compile_config(&combo(&["RightCommand", "Hyper"])).is_err());
+    }
+
+    fn flags_changed_at(slots: &[SlotState], flags: u64, key_code: i64, now_ms: u64) -> bool {
+        dispatch_at(slots, CGEventType::FlagsChanged, flags, key_code, now_ms)
+    }
+
+    #[test]
+    fn a_long_press_runs_the_long_action_and_a_tap_the_slots_own() {
+        static LONG: AtomicUsize = AtomicUsize::new(0);
+        let (slot, tapped) = counting_slot!(TAPPED, HotkeyConfig::modifier_tap("RightCommand"));
+        let slots = [slot.with_long_press(Some(|| {
+            LONG.fetch_add(1, Ordering::Relaxed);
+        }))];
+
+        // A tap, and a slow one just under the line.
+        flags_changed_at(&slots, RCMD_HELD, KV_RCMD, 1_000);
+        flags_changed_at(&slots, NOTHING_HELD, KV_RCMD, 1_120);
+        flags_changed_at(&slots, RCMD_HELD, KV_RCMD, 2_000);
+        flags_changed_at(&slots, NOTHING_HELD, KV_RCMD, 2_000 + LONG_PRESS_MS - 1);
+        assert_eq!((count(tapped), count(&LONG)), (2, 0));
+
+        // Held to the line: the long action, and only that.
+        flags_changed_at(&slots, RCMD_HELD, KV_RCMD, 3_000);
+        flags_changed_at(&slots, NOTHING_HELD, KV_RCMD, 3_000 + LONG_PRESS_MS);
+        assert_eq!((count(tapped), count(&LONG)), (2, 1));
+
+        // Held long and used as a modifier: neither.
+        flags_changed_at(&slots, RCMD_HELD, KV_RCMD, 5_000);
+        key_down(&slots, RCMD_HELD, KV_A);
+        key_up(&slots, RCMD_HELD, KV_A);
+        flags_changed_at(&slots, NOTHING_HELD, KV_RCMD, 6_000);
+        assert_eq!((count(tapped), count(&LONG)), (2, 1));
+    }
+
+    #[test]
+    fn without_a_long_action_a_long_press_is_a_tap() {
+        let (slot, tapped) = counting_slot!(TAPPED, HotkeyConfig::modifier_tap("RightCommand"));
+        let slots = [slot];
+        flags_changed_at(&slots, RCMD_HELD, KV_RCMD, 1_000);
+        flags_changed_at(&slots, NOTHING_HELD, KV_RCMD, 9_000);
+        assert_eq!(count(tapped), 1);
+    }
+
+    fn capture_flags(capture: &CaptureState, flags: u64, key_code: i64) -> Option<HotkeyConfig> {
+        let (swallow, config) = capture_step(capture, CGEventType::FlagsChanged, flags, key_code);
+        assert!(swallow, "capture swallows every key event");
+        config
+    }
+
+    #[test]
+    fn capture_records_one_modifier_as_a_tap_and_several_as_a_combo() {
+        let capture = CaptureState::default();
+        assert_eq!(capture_flags(&capture, RCMD_HELD, KV_RCMD), None);
+        assert_eq!(
+            capture_flags(&capture, NOTHING_HELD, KV_RCMD),
+            Some(HotkeyConfig::modifier_tap("RightCommand"))
+        );
+
+        // Two keys: nothing until the last one is let go, and the
+        // same binding whichever went down first.
+        for (first, second) in [((RCMD_HELD, KV_RCMD), (ROPT_HELD, KV_ROPT)), ((ROPT_HELD, KV_ROPT), (RCMD_HELD, KV_RCMD))] {
+            assert_eq!(capture_flags(&capture, first.0, first.1), None);
+            assert_eq!(capture_flags(&capture, first.0 | second.0, second.1), None);
+            assert_eq!(capture_flags(&capture, first.0, second.1), None);
+            assert_eq!(
+                capture_flags(&capture, NOTHING_HELD, first.1),
+                Some(combo(&["RightCommand", "RightOption"]))
+            );
+        }
+
+        // A key that is no modifier we know (Caps Lock) records nothing.
+        assert_eq!(capture_flags(&capture, CAPS_LOCK_LIT, KV_CAPS_LOCK), None);
+    }
+
+    #[test]
+    fn capture_records_a_chord_at_once_and_no_tap_when_its_modifier_is_let_go() {
+        let capture = CaptureState::default();
+        assert_eq!(capture_flags(&capture, RCMD_HELD, KV_RCMD), None);
+        let (swallow, config) = capture_step(&capture, CGEventType::KeyDown, RCMD_HELD, KV_SPACE);
+        assert!(swallow);
+        assert_eq!(config, Some(HotkeyConfig::chord("Space", &["Cmd"])));
+        // Were capture still on, letting go of Command adds nothing.
+        assert_eq!(capture_flags(&capture, NOTHING_HELD, KV_RCMD), None);
     }
 
     #[test]

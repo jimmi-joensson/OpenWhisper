@@ -760,6 +760,33 @@ body[data-platform="macos"] .ow-titlebar {
   border-radius: 8px;
 }
 
+/* A card with a line of small print under its text and controls: the
+   line wraps onto a row of its own and takes the card's whole width. */
+.ow-home-switch--with-note {
+  flex-wrap: wrap;
+}
+
+/* The model and effort Refine would use: the same small print as the
+   Refine mark on a history row. One line; a name too long for the
+   card is cut short (and is whole in the tooltip). */
+.ow-home-switch__model {
+  flex: 0 0 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+
+.ow-home-switch__model svg {
+  display: inline;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
 /* A card with a wider control than a switch (the Mode select) takes
    a row of its own, under the switches. */
 .ow-home-switch--wide {
@@ -844,6 +871,14 @@ body[data-platform="macos"] .ow-titlebar {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted-foreground);
+}
+
+/* The Refine mark in the small print: the icon sits on the text's
+ * line and takes its colour. */
+.ow-history-row__refined {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .ow-history-row__text {

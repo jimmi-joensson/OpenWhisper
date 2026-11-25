@@ -112,6 +112,10 @@ pub struct CallUsage {
     /// Claude CLI on a subscription: how full the plan's usage
     /// windows are after this call.
     pub plan: Option<PlanWindows>,
+    /// The exact model that answered, when the backend says: the
+    /// settings name a model loosely (`sonnet`), the backend knows
+    /// which one that was today (`claude-sonnet-5-5`).
+    pub model: Option<String>,
 }
 
 /// The subscription's usage windows, as the Claude CLI reports them
@@ -577,6 +581,49 @@ pub fn refine_text_in_mode(settings: &RefineSettings, choice: &ModeChoice, text:
     run.refine(backend.as_mut(), text)
 }
 
+/// What a dictation would be refined with if it went through Refine
+/// now, for the windows to show next to the Refine switch (TASK-108).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ModelInUse {
+    /// Backend id, e.g. `claude-cli`.
+    pub backend: String,
+    /// The model: the exact one the backend named the last time this
+    /// setting ran (`claude-sonnet-5-5`), otherwise the name in the
+    /// settings (`sonnet`). Empty when none is set.
+    pub model: String,
+    /// The effort id (`low`); empty when none is sent.
+    pub effort: String,
+}
+
+/// The backend, model and effort of the selected mode, with the
+/// cached settings: what the Refine switch, the refine key or a long
+/// press would run. A mode's own model and effort count the way they
+/// do for a dictation ([`apply_mode`]). An app's default mode does
+/// not: this is asked from our own window, where no other app is in
+/// front.
+///
+/// The exact model comes from the stored runs
+/// ([`history::latest_exact_model`]): a name like `sonnet` stands for
+/// a newer model over time, and only a run tells which. Before the
+/// first run it is the name in the settings.
+pub fn model_in_use() -> ModelInUse {
+    let settings = crate::settings::current_refine_settings();
+    let modes = crate::settings::current_modes_settings();
+    let choice = crate::modes::resolve(&modes, &settings, None);
+    // No dictionary terms: they shape the prompt, not the model.
+    let run = ModeRun::with_terms(&settings, &choice, &[]);
+    let backend = run.settings.backend.as_str().to_string();
+    let named = run.settings.active_model().trim().to_string();
+    let exact = crate::stats::store()
+        .filter(|_| !named.is_empty())
+        .and_then(|store| history::latest_exact_model(store, &backend, &named));
+    ModelInUse {
+        backend,
+        model: exact.unwrap_or(named),
+        effort: run.settings.active_effort().to_string(),
+    }
+}
+
 /// Id and name of the frontmost app, for the per-app default mode.
 /// `None` when it is not known or is OpenWhisper itself: its own
 /// windows never match an app default.
@@ -646,9 +693,14 @@ fn take_warm() -> Option<WarmSlot> {
 /// What a dictation runs as right now: the cached Refine settings,
 /// the mode resolved for the app in front, and its prompt. `None`
 /// with Refine off; then nothing is resolved at all.
-fn current_run() -> Option<ModeRun> {
+///
+/// `forced` is the "dictate with Refine" key (TASK-108): the run is
+/// worked out as if the switch were on, for this one dictation. The
+/// stored switch is not touched, and everything else (backend, mode,
+/// instructions, the word minimum) is what the settings say.
+fn current_run(forced: bool) -> Option<ModeRun> {
     let settings = crate::settings::current_refine_settings();
-    if !settings.enabled {
+    if !settings.enabled && !forced {
         return None;
     }
     let choice = resolve_for_dictation(&settings);
@@ -671,11 +723,18 @@ fn current_run() -> Option<ModeRun> {
 /// user can still switch mode, or app, before they stop talking.
 /// [`run_for_dictation_announced`] checks.
 pub fn warm_for_recording() {
+    warm_for_recording_with(false);
+}
+
+/// [`warm_for_recording`] for a recording that may have been started
+/// with the "dictate with Refine" key: with `forced`, the backend is
+/// warmed with the Refine switch off too.
+pub fn warm_for_recording_with(forced: bool) {
     // Whatever was left from an earlier recording goes first.
     drop(take_warm());
     let epoch = EPOCH.load(Ordering::SeqCst);
     let started = Instant::now();
-    let Some(run) = current_run() else {
+    let Some(run) = current_run(forced) else {
         return;
     };
     let mut backend = backend_for(&run.settings);
@@ -721,8 +780,21 @@ pub fn discard_warm() {
 /// With Refine off, returns [`RefineOutcome::disabled`] and starts
 /// nothing, whatever mode is selected.
 pub fn run_for_dictation_announced(text: &str, before_call: impl FnOnce()) -> RefineOutcome {
+    run_for_dictation_with(text, false, before_call)
+}
+
+/// [`run_for_dictation_announced`] for a dictation that may have been
+/// started or stopped with the "dictate with Refine" key. With
+/// `forced` the text is refined with the Refine switch off too. A
+/// dictation only forced when it was stopped has no warmed backend
+/// and runs cold.
+pub fn run_for_dictation_with(text: &str, forced: bool, before_call: impl FnOnce()) -> RefineOutcome {
     let warm = take_warm();
-    let Some(run) = current_run() else {
+    crate::verbose_log!(
+        "[ow.refine] dictation switch_on={} refine_key={forced}",
+        crate::settings::current_refine_settings().enabled
+    );
+    let Some(run) = current_run(forced) else {
         // Off, or switched off during the recording: `warm` drops.
         return RefineOutcome::disabled(text);
     };
@@ -756,7 +828,7 @@ pub fn run_for_dictation(text: &str) -> RefineOutcome {
 /// built-in mode that takes [`RefineSettings::min_words`] words; a
 /// mode that rewrites sends any text.
 pub fn will_call_backend(text: &str) -> bool {
-    current_run().is_some_and(|run| run.sends(text))
+    current_run(false).is_some_and(|run| run.sends(text))
 }
 
 // --- status and connection test -----------------------------------
@@ -1349,6 +1421,43 @@ Friday because there's a release on Thursday."
     }
 
     #[test]
+    fn a_forced_dictation_is_refined_with_the_switch_off() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let made = Arc::new(Mutex::new(0usize));
+        let (c, m) = (calls.clone(), made.clone());
+        // The switch is off: `RefineSettings::default()`.
+        let _scope = scope(RefineSettings::default(), move |_| {
+            *m.lock().unwrap() += 1;
+            Box::new(Stub::new(c.clone(), |_| {
+                Ok("I think we should move the meeting with Jeppe to Thursday.".into())
+            }))
+        });
+        // Forced from the start: warmed while recording, then used.
+        warm_for_recording_with(true);
+        assert_eq!(calls.lock().unwrap().warmed, 1);
+        let mut announced = 0;
+        let out = run_for_dictation_with(SAID, true, || announced += 1);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "I think we should move the meeting with Jeppe to Thursday. ");
+        assert_eq!(announced, 1);
+        assert_eq!(*made.lock().unwrap(), 1, "the warmed backend is the one that ran");
+
+        // Forced only when it was stopped: nothing was warmed, so it
+        // runs on a cold backend.
+        warm_for_recording_with(false);
+        assert_eq!(calls.lock().unwrap().warmed, 1);
+        let out = run_for_dictation_with(SAID, true, || {});
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(*made.lock().unwrap(), 2);
+
+        // The switch itself is untouched: the next plain dictation is
+        // not refined.
+        assert!(!will_call_backend(SAID));
+        assert_eq!(run_for_dictation(SAID).status, RefineStatus::Disabled);
+        assert_eq!(*made.lock().unwrap(), 2);
+    }
+
+    #[test]
     fn pipeline_warms_at_record_start_and_reuses_that_backend() {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let made = Arc::new(Mutex::new(0usize));
@@ -1592,6 +1701,40 @@ Friday because there's a release on Thursday."
             assert_eq!(out.mode.name, "Write in English");
             assert_eq!(out.model, "server-default");
         }
+    }
+
+    #[test]
+    fn the_model_in_use_is_the_selected_modes_and_exact_once_a_run_named_it() {
+        let _scope = scope(on(), |_| {
+            Box::new(Stub::new(Arc::new(Mutex::new(Calls::default())), |t| Ok(t.to_string())))
+        });
+        // A model name no other test stores runs under.
+        let mut settings = on();
+        settings.claude_cli.model = "in-use-test".into();
+        settings.claude_cli.effort = RefineEffort::Low;
+        crate::settings::set_refine_settings_cache(settings);
+        let in_use = |model: &str, effort: &str| ModelInUse {
+            backend: "claude-cli".into(),
+            model: model.into(),
+            effort: effort.into(),
+        };
+        // No run yet: the name in the settings.
+        assert_eq!(model_in_use(), in_use("in-use-test", "low"));
+
+        // A run names the exact model: that one from then on.
+        crate::stats::set_store(Arc::new(crate::store::Store::in_memory_for_test()));
+        let store = crate::stats::store().expect("a store is registered");
+        let mut outcome = RefineOutcome::disabled("hello there ");
+        outcome.status = RefineStatus::Refined;
+        outcome.backend = "claude-cli".into();
+        outcome.model = "in-use-test".into();
+        outcome.usage = Some(CallUsage { model: Some("claude-in-use-9-9".into()), ..CallUsage::default() });
+        history::record(store, &history::RefineRun::from_outcome(history::SOURCE_DICTATION, &outcome, 1).unwrap());
+        assert_eq!(model_in_use(), in_use("claude-in-use-9-9", "low"));
+
+        // A selected mode with a model and effort of its own.
+        crate::settings::set_modes_settings_cache(modes_with("write-in-english"));
+        assert_eq!(model_in_use(), in_use("opus", "high"));
     }
 
     #[test]

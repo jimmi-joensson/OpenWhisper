@@ -110,6 +110,13 @@ export interface RefineInfo {
   // formal"), in the speaker's words; "" for plain cleanup.
   instruction: string;
   backend: string;
+  // The model that answered: the exact one when the backend says
+  // ("claude-sonnet-5-5"), otherwise as the settings name it
+  // ("sonnet"); "" when the backend has no named model. Absent from
+  // a tick sent by an older build.
+  model?: string;
+  // The effort the model was asked for ("low"); "" when none was sent.
+  effort?: string;
   elapsed_ms: number;
   // Name of the mode the dictation ran in (TASK-96), when there is
   // something to say about it: a mode the user made, or any mode
@@ -137,6 +144,65 @@ export const NO_REFINE: RefineInfo = {
   mode_reason: "",
   mode_app: "",
 };
+
+// A model's name as a person reads it. A Claude model by family and
+// version: "claude-sonnet-5-5" is "Sonnet 5.5", also with a date at
+// the end ("claude-opus-4-1-20250805" is "Opus 4.1") or the version
+// first ("claude-3-5-sonnet-20241022" is "Sonnet 3.5"); a bare family
+// name ("sonnet", as the settings have it) is "Sonnet". Any other
+// model is shown as it is written.
+export function modelLabel(model: string): string {
+  const name = model.trim();
+  const short = CLAUDE_MODELS.find((m) => m.value === name.toLowerCase());
+  if (short) return short.label;
+  if (!/^claude-/i.test(name)) return name;
+  const parts = name.toLowerCase().split("-").slice(1);
+  const words = parts.filter((p) => /^[a-z]+$/.test(p) && p !== "latest");
+  // Version numbers are short; eight digits are a release date.
+  const version = parts.filter((p) => /^\d{1,2}$/.test(p));
+  if (words.length === 0) return name;
+  const family = words.map((w) => w[0].toUpperCase() + w.slice(1)).join(" ");
+  return version.length > 0 ? `${family} ${version.join(".")}` : family;
+}
+
+// Who refined a text, as a person reads it: the model (`modelLabel`),
+// or the backend ("Claude") when no model is known. `by` is
+// `RefineInfo.model`, or what a history entry stored
+// (`HistoryEntry.refined`: the model, or the backend's id). "" when
+// nothing is known.
+export function refinedByLabel(by: string | null | undefined, backend = ""): string {
+  const name = (by ?? "").trim() || backend.trim();
+  if (!name) return "";
+  return name in BACKEND_LABELS ? BACKEND_LABELS[name as RefineBackend] : modelLabel(name);
+}
+
+// The effort as the Refine settings name it ("Low", "Extra high"),
+// for small print where it stands right after the model: "Sonnet 5.5
+// · Low". "" for none, and an effort this build does not know is
+// shown as written.
+export function effortLabel(effort: string | null | undefined): string {
+  const id = (effort ?? "").trim();
+  if (!id) return "";
+  return id in EFFORT_LABELS ? EFFORT_LABELS[id as RefineEffort] : id;
+}
+
+// The effort inside a sentence, where a bare "Low" would not read:
+// "Refined by Sonnet 5.5 at low effort". "" for none.
+export function effortPhrase(effort: string | null | undefined): string {
+  const label = effortLabel(effort);
+  return label ? `${label.toLowerCase()} effort` : "";
+}
+
+// Mirrors `ModelInUse` in core/src/refine/mod.rs: what a dictation
+// would be refined with now. `model` is the exact one once a run has
+// named it ("claude-sonnet-5-5"), before that the name in the
+// settings ("sonnet"); "" when none is set. `effort` is "" when none
+// is sent.
+export interface RefineModelInUse {
+  backend: string;
+  model: string;
+  effort: string;
+}
 
 // Mirrors `RefineRun` in core/src/refine/history.rs. One Refine run;
 // timings and reasons only, never any dictated text.

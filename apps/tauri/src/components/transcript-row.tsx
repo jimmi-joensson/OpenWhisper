@@ -10,7 +10,13 @@ import {
 } from "lucide-react";
 
 import type { DictionaryReplacement } from "../lib/dictation";
-import { NO_REFINE, refineFellBack, type RefineInfo } from "../lib/refine";
+import {
+  NO_REFINE,
+  effortPhrase,
+  refineFellBack,
+  refinedByLabel,
+  type RefineInfo,
+} from "../lib/refine";
 
 interface TranscriptRowProps {
   text: string;
@@ -83,6 +89,11 @@ export function TranscriptNotes({
   const refined = refine.status === "refined";
   const original = refine.raw_transcript.trim();
   const changed = refined && original !== text.trim();
+  // "Refined by Sonnet 5.5 at low effort": who did it and how hard
+  // it was asked to think, as far as the tick says.
+  const by = refinedByLabel(refine.model, refine.backend);
+  const effort = effortPhrase(refine.effort);
+  const refinedLead = by ? `Refined by ${by}${effort ? ` at ${effort}` : ""}` : "Refined";
 
   return (
     <>
@@ -105,10 +116,10 @@ export function TranscriptNotes({
           <Sparkles size={12} aria-hidden="true" className="ow-transcript-row__fixes-icon" />
           <span>
             {refine.instruction
-              ? `Refined, as you asked: “${refine.instruction}”`
+              ? `${refinedLead}, as you asked: “${refine.instruction}”`
               : changed
-                ? "Refined"
-                : "Refined, nothing to change"}
+                ? refinedLead
+                : `${refinedLead}, nothing to change`}
           </span>
           {changed && (
             <button
@@ -151,6 +162,29 @@ export function TranscriptNotes({
         />
       )}
     </>
+  );
+}
+
+// The Refine mark in a row's small print, next to the time and the
+// app: the Sparkles icon and "Refined", then who did it and at what
+// effort as far as that is known ("Refined · Sonnet 5.5 · Low").
+// The same icon names Refine everywhere: on the pill while
+// it runs, on the latest transcript, on a stored entry and next to
+// the shortcut.
+export function RefinedNote({
+  by = "",
+  effort = "",
+  testId,
+}: {
+  by?: string;
+  effort?: string;
+  testId: string;
+}) {
+  return (
+    <span className="ow-history-row__refined" data-testid={testId}>
+      <Sparkles size={11} aria-hidden="true" />
+      {["Refined", by, by ? effort : ""].filter(Boolean).join(" · ")}
+    </span>
   );
 }
 

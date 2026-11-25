@@ -432,6 +432,47 @@ test.describe("home: refine marker on the latest transcript", () => {
     await expect(page.getByTestId("home-latest-original")).toHaveCount(0);
   });
 
+  test("the marker names the model that refined the text", async ({ page }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+    const refined = (model: string | undefined) => ({
+      raw_transcript: "so i think we should move the meeting to thursday ",
+      status: "refined",
+      detail: "",
+      backend: "openai-compatible",
+      model,
+      elapsed_ms: 640,
+    });
+    // The exact Claude model the backend named, and the effort.
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Thursday. ",
+      refine: { ...refined("claude-sonnet-5-5"), backend: "claude-cli", effort: "low" },
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(
+      /^Refined by Sonnet 5\.5 at low effort/,
+    );
+    // Any other model: as it is written.
+    await emitTick(page, { phase: 2, status: "recording" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Friday. ",
+      refine: refined("qwen2.5:7b"),
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(/^Refined by qwen2\.5:7b/);
+    // No model known: the backend.
+    await emitTick(page, { phase: 2, status: "recording" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Monday. ",
+      refine: refined(undefined),
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(/^Refined by OpenAI-compatible/);
+  });
+
   test("a followed spoken instruction is named, original one click away", async ({ page }) => {
     await page.goto("/");
     await waitForTickListener(page);
@@ -449,8 +490,9 @@ test.describe("home: refine marker on the latest transcript", () => {
         elapsed_ms: 1320,
       },
     });
+    // No model on the tick: the backend is who refined it.
     await expect(page.getByTestId("home-latest-refine")).toContainText(
-      "Refined, as you asked: “skriv det på engelsk”",
+      "Refined by Claude, as you asked: “skriv det på engelsk”",
     );
     await page.getByRole("button", { name: "Show original" }).click();
     await expect(page.getByTestId("home-latest-original")).toContainText(

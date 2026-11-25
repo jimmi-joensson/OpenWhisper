@@ -5,6 +5,10 @@ export function configToChipKeys(cfg: HotkeyConfig | null): string[] {
   if (cfg.kind === "modifier-tap") {
     return [modifierLabel(cfg.code)];
   }
+  // Modifier keys held together: every key by its sided name.
+  if (cfg.kind === "modifier-combo") {
+    return [cfg.code, ...cfg.mods].map(modifierLabel);
+  }
   return [...cfg.mods.map(modShortLabel), codeLabel(cfg.code)];
 }
 

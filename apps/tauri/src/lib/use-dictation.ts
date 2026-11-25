@@ -26,6 +26,11 @@ export interface DictationView {
   isRecording: boolean;
   // What the recording in flight (or the last one) is for.
   sessionKind: SessionKind;
+  // The dictation in flight goes through Refine, recording or being
+  // transcribed.
+  willRefine: boolean;
+  // The transcript is with the Refine backend right now.
+  refining: boolean;
   // The cancel key would do something: a recording or a running ask.
   cancelWouldAct: boolean;
   downloadBytesDone: number;
@@ -48,6 +53,8 @@ const INITIAL: Omit<DictationView, "toggle" | "cancel"> = {
   canToggle: true,
   isRecording: false,
   sessionKind: "dictation",
+  willRefine: false,
+  refining: false,
   cancelWouldAct: false,
   downloadBytesDone: 0,
   downloadBytesTotal: 0,
@@ -84,6 +91,8 @@ export function useDictation(): DictationView {
           canToggle: t.can_toggle,
           isRecording: t.is_recording,
           sessionKind: t.session_kind ?? "dictation",
+          willRefine: t.will_refine ?? false,
+          refining: t.refining ?? false,
           cancelWouldAct: t.cancel_would_act ?? t.is_recording,
           downloadBytesDone: t.download_bytes_done,
           downloadBytesTotal: t.download_bytes_total,

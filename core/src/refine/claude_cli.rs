@@ -916,7 +916,22 @@ pub(crate) fn parse_usage(result_line: &str) -> Option<CallUsage> {
         tokens_out: n("output_tokens"),
         cost_usd: v["total_cost_usd"].as_f64(),
         plan: None,
+        model: parse_model(&v),
     })
+}
+
+/// The exact model of the call, from the `modelUsage` block of the
+/// CLI's `result` event: its keys are full model names
+/// (`claude-sonnet-5-5`). When the CLI used more than one (a small
+/// model for a side task), the one that wrote the most is the one
+/// that wrote the answer.
+fn parse_model(result: &Value) -> Option<String> {
+    result["modelUsage"]
+        .as_object()?
+        .iter()
+        .max_by_key(|(_, used)| used["outputTokens"].as_u64().unwrap_or(0))
+        .map(|(name, _)| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// The plan's usage windows from the CLI's `rate_limit_event`. Only
@@ -1446,6 +1461,21 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello ther
         // Everywhere else it is the temp folder, whatever is set.
         assert_eq!(neutral_dir_from(false, Some(public), temp.clone(), &there), temp);
         assert_eq!(neutral_dir(), std::env::temp_dir());
+    }
+
+    #[test]
+    fn the_result_event_names_the_exact_model_that_answered() {
+        // As the CLI sends it for `--model sonnet`.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":2,"output_tokens":4},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":2,"outputTokens":4}}}"#;
+        assert_eq!(parse_usage(line).unwrap().model.as_deref(), Some("claude-sonnet-5-5"));
+        // Two models in one call: the one that wrote the answer.
+        let line = r#"{"type":"result","usage":{"input_tokens":2,"output_tokens":40},"modelUsage":{"claude-haiku-5-5":{"outputTokens":3},"claude-opus-5-5":{"outputTokens":37}}}"#;
+        assert_eq!(parse_usage(line).unwrap().model.as_deref(), Some("claude-opus-5-5"));
+        // An older CLI without the block: no exact model, still usage.
+        let line = r#"{"type":"result","usage":{"input_tokens":2,"output_tokens":4}}"#;
+        let usage = parse_usage(line).unwrap();
+        assert_eq!(usage.model, None);
+        assert_eq!(usage.tokens_out, 4);
     }
 
     #[test]

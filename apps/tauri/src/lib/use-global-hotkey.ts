@@ -10,8 +10,8 @@
 // Capture-phase + window-level (not document, not React synthetic) so we
 // see the event before any <input>/<button> can stopPropagation. The
 // handler matches the configured chords (toggle, cancel, the optional
-// cycle-mode slot when it is set, and the optional ask slot while Ask
-// is switched on) against the event and
+// cycle-mode and refine slots when they are set, and the optional ask
+// slot while Ask is switched on) against the event and
 // invokes the matching command, calling preventDefault +
 // stopImmediatePropagation so Chromium's built-in shortcuts (Ctrl+J →
 // downloads, Ctrl+P → print, Ctrl+F → find, Ctrl+R → reload) don't fire
@@ -34,7 +34,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { useAsk } from "./use-ask";
 
-export type HotkeyKind = "modifier-tap" | "chord";
+// "modifier-combo": two or more modifier keys together, `code` one of
+// them and `mods` the others, by their sided names ("RightCommand").
+// Mac-only, like "modifier-tap".
+export type HotkeyKind = "modifier-tap" | "chord" | "modifier-combo";
+/** What a long press of the dictation key does. Only a dictation key
+ *  that is a single modifier has a long press. */
+export type LongPressAction = "off" | "refine";
 export interface HotkeyConfig {
   kind: HotkeyKind;
   code: string;
@@ -49,8 +55,19 @@ export interface HotkeySettings {
    *  a dictation. null once the user cleared it. Only active while
    *  Ask is switched on. */
   ask?: HotkeyConfig | null;
+  /** Optional slot: a dictation that goes through Refine whatever the
+   *  Refine switch says. Has a default on macOS; null when cleared or
+   *  never set. */
+  refine?: HotkeyConfig | null;
+  /** Left out while off. */
+  long_press?: LongPressAction;
 }
-export type HotkeyTarget = "toggle" | "cancel" | "cycle-mode" | "ask";
+export type HotkeyTarget =
+  | "toggle"
+  | "cancel"
+  | "cycle-mode"
+  | "ask"
+  | "refine";
 export interface HotkeyCapturedPayload {
   target: HotkeyTarget;
   config: HotkeyConfig;
@@ -70,6 +87,8 @@ export function hotkeyFor(
       return settings.cycle_mode ?? null;
     case "ask":
       return settings.ask ?? null;
+    case "refine":
+      return settings.refine ?? null;
   }
 }
 
@@ -90,6 +109,8 @@ export function withHotkey(
       return { ...settings, cycle_mode: config };
     case "ask":
       return { ...settings, ask: config };
+    case "refine":
+      return { ...settings, refine: config };
   }
 }
 
@@ -239,6 +260,14 @@ export function useGlobalHotkey({ cancelWouldAct }: UseGlobalHotkeyOpts) {
         e.preventDefault();
         e.stopImmediatePropagation();
         if (!e.repeat) void invoke("ask_toggle");
+        return;
+      }
+      // The refine slot: a toggle too, so one press is one step.
+      const refine = bindings.refine;
+      if (refine && chordMatches(refine, e)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) void invoke("dictation_toggle_refined");
       }
     }
 

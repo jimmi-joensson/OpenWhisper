@@ -189,8 +189,16 @@ function App() {
     void emitTo("pill", PILL_STATE_EVENT, {
       status: dictation.status,
       levels: dictation.levels.slice(-PILL_BAR_COUNT),
+      willRefine: dictation.willRefine,
+      refining: dictation.refining,
     } satisfies PillState);
-  }, [dictation.status, dictation.levels, pillOverride.enabled]);
+  }, [
+    dictation.status,
+    dictation.levels,
+    dictation.willRefine,
+    dictation.refining,
+    pillOverride.enabled,
+  ]);
 
   // Manual override emitter. Idle/transcribing emit once; recording emits
   // a simulated envelope at 20 Hz so the pill meter has data without a mic.

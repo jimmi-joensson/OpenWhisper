@@ -407,13 +407,18 @@ async function installTauriShim(
         // "cycle_mode". The optional `ask` slot (TASK-97) has a
         // default (the mac one here, like the toggle default), which
         // a seed without the key gets too, the way Rust fills it in
-        // for a file from before the slot; cleared, it is null. Keep
-        // in step with scripts/pw-shim.js.
+        // for a file from before the slot; cleared, it is null. The
+        // optional `refine` slot (TASK-108) works the same way, its
+        // default being the mac one too: Right ⌘ and Right ⌥
+        // together. `long_press` is absent while off, the way Rust
+        // leaves it out. Keep in step with scripts/pw-shim.js.
         if (
           cmd === "settings_get_hotkeys" ||
           cmd === "settings_set_hotkey" ||
           cmd === "settings_reset_hotkey" ||
-          cmd === "settings_clear_hotkey"
+          cmd === "settings_clear_hotkey" ||
+          cmd === "settings_set_long_press" ||
+          cmd === "settings_get_hotkey_defaults"
         ) {
           const w = window as unknown as {
             __owHotkeys?: Record<string, unknown>;
@@ -422,19 +427,46 @@ async function installTauriShim(
             __owHotkeyClearCount?: number;
             __owHotkeyLastTarget?: string;
             __owHotkeyLastConfig?: unknown;
+            __owLongPressSetCount?: number;
           };
           const askDefault = { kind: "modifier-tap", code: "RightOption", mods: [] };
+          const refineDefault = {
+            kind: "modifier-combo",
+            code: "RightCommand",
+            mods: ["RightOption"],
+          };
           w.__owHotkeys = w.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
           if (!("ask" in w.__owHotkeys)) w.__owHotkeys.ask = askDefault;
+          if (!("refine" in w.__owHotkeys)) w.__owHotkeys.refine = refineDefault;
+          // The slots before any change, on this (made-up mac)
+          // platform. `__owHotkeyDefaults` overrides it, for a
+          // platform where a slot has no default.
+          if (cmd === "settings_get_hotkey_defaults") {
+            return (
+              (window as unknown as { __owHotkeyDefaults?: unknown }).__owHotkeyDefaults ?? {
+                toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+                cancel: { kind: "chord", code: "Escape", mods: [] },
+                ask: askDefault,
+                refine: refineDefault,
+              }
+            );
+          }
           // A copy, as over real IPC: the caller must not see later
           // writes through a shared object.
           if (cmd === "settings_get_hotkeys") return structuredClone(w.__owHotkeys);
+          if (cmd === "settings_set_long_press") {
+            const { action } = (args ?? {}) as { action: "off" | "refine" };
+            w.__owLongPressSetCount = (w.__owLongPressSetCount ?? 0) + 1;
+            if (action === "off") delete w.__owHotkeys.long_press;
+            else w.__owHotkeys.long_press = action;
+            return null;
+          }
 
           const { target, config } = (args ?? {}) as {
-            target: "toggle" | "cancel" | "cycle-mode" | "ask";
+            target: "toggle" | "cancel" | "cycle-mode" | "ask" | "refine";
             config?: unknown;
           };
           const key = target === "cycle-mode" ? "cycle_mode" : target;
@@ -451,7 +483,7 @@ async function installTauriShim(
               throw `The ${target} shortcut cannot be removed, only changed.`;
             }
             w.__owHotkeyClearCount = (w.__owHotkeyClearCount ?? 0) + 1;
-            if (target === "ask") w.__owHotkeys.ask = null;
+            if (target === "ask" || target === "refine") w.__owHotkeys[key] = null;
             else delete w.__owHotkeys[key];
             return null;
           }
@@ -467,7 +499,9 @@ async function installTauriShim(
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
               : target === "ask"
                 ? askDefault
-                : { kind: "chord", code: "Escape", mods: [] };
+                : target === "refine"
+                  ? refineDefault
+                  : { kind: "chord", code: "Escape", mods: [] };
           w.__owHotkeys[key] = def;
           return def;
         }
@@ -1208,6 +1242,19 @@ async function installTauriShim(
             w.__owRefineStored = saved;
             w.__owRefineSaves = [...(w.__owRefineSaves ?? []), saved];
             return saved;
+          }
+          // `refine::model_in_use` in core: backend, model and effort
+          // of the stored settings. `__owRefineModel` overrides it,
+          // for the exact model a run has named.
+          if (cmd === "refine_model_in_use") {
+            const openai = stored.backend === "openai-compatible";
+            return (
+              (w as unknown as { __owRefineModel?: unknown }).__owRefineModel ?? {
+                backend: stored.backend,
+                model: openai ? stored.openai.model : stored.claude_cli.model,
+                effort: (openai ? stored.openai.effort : stored.claude_cli.effort) ?? "",
+              }
+            );
           }
           if (cmd === "refine_status") {
             w.__owRefineStatusCount = (w.__owRefineStatusCount ?? 0) + 1;

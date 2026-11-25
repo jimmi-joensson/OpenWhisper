@@ -53,6 +53,34 @@ describe("the ask slot", () => {
   });
 });
 
+describe("the refine slot", () => {
+  // The macOS default: two modifier keys together.
+  const refine: HotkeyConfig = {
+    kind: "modifier-combo",
+    code: "RightCommand",
+    mods: ["RightOption"],
+  };
+
+  it("reads the refine target from the refine key", () => {
+    expect(hotkeyFor({ ...unbound, refine }, "refine")).toBe(refine);
+  });
+
+  it("is null when cleared or never set", () => {
+    expect(hotkeyFor({ ...unbound, refine: null }, "refine")).toBeNull();
+    expect(hotkeyFor(unbound, "refine")).toBeNull();
+  });
+
+  it("is set and cleared without touching the other slots or the long press", () => {
+    const base: HotkeySettings = { ...unbound, long_press: "refine" };
+    const bound = withHotkey(base, "refine", refine);
+    expect(bound).toEqual({ toggle, cancel, long_press: "refine", refine });
+    const cleared = withHotkey(bound, "refine", null);
+    expect(hotkeyFor(cleared, "refine")).toBeNull();
+    expect(cleared.long_press).toBe("refine");
+    expect(cleared.toggle).toBe(toggle);
+  });
+});
+
 describe("withHotkey", () => {
   it("replaces one slot and leaves the others", () => {
     const next = withHotkey(unbound, "cancel", cycle);

@@ -1,11 +1,11 @@
 import { useMemo, useState } from "react";
 import { Check, Copy, Trash2 } from "lucide-react";
 
-import { ModeMarker, TranscriptNotes } from "@/components/transcript-row";
+import { ModeMarker, RefinedNote, TranscriptNotes } from "@/components/transcript-row";
 import { Badge } from "@/components/ui/badge";
 import type { DictionaryReplacement } from "@/lib/dictation";
 import { formatClock, groupByDay, isAskEntry, type HistoryEntry } from "@/lib/history";
-import type { RefineInfo } from "@/lib/refine";
+import { effortLabel, refinedByLabel, type RefineInfo } from "@/lib/refine";
 
 // Text longer than this is folded to a few lines until expanded.
 const FOLD_AT_CHARS = 280;
@@ -72,6 +72,9 @@ function HistoryRow({
   // is one click away, like the original of a refined dictation.
   const ask = isAskEntry(entry);
   const answer = ask ? entry.answer : null;
+  // Refine's text: the entry says who refined it, or (an entry from
+  // before it could) keeps the text from before Refine.
+  const refined = !ask && Boolean(entry.refined || original);
   // Copy takes what is being read: the answer while it is shown,
   // otherwise the row text.
   const copiesAnswer = answer !== null && showAnswer;
@@ -102,6 +105,13 @@ function HistoryRow({
             <Badge variant="outline" data-testid="history-row-ask">
               Ask
             </Badge>
+          )}
+          {refined && (
+            <RefinedNote
+              by={refinedByLabel(entry.refined)}
+              effort={effortLabel(entry.effort)}
+              testId="history-row-refined"
+            />
           )}
         </div>
         <p

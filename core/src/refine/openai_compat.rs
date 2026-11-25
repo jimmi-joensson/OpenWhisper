@@ -305,6 +305,9 @@ pub(crate) fn parse_usage(body: &str) -> Option<CallUsage> {
         tokens_out: usage["completion_tokens"].as_u64().unwrap_or(0),
         cost_usd: None,
         plan: None,
+        // The server echoes the model it ran, often more exactly
+        // than it was asked for.
+        model: v["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string),
     })
 }
 

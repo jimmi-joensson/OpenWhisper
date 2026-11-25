@@ -8,6 +8,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { ASK_TICK_EVENT, type AskSnapshot } from "./ask";
 import type { HistoryPage, HistorySettings, HistoryState } from "./history";
 
 // Data for transcript history (TASK-95), on TanStack Query: Rust owns
@@ -113,15 +114,25 @@ export function useHistoryActions() {
 
 // Re-read the lists when Rust says the store changed: every finished
 // dictation, and every removal made elsewhere (the CLI, retention).
+// A finished ask is stored too, but writes no stats row, so its
+// `ask_tick` is the signal: once per ask, when it turns `done`.
 // Mounted once, in App.
 export function useHistorySync() {
   const client = useQueryClient();
   useEffect(() => {
-    const unlisten = listen("stats_changed", () => {
-      void client.invalidateQueries({ queryKey: LISTS_KEY });
+    const refresh = () => void client.invalidateQueries({ queryKey: LISTS_KEY });
+    const unlisten = listen("stats_changed", refresh);
+    let lastDoneAsk = 0;
+    const unlistenAsk = listen<AskSnapshot>(ASK_TICK_EVENT, (event) => {
+      const { id, phase } = event.payload;
+      if (phase === "done" && id !== lastDoneAsk) {
+        lastDoneAsk = id;
+        refresh();
+      }
     });
     return () => {
       void unlisten.then((fn) => fn());
+      void unlistenAsk.then((fn) => fn());
     };
   }, [client]);
 }

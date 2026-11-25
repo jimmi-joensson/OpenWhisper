@@ -253,6 +253,24 @@ export function RefinePane() {
           onSave={(instructions) => void update({ instructions })}
         />
       )}
+
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor="refine-no-long-dashes">Never use long dashes</FieldLabel>
+          <FieldDescription>
+            Refine and Ask write a hyphen, a comma or a new sentence
+            instead of an em dash or en dash.
+          </FieldDescription>
+        </FieldContent>
+        <Switch
+          id="refine-no-long-dashes"
+          // On unless switched off, like a settings file from before
+          // the switch existed.
+          checked={settings?.no_long_dashes ?? true}
+          disabled={!settings}
+          onCheckedChange={(no_long_dashes) => void update({ no_long_dashes })}
+        />
+      </Field>
     </FieldGroup>
   );
 }

@@ -9,6 +9,7 @@ import { TranscriptRow } from "./transcript-row";
 import { useCurrentHotkey } from "../lib/use-current-hotkey";
 import { useLastTranscription } from "../lib/use-last-transcription";
 import { useHistoryPage, useHistorySettings } from "../lib/use-history";
+import { isAskEntry } from "../lib/history";
 import { formatHotkeyLabel } from "../lib/hotkey-format";
 
 // How long a finished dictation may take to show up in the history
@@ -51,7 +52,9 @@ export function HomePane({
   // entry of the history list and is shown there, with its dictionary
   // fixes and Refine marker. The row of its own is only for a latest
   // transcript that is not in the list: history off, or not stored.
-  const newest = recent.page?.entries[0];
+  // Asks are in the list too and are not dictations: the newest
+  // dictation is the first entry that is not an ask.
+  const newest = recent.page?.entries.find((entry) => !isAskEntry(entry));
   const latestEntryId =
     latest && newest && newest.text.trim() === latest.text.trim() ? newest.id : null;
   // The list re-reads a moment after the dictation ends. Until then

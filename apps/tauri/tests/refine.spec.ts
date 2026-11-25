@@ -329,6 +329,58 @@ test.describe("refine pane", () => {
     await expect(note).toContainText("never answered or carried out");
   });
 
+  test("never use long dashes is on by default, says what it does and saves off and on", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openRefine(page);
+    const dashes = page.getByRole("switch", { name: "Never use long dashes" });
+    await expect(dashes).toBeChecked();
+    await expect(
+      page.getByText(
+        "Refine and Ask write a hyphen, a comma or a new sentence instead of an em dash or en dash.",
+      ),
+    ).toBeVisible();
+    // The sentence itself is written without one (U+2014, U+2013).
+    const pane = await page.getByRole("tabpanel").innerText();
+    expect(pane).not.toMatch(/[\u2013\u2014]/);
+
+    const lastSave = async () =>
+      (await recorded<{ no_long_dashes: boolean; enabled: boolean }[]>(page, "__owRefineSaves"))?.at(-1);
+    await dashes.click();
+    await expect(dashes).not.toBeChecked();
+    await expect.poll(async () => (await lastSave())?.no_long_dashes).toBe(false);
+    // The switch works with Refine off, and leaves it off.
+    expect((await lastSave())?.enabled).toBe(false);
+
+    await dashes.click();
+    await expect(dashes).toBeChecked();
+    await expect.poll(async () => (await lastSave())?.no_long_dashes).toBe(true);
+  });
+
+  test("never use long dashes shows what is stored, and on for a block without it", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineSettings: unknown }).__owRefineSettings = {
+        no_long_dashes: false,
+      };
+    });
+    await page.goto("/");
+    await openRefine(page);
+    await expect(page.getByRole("switch", { name: "Never use long dashes" })).not.toBeChecked();
+
+    // A block from before the switch existed.
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineSettings: unknown }).__owRefineSettings = {
+        no_long_dashes: undefined,
+      };
+    });
+    await page.reload();
+    await openRefine(page);
+    await expect(page.getByRole("switch", { name: "Never use long dashes" })).toBeChecked();
+  });
+
   test("the API key note names the platform's own store", async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "platform", { get: () => "Win32" });
@@ -374,6 +426,47 @@ test.describe("home: refine marker on the latest transcript", () => {
     await expect(page.getByTestId("home-latest-original")).toHaveCount(0);
   });
 
+  test("the marker names the model that refined the text", async ({ page }) => {
+    await page.goto("/");
+    await waitForTickListener(page);
+    const refined = (model: string | undefined) => ({
+      raw_transcript: "so i think we should move the meeting to thursday ",
+      status: "refined",
+      detail: "",
+      backend: "openai-compatible",
+      model,
+      elapsed_ms: 640,
+    });
+    // The exact Claude model the backend named, and the effort.
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Thursday. ",
+      refine: { ...refined("claude-sonnet-5-5"), backend: "claude-cli", effort: "low" },
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(
+      /^Refined by Sonnet 5\.5 at low effort/,
+    );
+    // Any other model: as it is written.
+    await emitTick(page, { phase: 2, status: "recording" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Friday. ",
+      refine: refined("qwen2.5:7b"),
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(/^Refined by qwen2\.5:7b/);
+    // No model known: the backend.
+    await emitTick(page, { phase: 2, status: "recording" });
+    await emitTick(page, {
+      phase: 4,
+      status: "idle",
+      transcript: "I think we should move the meeting to Monday. ",
+      refine: refined(undefined),
+    });
+    await expect(page.getByTestId("home-latest-refine")).toHaveText(/^Refined by OpenAI-compatible/);
+  });
+
   test("a followed spoken instruction is named, original one click away", async ({ page }) => {
     await page.goto("/");
     await waitForTickListener(page);
@@ -391,8 +484,9 @@ test.describe("home: refine marker on the latest transcript", () => {
         elapsed_ms: 1320,
       },
     });
+    // No model on the tick: the backend is who refined it.
     await expect(page.getByTestId("home-latest-refine")).toContainText(
-      "Refined, as you asked: “skriv det på engelsk”",
+      "Refined by Claude, as you asked: “skriv det på engelsk”",
     );
     await page.getByRole("button", { name: "Show original" }).click();
     await expect(page.getByTestId("home-latest-original")).toContainText(

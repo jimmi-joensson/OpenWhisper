@@ -18,9 +18,11 @@ if (import.meta.env.PROD) {
   });
 }
 
-// Single Vite bundle, two windows. Choose the React tree by window label.
+// Single Vite bundle, three windows. Choose the React tree by window label.
 // PillOverlay (and its global html/body/#root CSS) is dynamically imported
-// only in the pill window so it doesn't override the main-window layout.
+// only in the pill window so it doesn't override the main-window layout,
+// and AnswerPanel (the answer window of Ask, with its own global CSS)
+// only in the answer window, for the same reason in both directions.
 // Settings is an in-window route inside App, not its own window.
 const label = getCurrentWindow().label;
 
@@ -29,7 +31,11 @@ const Root: React.ComponentType =
     ? React.lazy(() =>
         import("./PillOverlay").then((m) => ({ default: m.PillOverlay })),
       )
-    : React.lazy(() => import("./App").then((m) => ({ default: m.default })));
+    : label === "answer"
+      ? React.lazy(() =>
+          import("./AnswerPanel").then((m) => ({ default: m.AnswerPanel })),
+        )
+      : React.lazy(() => import("./App").then((m) => ({ default: m.default })));
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

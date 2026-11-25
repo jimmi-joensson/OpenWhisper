@@ -178,6 +178,14 @@ pub struct RefineSettings {
     /// said (an answer, an email, a translation). Turn off when the
     /// instructions ask for heavy rewriting on purpose.
     pub drift_guard: bool,
+    /// Text a model writes for the app contains no em dash and no en
+    /// dash: Refine in every mode, and the answers of Ask, which uses
+    /// this block's backend. The prompts ask for a hyphen, a comma or
+    /// a new sentence instead, and what comes back is put right in
+    /// code ([`crate::dashes`]). On by default; a file written before
+    /// this existed loads as on. The transcript as it was recognized
+    /// is never touched, so with Refine off nothing changes.
+    pub no_long_dashes: bool,
     pub claude_cli: ClaudeCliSettings,
     pub openai: OpenAiSettings,
 }
@@ -191,6 +199,7 @@ impl Default for RefineSettings {
             timeout_ms: 5_000,
             min_words: 4,
             drift_guard: true,
+            no_long_dashes: true,
             claude_cli: ClaudeCliSettings::default(),
             openai: OpenAiSettings::default(),
         }
@@ -254,6 +263,7 @@ mod tests {
         assert_eq!(s.timeout_ms, 5_000);
         assert_eq!(s.min_words, 4);
         assert!(s.drift_guard);
+        assert!(s.no_long_dashes);
         assert_eq!(s.claude_cli.model, "sonnet");
         assert_eq!(s.claude_cli.effort, RefineEffort::Low);
         assert_eq!(s.openai.effort, None);
@@ -291,6 +301,18 @@ mod tests {
             assert_eq!(RefineEffort::parse(e.as_str()), Some(e));
             assert_eq!(serde_json::to_string(&e).unwrap(), format!("\"{}\"", e.as_str()));
         }
+    }
+
+    #[test]
+    fn long_dashes_are_off_limits_unless_the_file_says_otherwise() {
+        // A block written before the switch existed.
+        let s: RefineSettings = serde_json::from_str(r#"{"enabled":true,"drift_guard":false}"#).unwrap();
+        assert!(s.no_long_dashes);
+        let s: RefineSettings = serde_json::from_str(r#"{"no_long_dashes":false}"#).unwrap();
+        assert!(!s.no_long_dashes);
+        assert!(!s.clone().cleaned().no_long_dashes);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"no_long_dashes\":false"), "{json}");
     }
 
     #[test]

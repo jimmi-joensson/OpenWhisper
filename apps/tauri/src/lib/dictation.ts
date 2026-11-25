@@ -6,9 +6,23 @@ export interface DictionaryReplacement {
 
 import type { RefineInfo } from "./refine";
 
+// Mirrors `SessionKind` in core/src/dictation.rs.
+export type SessionKind = "dictation" | "ask";
+
 // Mirrors `DictationTick` in src-tauri/src/lib.rs.
 export interface DictationTick {
   phase: number;
+  // What the recording in flight is for, or what the last one was
+  // for. After an ask recording the phase goes to DONE while
+  // `transcript` still holds the dictation before it: an "ask" tick
+  // never carries a new dictation.
+  session_kind: SessionKind;
+  /** The dictation in flight goes through Refine (the switch is on,
+   *  or the refine key started or stopped it): from the start of the
+   *  recording until the text is delivered. */
+  will_refine?: boolean;
+  /** The transcript is with the Refine backend right now. */
+  refining?: boolean;
   status: "idle" | "recording" | "transcribing";
   status_message: string;
   transcript: string;
@@ -22,6 +36,9 @@ export interface DictationTick {
   error_message: string;
   can_toggle: boolean;
   is_recording: boolean;
+  // The cancel key would do something now: a recording, or an ask
+  // that is being transcribed or answered.
+  cancel_would_act: boolean;
   level: number;
   download_bytes_done: number;
   download_bytes_total: number;

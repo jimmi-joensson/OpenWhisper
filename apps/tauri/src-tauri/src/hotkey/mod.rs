@@ -1,16 +1,24 @@
 //! Global hotkeys.
 //!
 //! The slots are a table, [`SLOTS`]: toggle (start/stop dictation),
-//! cancel (discard the current recording, only while recording) and
-//! the optional cycle-mode slot (switch to the next mode). Defaults:
-//! Right ⌘ / Esc on mac, Ctrl+Space / Esc on Windows; cycle-mode is
-//! unbound until the user records a key. All rebindable via
-//! Settings → Shortcuts. A new slot is one more table entry plus its
-//! action; neither backend names a slot.
+//! cancel (discard the current recording or stop a running ask, only
+//! while there is one), the optional cycle-mode slot (switch to the
+//! next mode), the optional ask slot (start an ask instead of a
+//! dictation, TASK-97) and the optional refine slot (a dictation that
+//! goes through Refine whatever the Refine switch says, TASK-108).
+//! Defaults: Right ⌘ / Esc on mac, Ctrl+Space / Esc on Windows;
+//! cycle-mode is unbound until the user records a key; ask is Right ⌥
+//! on mac and Ctrl+Shift+Space on Windows, and is only installed
+//! while Ask is switched on ([`effective_settings`]); refine is
+//! Right ⌘ and Right ⌥ together on mac and unbound on Windows.
+//! All rebindable via Settings → Shortcuts. A new slot is one more
+//! table entry plus its action; neither backend names a slot.
 //!
 //! Per-platform because activation gestures differ:
-//! - **Mac**: `CGEventTap`. Every slot supports both modifier-tap
-//!   (default Right Cmd: tap-not-hold) and chord.
+//! - **Mac**: `CGEventTap`. Every slot supports modifier-tap (default
+//!   Right Cmd: tap-not-hold), modifier-combo (two or more modifier
+//!   keys together) and chord. A modifier-tap toggle key can also
+//!   tell a long press from a tap ([`long_press_action`]).
 //! - **Windows**: `WH_KEYBOARD_LL` hook, chord-only for every slot.
 //!
 //! Status surface: `hotkey_status` Tauri event (see [`HotkeyStatus`]) and
@@ -27,10 +35,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use openwhisper_core::dictation;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::settings::{HotkeyConfig, HotkeySettings, HotkeyTarget};
+use crate::settings::{HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, LongPressAction};
 
 #[cfg(target_os = "macos")]
 mod mac;
@@ -58,9 +67,11 @@ pub struct SkippedSlot {
 /// One hotkey slot: which binding it reads and what it does.
 pub(crate) struct SlotSpec {
     pub target: HotkeyTarget,
-    /// Fire only while a recording is active; outside one the key
-    /// passes through to the focused app.
-    pub gate_on_recording: bool,
+    /// When set, the slot fires only while this returns true; while
+    /// it returns false the key passes through to the focused app.
+    /// Called on the hook / tap thread for every matching key event,
+    /// so it has to be lock-free.
+    pub gate: Option<fn() -> bool>,
     /// Called on the hook / tap thread once per press. Must return at
     /// once: anything slow goes on its own thread.
     pub action: fn(),
@@ -70,25 +81,73 @@ pub(crate) struct SlotSpec {
 /// key event, the earlier one wins. Whether a slot may be unbound is
 /// [`HotkeyTarget::is_optional`]; an unbound slot installs nothing.
 pub(crate) const SLOTS: &[SlotSpec] = &[
-    SlotSpec { target: HotkeyTarget::Toggle, gate_on_recording: false, action: fire_toggle },
-    SlotSpec { target: HotkeyTarget::Cancel, gate_on_recording: true, action: fire_cancel },
-    SlotSpec { target: HotkeyTarget::CycleMode, gate_on_recording: false, action: fire_cycle_mode },
+    SlotSpec { target: HotkeyTarget::Toggle, gate: None, action: fire_toggle },
+    // Escape is swallowed only while it would do something: a
+    // recording, or an ask that is being transcribed or answered.
+    SlotSpec {
+        target: HotkeyTarget::Cancel,
+        gate: Some(dictation::cancel_would_act),
+        action: fire_cancel,
+    },
+    SlotSpec { target: HotkeyTarget::CycleMode, gate: None, action: fire_cycle_mode },
+    SlotSpec { target: HotkeyTarget::Ask, gate: None, action: fire_ask },
+    SlotSpec { target: HotkeyTarget::Refine, gate: None, action: fire_refine },
 ];
 
-fn fire_toggle() {
-    let run = || {
-        if let Err(e) = crate::do_toggle() {
-            eprintln!("hotkey toggle failed: {e}");
-        }
-    };
-    // The Windows hook has always handed the toggle to a thread; the
-    // mac tap has always run it in place. Kept as they were.
+impl SlotSpec {
+    /// The slot may fire now. See [`SlotSpec::gate`].
+    pub(crate) fn gate_passes(&self) -> bool {
+        self.gate.is_none_or(|open| open())
+    }
+}
+
+/// Run a start/stop toggle the way each backend always has: the
+/// Windows hook hands it to a thread (the hook callback has to return
+/// within the system's timeout), the mac tap runs it in place.
+fn run_toggle(run: impl FnOnce() + Send + 'static) {
     #[cfg(target_os = "windows")]
     {
         std::thread::spawn(run);
     }
     #[cfg(not(target_os = "windows"))]
     run();
+}
+
+fn fire_toggle() {
+    run_toggle(|| {
+        if let Err(e) = crate::do_toggle() {
+            eprintln!("hotkey toggle failed: {e}");
+        }
+    });
+}
+
+fn fire_ask() {
+    run_toggle(|| {
+        if let Err(e) = crate::do_ask_toggle() {
+            eprintln!("hotkey ask failed: {e}");
+        }
+    });
+}
+
+fn fire_refine() {
+    run_toggle(|| {
+        if let Err(e) = crate::do_refine_toggle() {
+            eprintln!("hotkey refine failed: {e}");
+        }
+    });
+}
+
+/// What a long press of a slot's key does, when it is to do something
+/// else than a tap of it. Only the toggle slot has one, and only
+/// while the user has switched it on. The backend decides whether it
+/// can tell a long press at all (a modifier-tap can, a chord cannot).
+/// Same contract as [`SlotSpec::action`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn long_press_action(settings: &HotkeySettings, target: HotkeyTarget) -> Option<fn()> {
+    match (target, settings.long_press) {
+        (HotkeyTarget::Toggle, LongPressAction::Refine) => Some(fire_refine),
+        _ => None,
+    }
 }
 
 fn fire_cancel() {
@@ -112,11 +171,29 @@ fn slot_config(settings: &HotkeySettings, target: HotkeyTarget) -> Option<&Hotke
         HotkeyTarget::Toggle => Some(&settings.toggle),
         HotkeyTarget::Cancel => Some(&settings.cancel),
         HotkeyTarget::CycleMode => settings.cycle_mode.as_ref(),
+        HotkeyTarget::Ask => settings.ask.as_ref(),
+        HotkeyTarget::Refine => settings.refine.as_ref(),
     }
 }
 
+/// The bindings to install, given whether Ask is switched on. With
+/// Ask off its slot is left out, so the key stays with the focused
+/// app and nothing can start an ask; the saved binding is kept for
+/// when Ask is switched on again.
+pub(crate) fn effective_settings(mut settings: HotkeySettings, ask_enabled: bool) -> HotkeySettings {
+    if !ask_enabled {
+        settings.ask = None;
+    }
+    settings
+}
+
 /// Same key and same modifiers, whatever order the modifiers are in.
+/// A modifier-combo is its set of keys: which of them is stored as
+/// `code` does not matter.
 fn same_binding(a: &HotkeyConfig, b: &HotkeyConfig) -> bool {
+    if a.kind == HotkeyKind::ModifierCombo || b.kind == HotkeyKind::ModifierCombo {
+        return a.kind == b.kind && a.combo_keys() == b.combo_keys();
+    }
     let sorted = |c: &HotkeyConfig| {
         let mut mods = c.mods.clone();
         mods.sort();
@@ -277,36 +354,60 @@ pub(crate) fn deliver_capture(config: HotkeyConfig) {
     }
 }
 
+/// Run `change`, one caller at a time, process-wide.
+///
+/// Every install and teardown of the platform hook goes through
+/// here. They come from more than one thread: the main thread (boot,
+/// a hotkey save, the fullscreen path) and a blocking thread (the Ask
+/// switch, noticed in `ask_get` or saved in `ask_set`). An install is
+/// "tear down the old hook, read the settings, put up the new one";
+/// two of those interleaved can leave two hooks up, or none.
+fn serialized<R>(change: impl FnOnce() -> R) -> R {
+    static CHANGING: Mutex<()> = Mutex::new(());
+    let _held = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+    change()
+}
+
 /// Toggle the global hotkey on/off. Used by the fullscreen-aware path.
 pub fn set_active(app: &AppHandle, active: bool) {
     if active {
         install(app);
     } else {
-        #[cfg(target_os = "macos")]
-        mac::teardown();
-        #[cfg(target_os = "windows")]
-        windows::teardown(app);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = app;
+        serialized(|| {
+            #[cfg(target_os = "macos")]
+            mac::teardown();
+            #[cfg(target_os = "windows")]
+            windows::teardown(app);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let _ = app;
+        });
     }
 }
 
 /// Install the platform hook for every bound slot. Idempotent: calling
 /// twice tears down and reinstalls. Used at boot, from `hotkey_retry`,
-/// and after any hotkey save, reset or clear.
+/// after any hotkey save, reset or clear, and after Ask is switched
+/// on or off (`ask_set`, or `ask_get` when the file changed). Safe to
+/// call from any thread: installs are [`serialized`], and the
+/// settings are read inside, so the install that runs last puts up
+/// the hook for the settings as they are last.
 pub fn install(app: &AppHandle) {
-    store_handle(app);
-    let settings =
-        crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings);
-    #[cfg(target_os = "macos")]
-    emit_status(app, mac::install(app, &settings));
-    #[cfg(target_os = "windows")]
-    emit_status(app, windows::install(app, &settings));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = settings;
-        emit_status(app, Err("hotkey: platform not supported in MVP".into()));
-    }
+    serialized(|| {
+        store_handle(app);
+        let settings = effective_settings(
+            crate::settings::current_settings().unwrap_or_else(crate::settings::default_settings),
+            openwhisper_core::settings::current_ask_settings().enabled,
+        );
+        #[cfg(target_os = "macos")]
+        emit_status(app, mac::install(app, &settings));
+        #[cfg(target_os = "windows")]
+        emit_status(app, windows::install(app, &settings));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = settings;
+            emit_status(app, Err("hotkey: platform not supported in MVP".into()));
+        }
+    });
 }
 
 #[tauri::command]
@@ -356,11 +457,11 @@ mod tests {
     use crate::settings::default_settings;
 
     /// A stand-in backend: chords compile to their key name, a
-    /// modifier-tap does not compile at all.
+    /// modifier-tap or a modifier-combo does not compile at all.
     fn chords_only(config: &HotkeyConfig) -> Result<String, String> {
         match config.kind {
-            crate::settings::HotkeyKind::Chord => Ok(config.code.clone()),
-            crate::settings::HotkeyKind::ModifierTap => Err("Chords only.".into()),
+            HotkeyKind::Chord => Ok(config.code.clone()),
+            HotkeyKind::ModifierTap | HotkeyKind::ModifierCombo => Err("Chords only.".into()),
         }
     }
 
@@ -369,6 +470,9 @@ mod tests {
             toggle: HotkeyConfig::chord("Space", &["Ctrl"]),
             cancel: HotkeyConfig::chord("Escape", &[]),
             cycle_mode: None,
+            ask: None,
+            refine: None,
+            long_press: LongPressAction::Off,
         }
     }
 
@@ -377,15 +481,189 @@ mod tests {
     }
 
     #[test]
+    fn installs_from_several_threads_run_one_at_a_time() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        static INSIDE: AtomicBool = AtomicBool::new(false);
+        static OVERLAPS: AtomicUsize = AtomicUsize::new(0);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..5 {
+                        serialized(|| {
+                            if INSIDE.swap(true, Ordering::SeqCst) {
+                                OVERLAPS.fetch_add(1, Ordering::SeqCst);
+                            }
+                            // Long enough for another thread to get
+                            // in, if anything let it.
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            INSIDE.store(false, Ordering::SeqCst);
+                        });
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(OVERLAPS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn the_table_has_one_entry_per_target_and_only_cancel_is_gated() {
         let listed: Vec<&str> = SLOTS.iter().map(|s| s.target.as_str()).collect();
-        assert_eq!(listed, ["toggle", "cancel", "cycle-mode"]);
-        let gated: Vec<&str> = SLOTS
-            .iter()
-            .filter(|s| s.gate_on_recording)
-            .map(|s| s.target.as_str())
-            .collect();
+        assert_eq!(listed, ["toggle", "cancel", "cycle-mode", "ask", "refine"]);
+        let gated: Vec<&str> =
+            SLOTS.iter().filter(|s| s.gate.is_some()).map(|s| s.target.as_str()).collect();
         assert_eq!(gated, ["cancel"]);
+    }
+
+    #[test]
+    fn the_cancel_gate_is_closed_while_nothing_records_and_no_ask_runs() {
+        // Nothing records and no ask runs in this test binary, so
+        // Escape is left to the focused app; the ungated slots pass.
+        let passes: Vec<(&str, bool)> =
+            SLOTS.iter().map(|s| (s.target.as_str(), s.gate_passes())).collect();
+        assert_eq!(
+            passes,
+            [("toggle", true), ("cancel", false), ("cycle-mode", true), ("ask", true), ("refine", true)]
+        );
+        // The gate is core's: a recording, or an ask that is running.
+        let cancel = &SLOTS[1];
+        assert_eq!(cancel.gate.map(|g| g()), Some(dictation::cancel_would_act()));
+    }
+
+    #[test]
+    fn the_ask_slot_is_installed_only_while_ask_is_on_and_bound() {
+        let ask = HotkeyConfig::chord("Space", &["Ctrl", "Shift"]);
+        let bound = HotkeySettings { ask: Some(ask.clone()), ..chord_settings() };
+
+        // Ask off: the binding is kept in the file, not installed.
+        let off = effective_settings(bound.clone(), false);
+        assert_eq!(off.ask, None);
+        let (compiled, skipped) = compile_slots(&off, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert!(skipped.is_empty());
+
+        // Ask on: installed after the others.
+        let on = effective_settings(bound.clone(), true);
+        assert_eq!(on, bound);
+        let (compiled, skipped) = compile_slots(&on, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "ask"]);
+        assert_eq!(compiled[2].1, "Space");
+        assert!(skipped.is_empty());
+
+        // Ask on, slot cleared: nothing to install, nothing to report.
+        let cleared = effective_settings(chord_settings(), true);
+        let (compiled, skipped) = compile_slots(&cleared, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert!(skipped.is_empty());
+
+        // Only the ask slot is touched.
+        assert_eq!(off.toggle, bound.toggle);
+        assert_eq!(off.cancel, bound.cancel);
+        assert_eq!(off.cycle_mode, bound.cycle_mode);
+    }
+
+    #[test]
+    fn an_ask_binding_the_backend_cannot_install_is_skipped_not_fatal() {
+        // The mac default (a modifier tap) on a chords-only backend,
+        // as on Windows with a settings file brought over from a Mac.
+        let settings = HotkeySettings {
+            ask: Some(HotkeyConfig::modifier_tap("RightOption")),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert_eq!(skipped, [SkippedSlot { target: "ask", reason: "Chords only.".into() }]);
+
+        // On the keys of the switch-mode slot: the earlier slot keeps them.
+        let settings = HotkeySettings {
+            cycle_mode: Some(HotkeyConfig::chord("M", &["Ctrl", "Alt"])),
+            ask: Some(HotkeyConfig::chord("M", &["Alt", "Ctrl"])),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "cycle-mode"]);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].target, "ask");
+        assert!(skipped[0].reason.contains("cycle-mode"), "{}", skipped[0].reason);
+    }
+
+    #[test]
+    fn the_refine_slot_installs_when_bound_and_is_skipped_on_keys_already_taken() {
+        let settings = HotkeySettings {
+            refine: Some(HotkeyConfig::chord("Space", &["Ctrl", "Alt"])),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "refine"]);
+        assert!(skipped.is_empty());
+
+        // The mac default (two modifier keys) on a chords-only
+        // backend: left out, dictation itself still installs.
+        let settings = HotkeySettings {
+            refine: HotkeyConfig::modifier_combo(&["RightCommand", "RightOption"]),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert_eq!(skipped, [SkippedSlot { target: "refine", reason: "Chords only.".into() }]);
+
+        // On the dictation keys: the toggle slot keeps them.
+        let settings = HotkeySettings {
+            refine: Some(HotkeyConfig::chord("Space", &["Ctrl"])),
+            ..chord_settings()
+        };
+        let (compiled, skipped) = compile_slots(&settings, chords_only).unwrap();
+        assert_eq!(targets(&compiled), ["toggle", "cancel"]);
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].reason.contains("toggle"), "{}", skipped[0].reason);
+    }
+
+    #[test]
+    fn two_combos_of_the_same_keys_are_one_binding_whatever_the_order() {
+        let a = HotkeyConfig::modifier_combo(&["RightCommand", "RightOption"]).unwrap();
+        let by_hand = HotkeyConfig {
+            kind: HotkeyKind::ModifierCombo,
+            code: "RightOption".into(),
+            mods: vec!["RightCommand".into()],
+        };
+        assert!(same_binding(&a, &by_hand));
+        assert!(!same_binding(&a, &HotkeyConfig::modifier_tap("RightCommand")));
+        assert!(!same_binding(
+            &a,
+            &HotkeyConfig::modifier_combo(&["RightCommand", "RightShift"]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn only_the_toggle_slot_has_a_long_press_and_only_when_switched_on() {
+        let off = chord_settings();
+        let on = HotkeySettings { long_press: LongPressAction::Refine, ..chord_settings() };
+        for spec in SLOTS {
+            assert!(long_press_action(&off, spec.target).is_none());
+            assert_eq!(
+                long_press_action(&on, spec.target).is_some(),
+                spec.target == HotkeyTarget::Toggle,
+                "{}",
+                spec.target.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_platform_default_ask_key_installs_next_to_the_other_defaults() {
+        // The defaults as shipped, Ask on, on a backend that takes
+        // every kind of binding (the mac tap).
+        let settings = effective_settings(default_settings(), true);
+        let (compiled, skipped) =
+            compile_slots(&settings, |c| Ok::<_, String>(c.code.clone())).unwrap();
+        // The refine slot has a default key on macOS only.
+        #[cfg(target_os = "macos")]
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "ask", "refine"]);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "ask"]);
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     #[test]
@@ -394,9 +672,16 @@ mod tests {
         assert_eq!(targets(&compiled), ["toggle", "cancel"]);
         assert!(skipped.is_empty());
 
-        // The platform defaults compile on a backend that takes everything.
-        let (compiled, skipped) =
-            compile_slots(&default_settings(), |c| Ok::<_, String>(c.code.clone())).unwrap();
+        // The platform defaults compile on a backend that takes
+        // everything. Ask is off by default, so its key is not there.
+        // The refine slot has a default key on macOS only.
+        let (compiled, skipped) = compile_slots(&effective_settings(default_settings(), false), |c| {
+            Ok::<_, String>(c.code.clone())
+        })
+        .unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(targets(&compiled), ["toggle", "cancel", "refine"]);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(targets(&compiled), ["toggle", "cancel"]);
         assert!(skipped.is_empty());
     }

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Sparkles } from "lucide-react";
 import {
   cancelJsCapture,
   hotkeyFor,
@@ -12,9 +12,12 @@ import {
   type HotkeyConfig,
   type HotkeySettings,
   type HotkeyTarget,
+  type LongPressAction,
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
+import { useAsk } from "./lib/use-ask";
+import { Badge } from "./components/ui/badge";
 import type { SettingsPaneId } from "./lib/settings-panes";
 import { LevelMeter } from "./components/level-meter";
 import {
@@ -41,6 +44,7 @@ import { usePauseAudio } from "./lib/use-pause-audio";
 import { DictionaryPane } from "./components/dictionary-pane";
 import { RefinePane } from "./components/refine-pane";
 import { ModesPane } from "./components/modes-pane";
+import { AskPane } from "./components/ask-pane";
 import { GeneralPane } from "./components/general-pane";
 import { SettingsModelsPane } from "./components/settings-models-pane";
 import "./Settings.css";
@@ -72,7 +76,8 @@ const PREVIEW_SAMPLE_RATE_HZ = 16_000;
 interface SettingsShellProps {
   active: SettingsPaneId;
   onBack: () => void;
-  // Lets a pane send the user to another pane (Modes to Refine).
+  // Lets a pane send the user to another pane (Modes to Refine, Ask
+  // to Refine and Shortcuts).
   onSelectPane?: (pane: SettingsPaneId) => void;
 }
 
@@ -100,6 +105,7 @@ export function SettingsShell({ active, onBack, onSelectPane }: SettingsShellPro
         {active === "dictionary" && <DictionaryPane />}
         {active === "refine" && <RefinePane />}
         {active === "modes" && <ModesPane onOpenPane={onSelectPane} />}
+        {active === "ask" && <AskPane onOpenPane={onSelectPane} />}
       </div>
     </div>
   );
@@ -622,13 +628,20 @@ function formatDelayShort(ms: number): string {
 }
 
 // One row per hotkey slot, in the order of the Rust slot table
-// (`hotkey/mod.rs`). An optional slot starts out not set, and its
-// reset control clears it instead of restoring a default.
+// (`hotkey/mod.rs`). An optional slot may be without a key. One that
+// has no default starts out not set, and its reset control clears it
+// instead of restoring a default; one that has a default gets both
+// controls (`hasDefault`). Left out, `hasDefault` is whether the
+// backend's defaults have a key for the slot: for a slot whose
+// default depends on the platform.
 interface ShortcutRowDef {
   target: HotkeyTarget;
   title: string;
   hint: string;
+  /** The row is about Refine: its title carries the Refine mark. */
+  refine?: boolean;
   optional?: boolean;
+  hasDefault?: boolean;
 }
 
 const SHORTCUT_ROWS: ShortcutRowDef[] = [
@@ -648,7 +661,31 @@ const SHORTCUT_ROWS: ShortcutRowDef[] = [
     hint: "Cycles through your Refine modes. Not set until you record a key.",
     optional: true,
   },
+  {
+    target: "ask",
+    title: "Ask",
+    hint: "Press it, ask a question out loud, press again. The answer shows in a panel and is not typed anywhere.",
+    optional: true,
+    hasDefault: true,
+  },
+  {
+    target: "refine",
+    title: "Dictate with Refine",
+    refine: true,
+    hint: "Works like the dictation key, but the text always goes through Refine, also while Refine is switched off. Start with it, or stop a dictation with it.",
+    optional: true,
+    // No `hasDefault`: Right ⌘ + Right ⌥ on macOS, not set elsewhere.
+    // The pane asks the backend (`settings_get_hotkey_defaults`).
+  },
 ];
+
+// The long press belongs to the refine slot: the row goes under it.
+const LONG_PRESS_AFTER: HotkeyTarget = "refine";
+
+// Shown on the Ask row while Ask is switched off: the slot is not
+// installed then, whatever key it holds.
+const ASK_OFF_NOTE =
+  "Ask is switched off, so this key does nothing. The key is kept for when you switch Ask on.";
 
 // Shortcuts pane: capture-on-click rebind for every hotkey slot. Each
 // row is independent: clicking one chip starts a capture targeted at
@@ -656,6 +693,10 @@ const SHORTCUT_ROWS: ShortcutRowDef[] = [
 // target and the UI saves to the matching slot.
 function ShortcutsPane() {
   const [settings, setSettings] = useState<HotkeySettings | null>(null);
+  // Every slot as it is before the user changes anything, on this
+  // platform. null until loaded: a platform-dependent slot then shows
+  // as one without a default for a moment.
+  const [defaults, setDefaults] = useState<HotkeySettings | null>(null);
   // An optional slot the backend could not install is reported here,
   // with `ok` still true (dictation itself is fine).
   const skipped = useHotkeyStatus().status?.skipped ?? [];
@@ -663,6 +704,10 @@ function ShortcutsPane() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  // Whether Ask is switched on; null until known. The ask slot is
+  // only installed while it is. From the Ask settings every reader
+  // shares, which follow `ask_changed`.
+  const askEnabled = useAsk().state?.settings.enabled ?? null;
 
   useEffect(() => {
     let alive = true;
@@ -673,6 +718,11 @@ function ShortcutsPane() {
       .catch((e) => {
         if (alive) setError(String(e));
       });
+    invoke<HotkeySettings>("settings_get_hotkey_defaults")
+      .then((d) => {
+        if (alive) setDefaults(d);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -756,8 +806,37 @@ function ShortcutsPane() {
     }
   }, []);
 
-  // Back to the slot's default: the platform binding for toggle and
-  // cancel, "not set" (null) for an optional slot.
+  // Leave an optional slot without a key. For a slot whose reset
+  // restores a default (Ask); the others clear through reset.
+  const clearTarget = useCallback(async (target: HotkeyTarget) => {
+    setError(null);
+    try {
+      await invoke("settings_clear_hotkey", { target });
+      setSettings((prev) => (prev ? withHotkey(prev, target, null) : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // What a long press of the dictation key does. A switch today:
+  // off, or the same as the "Dictate with Refine" key.
+  const setLongPress = useCallback(async (on: boolean) => {
+    const action: LongPressAction = on ? "refine" : "off";
+    setError(null);
+    try {
+      await invoke("settings_set_long_press", { action });
+      setSettings((prev) => (prev ? { ...prev, long_press: action } : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // Only a dictation key that is a single modifier fires when it is
+  // let go, so only that one can tell a long press from a tap.
+  const canLongPress = settings?.toggle.kind === "modifier-tap";
+
+  // Back to the slot's default: the platform binding for toggle,
+  // cancel and ask, "not set" (null) for the switch-mode slot.
   const resetTarget = useCallback(async (target: HotkeyTarget) => {
     setError(null);
     try {
@@ -781,18 +860,56 @@ function ShortcutsPane() {
       </header>
 
       {SHORTCUT_ROWS.map((row) => (
-        <ShortcutRow
-          key={row.target}
-          title={row.title}
-          hint={row.hint}
-          target={row.target}
-          optional={row.optional}
-          config={settings ? hotkeyFor(settings, row.target) : null}
-          recordingTarget={recordingTarget}
-          onStart={startCapture}
-          onCancel={cancelCapture}
-          onReset={resetTarget}
-        />
+        <Fragment key={row.target}>
+          <ShortcutRow
+            title={row.title}
+            refineMark={row.refine}
+            hint={row.hint}
+            target={row.target}
+            optional={row.optional}
+            hasDefault={
+              row.hasDefault ??
+              (defaults !== null && hotkeyFor(defaults, row.target) !== null)
+            }
+            inactiveNote={
+              row.target === "ask" && askEnabled === false ? ASK_OFF_NOTE : null
+            }
+            config={settings ? hotkeyFor(settings, row.target) : null}
+            recordingTarget={recordingTarget}
+            onStart={startCapture}
+            onCancel={cancelCapture}
+            onReset={resetTarget}
+            onClear={clearTarget}
+          />
+          {row.target === LONG_PRESS_AFTER && canLongPress && (
+            <section
+              className="ow-shortcuts__row"
+              data-testid="shortcut-long-press"
+            >
+              <div className="ow-shortcuts__row-label">
+                <div className="ow-shortcuts__row-title">
+                  <Sparkles
+                    size={13}
+                    aria-hidden="true"
+                    className="text-muted-foreground"
+                  />
+                  Long press to refine
+                </div>
+                <div className="ow-shortcuts__row-hint">
+                  Hold the dictation key a little longer and it works like
+                  Dictate with Refine. A normal tap stays a normal dictation.
+                </div>
+              </div>
+              <div className="ow-shortcuts__row-control">
+                <Switch
+                  checked={settings?.long_press === "refine"}
+                  onCheckedChange={(on) => void setLongPress(on)}
+                  aria-label="Long press to refine"
+                />
+              </div>
+            </section>
+          )}
+        </Fragment>
       ))}
 
       <div className="ow-shortcuts__note">
@@ -815,27 +932,40 @@ function ShortcutsPane() {
 
 interface ShortcutRowProps {
   title: string;
+  /** Show the Refine mark before the title. */
+  refineMark?: boolean;
   hint: string;
   target: HotkeyTarget;
   /** The slot may be unset: shows "Not set", and reset clears it. */
   optional?: boolean;
+  /** An optional slot that has a default to go back to: it gets
+   *  "Reset to default" next to "Clear". */
+  hasDefault?: boolean;
+  /** Why the binding does nothing right now, when it does nothing:
+   *  the row is marked "Off" and says this under the hint. */
+  inactiveNote?: string | null;
   config: HotkeyConfig | null;
   recordingTarget: HotkeyTarget | null;
   onStart: (target: HotkeyTarget) => void;
   onCancel: () => Promise<void>;
   onReset: (target: HotkeyTarget) => Promise<void>;
+  onClear: (target: HotkeyTarget) => Promise<void>;
 }
 
 function ShortcutRow({
   title,
+  refineMark = false,
   hint,
   target,
   optional = false,
+  hasDefault = false,
+  inactiveNote = null,
   config,
   recordingTarget,
   onStart,
   onCancel,
   onReset,
+  onClear,
 }: ShortcutRowProps) {
   const recording = recordingTarget === target;
   const otherRecording =
@@ -843,8 +973,30 @@ function ShortcutRow({
   return (
     <section className="ow-shortcuts__row">
       <div className="ow-shortcuts__row-label">
-        <div className="ow-shortcuts__row-title">{title}</div>
+        <div className="ow-shortcuts__row-title">
+          {refineMark && (
+            <Sparkles
+              size={13}
+              aria-hidden="true"
+              className="text-muted-foreground"
+            />
+          )}
+          {title}
+          {inactiveNote && (
+            <Badge variant="secondary" data-testid={`shortcut-off-${target}`}>
+              Off
+            </Badge>
+          )}
+        </div>
         <div className="ow-shortcuts__row-hint">{hint}</div>
+        {inactiveNote && (
+          <div
+            className="ow-shortcuts__row-hint"
+            data-testid={`shortcut-off-note-${target}`}
+          >
+            {inactiveNote}
+          </div>
+        )}
       </div>
       <div className="ow-shortcuts__row-control">
         <button
@@ -876,6 +1028,25 @@ function ShortcutRow({
           >
             Cancel
           </button>
+        ) : optional && hasDefault ? (
+          <>
+            <button
+              type="button"
+              className="ow-shortcuts__reset"
+              onClick={() => void onReset(target)}
+              disabled={otherRecording}
+            >
+              Reset to default
+            </button>
+            <button
+              type="button"
+              className="ow-shortcuts__reset"
+              onClick={() => void onClear(target)}
+              disabled={otherRecording || config === null}
+            >
+              Clear
+            </button>
+          </>
         ) : (
           <button
             type="button"

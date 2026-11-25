@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { Sparkles } from "lucide-react";
 import {
   INITIAL_PILL_STATE,
   PILL_STATE_EVENT,
@@ -13,6 +14,16 @@ import "./PillOverlay.css";
 // How long the name of the mode stays up after the user switches mode
 // (the hotkey, the tray menu, the select on Home). Then it fades out.
 const MODE_LABEL_MS = 1500;
+
+// The line about Refine that belongs above the capsule in this state,
+// or null. It is up for the whole of a dictation that goes through
+// Refine: "Refine" while it is recorded and transcribed, "Refining"
+// while the model has the text. Nothing takes it down in between.
+function refineLine(state: PillState): string | null {
+  if (state.status === "idle") return null;
+  if (state.refining === true) return "Refining";
+  return state.willRefine === true ? "Refine" : null;
+}
 
 // Outer capsule width per state. Height (22) and radius (11) stay fixed.
 // Inner SVG canvas is fixed at PILL_INNER_W × PILL_INNER_H; the capsule has
@@ -180,7 +191,35 @@ export function PillOverlay() {
 
   const capsuleRef = useRef<HTMLDivElement>(null);
   const modeLabelRef = useRef<HTMLDivElement>(null);
+  const modeLabelTextRef = useRef<HTMLSpanElement>(null);
   const modeLabelTimerRef = useRef<number | undefined>(undefined);
+
+  // Put a line in the label above the capsule: the name of a mode, or
+  // (with the Refine mark in front) what Refine is doing. `holdMs`
+  // null keeps it up until `hideLabel`. A line with a time on it (a
+  // mode name) gives the place back to the Refine line when that one
+  // still applies. Written straight to the DOM and timed from a ref,
+  // like everything else that moves here.
+  const showLabel = (text: string, refine: boolean, holdMs: number | null) => {
+    const label = modeLabelRef.current;
+    const line = modeLabelTextRef.current;
+    if (!label || !line) return;
+    line.textContent = text;
+    label.dataset.refine = refine ? "true" : "false";
+    label.dataset.visible = "true";
+    window.clearTimeout(modeLabelTimerRef.current);
+    if (holdMs !== null) {
+      modeLabelTimerRef.current = window.setTimeout(() => {
+        const back = refineLine(stateRef.current);
+        if (back) showLabel(back, true, null);
+        else label.dataset.visible = "false";
+      }, holdMs);
+    }
+  };
+  const hideLabel = () => {
+    window.clearTimeout(modeLabelTimerRef.current);
+    if (modeLabelRef.current) modeLabelRef.current.dataset.visible = "false";
+  };
   const rectRefs = useRef<(SVGRectElement | null)[]>(
     Array.from({ length: PARTICLE_COUNT }, () => null),
   );
@@ -199,6 +238,16 @@ export function PillOverlay() {
       const next = event.payload;
       const prev = stateRef.current;
       stateRef.current = next;
+
+      // Refine is said in the line above the capsule and nowhere
+      // else: the capsule moves as it does for any dictation. The
+      // line goes up when the state first calls for it and stays
+      // until the state no longer does (`refineLine`).
+      const line = refineLine(next);
+      if (line !== refineLine(prev)) {
+        if (line) showLabel(line, true, null);
+        else hideLabel();
+      }
 
       if (prev.status !== next.status) {
         const sphere = next.status === "transcribing" || prev.status === "transcribing";
@@ -226,16 +275,10 @@ export function PillOverlay() {
   useEffect(() => {
     const unlisten = listen<ModesChanged>(MODES_CHANGED_EVENT, (event) => {
       const name = event.payload.switched_to;
-      const label = modeLabelRef.current;
       // Other changes to the modes (one added, edited, deleted) are
       // not a switch and show nothing.
-      if (!name || !label) return;
-      label.textContent = name;
-      label.dataset.visible = "true";
-      window.clearTimeout(modeLabelTimerRef.current);
-      modeLabelTimerRef.current = window.setTimeout(() => {
-        label.dataset.visible = "false";
-      }, MODE_LABEL_MS);
+      if (!name) return;
+      showLabel(name, false, MODE_LABEL_MS);
     });
     return () => {
       window.clearTimeout(modeLabelTimerRef.current);
@@ -540,8 +583,12 @@ export function PillOverlay() {
         className="pill-mode-label"
         data-testid="pill-mode-label"
         data-visible="false"
+        data-refine="false"
         role="status"
-      />
+      >
+        <Sparkles className="pill-mode-label__icon" aria-hidden="true" />
+        <span ref={modeLabelTextRef} className="pill-mode-label__text" />
+      </div>
       <div
         ref={capsuleRef}
         className="pill-capsule"

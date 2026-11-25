@@ -1,4 +1,4 @@
-import { Settings2 } from "lucide-react";
+import { Settings2, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -18,8 +18,10 @@ import {
 } from "@/components/ui/select";
 import type { HistorySettings } from "@/lib/history";
 import { BUILTIN_MODE_ID } from "@/lib/modes";
+import { effortLabel, refinedByLabel } from "@/lib/refine";
 import { useModes } from "@/lib/use-modes";
 import { useRefineEnabled } from "@/lib/use-refine-enabled";
+import { useRefineModel } from "@/lib/use-refine-model";
 
 interface HomeSwitchesProps {
   // Owned by HomePane, which also feeds the history list from it.
@@ -44,11 +46,20 @@ export function HomeSwitches({ history, onHistoryChange, onOpenSettings }: HomeS
   const refine = useRefineEnabled();
   const modes = useModes();
   const refineOn = refine.enabled === true;
+  // Who would refine a dictation, and how hard it is asked to think:
+  // "Sonnet 5.5 · Low". Shown with the switch off too, since
+  // the refine key and a long press use it all the same.
+  const inUse = useRefineModel();
+  const refineWith = inUse
+    ? [refinedByLabel(inUse.model, inUse.backend), effortLabel(inUse.effort)]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
   const modeItems = (modes.state?.modes ?? []).map((m) => ({ value: m.id, label: m.name }));
 
   return (
     <div className="ow-home-switches" data-testid="home-switches">
-      <Field orientation="horizontal" className="ow-home-switch">
+      <Field orientation="horizontal" className="ow-home-switch ow-home-switch--with-note">
         <FieldContent>
           <FieldLabel htmlFor="home-refine">Refine</FieldLabel>
           <FieldDescription>
@@ -74,6 +85,18 @@ export function HomeSwitches({ history, onHistoryChange, onOpenSettings }: HomeS
           disabled={refine.enabled === null}
           onCheckedChange={(next) => void refine.setEnabled(next)}
         />
+        {/* A row of its own under the text and the controls, so the
+            whole line fits: the text column next to them is narrow. */}
+        {refineWith && (
+          <span
+            className="ow-home-switch__model"
+            data-testid="home-refine-model"
+            title={refineWith}
+          >
+            <Sparkles size={11} aria-hidden="true" />
+            {refineWith}
+          </span>
+        )}
       </Field>
       <Field orientation="horizontal" className="ow-home-switch">
         <FieldContent>

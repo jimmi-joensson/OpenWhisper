@@ -112,6 +112,10 @@ pub struct CallUsage {
     /// Claude CLI on a subscription: how full the plan's usage
     /// windows are after this call.
     pub plan: Option<PlanWindows>,
+    /// The exact model that answered, when the backend says: the
+    /// settings name a model loosely (`sonnet`), the backend knows
+    /// which one that was today (`claude-sonnet-5-5`).
+    pub model: Option<String>,
 }
 
 /// The subscription's usage windows, as the Claude CLI reports them
@@ -337,7 +341,7 @@ pub fn backend_for(settings: &RefineSettings) -> Box<dyn Refiner> {
 /// and the current dictionary terms.
 pub fn compose_prompt(settings: &RefineSettings) -> Prompt {
     let matcher = crate::dictionary::current_matcher();
-    Prompt::compose(&settings.instructions, matcher.prompt_terms())
+    Prompt::compose_with(&settings.instructions, matcher.prompt_terms(), prompt::PromptOptions::of(settings))
 }
 
 /// Run `text` through `backend` and apply every safety net: the
@@ -421,7 +425,9 @@ pub fn refine_with(
             };
             match verdict {
                 Ok(()) => RefineOutcome {
-                    text: crate::transcript::finalize_refined(&cleaned),
+                    // The guard has judged the text as the model
+                    // wrote it; only now are its long dashes replaced.
+                    text: crate::transcript::finalize_refined_with(&cleaned, settings.no_long_dashes),
                     raw: text.to_string(),
                     status: RefineStatus::Refined,
                     detail: String::new(),
@@ -517,11 +523,12 @@ impl ModeRun {
                 }
             }
         }
+        let options = prompt::PromptOptions::of(&settings);
         let prompt = if mode.rewrites() {
             settings.instructions = mode.instructions.trim().to_string();
-            Prompt::compose_mode(&mode.name, &mode.instructions, terms)
+            Prompt::compose_mode_with(&mode.name, &mode.instructions, terms, options)
         } else {
-            Prompt::compose(&settings.instructions, terms)
+            Prompt::compose_with(&settings.instructions, terms, options)
         };
         Self {
             settings,
@@ -572,6 +579,49 @@ pub fn refine_text_in_mode(settings: &RefineSettings, choice: &ModeChoice, text:
     let run = apply_mode(settings, choice);
     let mut backend = backend_for(&run.settings);
     run.refine(backend.as_mut(), text)
+}
+
+/// What a dictation would be refined with if it went through Refine
+/// now, for the windows to show next to the Refine switch (TASK-108).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ModelInUse {
+    /// Backend id, e.g. `claude-cli`.
+    pub backend: String,
+    /// The model: the exact one the backend named the last time this
+    /// setting ran (`claude-sonnet-5-5`), otherwise the name in the
+    /// settings (`sonnet`). Empty when none is set.
+    pub model: String,
+    /// The effort id (`low`); empty when none is sent.
+    pub effort: String,
+}
+
+/// The backend, model and effort of the selected mode, with the
+/// cached settings: what the Refine switch, the refine key or a long
+/// press would run. A mode's own model and effort count the way they
+/// do for a dictation ([`apply_mode`]). An app's default mode does
+/// not: this is asked from our own window, where no other app is in
+/// front.
+///
+/// The exact model comes from the stored runs
+/// ([`history::latest_exact_model`]): a name like `sonnet` stands for
+/// a newer model over time, and only a run tells which. Before the
+/// first run it is the name in the settings.
+pub fn model_in_use() -> ModelInUse {
+    let settings = crate::settings::current_refine_settings();
+    let modes = crate::settings::current_modes_settings();
+    let choice = crate::modes::resolve(&modes, &settings, None);
+    // No dictionary terms: they shape the prompt, not the model.
+    let run = ModeRun::with_terms(&settings, &choice, &[]);
+    let backend = run.settings.backend.as_str().to_string();
+    let named = run.settings.active_model().trim().to_string();
+    let exact = crate::stats::store()
+        .filter(|_| !named.is_empty())
+        .and_then(|store| history::latest_exact_model(store, &backend, &named));
+    ModelInUse {
+        backend,
+        model: exact.unwrap_or(named),
+        effort: run.settings.active_effort().to_string(),
+    }
 }
 
 /// Id and name of the frontmost app, for the per-app default mode.
@@ -643,9 +693,14 @@ fn take_warm() -> Option<WarmSlot> {
 /// What a dictation runs as right now: the cached Refine settings,
 /// the mode resolved for the app in front, and its prompt. `None`
 /// with Refine off; then nothing is resolved at all.
-fn current_run() -> Option<ModeRun> {
+///
+/// `forced` is the "dictate with Refine" key (TASK-108): the run is
+/// worked out as if the switch were on, for this one dictation. The
+/// stored switch is not touched, and everything else (backend, mode,
+/// instructions, the word minimum) is what the settings say.
+fn current_run(forced: bool) -> Option<ModeRun> {
     let settings = crate::settings::current_refine_settings();
-    if !settings.enabled {
+    if !settings.enabled && !forced {
         return None;
     }
     let choice = resolve_for_dictation(&settings);
@@ -668,11 +723,18 @@ fn current_run() -> Option<ModeRun> {
 /// user can still switch mode, or app, before they stop talking.
 /// [`run_for_dictation_announced`] checks.
 pub fn warm_for_recording() {
+    warm_for_recording_with(false);
+}
+
+/// [`warm_for_recording`] for a recording that may have been started
+/// with the "dictate with Refine" key: with `forced`, the backend is
+/// warmed with the Refine switch off too.
+pub fn warm_for_recording_with(forced: bool) {
     // Whatever was left from an earlier recording goes first.
     drop(take_warm());
     let epoch = EPOCH.load(Ordering::SeqCst);
     let started = Instant::now();
-    let Some(run) = current_run() else {
+    let Some(run) = current_run(forced) else {
         return;
     };
     let mut backend = backend_for(&run.settings);
@@ -718,8 +780,21 @@ pub fn discard_warm() {
 /// With Refine off, returns [`RefineOutcome::disabled`] and starts
 /// nothing, whatever mode is selected.
 pub fn run_for_dictation_announced(text: &str, before_call: impl FnOnce()) -> RefineOutcome {
+    run_for_dictation_with(text, false, before_call)
+}
+
+/// [`run_for_dictation_announced`] for a dictation that may have been
+/// started or stopped with the "dictate with Refine" key. With
+/// `forced` the text is refined with the Refine switch off too. A
+/// dictation only forced when it was stopped has no warmed backend
+/// and runs cold.
+pub fn run_for_dictation_with(text: &str, forced: bool, before_call: impl FnOnce()) -> RefineOutcome {
     let warm = take_warm();
-    let Some(run) = current_run() else {
+    crate::verbose_log!(
+        "[ow.refine] dictation switch_on={} refine_key={forced}",
+        crate::settings::current_refine_settings().enabled
+    );
+    let Some(run) = current_run(forced) else {
         // Off, or switched off during the recording: `warm` drops.
         return RefineOutcome::disabled(text);
     };
@@ -753,7 +828,7 @@ pub fn run_for_dictation(text: &str) -> RefineOutcome {
 /// built-in mode that takes [`RefineSettings::min_words`] words; a
 /// mode that rewrites sends any text.
 pub fn will_call_backend(text: &str) -> bool {
-    current_run().is_some_and(|run| run.sends(text))
+    current_run(false).is_some_and(|run| run.sends(text))
 }
 
 // --- status and connection test -----------------------------------
@@ -887,6 +962,16 @@ pub(crate) mod test_support {
 
     pub(crate) fn factory() -> Option<Factory> {
         FACTORY.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Install (or with `None` remove) the backend factory without
+    /// taking the test lock: for a test that already holds it through
+    /// another module's scope (`crate::ask::test_support::scope`) and
+    /// wants to see that Refine is *not* called.
+    pub(crate) fn set_factory(make: Option<Factory>) {
+        if let Ok(mut g) = FACTORY.lock() {
+            *g = make;
+        }
     }
 
     /// Holds the global test lock and resets shared state on drop.
@@ -1027,6 +1112,101 @@ mod tests {
         assert!(out.detail.is_empty());
         // The backend got the trimmed transcript, once.
         assert_eq!(calls.lock().unwrap().refined, vec![SAID.trim().to_string()]);
+    }
+
+    /// What a model might return for [`SAID`] with an aside set off
+    /// by em dashes and a range written with an en dash.
+    const DASHED: &str = "I think we should move the meeting with Jeppe \u{2014} to Thursday \u{2014} at 10\u{2013}12.";
+
+    #[test]
+    fn refined_text_has_no_long_dashes_by_default() {
+        let (_, mut stub) = stub_with(|_| Ok(DASHED.into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "I think we should move the meeting with Jeppe - to Thursday - at 10-12. ");
+        // What was said is kept as it was said.
+        assert_eq!(out.raw, SAID);
+    }
+
+    #[test]
+    fn with_the_switch_off_the_refined_text_keeps_its_dashes() {
+        let settings = RefineSettings { no_long_dashes: false, ..on() };
+        let (_, mut stub) = stub_with(|_| Ok(DASHED.into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &settings, SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, format!("{DASHED} "));
+    }
+
+    #[test]
+    fn a_mode_and_a_spoken_instruction_lose_their_long_dashes_too() {
+        let prompt = Prompt::compose_mode("Formal", "Rewrite it in a formal tone.", &[]);
+        let (_, mut stub) = stub_with(|_| Ok("We should \u{2013} I believe \u{2013} move the meeting.".into()));
+        let out = refine_with(&mut stub, &prompt, &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "We should - I believe - move the meeting. ");
+
+        let (_, mut stub) =
+            stub_with(|_| Ok("[instruction: make it formal]\nThe meeting\u{2014}with Jeppe\u{2014}moves.".into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), SAID);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.instruction, "make it formal");
+        assert_eq!(out.text, "The meeting-with Jeppe-moves. ");
+    }
+
+    #[test]
+    fn a_transcript_that_is_typed_as_said_is_never_touched() {
+        // A dash in what was said (a dictionary term, say) survives
+        // every path that does not use the model's text.
+        let said = "so the range is ten \u{2013} twelve and we move the meeting to thursday ";
+        // Rejected by the guard.
+        let (_, mut stub) = stub_with(|_| Ok("Here is a poem about ranges \u{2014} and meetings \u{2014} for you to enjoy today.".into()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+        assert_eq!(out.status, RefineStatus::Rejected);
+        assert_eq!(out.text, said);
+        // Failed, timed out, too short to send.
+        let (_, mut stub) = stub_with(|_| Err(RefineError::Timeout));
+        assert_eq!(refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said).text, said);
+        let (_, mut stub) = stub_with(|_| Ok("unused".into()));
+        let short = "ten \u{2013} twelve ";
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), short);
+        assert_eq!((out.status, out.text.as_str()), (RefineStatus::SkippedShort, short));
+        // And with Refine off nothing is looked at at all.
+        assert_eq!(RefineOutcome::disabled(said).text, said);
+    }
+
+    #[test]
+    fn the_guard_judges_the_text_before_its_dashes_are_replaced() {
+        // A good cleanup that sets an aside off with dashes passes
+        // the strict guard however the dashes are written, and the
+        // text it turns into passes as well: replacing a dash can
+        // neither fail a good cleanup nor let a bad one through.
+        let said = "the report which by the way is late needs a review before friday";
+        for answer in [
+            "The report \u{2014} which by the way is late \u{2014} needs a review before Friday.",
+            "The report\u{2014} which by the way is late\u{2014} needs a review before Friday.",
+            "The report, which by the way is late, needs a review before Friday \u{2013}",
+        ] {
+            assert_eq!(guard::check(said, answer, true), Ok(()), "{answer}");
+            let replaced = crate::dashes::normalize(answer);
+            assert_eq!(guard::check(said, &replaced, true), Ok(()), "{replaced}");
+            let (_, mut stub) = stub_with(move |_| Ok(answer.into()));
+            let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+            assert_eq!(out.status, RefineStatus::Refined, "{answer}");
+            assert!(!crate::dashes::has_long_dash(&out.text), "{}", out.text);
+        }
+        // Right at the length limit: the text as the model wrote it
+        // is what is measured, so the two blanks a replaced dash can
+        // add do not push a cleanup over it.
+        let said = "one two three four";
+        let limit = (said.chars().count() as f64 * 1.5) as usize + 30;
+        let answer = format!("One two three four{}\u{2014}", "!".repeat(limit - said.chars().count() - 1));
+        assert_eq!(answer.chars().count(), limit);
+        assert_eq!(guard::check(said, &answer, true), Ok(()));
+        assert!(crate::dashes::normalize(&answer).chars().count() > limit);
+        let (_, mut stub) = stub_with(move |_| Ok(answer.clone()));
+        let out = refine_with(&mut stub, &Prompt::compose("", &[]), &on(), said);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert!(out.text.ends_with(" - "), "{}", out.text);
     }
 
     #[test]
@@ -1214,6 +1394,43 @@ Friday because there's a release on Thursday."
     }
 
     #[test]
+    fn a_forced_dictation_is_refined_with_the_switch_off() {
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let made = Arc::new(Mutex::new(0usize));
+        let (c, m) = (calls.clone(), made.clone());
+        // The switch is off: `RefineSettings::default()`.
+        let _scope = scope(RefineSettings::default(), move |_| {
+            *m.lock().unwrap() += 1;
+            Box::new(Stub::new(c.clone(), |_| {
+                Ok("I think we should move the meeting with Jeppe to Thursday.".into())
+            }))
+        });
+        // Forced from the start: warmed while recording, then used.
+        warm_for_recording_with(true);
+        assert_eq!(calls.lock().unwrap().warmed, 1);
+        let mut announced = 0;
+        let out = run_for_dictation_with(SAID, true, || announced += 1);
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(out.text, "I think we should move the meeting with Jeppe to Thursday. ");
+        assert_eq!(announced, 1);
+        assert_eq!(*made.lock().unwrap(), 1, "the warmed backend is the one that ran");
+
+        // Forced only when it was stopped: nothing was warmed, so it
+        // runs on a cold backend.
+        warm_for_recording_with(false);
+        assert_eq!(calls.lock().unwrap().warmed, 1);
+        let out = run_for_dictation_with(SAID, true, || {});
+        assert_eq!(out.status, RefineStatus::Refined);
+        assert_eq!(*made.lock().unwrap(), 2);
+
+        // The switch itself is untouched: the next plain dictation is
+        // not refined.
+        assert!(!will_call_backend(SAID));
+        assert_eq!(run_for_dictation(SAID).status, RefineStatus::Disabled);
+        assert_eq!(*made.lock().unwrap(), 2);
+    }
+
+    #[test]
     fn pipeline_warms_at_record_start_and_reuses_that_backend() {
         let calls = Arc::new(Mutex::new(Calls::default()));
         let made = Arc::new(Mutex::new(0usize));
@@ -1319,8 +1536,17 @@ Friday because there's a release on Thursday."
         };
         let run = ModeRun::with_terms(&settings, &choice(&modes_with("dictation"), &settings), &[]);
         assert_eq!(run.settings, settings);
-        assert_eq!(run.prompt, Prompt::compose("Use British spelling.", &[]));
+        // The cleanup prompt, with the dash rule the settings ask for
+        // by default.
+        let dashes = prompt::PromptOptions { no_long_dashes: true };
+        assert_eq!(run.prompt, Prompt::compose_with("Use British spelling.", &[], dashes));
+        assert!(run.prompt.system().contains(prompt::NO_LONG_DASHES_RULE));
         assert!(!run.prompt.is_rewrite());
+        // With the switch off it is the prompt as it always was.
+        let plain = RefineSettings { no_long_dashes: false, ..settings.clone() };
+        let run = ModeRun::with_terms(&plain, &choice(&modes_with("dictation"), &plain), &[]);
+        assert_eq!(run.prompt, Prompt::compose("Use British spelling.", &[]));
+        let run = ModeRun::with_terms(&settings, &choice(&modes_with("dictation"), &settings), &[]);
         assert_eq!(run.mode, ModeUse::default());
         assert!(run.mode.is_builtin());
     }
@@ -1451,6 +1677,40 @@ Friday because there's a release on Thursday."
     }
 
     #[test]
+    fn the_model_in_use_is_the_selected_modes_and_exact_once_a_run_named_it() {
+        let _scope = scope(on(), |_| {
+            Box::new(Stub::new(Arc::new(Mutex::new(Calls::default())), |t| Ok(t.to_string())))
+        });
+        // A model name no other test stores runs under.
+        let mut settings = on();
+        settings.claude_cli.model = "in-use-test".into();
+        settings.claude_cli.effort = RefineEffort::Low;
+        crate::settings::set_refine_settings_cache(settings);
+        let in_use = |model: &str, effort: &str| ModelInUse {
+            backend: "claude-cli".into(),
+            model: model.into(),
+            effort: effort.into(),
+        };
+        // No run yet: the name in the settings.
+        assert_eq!(model_in_use(), in_use("in-use-test", "low"));
+
+        // A run names the exact model: that one from then on.
+        crate::stats::set_store(Arc::new(crate::store::Store::in_memory_for_test()));
+        let store = crate::stats::store().expect("a store is registered");
+        let mut outcome = RefineOutcome::disabled("hello there ");
+        outcome.status = RefineStatus::Refined;
+        outcome.backend = "claude-cli".into();
+        outcome.model = "in-use-test".into();
+        outcome.usage = Some(CallUsage { model: Some("claude-in-use-9-9".into()), ..CallUsage::default() });
+        history::record(store, &history::RefineRun::from_outcome(history::SOURCE_DICTATION, &outcome, 1).unwrap());
+        assert_eq!(model_in_use(), in_use("claude-in-use-9-9", "low"));
+
+        // A selected mode with a model and effort of its own.
+        crate::settings::set_modes_settings_cache(modes_with("write-in-english"));
+        assert_eq!(model_in_use(), in_use("opus", "high"));
+    }
+
+    #[test]
     fn a_custom_mode_without_instructions_cleans_up_with_its_own_model() {
         let settings = on();
         let modes = crate::modes::add(
@@ -1465,7 +1725,7 @@ Friday because there's a release on Thursday."
         let modes = crate::modes::select(&modes, "careful").unwrap();
         let run = ModeRun::with_terms(&settings, &choice(&modes, &settings), &[]);
         assert!(!run.prompt.is_rewrite());
-        assert_eq!(run.prompt, Prompt::compose("", &[]));
+        assert_eq!(run.prompt, Prompt::compose_with("", &[], prompt::PromptOptions { no_long_dashes: true }));
         assert_eq!(run.settings.claude_cli.model, "opus");
         assert_eq!(run.mode.name, "Careful");
     }

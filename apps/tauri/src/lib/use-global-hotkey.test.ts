@@ -30,6 +30,57 @@ describe("hotkeyFor", () => {
   });
 });
 
+describe("the ask slot", () => {
+  const ask: HotkeyConfig = { kind: "modifier-tap", code: "RightOption", mods: [] };
+
+  it("reads the ask target from the ask key", () => {
+    expect(hotkeyFor({ ...unbound, ask }, "ask")).toBe(ask);
+  });
+
+  it("is null when cleared (null, as the backend sends it) or absent", () => {
+    expect(hotkeyFor({ ...unbound, ask: null }, "ask")).toBeNull();
+    expect(hotkeyFor(unbound, "ask")).toBeNull();
+  });
+
+  it("is set and cleared without touching the other slots", () => {
+    const withCycle = { ...unbound, cycle_mode: cycle };
+    const bound = withHotkey(withCycle, "ask", ask);
+    expect(bound).toEqual({ toggle, cancel, cycle_mode: cycle, ask });
+    const cleared = withHotkey(bound, "ask", null);
+    expect(hotkeyFor(cleared, "ask")).toBeNull();
+    expect(hotkeyFor(cleared, "cycle-mode")).toBe(cycle);
+    expect(cleared.toggle).toBe(toggle);
+  });
+});
+
+describe("the refine slot", () => {
+  // The macOS default: two modifier keys together.
+  const refine: HotkeyConfig = {
+    kind: "modifier-combo",
+    code: "RightCommand",
+    mods: ["RightOption"],
+  };
+
+  it("reads the refine target from the refine key", () => {
+    expect(hotkeyFor({ ...unbound, refine }, "refine")).toBe(refine);
+  });
+
+  it("is null when cleared or never set", () => {
+    expect(hotkeyFor({ ...unbound, refine: null }, "refine")).toBeNull();
+    expect(hotkeyFor(unbound, "refine")).toBeNull();
+  });
+
+  it("is set and cleared without touching the other slots or the long press", () => {
+    const base: HotkeySettings = { ...unbound, long_press: "refine" };
+    const bound = withHotkey(base, "refine", refine);
+    expect(bound).toEqual({ toggle, cancel, long_press: "refine", refine });
+    const cleared = withHotkey(bound, "refine", null);
+    expect(hotkeyFor(cleared, "refine")).toBeNull();
+    expect(cleared.long_press).toBe("refine");
+    expect(cleared.toggle).toBe(toggle);
+  });
+});
+
 describe("withHotkey", () => {
   it("replaces one slot and leaves the others", () => {
     const next = withHotkey(unbound, "cancel", cycle);

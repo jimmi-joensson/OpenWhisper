@@ -6,6 +6,12 @@
 //! desktop app's Diagnostics pane and `openwhisper refine history`
 //! read the same data, and so it survives a restart.
 //!
+//! Asks (TASK-97) are rows of the same table, with the source
+//! [`SOURCE_ASK`]: they go through the same backend and draw on the
+//! same plan, so the plan estimate has to count them. The numbers
+//! about Refine itself (how often it fell back, how fast it answers)
+//! leave them out; see [`summarize`].
+//!
 //! **No dictated text is stored**, not even the spoken instruction:
 //! only lengths, timings, the backend's settings, the name of the mode
 //! when it was one the user made, and the reason for a fallback. The
@@ -30,15 +36,19 @@ pub const MAX_ROWS: i64 = 500;
 pub const SOURCE_DICTATION: &str = "dictation";
 /// A run made by the connection test.
 pub const SOURCE_TEST: &str = "test";
+/// An ask (see `crate::ask`), not a Refine run: a question answered
+/// by the same backend. Its status is `answered`, `timeout`,
+/// `unavailable`, `failed` or `cancelled`.
+pub const SOURCE_ASK: &str = "ask";
 
 /// One Refine run.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RefineRun {
     /// Unix epoch milliseconds.
     pub at_ms: i64,
-    /// [`SOURCE_DICTATION`] or [`SOURCE_TEST`].
+    /// [`SOURCE_DICTATION`], [`SOURCE_TEST`] or [`SOURCE_ASK`].
     pub source: String,
-    /// [`RefineStatus`] id.
+    /// [`RefineStatus`] id; for an ask, see [`SOURCE_ASK`].
     pub status: String,
     pub backend: String,
     pub model: String,
@@ -73,6 +83,14 @@ pub struct RefineRun {
     /// user made. `None` for the built-in Dictation mode and for rows
     /// written before modes existed.
     pub mode: Option<String>,
+    /// An ask: from sending the question to the first text of the
+    /// answer. `None` for Refine runs (they do not stream), for asks
+    /// that got no text, and for rows written before asks existed.
+    pub first_text_ms: Option<i64>,
+    /// The exact model that answered, as the backend named it
+    /// (`claude-sonnet-5-5`); `model` is the name in the settings.
+    /// `None` when the backend did not say.
+    pub model_exact: Option<String>,
 }
 
 impl RefineRun {
@@ -106,7 +124,14 @@ impl RefineRun {
             window_7d_used: plan.and_then(|p| p.seven_day_used),
             window_7d_resets_at: plan.and_then(|p| p.seven_day_resets_at),
             mode: (!outcome.mode.is_builtin()).then(|| outcome.mode.name.clone()),
+            first_text_ms: None,
+            model_exact: usage.and_then(|u| u.model.clone()),
         })
+    }
+
+    /// The row is an ask, not a Refine run.
+    pub fn is_ask(&self) -> bool {
+        self.source == SOURCE_ASK
     }
 
     /// A backend was asked (so the timing means something).
@@ -132,8 +157,8 @@ pub fn record(store: &Store, run: &RefineRun) {
              (at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
               chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, tokens_out, \
               cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-              window_7d_resets_at, mode) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              window_7d_resets_at, mode, first_text_ms, model_exact) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.at_ms,
                 run.source,
@@ -156,6 +181,8 @@ pub fn record(store: &Store, run: &RefineRun) {
                 run.window_7d_used,
                 run.window_7d_resets_at,
                 run.mode,
+                run.first_text_ms,
+                run.model_exact,
             ],
         )?;
         c.execute(
@@ -186,6 +213,14 @@ pub fn record_outcome(source: &str, outcome: &RefineOutcome) {
     }
 }
 
+/// Record a ready-made row in the registered store, if there is one.
+/// What an ask calls: it has no [`RefineOutcome`].
+pub fn record_run(run: &RefineRun) {
+    if let Some(store) = crate::stats::store() {
+        record(store, run);
+    }
+}
+
 /// The newest `limit` runs, newest first.
 pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
     store.with_conn(|c| {
@@ -193,7 +228,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
             "SELECT at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
                     chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, \
                     tokens_out, cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-                    window_7d_resets_at, mode \
+                    window_7d_resets_at, mode, first_text_ms, model_exact \
              FROM refine_runs ORDER BY id DESC LIMIT ?",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
@@ -219,6 +254,8 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
                 window_7d_used: r.get(18)?,
                 window_7d_resets_at: r.get(19)?,
                 mode: r.get(20)?,
+                first_text_ms: r.get(21)?,
+                model_exact: r.get(22)?,
             })
         })?;
         let mut out = Vec::new();
@@ -227,6 +264,25 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
         }
         Ok(out)
     })
+}
+
+/// The exact model the backend named the last time `model` (the name
+/// in the settings, `sonnet`) was run on `backend`: which model that
+/// name stands for these days (`claude-sonnet-5-5`). `None` when no
+/// stored run says. Asks count too: same backend, same names.
+pub fn latest_exact_model(store: &Store, backend: &str, model: &str) -> Option<String> {
+    store
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT model_exact FROM refine_runs \
+                 WHERE backend = ? AND model = ? AND model_exact IS NOT NULL AND model_exact != '' \
+                 ORDER BY id DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query_map(params![backend, model], |r| r.get::<_, String>(0))?;
+            Ok(rows.next().transpose()?)
+        })
+        .ok()
+        .flatten()
 }
 
 /// Delete every stored run.
@@ -238,10 +294,24 @@ pub fn clear(store: &Store) -> Result<(), StoreError> {
 }
 
 /// Numbers over a set of runs.
+///
+/// Everything from `refined` to `total_cost_usd` is about Refine and
+/// leaves asks out: an ask that timed out is not a dictation that
+/// fell back, and an answer of several hundred tokens would skew the
+/// tokens "per dictation". Asks are counted on their own, and they
+/// are part of `plan`, which is about the plan as a whole.
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct RefineSummary {
-    /// Runs looked at.
+    /// Rows looked at, asks included.
     pub total: i64,
+    /// Asks among them.
+    pub asks: i64,
+    /// Asks that got an answer.
+    pub asks_answered: i64,
+    /// Over the answered asks: median time to the first text of the
+    /// answer, and to its end.
+    pub ask_median_first_text_ms: Option<i64>,
+    pub ask_median_ms: Option<i64>,
     /// The model's text was used.
     pub refined: i64,
     /// Too short to send.
@@ -297,7 +367,7 @@ pub struct PlanEstimate {
     pub five_hour_resets_at: Option<i64>,
     pub seven_day_used: Option<f64>,
     pub seven_day_resets_at: Option<i64>,
-    /// Refine runs recorded in the current 5-hour window.
+    /// Runs (Refine and asks) recorded in the current 5-hour window.
     pub window_runs: i64,
     /// How far the 5-hour window moved between the first and the
     /// newest of those runs (all plan use in that time).
@@ -320,7 +390,18 @@ pub struct PlanEstimate {
 pub const MIN_PACE_SPAN_MS: i64 = 10 * 60 * 1000;
 
 /// Summarize `runs` (as returned by [`recent`], newest first).
-pub fn summarize(runs: &[RefineRun]) -> RefineSummary {
+pub fn summarize(all_runs: &[RefineRun]) -> RefineSummary {
+    // The Refine numbers are over Refine runs only (see
+    // [`RefineSummary`]).
+    let refine_runs: Vec<RefineRun> = all_runs.iter().filter(|r| !r.is_ask()).cloned().collect();
+    let runs = &refine_runs[..];
+    let answered_asks: Vec<&RefineRun> = all_runs.iter().filter(|r| r.is_ask() && r.status == "answered").collect();
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v
+    };
+    let ask_first_text = sorted(answered_asks.iter().filter_map(|r| r.first_text_ms).collect());
+    let ask_times = sorted(answered_asks.iter().map(|r| r.elapsed_ms).collect());
     let count = |status: &str| runs.iter().filter(|r| r.status == status).count() as i64;
     // Only answers that arrived say something about response time; a
     // timeout would just report the timeout setting.
@@ -345,7 +426,11 @@ pub fn summarize(runs: &[RefineRun]) -> RefineSummary {
     let costs: Vec<f64> = runs.iter().filter_map(|r| r.cost_usd).collect();
 
     RefineSummary {
-        total: runs.len() as i64,
+        total: all_runs.len() as i64,
+        asks: all_runs.iter().filter(|r| r.is_ask()).count() as i64,
+        asks_answered: answered_asks.len() as i64,
+        ask_median_first_text_ms: percentile(&ask_first_text, 50),
+        ask_median_ms: percentile(&ask_times, 50),
         refined: count("refined"),
         skipped: count("skipped-short"),
         fallbacks: runs.iter().filter(|r| r.fell_back()).count() as i64,
@@ -376,7 +461,8 @@ pub fn summarize(runs: &[RefineRun]) -> RefineSummary {
         } else {
             Some(costs.iter().sum())
         },
-        plan: plan_estimate(runs),
+        // The plan is used by asks as much as by dictations.
+        plan: plan_estimate(all_runs),
     }
 }
 
@@ -475,6 +561,24 @@ mod tests {
             window_7d_used: None,
             window_7d_resets_at: None,
             mode: None,
+            first_text_ms: None,
+            model_exact: None,
+        }
+    }
+
+    /// An ask that was answered: first text after `first_ms`, done
+    /// after `elapsed_ms`.
+    fn ask(status: &str, first_ms: Option<i64>, elapsed_ms: i64) -> RefineRun {
+        RefineRun {
+            source: SOURCE_ASK.into(),
+            model: "sonnet".into(),
+            effort: "low".into(),
+            chars_in: 30,
+            chars_out: 400,
+            first_text_ms: first_ms,
+            model_exact: None,
+            detail: if status == "answered" { String::new() } else { format!("{status} reason") },
+            ..run(status, elapsed_ms, Some(2000))
         }
     }
 
@@ -555,6 +659,7 @@ mod tests {
                     seven_day_used: Some(0.21),
                     seven_day_resets_at: Some(1794646800),
                 }),
+                model: None,
             }),
             mode: crate::refine::ModeUse::default(),
         };
@@ -620,7 +725,9 @@ mod tests {
              INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
                 chars_in, chars_out, instruction, detail)
              VALUES (5, 'dictation', 'refined', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '');
-             ALTER TABLE refine_runs ADD COLUMN mode TEXT;",
+             ALTER TABLE refine_runs ADD COLUMN mode TEXT;
+             ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;
+             ALTER TABLE refine_runs ADD COLUMN model_exact TEXT;",
         )
         .unwrap();
         let store = Store::from_connection_for_test(conn);
@@ -628,6 +735,91 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].mode, None);
         assert_eq!(got[0].elapsed_ms, 900);
+        // The same goes for the column asks brought (migration 6),
+        // and for the exact model (migration 7).
+        assert_eq!(got[0].first_text_ms, None);
+        assert_eq!(got[0].model_exact, None);
+        assert_eq!(latest_exact_model(&store, "claude-cli", "sonnet"), None);
+    }
+
+    #[test]
+    fn the_newest_run_says_which_model_a_name_in_the_settings_stands_for() {
+        let store = Store::in_memory_for_test();
+        let named = |model: &str, exact: Option<&str>| RefineRun {
+            model: model.into(),
+            model_exact: exact.map(str::to_string),
+            ..run("refined", 700, None)
+        };
+        record(&store, &named("sonnet", Some("claude-sonnet-5-0")));
+        record(&store, &named("opus", Some("claude-opus-5-5")));
+        record(&store, &named("sonnet", Some("claude-sonnet-5-5")));
+        // A later run that did not say (a timeout) hides nothing.
+        record(&store, &named("sonnet", None));
+        assert_eq!(latest_exact_model(&store, "claude-cli", "sonnet").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(latest_exact_model(&store, "claude-cli", "opus").as_deref(), Some("claude-opus-5-5"));
+        // Another name, or the same name on another backend: unknown.
+        assert_eq!(latest_exact_model(&store, "claude-cli", "haiku"), None);
+        assert_eq!(latest_exact_model(&store, "openai-compatible", "sonnet"), None);
+        assert_eq!(recent(&store, 1).unwrap()[0].model_exact, None);
+        assert_eq!(recent(&store, 2).unwrap()[1].model_exact.as_deref(), Some("claude-sonnet-5-5"));
+    }
+
+    #[test]
+    fn an_ask_round_trips_with_its_time_to_first_text() {
+        let (_dir, store) = fresh_store();
+        let mut answered = ask("answered", Some(620), 2400);
+        answered.tokens_in = Some(900);
+        answered.tokens_out = Some(120);
+        record(&store, &run("refined", 700, None));
+        record(&store, &answered);
+        let got = recent(&store, 10).unwrap();
+        assert_eq!(got[0], answered);
+        assert!(got[0].is_ask());
+        assert_eq!(got[0].first_text_ms, Some(620));
+        // A Refine run in the same table has none.
+        assert_eq!(got[1].first_text_ms, None);
+        assert!(!got[1].is_ask());
+    }
+
+    #[test]
+    fn asks_are_counted_on_their_own_and_stay_out_of_the_refine_numbers() {
+        // Newest first.
+        let runs = vec![
+            ask("timeout", None, 60_000),
+            ask("answered", Some(700), 3000),
+            ask("answered", Some(500), 2000),
+            ask("cancelled", None, 900),
+            run("refined", 800, Some(2500)),
+            run("timeout", 5000, None),
+        ];
+        let s = summarize(&runs);
+        assert_eq!(s.total, 6);
+        assert_eq!((s.asks, s.asks_answered), (4, 2));
+        assert_eq!(s.ask_median_first_text_ms, Some(500));
+        assert_eq!(s.ask_median_ms, Some(2000));
+        // Refine: one refined, one timeout. The ask that timed out is
+        // not a dictation that fell back, and its minute is not a
+        // Refine response time.
+        assert_eq!((s.refined, s.fallbacks, s.timeouts), (1, 1, 1));
+        assert_eq!((s.median_ms, s.max_ms), (Some(800), Some(800)));
+        assert_eq!(s.last_problem, "timeout reason");
+        assert_eq!(s.last_problem_at_ms, Some(1_000));
+
+        // No asks: the ask numbers are empty, the rest as before.
+        let s = summarize(&[run("refined", 800, None)]);
+        assert_eq!((s.asks, s.asks_answered), (0, 0));
+        assert_eq!((s.ask_median_first_text_ms, s.ask_median_ms), (None, None));
+    }
+
+    #[test]
+    fn the_plan_estimate_counts_asks_too() {
+        let mut asked = metered(60, 0.30, 18_000);
+        asked.source = SOURCE_ASK.into();
+        asked.status = "answered".into();
+        let plan = summarize(&[asked, metered(0, 0.10, 18_000)]).plan.unwrap();
+        assert_eq!(plan.window_runs, 2);
+        assert_eq!(plan.five_hour_used, 0.30);
+        assert!((plan.window_moved.unwrap() - 0.20).abs() < 1e-9);
     }
 
     #[test]

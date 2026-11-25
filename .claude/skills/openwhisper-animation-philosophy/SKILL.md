@@ -28,7 +28,7 @@ When in doubt about tier, **demote one**. T2-with-whimsy reads as noise. T1-with
 
 - **T1**: `apps/tauri/src/PillOverlay.tsx`, global hotkey indicator, paste/typing injection (invisible — no motion).
 - **T2**: `record-button.tsx`, `sidebar-nav.tsx`, `transcript-row.tsx` (entry only), `window-controls.tsx`, `mic-glyph.tsx`, all button hover + press states.
-- **T3**: `home-pane.tsx` mount, settings pane switch, `health-banner.tsx`, `diagnostics-pane.tsx` reveals, model-load placeholder (TASK-64).
+- **T3**: `home-pane.tsx` mount, settings pane switch, `health-banner.tsx`, `diagnostics-pane.tsx` reveals, model-load placeholder (TASK-64), `AnswerPanel.tsx` card entrance (fade + 6 px rise, once; nothing animates while the answer streams).
 - **T4**: First-launch onboarding (none today — reserve), milestone success states (none today — reserve).
 
 ## Rules every tier obeys

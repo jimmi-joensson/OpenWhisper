@@ -1119,8 +1119,20 @@ mod tests {
     // Registry + apply_keep_warm (TASK-62.4)
     // -----------------------------------------------------------------
 
+    /// `apply_keep_warm` acts on every registered handle in the
+    /// process. A test that calls it while another one is waiting to
+    /// see its own handle stay loaded re-arms that handle's timer and
+    /// fails the other test, depending on how far apart the two were
+    /// started. The tests that call it take turns.
+    static KEEP_WARM_TESTS: Mutex<()> = Mutex::new(());
+
+    fn keep_warm_turn() -> std::sync::MutexGuard<'static, ()> {
+        KEEP_WARM_TESTS.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn apply_keep_warm_true_cancels_pending_fire_on_registered_handle() {
+        let _turn = keep_warm_turn();
         let calls = Arc::new(AtomicUsize::new(0));
         let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
             "mock-keepwarm-on",
@@ -1148,6 +1160,7 @@ mod tests {
 
     #[test]
     fn apply_keep_warm_false_rearms_with_configured_timeout() {
+        let _turn = keep_warm_turn();
         let calls = Arc::new(AtomicUsize::new(0));
         let h: ModelHandle<u32> = ModelHandle::with_idle_timeout(
             "mock-keepwarm-off",
@@ -1266,6 +1279,7 @@ mod tests {
 
     #[test]
     fn dropped_handles_fall_out_of_registry() {
+        let _turn = keep_warm_turn();
         // Identify our handle's `IdleControl` Arc via `Weak::ptr_eq`
         // so the test stays correct under parallel execution: other
         // tests' handles may also be in the registry, but we only

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { Sparkles } from "lucide-react";
 import {
   INITIAL_PILL_STATE,
   PILL_STATE_EVENT,
@@ -20,6 +21,21 @@ const MODE_LABEL_MS = 1500;
 // with the question. While the capture itself runs it stays up.
 const SCREEN_LABEL = "Screen";
 const SCREEN_LABEL_AFTER_MS = 1000;
+
+// What the label above the capsule is showing: the name of a mode
+// after a switch, "Screen" while an ask looks at the screen, or what
+// Refine is doing (the only one with the Refine mark in front).
+type LabelKind = "mode" | "screen" | "refine";
+
+// The line about Refine that belongs above the capsule in this state,
+// or null. It is up for the whole of a dictation that goes through
+// Refine: "Refine" while it is recorded and transcribed, "Refining"
+// while the model has the text. Nothing takes it down in between.
+function refineLine(state: PillState): string | null {
+  if (state.status === "idle") return null;
+  if (state.refining === true) return "Refining";
+  return state.willRefine === true ? "Refine" : null;
+}
 
 // Outer capsule width per state. Height (22) and radius (11) stay fixed.
 // Inner SVG canvas is fixed at PILL_INNER_W × PILL_INNER_H; the capsule has
@@ -186,14 +202,42 @@ export function PillOverlay() {
   });
 
   const capsuleRef = useRef<HTMLDivElement>(null);
-  // The one label above the capsule. It shows the name of the mode
-  // after a switch and "Screen" while an ask looks at the screen;
-  // whichever came last is what it says.
-  const labelRef = useRef<HTMLDivElement>(null);
-  const labelTimerRef = useRef<number | undefined>(undefined);
+  const modeLabelRef = useRef<HTMLDivElement>(null);
+  const modeLabelTextRef = useRef<HTMLSpanElement>(null);
+  const modeLabelTimerRef = useRef<number | undefined>(undefined);
   // The screen state of the ask on the last tick, to act on changes
   // only (ticks repeat about four times a second while an ask runs).
   const askScreenRef = useRef<AskScreen>("none");
+
+  // Put a line in the one label above the capsule: the name of a
+  // mode, "Screen" while an ask looks at the screen, or (with the
+  // Refine mark in front) what Refine is doing; whichever came last
+  // is what it says. `holdMs` null keeps it up until something hides
+  // or replaces it. A line with a time on it gives the place back to
+  // the Refine line when that one still applies. Written straight to
+  // the DOM and timed from a ref, like everything else that moves
+  // here.
+  const showLabel = (text: string, kind: LabelKind, holdMs: number | null) => {
+    const label = modeLabelRef.current;
+    const line = modeLabelTextRef.current;
+    if (!label || !line) return;
+    line.textContent = text;
+    label.dataset.kind = kind;
+    label.dataset.refine = kind === "refine" ? "true" : "false";
+    label.dataset.visible = "true";
+    window.clearTimeout(modeLabelTimerRef.current);
+    if (holdMs !== null) {
+      modeLabelTimerRef.current = window.setTimeout(() => {
+        const back = refineLine(stateRef.current);
+        if (back) showLabel(back, "refine", null);
+        else label.dataset.visible = "false";
+      }, holdMs);
+    }
+  };
+  const hideLabel = () => {
+    window.clearTimeout(modeLabelTimerRef.current);
+    if (modeLabelRef.current) modeLabelRef.current.dataset.visible = "false";
+  };
   const rectRefs = useRef<(SVGRectElement | null)[]>(
     Array.from({ length: PARTICLE_COUNT }, () => null),
   );
@@ -212,6 +256,16 @@ export function PillOverlay() {
       const next = event.payload;
       const prev = stateRef.current;
       stateRef.current = next;
+
+      // Refine is said in the line above the capsule and nowhere
+      // else: the capsule moves as it does for any dictation. The
+      // line goes up when the state first calls for it and stays
+      // until the state no longer does (`refineLine`).
+      const line = refineLine(next);
+      if (line !== refineLine(prev)) {
+        if (line) showLabel(line, "refine", null);
+        else hideLabel();
+      }
 
       if (prev.status !== next.status) {
         const sphere = next.status === "transcribing" || prev.status === "transcribing";
@@ -232,44 +286,28 @@ export function PillOverlay() {
     };
   }, []);
 
-  // The label above the capsule. It is written straight to the DOM
-  // (text + data attributes the CSS fades on) and timed from a ref, so
-  // it causes no React render and touches neither the capsule nor its
-  // state machine. Two things show in it:
+  // The label above the capsule, for what does not come with the pill
+  // state (the Refine line does, above). It is written straight to
+  // the DOM (text + data attributes the CSS fades on) and timed from
+  // a ref, so it causes no React render and touches neither the
+  // capsule nor its state machine. Two things show in it from here:
   //
   // - Mode switched: the new mode's name, for a moment.
   // - An ask looks at the screen (Vision): "Screen" for as long as the
   //   capture runs and a second after the screenshot went out with
   //   the question. Every capture is visible here while it happens.
   useEffect(() => {
-    // `stayMs` null: up until something else hides or replaces it.
-    const show = (text: string, kind: "mode" | "screen", stayMs: number | null) => {
-      const label = labelRef.current;
-      if (!label) return;
-      label.textContent = text;
-      label.dataset.kind = kind;
-      label.dataset.visible = "true";
-      window.clearTimeout(labelTimerRef.current);
-      if (stayMs !== null) {
-        labelTimerRef.current = window.setTimeout(() => {
-          label.dataset.visible = "false";
-        }, stayMs);
-      }
-    };
     // Only the screen label is taken down from here: a mode name that
     // replaced it runs on its own timer.
     const hideScreen = () => {
-      const label = labelRef.current;
-      if (!label || label.dataset.kind !== "screen") return;
-      window.clearTimeout(labelTimerRef.current);
-      label.dataset.visible = "false";
+      if (modeLabelRef.current?.dataset.kind === "screen") hideLabel();
     };
 
     const unlistenModes = listen<ModesChanged>(MODES_CHANGED_EVENT, (event) => {
       const name = event.payload.switched_to;
       // Other changes to the modes (one added, edited, deleted) are
       // not a switch and show nothing.
-      if (name) show(name, "mode", MODE_LABEL_MS);
+      if (name) showLabel(name, "mode", MODE_LABEL_MS);
     });
 
     const unlistenAsk = listen<AskSnapshot>(ASK_TICK_EVENT, (event) => {
@@ -278,10 +316,10 @@ export function PillOverlay() {
       if (screen === before) return;
       askScreenRef.current = screen;
       if (screen === "capturing") {
-        show(SCREEN_LABEL, "screen", null);
+        showLabel(SCREEN_LABEL, "screen", null);
       } else if (screen === "included") {
         // Also when the capture was over before a tick showed it.
-        show(SCREEN_LABEL, "screen", SCREEN_LABEL_AFTER_MS);
+        showLabel(SCREEN_LABEL, "screen", SCREEN_LABEL_AFTER_MS);
       } else if (before === "capturing") {
         // No screenshot after all (an app that is never captured is
         // in front, no permission), or the ask was stopped. The
@@ -291,7 +329,7 @@ export function PillOverlay() {
     });
 
     return () => {
-      window.clearTimeout(labelTimerRef.current);
+      window.clearTimeout(modeLabelTimerRef.current);
       unlistenModes.then((fn) => fn());
       unlistenAsk.then((fn) => fn());
     };
@@ -590,12 +628,16 @@ export function PillOverlay() {
   return (
     <div className="pill-root">
       <div
-        ref={labelRef}
+        ref={modeLabelRef}
         className="pill-mode-label"
         data-testid="pill-mode-label"
         data-visible="false"
+        data-refine="false"
         role="status"
-      />
+      >
+        <Sparkles className="pill-mode-label__icon" aria-hidden="true" />
+        <span ref={modeLabelTextRef} className="pill-mode-label__text" />
+      </div>
       <div
         ref={capsuleRef}
         className="pill-capsule"

@@ -36,6 +36,8 @@ fn add_in_mode(
             app_id: app.0,
             app_name: app.1,
             mode,
+            refined: "",
+            effort: "",
             kind: "",
             answer: None,
             screen: false,
@@ -57,6 +59,8 @@ fn add_ask(dir: &Path, at_ms: i64, question: &str, answer: &str) -> HistoryEntry
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: KIND_ASK,
             answer: Some(answer),
             screen: false,
@@ -155,6 +159,8 @@ fn empty_text_is_not_stored() {
             app_id: "",
             app_name: "",
             mode: "Formal",
+            refined: "",
+            effort: "",
             kind: "",
             answer: None,
             screen: false,
@@ -549,6 +555,8 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 app_id: Some("com.example.terminal".into()),
                 app_name: Some("Terminal".into()),
                 mode: None,
+                refined: None,
+                effort: None,
                 kind: None,
                 answer: None,
                 screen: false,
@@ -563,6 +571,8 @@ fn a_day_file_from_before_modes_reads_as_it_always_did() {
                 app_id: Some("com.example.chat".into()),
                 app_name: Some("Chatter".into()),
                 mode: None,
+                refined: None,
+                effort: None,
                 kind: None,
                 answer: None,
                 screen: false,
@@ -904,6 +914,8 @@ fn an_answer_given_to_something_that_is_not_an_ask_is_not_stored() {
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: "",
             answer: Some("not an answer to anything"),
             screen: false,
@@ -930,6 +942,8 @@ fn an_ask_with_an_empty_answer_or_question_is_handled() {
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: KIND_ASK,
             answer: Some("an answer"),
             screen: false,
@@ -980,6 +994,8 @@ fn an_entry_can_hold_both_quotes_in_either_order() {
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: KIND_ASK,
             answer: Some("I do not know that company.\nSorry."),
             screen: false,
@@ -1249,6 +1265,8 @@ fn add_ask_with_screen(dir: &Path, at_ms: i64, question: &str, answer: &str) -> 
             app_id: "",
             app_name: "",
             mode: "",
+            refined: "",
+            effort: "",
             kind: KIND_ASK,
             answer: Some(answer),
             screen: true,
@@ -1338,6 +1356,8 @@ fn the_screen_marker_means_something_in_an_ask_only() {
             app_id: "com.example.mail",
             app_name: "Mail",
             mode: "Formal",
+            refined: "",
+            effort: "",
             kind: "",
             answer: None,
             screen: true,
@@ -1455,4 +1475,45 @@ What is the capital of Norway?
     // The entry serializes with the flag, for the history view.
     let json = serde_json::to_value(&page.entries[0]).unwrap();
     assert_eq!(json["screen"], true);
+}
+
+#[test]
+fn the_model_that_refined_an_entry_is_kept_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let at_ms = at(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap(), 9, 30, 0);
+    let stored = append(
+        dir.path(),
+        &NewEntry {
+            at_ms,
+            duration_ms: 4200,
+            text: "Send the report to the team before Friday.",
+            // Refine found nothing to change: no original to keep.
+            original: None,
+            app_id: "",
+            app_name: "",
+            mode: "",
+            refined: "claude-sonnet-5-5",
+            effort: "low",
+            kind: "",
+            answer: None,
+            screen: false,
+        },
+    )
+    .expect("append")
+    .expect("stored");
+    assert_eq!(stored.refined.as_deref(), Some("claude-sonnet-5-5"));
+    assert_eq!(stored.effort.as_deref(), Some("low"));
+
+    let file = fs::read_to_string(day_path(dir.path(), NaiveDate::from_ymd_opt(2026, 11, 25).unwrap())).unwrap();
+    assert!(file.contains("<!-- extra: refined=claude-sonnet-5-5; effort=low -->"), "{file}");
+
+    let page = list(dir.path(), "", 10, 0);
+    assert_eq!(page.entries[0].refined.as_deref(), Some("claude-sonnet-5-5"));
+    assert_eq!(page.entries[0].effort.as_deref(), Some("low"));
+    assert_eq!(page.entries[0].original, None);
+
+    // A plain dictation has no extra line at all.
+    let plain = add(dir.path(), at_ms + 60_000, "Nothing refined here.");
+    assert_eq!(plain.refined, None);
+    assert_eq!(plain.effort, None);
 }

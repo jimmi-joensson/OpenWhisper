@@ -46,12 +46,16 @@
 //! comment line directly under the first: `<!-- extra: key=value;
 //! key=value -->`. Today that is `mode`, the name of the mode the
 //! text was rewritten in (TASK-96), written only for a mode the user
-//! made, `kind=ask` for an ask (below), and `screen=yes` for an ask
-//! that was sent with a screenshot of the screen (TASK-98; only the
-//! fact is kept, never the image). The line is left out when there is
-//! nothing to say, so a plain dictation looks exactly as it did
-//! before modes existed, and an ask without a screenshot exactly as
-//! it did before Vision.
+//! made, `kind=ask` for an ask (below), `screen=yes` for an ask that
+//! was sent with a screenshot of the screen (TASK-98; only the fact
+//! is kept, never the image), and `refined`, the model whose refined
+//! text the entry holds (`refined=claude-sonnet-5-5`; the backend's
+//! id when it has no named model), with `effort`, the effort it was
+//! asked for, after it when one was sent
+//! (`refined=claude-sonnet-5-5; effort=low`). The line is left out
+//! when there is nothing to say, so a plain dictation looks exactly
+//! as it did before modes existed, and an ask without a screenshot
+//! exactly as it did before Vision.
 //!
 //! An ask (TASK-97, `crate::ask`) is kept in the same files: a
 //! question the person asked out loud and the answer they got in the
@@ -151,6 +155,11 @@ const EXTRA_KIND: &str = "kind";
 /// value.
 const EXTRA_SCREEN: &str = "screen";
 const EXTRA_YES: &str = "yes";
+/// Who refined the text: the model, or the backend when it has no
+/// named model.
+const EXTRA_REFINED: &str = "refined";
+/// The effort the refining model was asked for.
+const EXTRA_EFFORT: &str = "effort";
 static DAY_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})\.md$").unwrap());
 static YEAR_DIR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}$").unwrap());
@@ -183,6 +192,16 @@ pub struct HistoryEntry {
     /// for dictations Refine did not change, and for entries written
     /// before modes existed.
     pub mode: Option<String>,
+    /// What refined the text, when Refine's answer was the text that
+    /// was inserted: the model (`sonnet`), or the backend's id when
+    /// it has no named model. Present also when Refine found nothing
+    /// to change, which `original` cannot tell. `None` for a
+    /// dictation Refine did not touch and for entries written before
+    /// the field existed (then `original` still says "refined").
+    pub refined: Option<String>,
+    /// The effort that model was asked for (`low`). `None` when none
+    /// was sent, and whenever `refined` is.
+    pub effort: Option<String>,
     /// What the entry is, when it is not a dictation: [`KIND_ASK`]
     /// for an ask. `None` for a dictation and for entries written
     /// before asks existed.
@@ -213,6 +232,12 @@ pub struct NewEntry<'a> {
     pub app_name: &'a str,
     /// Name of the custom mode that rewrote the text. Empty for none.
     pub mode: &'a str,
+    /// The model (or backend) whose refined text this is. Empty when
+    /// Refine did not produce the text.
+    pub refined: &'a str,
+    /// The effort that model was asked for. Stored only next to
+    /// `refined`.
+    pub effort: &'a str,
     /// Empty for a dictation, [`KIND_ASK`] for an ask (then `text` is
     /// the question).
     pub kind: &'a str,
@@ -414,6 +439,8 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     let mut mode = None;
     let mut kind = None;
     let mut screen = false;
+    let mut refined = None;
+    let mut effort = None;
     if let Some(extra) = chunk.get(text_from).and_then(|l| EXTRA.captures(bare(l))) {
         for pair in extra[1].split(';') {
             let Some((key, value)) = pair.split_once('=') else {
@@ -424,6 +451,8 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
                 EXTRA_MODE => mode = value,
                 EXTRA_KIND => kind = value,
                 EXTRA_SCREEN => screen = value.as_deref() == Some(EXTRA_YES),
+                EXTRA_REFINED => refined = value,
+                EXTRA_EFFORT => effort = value,
                 _ => {}
             }
         }
@@ -472,6 +501,7 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
     // edited by hand since, the text wins.
     let word_count = text.split_whitespace().count() as i64;
 
+    let has_refined = refined.is_some();
     Some(HistoryEntry {
         id,
         at_ms: local_ms(date, time),
@@ -482,6 +512,9 @@ fn parse_block(chunk: &[&str], date: NaiveDate) -> Option<HistoryEntry> {
         app_id,
         app_name,
         mode,
+        refined,
+        // An effort without a model says nothing.
+        effort: effort.filter(|_| has_refined),
         kind,
         answer,
         // Like the answer quote, the key means something in an ask
@@ -527,6 +560,12 @@ fn extra_pairs(entry: &HistoryEntry) -> Vec<String> {
     }
     if entry.screen {
         pairs.push(format!("{EXTRA_SCREEN}={EXTRA_YES}"));
+    }
+    if let Some(by) = entry.refined.as_deref().map(extra_value).filter(|r| !r.is_empty()) {
+        pairs.push(format!("{EXTRA_REFINED}={by}"));
+        if let Some(effort) = entry.effort.as_deref().map(extra_value).filter(|e| !e.is_empty()) {
+            pairs.push(format!("{EXTRA_EFFORT}={effort}"));
+        }
     }
     pairs
 }
@@ -717,6 +756,8 @@ pub fn append(dir: &Path, new: &NewEntry<'_>) -> io::Result<Option<HistoryEntry>
         app_name: non_empty(new.app_name),
         // Stored the way it will read back.
         mode: Some(extra_value(new.mode)).filter(|m| !m.is_empty()),
+        refined: Some(extra_value(new.refined)).filter(|r| !r.is_empty()),
+        effort: Some(extra_value(new.effort)).filter(|e| !e.is_empty() && !new.refined.trim().is_empty()),
         kind: Some(extra_value(new.kind)).filter(|k| !k.is_empty()),
         // Only an ask has an answer: in any other entry the quote
         // would not be read back as one.

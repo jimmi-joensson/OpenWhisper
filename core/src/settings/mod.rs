@@ -132,6 +132,11 @@ pub enum HotkeyKind {
     ModifierTap,
     /// Modifier(s) + non-modifier key, fired on the non-modifier KeyDown.
     Chord,
+    /// Two or more modifier keys held together and let go, with no
+    /// other key pressed meanwhile (TASK-108). `code` is one of the
+    /// keys and `mods` the others, all by their sided names
+    /// ("RightCommand", "RightOption"). Mac-only today.
+    ModifierCombo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -163,6 +168,34 @@ impl HotkeyConfig {
             mods: mods.iter().map(|s| s.to_string()).collect(),
         }
     }
+
+    /// Modifier keys pressed together, by their sided names. The
+    /// names are sorted, so the same keys always give the same
+    /// binding whatever order they were pressed in. `None` for fewer
+    /// than two different keys: one key alone is a
+    /// [`HotkeyConfig::modifier_tap`].
+    #[allow(dead_code)]
+    pub fn modifier_combo(keys: &[&str]) -> Option<Self> {
+        let mut keys: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
+        keys.sort();
+        keys.dedup();
+        if keys.len() < 2 {
+            return None;
+        }
+        let code = keys.remove(0);
+        Some(Self { kind: HotkeyKind::ModifierCombo, code, mods: keys })
+    }
+
+    /// The keys of a [`HotkeyKind::ModifierCombo`], sorted: `code`
+    /// and `mods` together. Two combos are the same binding when
+    /// these are equal.
+    pub fn combo_keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> =
+            std::iter::once(self.code.as_str()).chain(self.mods.iter().map(String::as_str)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -185,7 +218,52 @@ pub struct HotkeySettings {
     /// while Ask is switched on ([`AskSettings::enabled`]).
     #[serde(default = "default_ask_slot")]
     pub ask: Option<HotkeyConfig>,
+    /// Start or stop a dictation that goes through Refine whatever
+    /// the Refine switch says (TASK-108). Like `ask`, the slot has a
+    /// default where the platform has one ([`default_refine_hotkey`]),
+    /// a file written before the slot existed reads with it, and an
+    /// explicit `null` means the user cleared it.
+    #[serde(default = "default_refine_hotkey")]
+    pub refine: Option<HotkeyConfig>,
+    /// What holding the dictation key down does, where the platform
+    /// can tell a long press from a tap ([`LongPressAction`]). Off
+    /// unless the user switches it on; left out of the file while
+    /// off.
+    #[serde(default, skip_serializing_if = "LongPressAction::is_off")]
+    pub long_press: LongPressAction,
 }
+
+/// What a long press of the dictation key does (TASK-108). An enum
+/// and not a switch, so that another use of the long press can be
+/// added as one more choice instead of a second switch that fights
+/// the first.
+///
+/// Only a dictation key that is a single modifier (the macOS default,
+/// a tap on Right Command) has a long press: it fires when the key is
+/// let go, so how long it was held is known by then and a normal tap
+/// is not delayed. A chord fires when its key goes down and has none.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LongPressAction {
+    /// A long press is a tap: the key does the same however long it
+    /// is held.
+    #[default]
+    Off,
+    /// A long press does what the "dictate with Refine" key does
+    /// ([`HotkeyTarget::Refine`]).
+    Refine,
+}
+
+impl LongPressAction {
+    pub fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+}
+
+/// How long the dictation key is held before the press counts as a
+/// long one, in milliseconds. A tap is well under 200 ms; at 400 a
+/// slow tap is still a tap and the hold does not feel like waiting.
+pub const LONG_PRESS_MS: u64 = 400;
 
 fn default_ask_slot() -> Option<HotkeyConfig> {
     Some(default_ask_hotkey())
@@ -204,6 +282,10 @@ pub enum HotkeyTarget {
     /// The "ask instead of dictate" slot. Has a default key and can
     /// be cleared.
     Ask,
+    /// The "dictate with Refine" slot: a dictation that is refined
+    /// even with the Refine switch off. Has a default key on macOS
+    /// and can be cleared.
+    Refine,
 }
 
 impl HotkeyTarget {
@@ -213,6 +295,7 @@ impl HotkeyTarget {
             HotkeyTarget::Cancel => "cancel",
             HotkeyTarget::CycleMode => "cycle-mode",
             HotkeyTarget::Ask => "ask",
+            HotkeyTarget::Refine => "refine",
         }
     }
 
@@ -220,7 +303,7 @@ impl HotkeyTarget {
     /// Dictation needs its toggle and cancel keys; they can be
     /// changed, never removed.
     pub fn is_optional(self) -> bool {
-        matches!(self, HotkeyTarget::CycleMode | HotkeyTarget::Ask)
+        matches!(self, HotkeyTarget::CycleMode | HotkeyTarget::Ask | HotkeyTarget::Refine)
     }
 }
 
@@ -254,12 +337,33 @@ pub fn default_ask_hotkey() -> HotkeyConfig {
     }
 }
 
+/// The key that starts a dictation with Refine until the user picks
+/// another. On macOS: Right Command and Right Option together, the
+/// dictation key and the key next to it. A press of both fired
+/// nothing before the slot existed (two modifier-tap slots held
+/// together fire neither), so the default takes no gesture away.
+/// Elsewhere there is none: every chord near Ctrl+Space either is
+/// taken (Ctrl+Shift+Space asks) or types something on a keyboard
+/// with AltGr (Ctrl+Alt), so the user records one.
+pub fn default_refine_hotkey() -> Option<HotkeyConfig> {
+    #[cfg(target_os = "macos")]
+    {
+        HotkeyConfig::modifier_combo(&["RightCommand", "RightOption"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 pub fn default_settings() -> HotkeySettings {
     HotkeySettings {
         toggle: default_toggle_hotkey(),
         cancel: default_cancel_hotkey(),
         cycle_mode: None,
         ask: Some(default_ask_hotkey()),
+        refine: default_refine_hotkey(),
+        long_press: LongPressAction::Off,
     }
 }
 
@@ -684,6 +788,8 @@ fn merge_loaded(file: SettingsFile) -> HotkeySettings {
         cancel: default_cancel_hotkey(),
         cycle_mode: None,
         ask: Some(default_ask_hotkey()),
+        refine: default_refine_hotkey(),
+        long_press: LongPressAction::Off,
     }
 }
 
@@ -1342,6 +1448,7 @@ pub fn update_hotkey_slot(
         HotkeyTarget::Cancel => current.cancel = config,
         HotkeyTarget::CycleMode => current.cycle_mode = Some(config),
         HotkeyTarget::Ask => current.ask = Some(config),
+        HotkeyTarget::Refine => current.refine = Some(config),
     }
     save_settings_locked(path, current)
 }
@@ -1357,6 +1464,7 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
     match target {
         HotkeyTarget::CycleMode => current.cycle_mode = None,
         HotkeyTarget::Ask => current.ask = None,
+        HotkeyTarget::Refine => current.refine = None,
         HotkeyTarget::Toggle | HotkeyTarget::Cancel => {
             return Err(format!(
                 "The {} shortcut cannot be removed, only changed.",
@@ -1364,6 +1472,15 @@ pub fn clear_hotkey_slot(path: &Path, target: HotkeyTarget) -> Result<(), String
             ));
         }
     }
+    save_settings_locked(path, current)
+}
+
+/// Set what a long press of the dictation key does and persist. Used
+/// by the shell's `settings_set_long_press` command.
+pub fn update_long_press(path: &Path, action: LongPressAction) -> Result<(), String> {
+    let _saving = saving();
+    let mut current = current_settings().unwrap_or_else(default_settings);
+    current.long_press = action;
     save_settings_locked(path, current)
 }
 
@@ -1533,7 +1650,13 @@ mod tests {
 
     #[test]
     fn hotkey_target_ids_match_the_serialized_form() {
-        for t in [HotkeyTarget::Toggle, HotkeyTarget::Cancel, HotkeyTarget::CycleMode, HotkeyTarget::Ask] {
+        for t in [
+            HotkeyTarget::Toggle,
+            HotkeyTarget::Cancel,
+            HotkeyTarget::CycleMode,
+            HotkeyTarget::Ask,
+            HotkeyTarget::Refine,
+        ] {
             assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{}\"", t.as_str()));
         }
         assert_eq!(HotkeyTarget::CycleMode.as_str(), "cycle-mode");
@@ -1541,6 +1664,8 @@ mod tests {
         assert!(!HotkeyTarget::Toggle.is_optional());
         assert_eq!(HotkeyTarget::Ask.as_str(), "ask");
         assert!(HotkeyTarget::Ask.is_optional());
+        assert_eq!(HotkeyTarget::Refine.as_str(), "refine");
+        assert!(HotkeyTarget::Refine.is_optional());
     }
 
     #[test]
@@ -1717,6 +1842,121 @@ mod tests {
         set_ask_settings_cache(AskSettings::default());
         set_modes_settings_cache(ModesSettings::default());
         set_refine_settings_cache(RefineSettings::default());
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+    }
+
+    #[test]
+    fn hotkeys_written_before_the_refine_slot_read_with_its_default_key() {
+        let old = r#"{"toggle":{"kind":"chord","code":"Space","mods":["Ctrl"]},"cancel":{"kind":"chord","code":"Escape","mods":[]}}"#;
+        let parsed: HotkeySettings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.refine, default_refine_hotkey());
+        assert_eq!(default_settings().refine, default_refine_hotkey());
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            default_refine_hotkey(),
+            Some(HotkeyConfig {
+                kind: HotkeyKind::ModifierCombo,
+                code: "RightCommand".into(),
+                mods: vec!["RightOption".into()],
+            })
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(default_refine_hotkey(), None);
+
+        // Cleared is written as null and reads back as cleared.
+        let cleared = HotkeySettings { refine: None, ..parsed.clone() };
+        let json = serde_json::to_string(&cleared).unwrap();
+        assert!(json.contains("\"refine\":null"), "{json}");
+        assert_eq!(serde_json::from_str::<HotkeySettings>(&json).unwrap().refine, None);
+
+        let combo = HotkeyConfig::modifier_combo(&["RightShift", "RightCommand"]).unwrap();
+        let bound = HotkeySettings { refine: Some(combo), ..parsed };
+        let json = serde_json::to_string(&bound).unwrap();
+        assert!(json.contains("\"kind\":\"modifier-combo\""), "{json}");
+        assert_eq!(serde_json::from_str::<HotkeySettings>(&json).unwrap(), bound);
+
+        let legacy: SettingsFile = serde_json::from_str(r#"{"hotkey":{"kind":"chord","code":"F5","mods":[]}}"#).unwrap();
+        assert_eq!(merge_loaded(legacy).refine, default_refine_hotkey());
+    }
+
+    #[test]
+    fn the_long_press_is_off_until_set_and_left_out_of_the_file_while_off() {
+        let _lock = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _cache = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let old = r#"{"toggle":{"kind":"chord","code":"Space","mods":["Ctrl"]},"cancel":{"kind":"chord","code":"Escape","mods":[]}}"#;
+        let parsed: HotkeySettings = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.long_press, LongPressAction::Off);
+        assert!(!serde_json::to_string(&parsed).unwrap().contains("long_press"));
+        assert_eq!(default_settings().long_press, LongPressAction::Off);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        update_long_press(&path, LongPressAction::Refine).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"long_press\": \"refine\""), "{text}");
+        assert_eq!(current_settings().unwrap().long_press, LongPressAction::Refine);
+        // A slot saved afterwards keeps it.
+        update_hotkey_slot(&path, HotkeyTarget::CycleMode, HotkeyConfig::chord("KeyM", &["Ctrl"])).unwrap();
+        assert_eq!(current_settings().unwrap().long_press, LongPressAction::Refine);
+        update_long_press(&path, LongPressAction::Off).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("long_press"));
+
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+    }
+
+    #[test]
+    fn a_modifier_combo_is_the_same_binding_in_any_key_order() {
+        let a = HotkeyConfig::modifier_combo(&["RightOption", "RightCommand"]).unwrap();
+        let b = HotkeyConfig::modifier_combo(&["RightCommand", "RightOption"]).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.combo_keys(), vec!["RightCommand", "RightOption"]);
+        // A file edited by hand may name the keys the other way round.
+        let by_hand = HotkeyConfig {
+            kind: HotkeyKind::ModifierCombo,
+            code: "RightOption".into(),
+            mods: vec!["RightCommand".into()],
+        };
+        assert_eq!(by_hand.combo_keys(), a.combo_keys());
+        // One key, or the same key twice, is not a combo.
+        assert_eq!(HotkeyConfig::modifier_combo(&["RightCommand"]), None);
+        assert_eq!(HotkeyConfig::modifier_combo(&["RightCommand", "RightCommand"]), None);
+    }
+
+    #[test]
+    fn the_refine_slot_can_be_set_and_cleared() {
+        let _lock = HOTKEY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The hotkey block rides along in every other block's save,
+        // so this also waits for the tests that write those.
+        let _cache = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        if let Ok(mut g) = CURRENT.lock() {
+            *g = None;
+        }
+        let read = || -> HotkeySettings {
+            let on_disk: SettingsFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            on_disk.hotkeys.unwrap()
+        };
+
+        let chord = HotkeyConfig::chord("KeyR", &["Ctrl", "Alt"]);
+        update_hotkey_slot(&path, HotkeyTarget::Refine, chord.clone()).unwrap();
+        assert_eq!(read().refine, Some(chord));
+        assert_eq!(read().ask, Some(default_ask_hotkey()));
+
+        clear_hotkey_slot(&path, HotkeyTarget::Refine).unwrap();
+        assert_eq!(read().refine, None);
+        assert_eq!(current_settings().unwrap().refine, None);
+        // Another slot saved afterwards leaves it cleared.
+        update_hotkey_slot(&path, HotkeyTarget::CycleMode, HotkeyConfig::chord("KeyM", &["Ctrl"])).unwrap();
+        assert_eq!(read().refine, None);
+
         if let Ok(mut g) = CURRENT.lock() {
             *g = None;
         }

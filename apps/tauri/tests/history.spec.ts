@@ -16,6 +16,10 @@ interface Entry {
   original: string | null;
   app_id: string | null;
   app_name: string | null;
+  // Who refined the text, and at what effort; left out on a plain
+  // dictation and on an entry from before the fields.
+  refined?: string | null;
+  effort?: string | null;
 }
 
 interface Seed {
@@ -131,6 +135,59 @@ test.describe("home: history", () => {
     await expect(history.getByRole("heading", { name: "Yesterday" })).toBeVisible();
     // Everything fits on Home, so the link just opens the screen.
     await expect(page.getByTestId("history-see-all")).toHaveText("Open history");
+  });
+
+  test("a refined entry carries the Refine mark, with the model when the entry knows it", async ({
+    page,
+  }) => {
+    await seed(page, {
+      settings: { enabled: true },
+      entries: [
+        // Refined, nothing to change: no original, the field alone
+        // tells. The exact model and the effort, as the backend said.
+        {
+          id: "r4",
+          hoursAgo: 0.5,
+          text: "All good on my side.",
+          original: null,
+          app_id: "com.example.chat",
+          app_name: "Chatter",
+          refined: "claude-sonnet-5-5",
+          effort: "low",
+        },
+        // Stored when only the loose name was known, and no effort.
+        { id: "r3", hoursAgo: 1, text: "See you at nine.", original: null, app_id: null, app_name: null, refined: "sonnet" },
+        // An entry from before the field: the original still tells.
+        {
+          id: "r2",
+          hoursAgo: 2,
+          text: "Send the report to the team before Friday.",
+          original: "send the reaport to the team before friday",
+          app_id: null,
+          app_name: null,
+        },
+        // A plain dictation.
+        { id: "r1", hoursAgo: 3, text: "Remember to book the meeting room.", original: null, app_id: null, app_name: null },
+      ],
+    });
+    await page.goto("/");
+    const rows = page.getByTestId("history-row");
+    await expect(rows).toHaveCount(4);
+    const mark = (n: number) => rows.nth(n).getByTestId("history-row-refined");
+    await expect(mark(0)).toHaveText("Refined · Sonnet 5.5 · Low");
+    await expect(mark(0).locator("svg")).toBeVisible();
+    // Small print, like the time and the app next to it: same
+    // font, size and colour, and no box around it.
+    const print = (el: Element) => {
+      const c = getComputedStyle(el);
+      return [c.fontFamily, c.fontSize, c.color, c.borderTopWidth].join("|");
+    };
+    expect(await mark(0).evaluate(print)).toBe(
+      await rows.nth(0).getByTestId("history-row-app").evaluate(print),
+    );
+    await expect(mark(1)).toHaveText("Refined · Sonnet");
+    await expect(mark(2)).toHaveText("Refined");
+    await expect(mark(3)).toHaveCount(0);
   });
 
   test("deleting an entry on Home removes it", async ({ page }) => {
@@ -416,6 +473,56 @@ test.describe("history screen", () => {
 });
 
 test.describe("home: quick switches", () => {
+  test("the Refine card names the model and effort Refine would use, switch on or off", async ({
+    page,
+  }) => {
+    // The settings as stored: the loose name, until a run names the
+    // exact model.
+    await page.goto("/");
+    await expect(page.getByTestId("home-refine-switch")).not.toBeChecked();
+    const model = page.getByTestId("home-refine-model");
+    await expect(model).toHaveText(/^\S.* · \S+/);
+    await expect(model.locator("svg")).toBeVisible();
+
+    // The exact model a run has named, by family and version.
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineModel?: unknown }).__owRefineModel = {
+        backend: "claude-cli",
+        model: "claude-sonnet-5-5",
+        effort: "low",
+      };
+    });
+    await page.reload();
+    await expect(page.getByTestId("home-refine-model")).toHaveText("Sonnet 5.5 · Low");
+    // One line, inside the card, at the narrowest the window gets:
+    // as tall as one line of its small print, no wider than the card.
+    await page.setViewportSize({ width: 724, height: 825 });
+    const fits = await page.getByTestId("home-refine-model").evaluate((el) => {
+      const card = el.closest(".ow-home-switch")!.getBoundingClientRect();
+      const line = el.getBoundingClientRect();
+      return {
+        oneLine: line.height <= parseFloat(getComputedStyle(el).lineHeight) + 1,
+        inside: line.left >= card.left && line.right <= card.right,
+        whole: el.scrollWidth <= el.clientWidth,
+      };
+    });
+    expect(fits).toEqual({ oneLine: true, inside: true, whole: true });
+    await page.getByTestId("home-refine-switch").click();
+    await expect(page.getByTestId("home-refine-switch")).toBeChecked();
+    await expect(page.getByTestId("home-refine-model")).toHaveText("Sonnet 5.5 · Low");
+
+    // No effort sent, no known model: the backend alone.
+    await page.addInitScript(() => {
+      (window as unknown as { __owRefineModel?: unknown }).__owRefineModel = {
+        backend: "openai-compatible",
+        model: "",
+        effort: "",
+      };
+    });
+    await page.reload();
+    await expect(page.getByTestId("home-refine-model")).toHaveText("OpenAI-compatible");
+  });
+
   test("the Refine switch follows the saved setting and saves a change", async ({ page }) => {
     await page.addInitScript(() => {
       (window as unknown as { __owRefineSettings: unknown }).__owRefineSettings = { enabled: true };

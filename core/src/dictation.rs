@@ -81,6 +81,11 @@ struct State {
     /// The ask the recording in flight belongs to
     /// ([`crate::ask::mark_listening`]); 0 for none.
     ask_id: u64,
+    /// The dictation in flight goes through Refine whatever the
+    /// Refine switch says: it was started or stopped with the
+    /// "dictate with Refine" key ([`dictation_request_toggle_refined`]).
+    /// Set again by every toggle that starts a recording.
+    refine_forced: bool,
     status_message: String,
     transcript: String,
     /// Dictionary fixes made in `transcript` (see
@@ -133,6 +138,13 @@ pub struct RefineInfo {
     pub instruction: String,
     /// Backend id, e.g. `claude-cli`.
     pub backend: String,
+    /// The model that answered: the exact one when the backend says
+    /// (`claude-sonnet-5-5`), otherwise as the settings (or the mode)
+    /// name it (`sonnet`). Empty when the backend has no named model.
+    pub model: String,
+    /// The effort the model was asked for (`low`); empty when none
+    /// was sent.
+    pub effort: String,
     /// Time spent waiting for the backend.
     pub elapsed_ms: u64,
     /// Name of the mode the dictation ran in (TASK-96), when there is
@@ -169,6 +181,12 @@ impl RefineInfo {
             detail: outcome.detail.clone(),
             instruction: outcome.instruction.clone(),
             backend: outcome.backend.clone(),
+            model: outcome
+                .usage
+                .as_ref()
+                .and_then(|used| used.model.clone())
+                .unwrap_or_else(|| outcome.model.clone()),
+            effort: outcome.effort.clone(),
             elapsed_ms: outcome.elapsed_ms,
             // Dictation as the selected mode is the plain case and
             // gets no label. Dictation because the app says so does:
@@ -181,12 +199,18 @@ impl RefineInfo {
     }
 }
 
+/// The status string while the transcript is with the Refine backend
+/// ([`dictation_mark_refining`]). [`DictationSnapshot::refining`]
+/// reads it, so the windows do not compare strings.
+const STATUS_REFINING: &str = "refining…";
+
 impl State {
     fn new() -> Self {
         Self {
             phase: PHASE_IDLE,
             kind: SessionKind::Dictation,
             ask_id: 0,
+            refine_forced: false,
             status_message: "idle — tap Record, speak, tap again".to_string(),
             transcript: String::new(),
             replacements: Vec::new(),
@@ -217,6 +241,9 @@ impl State {
 pub struct DictationSnapshot {
     phase: u32,
     session_kind: SessionKind,
+    refine_forced: bool,
+    will_refine: bool,
+    refining: bool,
     status_message: String,
     transcript: String,
     replacements: Vec<crate::dictionary::Replacement>,
@@ -241,6 +268,29 @@ impl DictationSnapshot {
     /// (not part of the swift-bridge surface).
     pub fn session_kind(&self) -> SessionKind {
         self.session_kind
+    }
+    /// The dictation in flight (or the last one) was started or
+    /// stopped with the "dictate with Refine" key, so it is refined
+    /// with the Refine switch off too. Rust-only (not part of the
+    /// swift-bridge surface).
+    pub fn refine_forced(&self) -> bool {
+        self.refine_forced
+    }
+    /// The dictation in flight goes through Refine: the Refine switch
+    /// is on, or it was started or stopped with the "dictate with
+    /// Refine" key. True from the start of the recording (from the
+    /// stop, when only the stop key marked it) until the text is
+    /// delivered, so the pill can say so the whole time. A very
+    /// short text is still not sent
+    /// ([`crate::settings::RefineSettings::min_words`]). Rust-only.
+    pub fn will_refine(&self) -> bool {
+        self.will_refine
+    }
+    /// The transcript is with the Refine backend right now
+    /// ([`dictation_mark_refining`]). The phase is TRANSCRIBING for
+    /// the whole of it. Rust-only.
+    pub fn refining(&self) -> bool {
+        self.refining
     }
     pub fn status_message(&self) -> String {
         self.status_message.clone()
@@ -385,9 +435,18 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 pub fn dictation_snapshot() -> DictationSnapshot {
+    // Read before the state lock is taken: the two locks are never
+    // held together.
+    let refine_on = refine_switch_on();
     with_state(|s| DictationSnapshot {
         phase: s.phase,
         session_kind: s.kind,
+        refine_forced: s.refine_forced,
+        will_refine: matches!(s.phase, PHASE_RECORDING | PHASE_TRANSCRIBING)
+            && s.kind == SessionKind::Dictation
+            && cfg!(feature = "refine")
+            && (refine_on || s.refine_forced),
+        refining: s.phase == PHASE_TRANSCRIBING && s.status_message == STATUS_REFINING,
         status_message: s.status_message.clone(),
         transcript: s.transcript.clone(),
         replacements: s.replacements.clone(),
@@ -404,6 +463,12 @@ pub fn dictation_snapshot() -> DictationSnapshot {
         download_bytes_done: s.download_bytes_done,
         download_bytes_total: s.download_bytes_total,
     })
+}
+
+/// The Refine switch, as cached. `false` without the `refine`
+/// feature: then nothing is ever refined.
+fn refine_switch_on() -> bool {
+    cfg!(feature = "refine") && crate::settings::current_refine_settings().enabled
 }
 
 /// Snapshot for the crash inspector. Reads the dictation state via
@@ -447,15 +512,47 @@ pub fn dictation_request_toggle() -> u32 {
 /// the Refine result of the last dictation where they are: they
 /// belong to that dictation, and an ask puts nothing in their place.
 pub fn dictation_request_toggle_kind(kind: SessionKind) -> u32 {
+    request_toggle(kind, false)
+}
+
+/// [`dictation_request_toggle`] from the "dictate with Refine" key
+/// (TASK-108): the dictation goes through Refine for this once,
+/// whatever the Refine switch says. It works at either end of a
+/// recording:
+///
+/// - **Starting one**: a dictation that will be refined. The backend
+///   warms up while the user talks, like with the switch on.
+/// - **Stopping one**: a dictation started with the plain key is
+///   refined after all (on a cold backend, about a second slower).
+///   An ask recording is stopped as the ask it is.
+///
+/// The plain key never takes the mark off again: a dictation started
+/// with this key and stopped with the plain one is still refined.
+pub fn dictation_request_toggle_refined() -> u32 {
+    request_toggle(SessionKind::Dictation, true)
+}
+
+/// Whether the dictation in flight (or the last one) is refined
+/// whatever the Refine switch says. See
+/// [`dictation_request_toggle_refined`].
+pub fn dictation_refine_forced() -> bool {
+    with_state(|s| s.refine_forced)
+}
+
+fn request_toggle(kind: SessionKind, refine: bool) -> u32 {
     with_state(|s| {
         if !s.can_toggle() {
             return TOGGLE_IGNORE;
         }
         if s.phase == PHASE_RECORDING {
+            if refine && s.kind == SessionKind::Dictation {
+                s.refine_forced = true;
+            }
             TOGGLE_STOP_RECORDING
         } else {
             s.kind = kind;
             s.ask_id = 0;
+            s.refine_forced = refine && kind == SessionKind::Dictation;
             if kind == SessionKind::Dictation {
                 // Fresh session: clear previous transcript/error so the UI
                 // doesn't briefly show stale content while the shell spins up.
@@ -646,7 +743,7 @@ pub fn dictation_mark_capture_stopped(sample_count: u64) {
 pub fn dictation_mark_refining() {
     with_state(|s| {
         if s.phase == PHASE_TRANSCRIBING {
-            s.status_message = "refining…".to_string();
+            s.status_message = STATUS_REFINING.to_string();
         }
     });
     crate::crashes::event_buffer::push_event(
@@ -672,7 +769,8 @@ fn refine_stage(cleaned: &str) -> String {
     // The mode is worked out once, when the transcript is ready (see
     // `run_for_dictation_announced`); the status goes up from there,
     // only when the text is really sent.
-    let outcome = crate::refine::run_for_dictation_announced(cleaned, dictation_mark_refining);
+    let outcome =
+        crate::refine::run_for_dictation_with(cleaned, dictation_refine_forced(), dictation_mark_refining);
     if let Some(info) = RefineInfo::from_outcome(&outcome) {
         dictation_set_refine_result(info);
     }
@@ -689,10 +787,15 @@ fn refine_stage(cleaned: &str) -> String {
 #[cfg(feature = "recognizer")]
 fn refine_warm<E: DictationEnv>(env: &E) {
     #[cfg(feature = "refine")]
-    env.spawn(
-        "openwhisper-refine-warm",
-        Box::new(crate::refine::warm_for_recording),
-    );
+    {
+        // Read here, on the toggle's thread: the mark was set by the
+        // toggle that started this recording.
+        let forced = dictation_refine_forced();
+        env.spawn(
+            "openwhisper-refine-warm",
+            Box::new(move || crate::refine::warm_for_recording_with(forced)),
+        );
+    }
     #[cfg(not(feature = "refine"))]
     let _ = env;
 }
@@ -933,10 +1036,19 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
             // text: a custom mode whose answer was used. The built-in
             // mode is never written, also when the snapshot names it
             // (an app default).
-            let (original, mode) = with_state(|s| {
-                let custom = s.refine.status == "refined" && !s.refine.mode_builtin;
+            // Likewise who refined it, and at what effort: only when
+            // the answer was used.
+            let (original, mode, refined_by, effort) = with_state(|s| {
+                let refined = s.refine.status == "refined";
+                let custom = refined && !s.refine.mode_builtin;
                 let mode = if custom { s.refine.mode.clone() } else { String::new() };
-                (s.refine.raw_transcript.clone(), mode)
+                let by = match (refined, s.refine.model.is_empty()) {
+                    (false, _) => String::new(),
+                    (true, false) => s.refine.model.clone(),
+                    (true, true) => s.refine.backend.clone(),
+                };
+                let effort = if refined { s.refine.effort.clone() } else { String::new() };
+                (s.refine.raw_transcript.clone(), mode, by, effort)
             });
             let (app_id, app_name) = delivered_to_app();
             let at_ms = if started_at_ms > 0 { started_at_ms } else { crate::history::now_ms() };
@@ -948,6 +1060,8 @@ pub fn dictation_deliver_transcript(text: &str, confidence: f32) {
                 app_id: &app_id,
                 app_name: &app_name,
                 mode: &mode,
+                refined: &refined_by,
+                effort: &effort,
                 kind: "",
                 answer: None,
                 screen: false,
@@ -1092,6 +1206,21 @@ pub fn run_toggle<E: DictationEnv>(env: &E) -> Result<(), String> {
 /// not end up typed as a dictation.
 #[cfg(feature = "recognizer")]
 pub fn run_toggle_kind<E: DictationEnv>(env: &E, kind: SessionKind) -> Result<(), String> {
+    run_toggle_with(env, kind, false)
+}
+
+/// [`run_toggle`] from the "dictate with Refine" key: the dictation
+/// it starts or stops is refined whatever the Refine switch says.
+/// See [`dictation_request_toggle_refined`] for what that means at
+/// each end of a recording. Without the `refine` feature this is
+/// [`run_toggle`].
+#[cfg(feature = "recognizer")]
+pub fn run_toggle_refined<E: DictationEnv>(env: &E) -> Result<(), String> {
+    run_toggle_with(env, SessionKind::Dictation, true)
+}
+
+#[cfg(feature = "recognizer")]
+fn run_toggle_with<E: DictationEnv>(env: &E, kind: SessionKind, refine: bool) -> Result<(), String> {
     // Gate: starting a recording without mic authorization would flip the
     // phase machine to RECORDING, fail at audio_start_capture, then
     // bounce back to ERROR — confusing UX. The mic-banner already tells
@@ -1108,7 +1237,7 @@ pub fn run_toggle_kind<E: DictationEnv>(env: &E, kind: SessionKind) -> Result<()
         crate::verbose_log!("[ow.dictation] ask toggle ignored: Ask is switched off");
         return Ok(());
     }
-    let action = dictation_request_toggle_kind(kind);
+    let action = request_toggle(kind, refine);
     match action {
         TOGGLE_BEGIN_RECORDING => {
             let t_start = std::time::Instant::now();
@@ -1533,6 +1662,8 @@ mod tests {
             detail: String::new(),
             instruction: String::new(),
             backend: "claude-cli".into(),
+            model: "sonnet".into(),
+            effort: "low".into(),
             elapsed_ms: 740,
             mode: "Formal".into(),
             mode_builtin: false,
@@ -1600,6 +1731,101 @@ mod tests {
     }
 
     #[test]
+    fn history_entry_names_what_refined_it_only_when_the_answer_was_used() {
+        let _lock = start();
+        let with_model = |status: &str, model: &str| RefineInfo {
+            model: model.into(),
+            effort: "low".into(),
+            ..refined_in("", status)
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let entry = deliver_with_history(dir.path(), Some(with_model("refined", "claude-sonnet-5-5")));
+        assert_eq!(entry.refined.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(entry.effort.as_deref(), Some("low"));
+        // A backend without a named model: its id.
+        let dir = tempfile::tempdir().unwrap();
+        with_state(|s| *s = State::new());
+        let entry = deliver_with_history(dir.path(), Some(with_model("refined", "")));
+        assert_eq!(entry.refined.as_deref(), Some("claude-cli"));
+        // The answer was not used, or Refine did not run: not refined.
+        for status in ["timeout", "rejected", "unavailable", "failed", "skipped-short"] {
+            let dir = tempfile::tempdir().unwrap();
+            with_state(|s| *s = State::new());
+            let entry = deliver_with_history(dir.path(), Some(with_model(status, "sonnet")));
+            assert_eq!(entry.refined, None, "{status}");
+            assert_eq!(entry.effort, None, "{status}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        with_state(|s| *s = State::new());
+        assert_eq!(deliver_with_history(dir.path(), None).refined, None);
+    }
+
+    #[test]
+    fn the_snapshot_says_when_a_dictation_will_be_and_is_being_refined() {
+        let _lock = start();
+        let _cache = crate::settings::CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let switch = |enabled: bool| {
+            crate::settings::set_refine_settings_cache(crate::settings::RefineSettings {
+                enabled,
+                ..crate::settings::RefineSettings::default()
+            });
+        };
+        let can_refine = cfg!(feature = "refine");
+
+        // Switch off, plain key: nothing to announce, at any point.
+        switch(false);
+        assert!(!dictation_snapshot().will_refine());
+        assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(!dictation_snapshot().will_refine());
+        assert!(!dictation_snapshot().refining());
+        // Stopped with the refine key: from then on it will be, and
+        // that holds while the recording is transcribed. "Is" starts
+        // when the text is handed to the backend.
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_STOP_RECORDING);
+        dictation_mark_transcribing_pending();
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        assert!(!dictation_snapshot().refining());
+        dictation_mark_capture_stopped(16000);
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        dictation_mark_refining();
+        assert!(dictation_snapshot().refining());
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        // Delivered: both are over.
+        dictation_deliver_transcript("Hello, world. ", 0.9);
+        assert!(!dictation_snapshot().refining());
+        assert!(!dictation_snapshot().will_refine());
+
+        // Started with the refine key: announced while recording.
+        with_state(|s| *s = State::new());
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        assert!(dictation_request_cancel());
+        assert!(!dictation_snapshot().will_refine());
+
+        // Switch on, plain key: the same announcement, through the
+        // transcribing too. An ask never.
+        switch(true);
+        assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        assert_eq!(dictation_request_toggle(), TOGGLE_STOP_RECORDING);
+        dictation_mark_transcribing_pending();
+        assert_eq!(dictation_snapshot().will_refine(), can_refine);
+        with_state(|s| *s = State::new());
+        assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(dictation_request_cancel());
+        assert!(!dictation_snapshot().will_refine());
+        assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(!dictation_snapshot().will_refine());
+
+        switch(false);
+    }
+
+    #[test]
     fn history_entry_has_no_mode_for_dictation_or_when_refine_did_not_change_the_text() {
         let _lock = start();
         // The built-in mode: `mode` is empty on the snapshot.
@@ -1634,6 +1860,22 @@ mod tests {
             usage: None,
             mode,
         }
+    }
+
+    #[cfg(feature = "refine")]
+    #[test]
+    fn the_refine_result_names_the_exact_model_when_the_backend_said_and_the_effort() {
+        use crate::refine::{CallUsage, ModeUse};
+        // The backend did not say: the model as the settings name it.
+        let loose = RefineInfo::from_outcome(&outcome_in(ModeUse::default())).unwrap();
+        assert_eq!((loose.model.as_str(), loose.effort.as_str()), ("haiku", "low"));
+        // It did: that one.
+        let exact = RefineInfo::from_outcome(&crate::refine::RefineOutcome {
+            usage: Some(CallUsage { model: Some("claude-haiku-5-5".into()), ..CallUsage::default() }),
+            ..outcome_in(ModeUse::default())
+        })
+        .unwrap();
+        assert_eq!(exact.model, "claude-haiku-5-5");
     }
 
     #[cfg(feature = "refine")]
@@ -1703,6 +1945,133 @@ mod tests {
         assert_eq!(dictation_snapshot().transcript(), "first run");
         let _ = dictation_request_toggle();
         assert_eq!(dictation_snapshot().transcript(), "");
+    }
+
+    // --- the "dictate with Refine" key (TASK-108) ----------------------
+
+    #[test]
+    fn the_refine_key_marks_the_dictation_it_starts_or_stops() {
+        let _lock = start();
+        // A plain dictation is not marked.
+        assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(!dictation_refine_forced());
+        // Stopped with the refine key, it is.
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_STOP_RECORDING);
+        assert!(dictation_refine_forced());
+        assert!(dictation_snapshot().refine_forced());
+        assert_eq!(dictation_snapshot().session_kind(), SessionKind::Dictation);
+
+        // Started with the refine key and stopped with the plain one:
+        // still marked.
+        with_state(|s| *s = State::new());
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(dictation_refine_forced());
+        assert_eq!(dictation_request_toggle(), TOGGLE_STOP_RECORDING);
+        assert!(dictation_refine_forced());
+        dictation_mark_transcribing_pending();
+        // Like the plain key, it does nothing while that is transcribed.
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_IGNORE);
+
+        // The next plain dictation starts without the mark.
+        with_state(|s| s.phase = PHASE_DONE);
+        assert_eq!(dictation_request_toggle(), TOGGLE_BEGIN_RECORDING);
+        assert!(!dictation_refine_forced());
+    }
+
+    /// The stop pipeline's own Refine hooks, start to stop, with a
+    /// backend that counts: the check that a plain dictation never
+    /// reaches the model with the switch off, also right after one
+    /// that did.
+    #[cfg(all(feature = "recognizer", feature = "refine"))]
+    #[test]
+    fn with_the_switch_off_only_a_dictation_marked_by_the_refine_key_reaches_the_backend() {
+        use crate::refine::test_support::{Calls, Stub, scope};
+        use std::sync::{Arc, Mutex};
+
+        /// Runs what the pipeline spawns in place.
+        struct Inline;
+        impl DictationEnv for Inline {
+            fn mic_authorized(&self) -> bool {
+                true
+            }
+            fn pause_audio(&self) {}
+            fn resume_audio(&self) {}
+            fn spawn(&self, _name: &'static str, f: Box<dyn FnOnce() + Send + 'static>) {
+                f();
+            }
+        }
+
+        const SAID: &str = "so i think we should move the meeting with jeppe to thursday ";
+        let _lock = start();
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let made = Arc::new(Mutex::new(0usize));
+        let (c, m) = (calls.clone(), made.clone());
+        // The switch is off.
+        let _scope = scope(crate::settings::RefineSettings::default(), move |_| {
+            *m.lock().unwrap() += 1;
+            Box::new(Stub::new(c.clone(), |t| Ok(t.to_string())))
+        });
+        let backends = || *made.lock().unwrap();
+        let sent = || calls.lock().unwrap().refined.len();
+        // One dictation through the Refine hooks: started and stopped
+        // with the given keys (`true` = the refine key).
+        let dictate = |start_refined: bool, stop_refined: bool| {
+            with_state(|s| *s = State::new());
+            assert_eq!(request_toggle(SessionKind::Dictation, start_refined), TOGGLE_BEGIN_RECORDING);
+            dictation_mark_capture_started();
+            refine_warm(&Inline);
+            assert_eq!(request_toggle(SessionKind::Dictation, stop_refined), TOGGLE_STOP_RECORDING);
+            dictation_mark_transcribing_pending();
+            dictation_mark_capture_stopped(16000);
+            let text = refine_stage(SAID);
+            dictation_deliver_transcript(&text, 0.9);
+            dictation_snapshot()
+        };
+
+        // Plain key at both ends: no backend is built, warmed or asked.
+        let plain = dictate(false, false);
+        assert_eq!((backends(), sent(), calls.lock().unwrap().warmed), (0, 0, 0));
+        assert_eq!(plain.refine(), RefineInfo::default());
+        assert_eq!(plain.transcript(), SAID);
+
+        // The refine key at the start: warmed and asked, once.
+        let forced = dictate(true, false);
+        assert_eq!((backends(), sent()), (1, 1));
+        assert_eq!(forced.refine().status, "refined");
+
+        // Plain again, right after: the mark did not stick.
+        let plain = dictate(false, false);
+        assert_eq!((backends(), sent()), (1, 1));
+        assert_eq!(plain.refine(), RefineInfo::default());
+        assert!(!plain.refine_forced());
+
+        // The refine key only at the stop: asked, on a cold backend.
+        dictate(false, true);
+        assert_eq!((backends(), sent()), (2, 2));
+
+        // And plain once more.
+        dictate(false, false);
+        assert_eq!((backends(), sent()), (2, 2));
+    }
+
+    #[test]
+    fn the_refine_key_stops_an_ask_recording_as_the_ask_it_is() {
+        let _lock = start();
+        assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_STOP_RECORDING);
+        assert_eq!(dictation_snapshot().session_kind(), SessionKind::Ask);
+        assert!(!dictation_refine_forced());
+
+        // And an ask started after a marked dictation is not marked.
+        with_state(|s| *s = State::new());
+        assert_eq!(dictation_request_toggle_refined(), TOGGLE_BEGIN_RECORDING);
+        dictation_mark_capture_started();
+        assert!(dictation_request_cancel());
+        assert_eq!(dictation_request_toggle_kind(SessionKind::Ask), TOGGLE_BEGIN_RECORDING);
+        assert!(!dictation_refine_forced());
     }
 
     // --- the ask kind (TASK-97) ---------------------------------------

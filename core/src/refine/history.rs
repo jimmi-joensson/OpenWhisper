@@ -87,6 +87,10 @@ pub struct RefineRun {
     /// answer. `None` for Refine runs (they do not stream), for asks
     /// that got no text, and for rows written before asks existed.
     pub first_text_ms: Option<i64>,
+    /// The exact model that answered, as the backend named it
+    /// (`claude-sonnet-5-5`); `model` is the name in the settings.
+    /// `None` when the backend did not say.
+    pub model_exact: Option<String>,
     /// An ask: whether a screenshot of the screen was taken for it
     /// (TASK-98). Written for every ask, also one that failed or was
     /// cancelled after the capture, so that a screenshot never leaves
@@ -127,6 +131,7 @@ impl RefineRun {
             window_7d_resets_at: plan.and_then(|p| p.seven_day_resets_at),
             mode: (!outcome.mode.is_builtin()).then(|| outcome.mode.name.clone()),
             first_text_ms: None,
+            model_exact: usage.and_then(|u| u.model.clone()),
             screen: None,
         })
     }
@@ -159,8 +164,8 @@ pub fn record(store: &Store, run: &RefineRun) {
              (at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
               chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, tokens_out, \
               cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-              window_7d_resets_at, mode, first_text_ms, screen) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              window_7d_resets_at, mode, first_text_ms, model_exact, screen) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.at_ms,
                 run.source,
@@ -184,6 +189,7 @@ pub fn record(store: &Store, run: &RefineRun) {
                 run.window_7d_resets_at,
                 run.mode,
                 run.first_text_ms,
+                run.model_exact,
                 run.screen,
             ],
         )?;
@@ -230,7 +236,7 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
             "SELECT at_ms, source, status, backend, model, effort, elapsed_ms, warm_lead_ms, \
                     chars_in, chars_out, instruction, detail, tokens_in, tokens_cached, \
                     tokens_out, cost_usd, window_5h_used, window_5h_resets_at, window_7d_used, \
-                    window_7d_resets_at, mode, first_text_ms, screen \
+                    window_7d_resets_at, mode, first_text_ms, model_exact, screen \
              FROM refine_runs ORDER BY id DESC LIMIT ?",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
@@ -257,7 +263,8 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
                 window_7d_resets_at: r.get(19)?,
                 mode: r.get(20)?,
                 first_text_ms: r.get(21)?,
-                screen: r.get(22)?,
+                model_exact: r.get(22)?,
+                screen: r.get(23)?,
             })
         })?;
         let mut out = Vec::new();
@@ -266,6 +273,25 @@ pub fn recent(store: &Store, limit: u32) -> Result<Vec<RefineRun>, StoreError> {
         }
         Ok(out)
     })
+}
+
+/// The exact model the backend named the last time `model` (the name
+/// in the settings, `sonnet`) was run on `backend`: which model that
+/// name stands for these days (`claude-sonnet-5-5`). `None` when no
+/// stored run says. Asks count too: same backend, same names.
+pub fn latest_exact_model(store: &Store, backend: &str, model: &str) -> Option<String> {
+    store
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT model_exact FROM refine_runs \
+                 WHERE backend = ? AND model = ? AND model_exact IS NOT NULL AND model_exact != '' \
+                 ORDER BY id DESC LIMIT 1",
+            )?;
+            let mut rows = stmt.query_map(params![backend, model], |r| r.get::<_, String>(0))?;
+            Ok(rows.next().transpose()?)
+        })
+        .ok()
+        .flatten()
 }
 
 /// Delete every stored run.
@@ -549,6 +575,7 @@ mod tests {
             window_7d_resets_at: None,
             mode: None,
             first_text_ms: None,
+            model_exact: None,
             screen: None,
         }
     }
@@ -563,6 +590,7 @@ mod tests {
             chars_in: 30,
             chars_out: 400,
             first_text_ms: first_ms,
+            model_exact: None,
             screen: Some(false),
             detail: if status == "answered" { String::new() } else { format!("{status} reason") },
             ..run(status, elapsed_ms, Some(2000))
@@ -646,6 +674,7 @@ mod tests {
                     seven_day_used: Some(0.21),
                     seven_day_resets_at: Some(1794646800),
                 }),
+                model: None,
             }),
             mode: crate::refine::ModeUse::default(),
         };
@@ -713,6 +742,7 @@ mod tests {
              VALUES (5, 'dictation', 'refined', 'claude-cli', 'sonnet', 'low', 900, 40, 42, 0, '');
              ALTER TABLE refine_runs ADD COLUMN mode TEXT;
              ALTER TABLE refine_runs ADD COLUMN first_text_ms INTEGER;
+             ALTER TABLE refine_runs ADD COLUMN model_exact TEXT;
              ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
         )
         .unwrap();
@@ -721,16 +751,19 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].mode, None);
         assert_eq!(got[0].elapsed_ms, 900);
-        // The same goes for the columns asks brought (migrations 6
-        // and 7).
+        // The same goes for the column asks brought (migration 6),
+        // for the exact model (migration 7) and for the screen marker
+        // of an ask (migration 8).
         assert_eq!(got[0].first_text_ms, None);
+        assert_eq!(got[0].model_exact, None);
         assert_eq!(got[0].screen, None);
+        assert_eq!(latest_exact_model(&store, "claude-cli", "sonnet"), None);
     }
 
     #[test]
     fn an_ask_records_whether_a_screenshot_was_taken_and_old_rows_read_as_unknown() {
         // The table as migration 6 left it, with an ask in it, then
-        // the screen column added the way migration 7 adds it.
+        // the columns of migrations 7 and 8 added the way they add them.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE refine_runs (
@@ -744,6 +777,7 @@ mod tests {
              INSERT INTO refine_runs (at_ms, source, status, backend, model, effort, elapsed_ms,
                 chars_in, chars_out, instruction, detail, first_text_ms)
              VALUES (5, 'ask', 'answered', 'claude-cli', 'sonnet', 'low', 2400, 30, 400, 0, '', 620);
+             ALTER TABLE refine_runs ADD COLUMN model_exact TEXT;
              ALTER TABLE refine_runs ADD COLUMN screen INTEGER;",
         )
         .unwrap();
@@ -772,6 +806,28 @@ mod tests {
         let json = serde_json::to_value(&got[3]).unwrap();
         assert_eq!(json["screen"], true);
         assert_eq!(serde_json::to_value(&got[0]).unwrap()["screen"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_newest_run_says_which_model_a_name_in_the_settings_stands_for() {
+        let store = Store::in_memory_for_test();
+        let named = |model: &str, exact: Option<&str>| RefineRun {
+            model: model.into(),
+            model_exact: exact.map(str::to_string),
+            ..run("refined", 700, None)
+        };
+        record(&store, &named("sonnet", Some("claude-sonnet-5-0")));
+        record(&store, &named("opus", Some("claude-opus-5-5")));
+        record(&store, &named("sonnet", Some("claude-sonnet-5-5")));
+        // A later run that did not say (a timeout) hides nothing.
+        record(&store, &named("sonnet", None));
+        assert_eq!(latest_exact_model(&store, "claude-cli", "sonnet").as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(latest_exact_model(&store, "claude-cli", "opus").as_deref(), Some("claude-opus-5-5"));
+        // Another name, or the same name on another backend: unknown.
+        assert_eq!(latest_exact_model(&store, "claude-cli", "haiku"), None);
+        assert_eq!(latest_exact_model(&store, "openai-compatible", "sonnet"), None);
+        assert_eq!(recent(&store, 1).unwrap()[0].model_exact, None);
+        assert_eq!(recent(&store, 2).unwrap()[1].model_exact.as_deref(), Some("claude-sonnet-5-5"));
     }
 
     #[test]

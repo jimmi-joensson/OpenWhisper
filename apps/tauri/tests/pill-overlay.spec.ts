@@ -9,6 +9,8 @@ import { pillTest as test, expect } from "./fixtures/tauri-shim";
 interface PillStatePayload {
   status: "idle" | "recording" | "transcribing";
   levels: number[];
+  willRefine?: boolean;
+  refining?: boolean;
 }
 
 const ZERO_LEVELS = Array.from({ length: 12 }, () => 0);
@@ -150,5 +152,125 @@ test.describe("pill overlay — click-through gating", () => {
         ),
       )
       .toBe(false);
+  });
+});
+
+// The Refine mark (TASK-108): the pill says in a line above the
+// capsule when a dictation goes through Refine, and says nothing when
+// it does not. The capsule itself moves as for any dictation.
+test.describe("pill overlay — Refine", () => {
+  const label = (page: import("@playwright/test").Page) =>
+    page.getByTestId("pill-mode-label");
+  // Where the first dot is, in canvas pixels. It is the lowest point
+  // of the sphere, whose spin leaves it in place.
+  const firstDot = (page: import("@playwright/test").Page) =>
+    page.locator(".pill-svg rect").first().evaluate((el) => {
+      const m = /translate\(([-\d.]+) ([-\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
+      return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+    });
+
+  test("a plain dictation shows no Refine line, recording or transcribing", async ({ page }) => {
+    await page.goto("/");
+    await waitForPillMount(page);
+    await emitPillState(page, { status: "recording", levels: RECORDING_LEVELS });
+    await expectCapsuleRect(page, 105, 33);
+    await expect(label(page)).toHaveAttribute("data-visible", "false");
+    await emitPillState(page, { status: "transcribing", levels: ZERO_LEVELS });
+    await expectCapsuleRect(page, 57, 33);
+    await expect(label(page)).toHaveAttribute("data-visible", "false");
+    await expect(label(page)).toHaveAttribute("data-refine", "false");
+  });
+
+  test("the Refine line stays up for the whole dictation: recording, transcribing, refining", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPillMount(page);
+    // Recording: up at once, and still up long after a mode name
+    // would have gone.
+    await emitPillState(page, {
+      status: "recording",
+      levels: RECORDING_LEVELS,
+      willRefine: true,
+    });
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+    await expect(label(page)).toHaveAttribute("data-refine", "true");
+    await expect(label(page)).toHaveText("Refine");
+    await expect(label(page).locator("svg")).toBeVisible();
+    await page.waitForTimeout(2000);
+    await emitPillState(page, {
+      status: "recording",
+      levels: RECORDING_LEVELS,
+      willRefine: true,
+    });
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+
+    // Stopped, being transcribed: the same line, over the usual
+    // sphere (its lowest dot stays where it is).
+    await emitPillState(page, { status: "transcribing", levels: ZERO_LEVELS, willRefine: true });
+    await expectCapsuleRect(page, 57, 33);
+    await expect(label(page)).toHaveText("Refine");
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+    await expect.poll(async () => (await firstDot(page))?.y ?? 0).toBeGreaterThan(9);
+
+    // With the model: it says so, and the sphere is still the sphere.
+    await emitPillState(page, {
+      status: "transcribing",
+      levels: ZERO_LEVELS,
+      willRefine: true,
+      refining: true,
+    });
+    await expect(label(page)).toHaveText("Refining");
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+    await page.waitForTimeout(1800);
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+    expect((await firstDot(page))?.y ?? 0).toBeGreaterThan(9);
+
+    // Delivered: back to idle, the line goes.
+    await emitPillState(page, { status: "idle", levels: ZERO_LEVELS });
+    await expect(label(page)).toHaveAttribute("data-visible", "false");
+    await expectCapsuleRect(page, 38, 22);
+  });
+
+  test("a dictation marked only when it was stopped gets the line from then on", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await waitForPillMount(page);
+    await emitPillState(page, { status: "recording", levels: RECORDING_LEVELS });
+    await expectCapsuleRect(page, 105, 33);
+    await expect(label(page)).toHaveAttribute("data-visible", "false");
+    await emitPillState(page, { status: "transcribing", levels: ZERO_LEVELS, willRefine: true });
+    await expect(label(page)).toHaveText("Refine");
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
+  });
+
+  test("a mode name shown meanwhile gives the place back to the Refine line", async ({ page }) => {
+    await page.goto("/");
+    await waitForPillMount(page);
+    await emitPillState(page, {
+      status: "recording",
+      levels: RECORDING_LEVELS,
+      willRefine: true,
+    });
+    await expect(label(page)).toHaveText("Refine");
+    // The user switches mode while talking.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          window.__owEmit("modes_changed", {
+            settings: { active: "formal", custom: [], app_defaults: [] },
+            modes: [],
+            switched_to: "Formal",
+          });
+          return document.querySelector('[data-testid="pill-mode-label"]')?.textContent;
+        }),
+      )
+      .toBe("Formal");
+    await expect(label(page)).toHaveAttribute("data-refine", "false");
+    // A moment later the Refine line is back, with its mark.
+    await expect(label(page)).toHaveText("Refine", { timeout: 4000 });
+    await expect(label(page)).toHaveAttribute("data-refine", "true");
+    await expect(label(page)).toHaveAttribute("data-visible", "true");
   });
 });

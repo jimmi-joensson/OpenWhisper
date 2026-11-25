@@ -554,16 +554,20 @@ test.describe("settings — keep models warm", () => {
 });
 
 test.describe("settings — shortcuts pane", () => {
-  test("renders the four rows, Switch mode not set", async ({ page }) => {
+  test("renders a row per slot and the long press row, Switch mode not set", async ({
+    page,
+  }) => {
     await page.goto("/");
     await openSettings(page);
     await page.getByRole("tab", { name: "Shortcuts" }).click();
-    await expect(page.locator(".ow-shortcuts__row")).toHaveCount(4);
+    await expect(page.locator(".ow-shortcuts__row")).toHaveCount(6);
     await expect(page.locator(".ow-shortcuts__row-title")).toHaveText([
       "Toggle dictation",
       "Cancel while recording",
       "Switch mode",
       /^Ask/,
+      "Dictate with Refine",
+      "Long press to refine",
     ]);
     await expect(
       page.getByRole("button", { name: "Rebind Toggle dictation" }),
@@ -742,6 +746,130 @@ test.describe("settings — shortcuts pane", () => {
       .all()) {
       await expect(reset).toBeDisabled();
     }
+  });
+
+  test("Dictate with Refine shows its default combo and can be cleared and reset", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const chip = page.getByRole("button", { name: "Rebind Dictate with Refine" });
+    // The macOS default: both keys, by their sided names.
+    await expect(chip).toContainText("Right ⌘");
+    await expect(chip).toContainText("Right ⌥");
+
+    const row = page.locator(".ow-shortcuts__row").filter({
+      has: page.getByRole("button", { name: "Rebind Dictate with Refine" }),
+    });
+    await row.getByRole("button", { name: "Clear" }).click();
+    await expect(chip).toContainText("Not set");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const w = window as unknown as {
+            __owHotkeyLastTarget?: string;
+            __owHotkeys?: Record<string, unknown>;
+          };
+          return { target: w.__owHotkeyLastTarget, refine: w.__owHotkeys?.refine };
+        }),
+      )
+      .toEqual({ target: "refine", refine: null });
+
+    await row.getByRole("button", { name: "Reset to default" }).click();
+    await expect(chip).toContainText("Right ⌘");
+    await expect(chip).toContainText("Right ⌥");
+    // The dictation key next to it is untouched.
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toHaveText("Right ⌘");
+  });
+
+  test("where Dictate with Refine has no default key it starts not set, with only Clear", async ({
+    page,
+  }) => {
+    // As on Windows: no default for the slot, and none stored.
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        __owHotkeys?: unknown;
+        __owHotkeyDefaults?: unknown;
+      };
+      const chords = {
+        toggle: { kind: "chord", code: "Space", mods: ["Ctrl"] },
+        cancel: { kind: "chord", code: "Escape", mods: [] },
+        ask: { kind: "chord", code: "Space", mods: ["Ctrl", "Shift"] },
+        refine: null,
+      };
+      w.__owHotkeys = { ...chords };
+      w.__owHotkeyDefaults = { ...chords };
+    });
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const chip = page.getByRole("button", { name: "Rebind Dictate with Refine" });
+    await expect(chip).toHaveText("Not set");
+    const row = page.locator(".ow-shortcuts__row").filter({ has: chip });
+    await expect(row.getByRole("button", { name: "Clear" })).toBeDisabled();
+    await expect(row.getByRole("button", { name: "Reset to default" })).toHaveCount(0);
+    // The dictation key is a chord there: no long press row.
+    await expect(page.getByTestId("shortcut-long-press")).toHaveCount(0);
+
+    // A recorded chord is saved to the slot.
+    await chip.click();
+    await page.keyboard.press("Control+Alt+KeyR");
+    await expect(chip).toContainText("R");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owHotkeys?: Record<string, unknown> })
+              .__owHotkeys?.refine,
+        ),
+      )
+      .toEqual({ kind: "chord", code: "R", mods: ["Ctrl", "Alt"] });
+  });
+
+  test("the long press switch saves and is only offered for a single-key dictation key", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await openSettings(page);
+    await page.getByRole("tab", { name: "Shortcuts" }).click();
+    const longPress = page.getByRole("switch", { name: "Long press to refine" });
+    await expect(longPress).not.toBeChecked();
+
+    await longPress.click();
+    await expect(longPress).toBeChecked();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __owHotkeys?: Record<string, unknown> })
+              .__owHotkeys?.long_press,
+        ),
+      )
+      .toBe("refine");
+
+    await longPress.click();
+    await expect(longPress).not.toBeChecked();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            "long_press" in
+            ((window as unknown as { __owHotkeys?: Record<string, unknown> })
+              .__owHotkeys ?? {}),
+        ),
+      )
+      .toBe(false);
+
+    // A chord fires when its key goes down: no long press to tell.
+    await page.getByRole("button", { name: "Rebind Toggle dictation" }).click();
+    await page.keyboard.press("Control+Space");
+    await expect(
+      page.getByRole("button", { name: "Rebind Toggle dictation" }),
+    ).toContainText("Space");
+    await expect(page.getByTestId("shortcut-long-press")).toHaveCount(0);
   });
 
   test("recording a key for Switch mode saves it to the cycle-mode slot", async ({
@@ -1189,7 +1317,7 @@ test.describe("settings — shortcuts pane", () => {
               {
                 target: "ask",
                 reason:
-                  "A single modifier key is unsupported on Windows. Record a key combination instead.",
+                  "Modifier keys on their own are unsupported on Windows. Record a key combination instead.",
               },
             ],
           }),
@@ -1197,7 +1325,7 @@ test.describe("settings — shortcuts pane", () => {
       )
       .toBeGreaterThan(0);
     await expect(page.locator(".ow-shortcuts__error")).toHaveText(
-      "Ask is not active. A single modifier key is unsupported on Windows. Record a key combination instead.",
+      "Ask is not active. Modifier keys on their own are unsupported on Windows. Record a key combination instead.",
     );
   });
 });

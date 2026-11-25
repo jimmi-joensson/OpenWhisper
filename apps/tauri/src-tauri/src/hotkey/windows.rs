@@ -324,7 +324,7 @@ fn try_match_slot(
 fn compile_config(config: &HotkeyConfig) -> Result<(u32, u32), String> {
     if !matches!(config.kind, HotkeyKind::Chord) {
         return Err(
-            "A single modifier key is unsupported on Windows. Record a key combination instead."
+            "Modifier keys on their own are unsupported on Windows. Record a key combination instead."
                 .into(),
         );
     }

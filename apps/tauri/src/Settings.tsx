@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Sparkles } from "lucide-react";
 import {
   cancelJsCapture,
   hotkeyFor,
@@ -12,6 +12,7 @@ import {
   type HotkeyConfig,
   type HotkeySettings,
   type HotkeyTarget,
+  type LongPressAction,
 } from "./lib/use-global-hotkey";
 import { configToChipKeys } from "./lib/hotkey-format";
 import { useHotkeyStatus } from "./lib/use-hotkey-status";
@@ -630,11 +631,15 @@ function formatDelayShort(ms: number): string {
 // (`hotkey/mod.rs`). An optional slot may be without a key. One that
 // has no default starts out not set, and its reset control clears it
 // instead of restoring a default; one that has a default gets both
-// controls (`hasDefault`).
+// controls (`hasDefault`). Left out, `hasDefault` is whether the
+// backend's defaults have a key for the slot: for a slot whose
+// default depends on the platform.
 interface ShortcutRowDef {
   target: HotkeyTarget;
   title: string;
   hint: string;
+  /** The row is about Refine: its title carries the Refine mark. */
+  refine?: boolean;
   optional?: boolean;
   hasDefault?: boolean;
 }
@@ -663,7 +668,19 @@ const SHORTCUT_ROWS: ShortcutRowDef[] = [
     optional: true,
     hasDefault: true,
   },
+  {
+    target: "refine",
+    title: "Dictate with Refine",
+    refine: true,
+    hint: "Works like the dictation key, but the text always goes through Refine, also while Refine is switched off. Start with it, or stop a dictation with it.",
+    optional: true,
+    // No `hasDefault`: Right ⌘ + Right ⌥ on macOS, not set elsewhere.
+    // The pane asks the backend (`settings_get_hotkey_defaults`).
+  },
 ];
+
+// The long press belongs to the refine slot: the row goes under it.
+const LONG_PRESS_AFTER: HotkeyTarget = "refine";
 
 // Shown on the Ask row while Ask is switched off: the slot is not
 // installed then, whatever key it holds.
@@ -676,6 +693,10 @@ const ASK_OFF_NOTE =
 // target and the UI saves to the matching slot.
 function ShortcutsPane() {
   const [settings, setSettings] = useState<HotkeySettings | null>(null);
+  // Every slot as it is before the user changes anything, on this
+  // platform. null until loaded: a platform-dependent slot then shows
+  // as one without a default for a moment.
+  const [defaults, setDefaults] = useState<HotkeySettings | null>(null);
   // An optional slot the backend could not install is reported here,
   // with `ok` still true (dictation itself is fine).
   const skipped = useHotkeyStatus().status?.skipped ?? [];
@@ -697,6 +718,11 @@ function ShortcutsPane() {
       .catch((e) => {
         if (alive) setError(String(e));
       });
+    invoke<HotkeySettings>("settings_get_hotkey_defaults")
+      .then((d) => {
+        if (alive) setDefaults(d);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -792,6 +818,23 @@ function ShortcutsPane() {
     }
   }, []);
 
+  // What a long press of the dictation key does. A switch today:
+  // off, or the same as the "Dictate with Refine" key.
+  const setLongPress = useCallback(async (on: boolean) => {
+    const action: LongPressAction = on ? "refine" : "off";
+    setError(null);
+    try {
+      await invoke("settings_set_long_press", { action });
+      setSettings((prev) => (prev ? { ...prev, long_press: action } : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // Only a dictation key that is a single modifier fires when it is
+  // let go, so only that one can tell a long press from a tap.
+  const canLongPress = settings?.toggle.kind === "modifier-tap";
+
   // Back to the slot's default: the platform binding for toggle,
   // cancel and ask, "not set" (null) for the switch-mode slot.
   const resetTarget = useCallback(async (target: HotkeyTarget) => {
@@ -817,23 +860,56 @@ function ShortcutsPane() {
       </header>
 
       {SHORTCUT_ROWS.map((row) => (
-        <ShortcutRow
-          key={row.target}
-          title={row.title}
-          hint={row.hint}
-          target={row.target}
-          optional={row.optional}
-          hasDefault={row.hasDefault}
-          inactiveNote={
-            row.target === "ask" && askEnabled === false ? ASK_OFF_NOTE : null
-          }
-          config={settings ? hotkeyFor(settings, row.target) : null}
-          recordingTarget={recordingTarget}
-          onStart={startCapture}
-          onCancel={cancelCapture}
-          onReset={resetTarget}
-          onClear={clearTarget}
-        />
+        <Fragment key={row.target}>
+          <ShortcutRow
+            title={row.title}
+            refineMark={row.refine}
+            hint={row.hint}
+            target={row.target}
+            optional={row.optional}
+            hasDefault={
+              row.hasDefault ??
+              (defaults !== null && hotkeyFor(defaults, row.target) !== null)
+            }
+            inactiveNote={
+              row.target === "ask" && askEnabled === false ? ASK_OFF_NOTE : null
+            }
+            config={settings ? hotkeyFor(settings, row.target) : null}
+            recordingTarget={recordingTarget}
+            onStart={startCapture}
+            onCancel={cancelCapture}
+            onReset={resetTarget}
+            onClear={clearTarget}
+          />
+          {row.target === LONG_PRESS_AFTER && canLongPress && (
+            <section
+              className="ow-shortcuts__row"
+              data-testid="shortcut-long-press"
+            >
+              <div className="ow-shortcuts__row-label">
+                <div className="ow-shortcuts__row-title">
+                  <Sparkles
+                    size={13}
+                    aria-hidden="true"
+                    className="text-muted-foreground"
+                  />
+                  Long press to refine
+                </div>
+                <div className="ow-shortcuts__row-hint">
+                  Hold the dictation key a little longer and it works like
+                  Dictate with Refine. A normal tap stays a normal dictation.
+                </div>
+              </div>
+              <div className="ow-shortcuts__row-control">
+                <Switch
+                  checked={settings?.long_press === "refine"}
+                  onCheckedChange={(on) => void setLongPress(on)}
+                  aria-label="Long press to refine"
+                />
+              </div>
+            </section>
+          )}
+        </Fragment>
       ))}
 
       <div className="ow-shortcuts__note">
@@ -856,6 +932,8 @@ function ShortcutsPane() {
 
 interface ShortcutRowProps {
   title: string;
+  /** Show the Refine mark before the title. */
+  refineMark?: boolean;
   hint: string;
   target: HotkeyTarget;
   /** The slot may be unset: shows "Not set", and reset clears it. */
@@ -876,6 +954,7 @@ interface ShortcutRowProps {
 
 function ShortcutRow({
   title,
+  refineMark = false,
   hint,
   target,
   optional = false,
@@ -895,6 +974,13 @@ function ShortcutRow({
     <section className="ow-shortcuts__row">
       <div className="ow-shortcuts__row-label">
         <div className="ow-shortcuts__row-title">
+          {refineMark && (
+            <Sparkles
+              size={13}
+              aria-hidden="true"
+              className="text-muted-foreground"
+            />
+          )}
           {title}
           {inactiveNote && (
             <Badge variant="secondary" data-testid={`shortcut-off-${target}`}>

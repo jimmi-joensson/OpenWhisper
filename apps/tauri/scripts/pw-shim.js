@@ -54,23 +54,48 @@ async (page) => {
         }
         // Hotkey slots, mirroring tests/fixtures/tauri-shim.ts: the
         // optional `cycle_mode` slot is absent until set; its command
-        // target is "cycle-mode". The optional `ask` slot has a
-        // default, which a seed without the key gets too; cleared, it
-        // is null.
+        // target is "cycle-mode". The optional `ask` and `refine`
+        // slots have a default, which a seed without the key gets
+        // too; cleared, they are null. `long_press` is absent while
+        // off.
         if (
           cmd === "settings_get_hotkeys" ||
           cmd === "settings_set_hotkey" ||
           cmd === "settings_reset_hotkey" ||
-          cmd === "settings_clear_hotkey"
+          cmd === "settings_clear_hotkey" ||
+          cmd === "settings_set_long_press" ||
+          cmd === "settings_get_hotkey_defaults"
         ) {
           const askDefault = { kind: "modifier-tap", code: "RightOption", mods: [] };
+          const refineDefault = {
+            kind: "modifier-combo",
+            code: "RightCommand",
+            mods: ["RightOption"],
+          };
           window.__owHotkeys = window.__owHotkeys ?? {
             toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
             cancel: { kind: "chord", code: "Escape", mods: [] },
           };
           if (!("ask" in window.__owHotkeys)) window.__owHotkeys.ask = askDefault;
+          if (!("refine" in window.__owHotkeys)) window.__owHotkeys.refine = refineDefault;
+          // The slots before any change, on this (made-up mac) platform.
+          if (cmd === "settings_get_hotkey_defaults") {
+            return {
+              toggle: { kind: "modifier-tap", code: "RightCommand", mods: [] },
+              cancel: { kind: "chord", code: "Escape", mods: [] },
+              ask: askDefault,
+              refine: refineDefault,
+            };
+          }
           // A copy, as over real IPC.
           if (cmd === "settings_get_hotkeys") return structuredClone(window.__owHotkeys);
+          if (cmd === "settings_set_long_press") {
+            const { action } = args ?? {};
+            window.__owLongPressSetCount = (window.__owLongPressSetCount ?? 0) + 1;
+            if (action === "off") delete window.__owHotkeys.long_press;
+            else window.__owHotkeys.long_press = action;
+            return null;
+          }
 
           const { target, config } = args ?? {};
           const key = target === "cycle-mode" ? "cycle_mode" : target;
@@ -87,7 +112,7 @@ async (page) => {
               throw `The ${target} shortcut cannot be removed, only changed.`;
             }
             window.__owHotkeyClearCount = (window.__owHotkeyClearCount ?? 0) + 1;
-            if (target === "ask") window.__owHotkeys.ask = null;
+            if (target === "ask" || target === "refine") window.__owHotkeys[key] = null;
             else delete window.__owHotkeys[key];
             return null;
           }
@@ -101,7 +126,9 @@ async (page) => {
               ? { kind: "modifier-tap", code: "RightCommand", mods: [] }
               : target === "ask"
                 ? askDefault
-                : { kind: "chord", code: "Escape", mods: [] };
+                : target === "refine"
+                  ? refineDefault
+                  : { kind: "chord", code: "Escape", mods: [] };
           window.__owHotkeys[key] = def;
           return def;
         }

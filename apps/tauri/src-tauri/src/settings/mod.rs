@@ -17,9 +17,9 @@ use tauri::{AppHandle, Emitter, Manager};
 // observer) reach `openwhisper_core::settings::X` directly.
 pub use core::{
     AudioSettings, BehaviorSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget,
-    PerformanceSettings, PillSettings, StatsSettings, current_pill_settings, current_settings,
-    current_stats_settings, default_ask_hotkey, default_cancel_hotkey, default_settings,
-    default_toggle_hotkey, follow_active_screen,
+    LongPressAction, PerformanceSettings, PillSettings, StatsSettings, current_pill_settings,
+    current_settings, current_stats_settings, default_ask_hotkey, default_cancel_hotkey,
+    default_refine_hotkey, default_settings, default_toggle_hotkey, follow_active_screen,
 };
 
 pub(crate) fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -93,15 +93,26 @@ pub fn settings_set_hotkey(
     Ok(())
 }
 
+/// Every slot as it is before the user changes anything, on this
+/// platform. The Shortcuts pane reads from it which optional slots
+/// have a default to go back to: the refine slot has one on macOS
+/// and none elsewhere, and the window cannot tell which it runs on.
+#[tauri::command]
+pub fn settings_get_hotkey_defaults() -> HotkeySettings {
+    default_settings()
+}
+
 /// The binding a slot has before the user picks one: the platform
 /// default for toggle, cancel and ask, `None` for the switch-mode
-/// slot, whose default is "not set".
+/// slot, whose default is "not set". The refine slot has a default
+/// on macOS only.
 fn default_hotkey(target: HotkeyTarget) -> Option<HotkeyConfig> {
     match target {
         HotkeyTarget::Toggle => Some(default_toggle_hotkey()),
         HotkeyTarget::Cancel => Some(default_cancel_hotkey()),
         HotkeyTarget::CycleMode => None,
         HotkeyTarget::Ask => Some(default_ask_hotkey()),
+        HotkeyTarget::Refine => default_refine_hotkey(),
     }
 }
 
@@ -130,6 +141,16 @@ pub fn settings_reset_hotkey(
 pub fn settings_clear_hotkey(app: AppHandle, target: HotkeyTarget) -> Result<(), String> {
     let path = settings_path(&app)?;
     core::clear_hotkey_slot(&path, target)?;
+    crate::hotkey::install(&app);
+    Ok(())
+}
+
+/// Set what a long press of the dictation key does (TASK-108). The
+/// hook is reinstalled so the next press already follows it.
+#[tauri::command]
+pub fn settings_set_long_press(app: AppHandle, action: LongPressAction) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    core::update_long_press(&path, action)?;
     crate::hotkey::install(&app);
     Ok(())
 }
@@ -308,5 +329,6 @@ mod tests {
         assert_eq!(default_hotkey(HotkeyTarget::CycleMode), None);
         // The ask slot is optional and still has a default to go back to.
         assert_eq!(default_hotkey(HotkeyTarget::Ask), Some(default_ask_hotkey()));
+        assert_eq!(default_hotkey(HotkeyTarget::Refine), default_refine_hotkey());
     }
 }

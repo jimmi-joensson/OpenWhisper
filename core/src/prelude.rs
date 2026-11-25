@@ -59,14 +59,15 @@ pub use crate::model_lifecycle::{
 pub use crate::modes::{ModeApp, ModeChoice, ModeEdit, ModeReason, ModeView};
 pub use crate::settings::{
     AppDefault, AskSettings, AudioSettings, BUILTIN_MODE_ID, BUILTIN_MODE_NAME, BehaviorSettings,
-    ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, Mode, ModesSettings,
+    ClaudeCliSettings, HotkeyConfig, HotkeyKind, HotkeySettings, HotkeyTarget, LongPressAction, Mode,
+    ModesSettings,
     OpenAiSettings, PerformanceSettings, PillSettings, RefineBackendKind, RefineEffort,
     RefineSettings, StatsSettings, keep_models_warm,
 };
 #[cfg(feature = "refine")]
 pub use crate::refine::{
-    BackendState, BackendStatus, ConnectionTest, ModeRun, ModeUse, Prompt, RefineError,
-    RefineOutcome, RefineStatus, Refiner, apply_mode, backend_status, refine_text,
+    BackendState, BackendStatus, ConnectionTest, ModelInUse, ModeRun, ModeUse, Prompt, RefineError,
+    RefineOutcome, RefineStatus, Refiner, apply_mode, backend_status, model_in_use, refine_text,
     refine_text_in_mode, test_connection,
 };
 pub use crate::stats::StatsSummary;
